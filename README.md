@@ -33,8 +33,8 @@ This scaffold gives you:
 ## Recommended Models for 16GB RAM Laptops
 
 The defaults are intentionally set to smaller models for better local speed:
-- `qwen2.5-3b-instruct` (good general purpose default/planner)
-- `phi-3.5-mini-instruct` (fast worker model)
+- `qwen/qwen3-4b` (good general purpose default/planner)
+- `liquid/lfm2.5-1.2b` (fast worker model)
 
 If your laptop is slower or has less VRAM/shared memory, try:
 - `llama-3.2-3b-instruct`
@@ -89,14 +89,15 @@ python app.py
 - Gradio runs as a local web server and can be deployed on your own VPS, local machine,
   Docker, or internal network without any required paid hosted service.
 - You retain full Python-level control over layouts, callbacks, components, and routing logic.
+- The chat component is implemented with a compatibility-safe `gr.Chatbot(...)` signature (without `type="messages"`) to work across current Gradio versions.
 
 ## Environment Variables
 
 - `LM_STUDIO_BASE_URL`: LM Studio OpenAI-compatible base URL (default `http://127.0.0.1:1234/v1`).
 - `LM_STUDIO_API_KEY`: Any value accepted by your local setup (default `lm-studio`).
-- `LM_STUDIO_DEFAULT_MODEL`: Default model name (default `qwen2.5-3b-instruct`).
-- `LM_STUDIO_PLANNER_MODEL`: Model for planning agent (default `qwen2.5-3b-instruct`).
-- `LM_STUDIO_WORKER_MODEL`: Model for worker agent (default `phi-3.5-mini-instruct`).
+- `LM_STUDIO_DEFAULT_MODEL`: Default model name (default `qwen/qwen3-4b`).
+- `LM_STUDIO_PLANNER_MODEL`: Model for planning agent (default `qwen/qwen3-4b`).
+- `LM_STUDIO_WORKER_MODEL`: Model for worker agent (default `liquid/lfm2.5-1.2b`).
 
 ## Add Your Own Tools
 
@@ -145,7 +146,16 @@ Then launch:
 python app.py
 ```
 
-5. **`ImportError` for symbols from `langchain.agents` (like `AgentExecutor` or `create_tool_calling_agent`)**
+5. **`TypeError: Chatbot.__init__() got an unexpected keyword argument 'type'`**
+   - This happens on Gradio builds where `gr.Chatbot(type="messages")` is unsupported.
+   - The app code now uses `gr.Chatbot(label="Conversation")` and tuple-style history for wider compatibility.
+   - Upgrade if needed:
+
+```bash
+python -m pip install -U gradio
+```
+
+6. **`ImportError` for symbols from `langchain.agents` (like `AgentExecutor` or `create_tool_calling_agent`)**
    - Newer LangChain releases have moved/changed parts of `langchain.agents`.
    - This project now uses `langgraph.prebuilt.create_react_agent` to avoid those brittle imports.
    - Then reinstall/upgrade dependencies:
@@ -155,7 +165,7 @@ python -m pip install -U langchain langchain-openai langchain-community
 pip install -e .[dev]
 ```
 
-6. **Have we updated the code for latest libraries?**
+7. **Have we updated the code for latest libraries?**
    - Yes. This repo now uses:
      - `langgraph.prebuilt.create_react_agent`
      - prompt-driven `chat_history` with `HumanMessage`/`AIMessage`

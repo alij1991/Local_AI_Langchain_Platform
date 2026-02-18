@@ -15,6 +15,6 @@ def test_load_config_defaults(monkeypatch):
 
     assert config.lm_studio_base_url == "http://127.0.0.1:1234/v1"
     assert config.lm_studio_api_key == "lm-studio"
-    assert config.default_model == "qwen2.5-3b-instruct"
-    assert config.planner_model == "qwen2.5-3b-instruct"
-    assert config.worker_model == "phi-3.5-mini-instruct"
+    assert config.default_model == "qwen/qwen3-4b"
+    assert config.planner_model == "qwen/qwen3-4b"
+    assert config.worker_model == "liquid/lfm2.5-1.2b"

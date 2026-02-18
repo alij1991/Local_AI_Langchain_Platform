@@ -9,9 +9,11 @@ from local_ai_platform.agents import AgentOrchestrator
 
 
 def build_chat_handler(orchestrator: AgentOrchestrator) -> Callable:
-    def chat(message: str, history: list[dict], mode: str, single_agent: str):
+    def chat(message: str, history: list[tuple[str, str]] | None, mode: str, single_agent: str):
         if not message.strip():
-            return "", history
+            return "", history or []
+
+        history = history or []
 
         if mode == "Single Agent":
             response = orchestrator.chat_with_agent(single_agent, message)
@@ -24,10 +26,7 @@ def build_chat_handler(orchestrator: AgentOrchestrator) -> Callable:
                 f"{output['worker']}"
             )
 
-        history = history + [
-            {"role": "user", "content": message},
-            {"role": "assistant", "content": response},
-        ]
+        history = history + [(message, response)]
         return "", history
 
     return chat
@@ -55,7 +54,7 @@ def build_app() -> gr.Blocks:
                 value="planner",
             )
 
-        chatbot = gr.Chatbot(type="messages", label="Conversation")
+        chatbot = gr.Chatbot(label="Conversation")
         prompt = gr.Textbox(label="Your prompt", placeholder="Ask your agents something...")
         send = gr.Button("Send", variant="primary")
 

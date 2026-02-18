@@ -18,7 +18,7 @@ def load_config() -> AppConfig:
     return AppConfig(
         lm_studio_base_url=os.getenv("LM_STUDIO_BASE_URL", "http://127.0.0.1:1234/v1"),
         lm_studio_api_key=os.getenv("LM_STUDIO_API_KEY", "lm-studio"),
-        default_model=os.getenv("LM_STUDIO_DEFAULT_MODEL", "qwen2.5-3b-instruct"),
-        planner_model=os.getenv("LM_STUDIO_PLANNER_MODEL", "qwen2.5-3b-instruct"),
-        worker_model=os.getenv("LM_STUDIO_WORKER_MODEL", "phi-3.5-mini-instruct"),
+        default_model=os.getenv("LM_STUDIO_DEFAULT_MODEL", "qwen/qwen3-4b"),
+        planner_model=os.getenv("LM_STUDIO_PLANNER_MODEL", "qwen/qwen3-4b"),
+        worker_model=os.getenv("LM_STUDIO_WORKER_MODEL", "liquid/lfm2.5-1.2b"),
     )
