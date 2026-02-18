@@ -1,0 +1,38 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "local-ai-langchain-platform"
+version = "0.1.0"
+description = "Starter UI + backend for LangChain agents powered by LM Studio."
+readme = "README.md"
+requires-python = ">=3.10"
+authors = [{ name = "Local AI Team" }]
+dependencies = [
+  "streamlit",
+  "langchain",
+  "langchain-openai",
+  "langchain-community",
+  "langgraph",
+  "pydantic",
+]
+
+[project.optional-dependencies]
+dev = [
+  "pytest",
+  "ruff",
+]
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+pythonpath = ["src"]
+addopts = "-q"
+
+[tool.ruff]
+line-length = 100
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "B"]
