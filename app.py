@@ -2,7 +2,8 @@ from __future__ import annotations
 
 import streamlit as st
 
-from local_ai_platform import AgentOrchestrator, load_config
+from local_ai_platform import load_config
+from local_ai_platform.agents import AgentOrchestrator
 
 
 st.set_page_config(page_title="Local AI LangChain Platform", page_icon="🤖", layout="wide")
