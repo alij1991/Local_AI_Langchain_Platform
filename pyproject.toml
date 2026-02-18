@@ -10,18 +10,18 @@ readme = "README.md"
 requires-python = ">=3.10"
 authors = [{ name = "Local AI Team" }]
 dependencies = [
-  "streamlit>=1.40.0",
-  "langchain>=0.3.10",
-  "langchain-openai>=0.2.5",
-  "langchain-community>=0.3.8",
-  "langgraph>=0.2.45",
-  "pydantic>=2.10.0",
+  "streamlit",
+  "langchain",
+  "langchain-openai",
+  "langchain-community",
+  "langgraph",
+  "pydantic",
 ]
 
 [project.optional-dependencies]
 dev = [
-  "pytest>=8.3.3",
-  "ruff>=0.7.3",
+  "pytest",
+  "ruff",
 ]
 
 [tool.setuptools.packages.find]
