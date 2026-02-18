@@ -1,54 +1,70 @@
 from __future__ import annotations
 
-import streamlit as st
+from collections.abc import Callable
+
+import gradio as gr
 
 from local_ai_platform import load_config
 from local_ai_platform.agents import AgentOrchestrator
 
 
-st.set_page_config(page_title="Local AI LangChain Platform", page_icon="🤖", layout="wide")
+def build_chat_handler(orchestrator: AgentOrchestrator) -> Callable:
+    def chat(message: str, history: list[dict], mode: str, single_agent: str):
+        if not message.strip():
+            return "", history
 
-st.title("🤖 Local AI LangChain Platform")
-st.caption("Run multi-agent conversations with LM Studio + LangChain.")
+        if mode == "Single Agent":
+            response = orchestrator.chat_with_agent(single_agent, message)
+        else:
+            output = orchestrator.combined_response(message)
+            response = (
+                "### Planner\n"
+                f"{output['planner']}\n\n"
+                "### Worker\n"
+                f"{output['worker']}"
+            )
 
-if "orchestrator" not in st.session_state:
-    st.session_state.orchestrator = AgentOrchestrator(load_config())
-if "chat_log" not in st.session_state:
-    st.session_state.chat_log = []
+        history = history + [
+            {"role": "user", "content": message},
+            {"role": "assistant", "content": response},
+        ]
+        return "", history
 
-orchestrator: AgentOrchestrator = st.session_state.orchestrator
+    return chat
 
-with st.sidebar:
-    st.header("Agent mode")
-    mode = st.radio(
-        "Choose how to run",
-        options=["Single Agent", "Combined (Planner + Worker)"],
-        index=0,
-    )
-    single_agent = st.selectbox("Single agent", options=["planner", "worker"])
 
-prompt = st.chat_input("Ask your agents something...")
+def build_app() -> gr.Blocks:
+    orchestrator = AgentOrchestrator(load_config())
+    chat_fn = build_chat_handler(orchestrator)
 
-for entry in st.session_state.chat_log:
-    with st.chat_message(entry["role"]):
-        st.markdown(entry["content"])
+    with gr.Blocks(title="Local AI LangChain Platform") as demo:
+        gr.Markdown("# 🤖 Local AI LangChain Platform")
+        gr.Markdown(
+            "Run multi-agent conversations with LM Studio + LangChain in a self-hosted Gradio UI."
+        )
 
-if prompt:
-    st.session_state.chat_log.append({"role": "user", "content": prompt})
-    with st.chat_message("user"):
-        st.markdown(prompt)
+        with gr.Row():
+            mode = gr.Radio(
+                label="Agent mode",
+                choices=["Single Agent", "Combined (Planner + Worker)"],
+                value="Single Agent",
+            )
+            single_agent = gr.Dropdown(
+                label="Single agent",
+                choices=["planner", "worker"],
+                value="planner",
+            )
 
-    with st.chat_message("assistant"):
-        with st.spinner("Running agents..."):
-            if mode == "Single Agent":
-                response = orchestrator.chat_with_agent(single_agent, prompt)
-            else:
-                output = orchestrator.combined_response(prompt)
-                response = (
-                    "### Planner\n"
-                    f"{output['planner']}\n\n"
-                    "### Worker\n"
-                    f"{output['worker']}"
-                )
-            st.markdown(response)
-            st.session_state.chat_log.append({"role": "assistant", "content": response})
+        chatbot = gr.Chatbot(type="messages", label="Conversation")
+        prompt = gr.Textbox(label="Your prompt", placeholder="Ask your agents something...")
+        send = gr.Button("Send", variant="primary")
+
+        send.click(chat_fn, inputs=[prompt, chatbot, mode, single_agent], outputs=[prompt, chatbot])
+        prompt.submit(chat_fn, inputs=[prompt, chatbot, mode, single_agent], outputs=[prompt, chatbot])
+
+    return demo
+
+
+if __name__ == "__main__":
+    app = build_app()
+    app.launch(server_name="0.0.0.0", server_port=7860)

@@ -3,7 +3,7 @@
 Starter project for a **Python UI app** backed by **LangChain** using **LM Studio models**.
 
 This scaffold gives you:
-- A Streamlit interface for chatting with agents.
+- A Gradio interface for chatting with agents.
 - LM Studio integration (OpenAI-compatible API endpoint).
 - Two built-in agents using different lightweight models (`planner` and `worker`).
 - Conversation memory per agent.
@@ -60,7 +60,7 @@ pip install -e .[dev]
 To force-upgrade to the newest releases in your environment:
 
 ```bash
-python -m pip install -U streamlit langchain langchain-openai langchain-community langgraph pydantic pytest ruff
+python -m pip install -U gradio langchain langchain-openai langchain-community langgraph pydantic pytest ruff
 ```
 
 4. Copy env template:
@@ -78,11 +78,17 @@ set +a
    - Start the local server.
    - Load the models referenced in your `.env`.
 
-6. Run the UI:
+6. Run the UI (fully self-hosted, no subscription required):
 
 ```bash
-streamlit run app.py
+python app.py
 ```
+
+### Why this UI is better for standalone deployment
+
+- Gradio runs as a local web server and can be deployed on your own VPS, local machine,
+  Docker, or internal network without any required paid hosted service.
+- You retain full Python-level control over layouts, callbacks, components, and routing logic.
 
 ## Environment Variables
 
@@ -126,7 +132,7 @@ python -m compileall app.py src tests
 pytest
 ```
 
-4. **Streamlit not found**
+4. **Gradio not found**
    - Install dependencies in the active venv first:
 
 ```bash
@@ -136,7 +142,7 @@ pip install -e .[dev]
 Then launch:
 
 ```bash
-streamlit run app.py
+python app.py
 ```
 
 5. **`ImportError` for symbols from `langchain.agents` (like `AgentExecutor` or `create_tool_calling_agent`)**
@@ -156,7 +162,7 @@ pip install -e .[dev]
    - Keep your environment up to date with:
 
 ```bash
-python -m pip install -U streamlit langchain langchain-openai langchain-community langgraph pydantic pytest ruff
+python -m pip install -U gradio langchain langchain-openai langchain-community langgraph pydantic pytest ruff
 pip install -e .[dev]
 ```
 
@@ -167,7 +173,7 @@ From your local machine (with `gh` CLI authenticated):
 ```bash
 git init
 git add .
-git commit -m "Initial scaffold: Streamlit + LangChain + LM Studio multi-agent app"
+git commit -m "Initial scaffold: Gradio + LangChain + LM Studio multi-agent app"
 gh repo create <your-org-or-user>/<repo-name> --private --source=. --push
 ```
 
