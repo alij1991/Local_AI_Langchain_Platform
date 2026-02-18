@@ -10,9 +10,9 @@ This scaffold gives you:
 - Tool support (example tools included).
 - Combined mode to run multiple agents on the same prompt.
 
-> ✅ The code has been adjusted for modern LangChain package layout (including the
-> `AgentExecutor` import path) and uses a message-history memory pattern that is
-> compatible with current LangChain agent prompts.
+> ✅ The code uses LangGraph's `create_react_agent` + message-history pattern,
+> which is compatible with current LangChain/LangGraph releases and avoids
+> fragile imports from older `langchain.agents` paths.
 
 ## Project Structure
 
@@ -139,9 +139,9 @@ Then launch:
 streamlit run app.py
 ```
 
-5. **`ImportError: cannot import name 'AgentExecutor' from 'langchain.agents'`**
-   - You likely have a newer LangChain build where `AgentExecutor` moved.
-   - This project now imports it from `langchain.agents.agent` for compatibility with current releases.
+5. **`ImportError` for symbols from `langchain.agents` (like `AgentExecutor` or `create_tool_calling_agent`)**
+   - Newer LangChain releases have moved/changed parts of `langchain.agents`.
+   - This project now uses `langgraph.prebuilt.create_react_agent` to avoid those brittle imports.
    - Then reinstall/upgrade dependencies:
 
 ```bash
@@ -151,9 +151,8 @@ pip install -e .[dev]
 
 6. **Have we updated the code for latest libraries?**
    - Yes. This repo now uses:
-     - `AgentExecutor` from `langchain.agents.agent`
-     - prompt-driven `chat_history` with `HumanMessage`/`AIMessage` instead of
-       legacy memory wiring in the executor
+     - `langgraph.prebuilt.create_react_agent`
+     - prompt-driven `chat_history` with `HumanMessage`/`AIMessage`
    - Keep your environment up to date with:
 
 ```bash
