@@ -2,8 +2,9 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-from langchain.agents import AgentExecutor, create_tool_calling_agent
-from langchain.memory import ConversationBufferMemory
+from langchain.agents import create_tool_calling_agent
+from langchain.agents.agent import AgentExecutor
+from langchain_core.messages import AIMessage, BaseMessage, HumanMessage
 from langchain_core.prompts import ChatPromptTemplate, MessagesPlaceholder
 from langchain_openai import ChatOpenAI
 
@@ -42,10 +43,8 @@ class AgentOrchestrator:
                 ),
             ),
         }
-        self.memories: dict[str, ConversationBufferMemory] = {
-            name: ConversationBufferMemory(memory_key="chat_history", return_messages=True)
-            for name in self.definitions
-        }
+        # Keep lightweight in-process history to avoid relying on deprecated memory modules.
+        self.chat_histories: dict[str, list[BaseMessage]] = {name: [] for name in self.definitions}
 
     def _build_executor(self, definition: AgentDefinition) -> AgentExecutor:
         llm = ChatOpenAI(
@@ -66,7 +65,6 @@ class AgentOrchestrator:
         return AgentExecutor(
             agent=agent,
             tools=self.tools,
-            memory=self.memories[definition.name],
             verbose=False,
             handle_parsing_errors=True,
         )
@@ -74,8 +72,13 @@ class AgentOrchestrator:
     def chat_with_agent(self, agent_name: str, user_input: str) -> str:
         definition = self.definitions[agent_name]
         executor = self._build_executor(definition)
-        result = executor.invoke({"input": user_input})
-        return str(result["output"])
+        history = self.chat_histories[agent_name]
+        result = executor.invoke({"input": user_input, "chat_history": history})
+        output = str(result["output"])
+
+        history.append(HumanMessage(content=user_input))
+        history.append(AIMessage(content=output))
+        return output
 
     def combined_response(self, user_input: str) -> dict[str, str]:
         """Route the same request to planner and worker to compare model behavior."""
