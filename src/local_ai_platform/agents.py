@@ -4,7 +4,9 @@ from dataclasses import dataclass
 from typing import TypedDict
 
 from langchain_core.messages import AIMessage, BaseMessage, HumanMessage
+from langchain_core.prompts import ChatPromptTemplate
 from langchain_core.tools import StructuredTool
+from langchain_openai import ChatOpenAI
 from langgraph.graph import END, START, StateGraph
 from langgraph.prebuilt import create_react_agent
 
@@ -25,30 +27,13 @@ class WorkflowState(TypedDict):
 
 
 class AgentOrchestrator:
-    """Build and coordinate multiple LM Studio-backed LangChain agents."""
+    """Runtime agent registry + tool registry + graph workflow runner."""
 
     def __init__(self, config: AppConfig) -> None:
         self.config = config
         self.tools: list[StructuredTool] = build_default_tools()
-        self.definitions = {
-            "planner": AgentDefinition(
-                name="planner",
-                model_name=config.planner_model,
-                system_prompt=(
-                    "You are a planning agent. Break user goals into concise actionable steps and "
-                    "identify when tools are needed."
-                ),
-            ),
-            "worker": AgentDefinition(
-                name="worker",
-                model_name=config.worker_model,
-                system_prompt=(
-                    "You are an execution agent. Complete user tasks using available tools and "
-                    "present clear answers."
-                ),
-            ),
-        }
-        self.chat_histories: dict[str, list[BaseMessage]] = {name: [] for name in self.definitions}
+        self.definitions: dict[str, AgentDefinition] = {}
+        self.chat_histories: dict[str, list[BaseMessage]] = {}
 
     def add_agent(self, name: str, model_name: str, system_prompt: str) -> None:
         self.definitions[name] = AgentDefinition(name=name, model_name=model_name, system_prompt=system_prompt)
@@ -90,9 +75,32 @@ class AgentOrchestrator:
     def get_tool_names(self) -> list[str]:
         return [tool.name for tool in self.tools]
 
-    def _build_agent_graph(self, definition: AgentDefinition):
-        from langchain_openai import ChatOpenAI
+    def generate_system_prompt(self, description: str) -> str:
+        """Built-in helper agent that drafts a system prompt from a short description."""
+        llm = ChatOpenAI(
+            model=self.config.prompt_builder_model,
+            base_url=self.config.lm_studio_base_url,
+            api_key=self.config.lm_studio_api_key,
+            temperature=0.2,
+        )
+        prompt = ChatPromptTemplate.from_messages(
+            [
+                (
+                    "system",
+                    "You are a senior AI architect. Create concise, production-ready system prompts "
+                    "for autonomous agents.",
+                ),
+                (
+                    "human",
+                    "Given this agent description, generate a clean system prompt with goals, constraints, "
+                    "and output style.\n\nDescription: {description}",
+                ),
+            ]
+        )
+        result = llm.invoke(prompt.format_messages(description=description))
+        return str(getattr(result, "content", ""))
 
+    def _build_agent_graph(self, definition: AgentDefinition):
         llm = ChatOpenAI(
             model=definition.model_name,
             base_url=self.config.lm_studio_base_url,
@@ -114,11 +122,6 @@ class AgentOrchestrator:
         history.append(HumanMessage(content=user_input))
         history.append(AIMessage(content=output))
         return output
-
-    def combined_response(self, user_input: str) -> dict[str, str]:
-        planner_result = self.chat_with_agent("planner", user_input)
-        worker_result = self.chat_with_agent("worker", user_input)
-        return {"planner": planner_result, "worker": worker_result}
 
     def run_agent_workflow(self, user_input: str, sequence: list[str]) -> dict[str, str]:
         if not sequence:

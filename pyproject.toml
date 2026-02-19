@@ -15,17 +15,14 @@ dependencies = [
   "langchain-openai",
   "langchain-community",
   "langgraph",
-  "httpx",
   "pydantic",
+  "lmstudio",
 ]
 
 [project.optional-dependencies]
 dev = [
   "pytest",
   "ruff",
-]
-lmstudio = [
-  "lmstudio",
 ]
 
 [tool.setuptools.packages.find]

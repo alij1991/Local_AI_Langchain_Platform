@@ -1,25 +1,20 @@
 # Local AI LangChain Platform
 
-Self-hosted Python UI for building and running agentic systems with **LM Studio + LangChain + LangGraph**.
+Self-hosted Python UI for building agentic systems with **LM Studio Python SDK + LangChain + LangGraph**.
 
-## Features
-- Clean multi-tab Gradio UX with dedicated workspaces:
-  - **Chat Workspace**
-  - **LM Studio Control**
-  - **Agent Builder**
-  - **Tool Builder**
-  - **Graph Workflow**
-- Multi-agent chat (`planner`, `worker`, and custom agents you create in UI).
-- Runtime model switching per agent.
-- LM Studio operations from UI:
-  - start/stop local server,
-  - list local models from CLI,
-  - load selected model,
-  - list loaded models from server API.
-- Tool builder:
-  - instruction tools,
-  - delegate tools that call another agent.
-- Graph workflow runner using LangGraph state graph over a custom agent sequence.
+## What changed
+- LM Studio integration now uses **LM Studio Python library** APIs (not CLI shell commands).
+- Removed hardcoded planner/worker architecture.
+- Added built-in **Prompt Builder Agent** (default model: `liquid/lfm2.5-1.2b`) to generate high-quality system prompts from descriptions.
+- UI redesigned into a simple step-by-step flow.
+
+## UX Layout (easy flow)
+1. **LM Studio**: connect/start/list/load models.
+2. **Prompt Builder**: describe agent behavior and generate a system prompt.
+3. **Agent Builder**: create agents and update models.
+4. **Tool Builder**: create instruction/delegate tools.
+5. **Chat**: talk to a selected agent.
+6. **Graph Workflow**: run a sequence of agents with LangGraph.
 
 ## Quick Start
 
@@ -34,54 +29,21 @@ python app.py
 ```
 
 ## Environment Variables
+- `LM_STUDIO_BASE_URL` (default `http://127.0.0.1:1234/v1`)
+- `LM_STUDIO_API_KEY` (default `lm-studio`)
+- `LM_STUDIO_DEFAULT_MODEL` (default `qwen/qwen3-4b`)
+- `LM_STUDIO_PROMPT_BUILDER_MODEL` (default `liquid/lfm2.5-1.2b`)
+- `GRADIO_SHARE` (default `false`, set `true` to enable public share links)
+- `GRADIO_SERVER_PORT` (default `7860`)
 
-### Core
-- `LM_STUDIO_BASE_URL` (default: `http://127.0.0.1:1234/v1`)
-- `LM_STUDIO_API_KEY` (default: `lm-studio`)
-- `LM_STUDIO_DEFAULT_MODEL` (default: `qwen/qwen3-4b`)
-- `LM_STUDIO_PLANNER_MODEL` (default: `qwen/qwen3-4b`)
-- `LM_STUDIO_WORKER_MODEL` (default: `liquid/lfm2.5-1.2b`)
-
-### CLI Controls
-- `LM_STUDIO_CLI_BIN` (default: `lms`)
-- `LM_STUDIO_CLI_SERVER_START` (default: `server start`)
-- `LM_STUDIO_CLI_SERVER_STOP` (default: `server stop`)
-- `LM_STUDIO_CLI_MODEL_LOAD_TEMPLATE` (default: `load "{model}"`)
-- `LM_STUDIO_CLI_LIST_MODELS` (default: `ls`)
-
-### Gradio Runtime
-- `GRADIO_SHARE` (default: `false`) → set `true` to generate a public share link.
-- `GRADIO_SERVER_PORT` (default: `7860`)
-
-## Fixes for your reported issues
-
-### 1) `load` received too many arguments
-The UI now sanitizes model list output before loading:
-- parse CLI output into clean IDs (`parse_model_lines`)
-- normalize selected value (`normalize_model_name`)
-- load with quoted model template (`load "{model}"`)
-
-### 2) Windows UnicodeDecodeError (cp1252) from CLI output
-CLI subprocess reading now uses:
-- `encoding="utf-8"`
-- `errors="replace"`
-
-This prevents crashes when LM Studio outputs bytes not representable in cp1252.
-
-### 3) Public link support
-`launch()` now reads `GRADIO_SHARE`; set:
-
-```bash
-export GRADIO_SHARE=true
-```
-
-(or in `.env`) to enable Gradio share links.
+## Notes
+- Since SDK APIs can vary by LM Studio version, the controller uses a compatibility strategy that tries common method names.
+- If SDK calls fail, upgrade LM Studio and the `lmstudio` package.
 
 ## Latest libraries
 
 ```bash
-python -m pip install -U gradio langchain langchain-openai langchain-community langgraph httpx pydantic pytest ruff
-python -m pip install -U lmstudio  # optional LM Studio SDK
+python -m pip install -U gradio langchain langchain-openai langchain-community langgraph pydantic lmstudio pytest ruff
 ```
 
 ## Validation
