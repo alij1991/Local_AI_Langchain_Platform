@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 from collections.abc import Callable
-import inspect
 from typing import Any
 
 import gradio as gr
@@ -34,6 +33,14 @@ def build_chat_handler(orchestrator: AgentOrchestrator, messages_format: bool) -
 
     return chat
 
+
+
+def _chatbot_uses_messages_format() -> bool:
+    try:
+        gr.Chatbot(type="messages")
+    except TypeError:
+        return False
+    return True
 
 def _human_size(size_bytes: int | None) -> str:
     if size_bytes is None:
@@ -94,7 +101,7 @@ def build_app() -> gr.Blocks:
     config = load_config()
     orchestrator = AgentOrchestrator(config)
     controller = OllamaController(config)
-    messages_format = "type" in inspect.signature(gr.Chatbot).parameters
+    messages_format = _chatbot_uses_messages_format()
     chat_fn = build_chat_handler(orchestrator, messages_format=messages_format)
 
     def _local_model_infos() -> list[ModelInfo]:
@@ -139,9 +146,21 @@ def build_app() -> gr.Blocks:
     def refresh_models() -> tuple[str, str, dict[str, Any], dict[str, Any], dict[str, Any]]:
         ok, infos, error = controller.list_local_models_detailed()
         if not ok:
-            return f"❌ {error}", "", gr.update(), gr.update(), gr.update()
+            return (
+                f"❌ {error}",
+                "",
+                gr.update(),
+                gr.update(choices=[startup_model], value=startup_model),
+                gr.update(choices=[startup_model], value=startup_model),
+            )
         if not infos:
-            return "No models returned by Ollama SDK.", "", gr.update(), gr.update(), gr.update()
+            return (
+                "No models returned by Ollama SDK.",
+                "",
+                gr.update(),
+                gr.update(choices=[startup_model], value=startup_model),
+                gr.update(choices=[startup_model], value=startup_model),
+            )
 
         load_choices = _load_model_choices(infos)
         agent_choices = _agent_model_choices(infos)
@@ -165,16 +184,17 @@ def build_app() -> gr.Blocks:
         result = controller.list_loaded_models()
         return result.output if result.ok else f"❌ {result.output}"
 
-    def create_agent(name: str, model_name: str, system_prompt: str):
+    def create_agent(name: str, model_name: str | None, system_prompt: str):
         clean = name.strip().lower().replace(" ", "-")
+        selected_model = (model_name or "").strip()
         if not clean:
             return "❌ Agent name is required.", gr.update(), gr.update(), gr.update(), gr.update()
         if clean in orchestrator.definitions:
             return "❌ Agent already exists.", gr.update(), gr.update(), gr.update(), gr.update()
-        if not model_name.strip():
+        if not selected_model:
             return "❌ Select or type a model name.", gr.update(), gr.update(), gr.update(), gr.update()
 
-        orchestrator.add_agent(clean, model_name.strip(), system_prompt.strip())
+        orchestrator.add_agent(clean, selected_model, system_prompt.strip())
         return (
             f"✅ Agent `{clean}` created.",
             gr.update(value=_agent_map_text()),
@@ -183,13 +203,14 @@ def build_app() -> gr.Blocks:
             _agent_choices(clean),
         )
 
-    def update_agent_model(agent_name: str, model_name: str):
+    def update_agent_model(agent_name: str, model_name: str | None):
         if not agent_name:
             return "❌ Select an agent.", gr.update()
-        if not model_name.strip():
+        selected_model = (model_name or "").strip()
+        if not selected_model:
             return "❌ Select or type a model name.", gr.update()
-        orchestrator.set_agent_model(agent_name, model_name)
-        return f"✅ Updated `{agent_name}` model to `{model_name}`.", gr.update(value=_agent_map_text())
+        orchestrator.set_agent_model(agent_name, selected_model)
+        return f"✅ Updated `{agent_name}` model to `{selected_model}`.", gr.update(value=_agent_map_text())
 
     def draft_prompt(description: str) -> str:
         if not description.strip():
@@ -271,7 +292,12 @@ def build_app() -> gr.Blocks:
                     agent_map = gr.Markdown(value=_agent_map_text(), label="Agent map")
                     gr.Markdown("Create role-specific agents and map each to a model.")
                     new_agent_name = gr.Textbox(label="New agent name", placeholder="legal-reviewer")
-                    new_agent_model = gr.Dropdown(label="Model", choices=[], allow_custom_value=True)
+                    new_agent_model = gr.Dropdown(
+                        label="Model",
+                        choices=[startup_model],
+                        value=startup_model,
+                        allow_custom_value=True,
+                    )
                     new_agent_prompt = gr.Textbox(label="System prompt", lines=5)
                     create_agent_btn = gr.Button("Create Agent", variant="primary")
                     create_agent_status = gr.Markdown()
@@ -282,7 +308,12 @@ def build_app() -> gr.Blocks:
                         choices=orchestrator.list_agents(),
                         value=orchestrator.list_agents()[0],
                     )
-                    update_agent_model_name = gr.Dropdown(label="New model", choices=[], allow_custom_value=True)
+                    update_agent_model_name = gr.Dropdown(
+                        label="New model",
+                        choices=[startup_model],
+                        value=startup_model,
+                        allow_custom_value=True,
+                    )
                     update_agent_btn = gr.Button("Apply Model Update")
                     update_agent_status = gr.Markdown()
 
