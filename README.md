@@ -5,7 +5,7 @@ Self-hosted Python UI for building agentic systems with **Ollama + LangChain + L
 ## What changed
 - Replaced LM Studio controls with **Ollama Python SDK** integration.
 - Kept the custom-agent architecture (no fixed planner/worker dependency).
-- Added built-in prompt-builder agent support using an Ollama model.
+- Added built-in prompt-builder agent support using a lightweight default model.
 
 ## UX Flow
 1. **Ollama**: list local/running models and ensure a selected model is available.
@@ -29,13 +29,14 @@ python app.py
 
 ## Environment Variables
 - `OLLAMA_BASE_URL` (default `http://127.0.0.1:11434`)
-- `OLLAMA_DEFAULT_MODEL` (default `qwen3:4b`)
-- `OLLAMA_PROMPT_BUILDER_MODEL` (default `llama3.2:3b`)
+- `OLLAMA_DEFAULT_MODEL` (default `gemma3:1b`)
+- `OLLAMA_PROMPT_BUILDER_MODEL` (default `gemma3:1b`)
 - `GRADIO_SHARE` (default `false`, set `true` for public share links)
 - `GRADIO_SERVER_PORT` (default `7860`)
 
 ## Notes
 - Ollama daemon is managed externally; start it with `ollama serve`.
+- If prompt-builder model is missing, the app now falls back to available local models and returns actionable guidance in the prompt panel instead of a generic error.
 - If model list/load fails, confirm daemon is running and your model exists (`ollama list`).
 
 ## Latest libraries

@@ -22,8 +22,8 @@ class AppConfig:
 def load_config() -> AppConfig:
     return AppConfig(
         ollama_base_url=os.getenv("OLLAMA_BASE_URL", "http://127.0.0.1:11434"),
-        default_model=os.getenv("OLLAMA_DEFAULT_MODEL", "qwen3:4b"),
-        prompt_builder_model=os.getenv("OLLAMA_PROMPT_BUILDER_MODEL", "llama3.2:3b"),
+        default_model=os.getenv("OLLAMA_DEFAULT_MODEL", "gemma3:1b"),
+        prompt_builder_model=os.getenv("OLLAMA_PROMPT_BUILDER_MODEL", "gemma3:1b"),
         gradio_share=_as_bool(os.getenv("GRADIO_SHARE"), default=False),
         gradio_server_port=int(os.getenv("GRADIO_SERVER_PORT", "7860")),
     )
