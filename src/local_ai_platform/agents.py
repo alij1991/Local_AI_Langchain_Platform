@@ -34,6 +34,7 @@ class AgentOrchestrator:
         self.tools: list[StructuredTool] = build_default_tools()
         self.definitions: dict[str, AgentDefinition] = {}
         self.chat_histories: dict[str, list[BaseMessage]] = {}
+        self._models_without_tool_support: set[str] = set()
 
     def add_agent(self, name: str, model_name: str, system_prompt: str) -> None:
         self.definitions[name] = AgentDefinition(name=name, model_name=model_name, system_prompt=system_prompt)
@@ -94,16 +95,32 @@ class AgentOrchestrator:
         result = llm.invoke(prompt.format_messages(description=description))
         return str(getattr(result, "content", ""))
 
-    def _build_agent_graph(self, definition: AgentDefinition):
+    def _build_agent_graph(self, definition: AgentDefinition, allow_tools: bool = True):
         llm = ChatOllama(model=definition.model_name, base_url=self.config.ollama_base_url, temperature=0.2)
-        return create_react_agent(model=llm, tools=self.tools, prompt=definition.system_prompt)
+        tools = self.tools
+        if not allow_tools or definition.model_name in self._models_without_tool_support:
+            tools = []
+        return create_react_agent(model=llm, tools=tools, prompt=definition.system_prompt)
+
+    @staticmethod
+    def _is_tool_support_error(exc: Exception) -> bool:
+        message = str(exc).lower()
+        return "does not support tools" in message
 
     def chat_with_agent(self, agent_name: str, user_input: str) -> str:
         definition = self.definitions[agent_name]
         graph = self._build_agent_graph(definition)
         history = self.chat_histories[agent_name]
 
-        result = graph.invoke({"messages": [*history, HumanMessage(content=user_input)]})
+        payload = {"messages": [*history, HumanMessage(content=user_input)]}
+        try:
+            result = graph.invoke(payload)
+        except Exception as exc:  # noqa: BLE001
+            if not self._is_tool_support_error(exc):
+                raise
+            self._models_without_tool_support.add(definition.model_name)
+            graph = self._build_agent_graph(definition, allow_tools=False)
+            result = graph.invoke(payload)
         messages = result.get("messages", [])
         final_message = next((msg for msg in reversed(messages) if isinstance(msg, AIMessage)), None)
         output = str(getattr(final_message, "content", "No response returned."))

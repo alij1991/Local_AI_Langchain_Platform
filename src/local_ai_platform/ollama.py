@@ -12,6 +12,16 @@ class CommandResult:
     output: str
 
 
+@dataclass
+class ModelInfo:
+    name: str
+    size_bytes: int | None = None
+    family: str = "unknown"
+    parameter_size: str = "unknown"
+    quantization: str = "unknown"
+    supports_tools: bool | None = None
+
+
 class OllamaController:
     """Ollama integration via official Python SDK."""
 
@@ -69,14 +79,98 @@ class OllamaController:
 
         return [str(payload)]
 
-    def list_local_models(self) -> CommandResult:
+    @staticmethod
+    def _to_dict(payload: Any) -> dict[str, Any]:
+        if isinstance(payload, dict):
+            return payload
+        if hasattr(payload, "model_dump"):
+            dumped = payload.model_dump()
+            if isinstance(dumped, dict):
+                return dumped
+        if hasattr(payload, "dict"):
+            dumped = payload.dict()
+            if isinstance(dumped, dict):
+                return dumped
+        if hasattr(payload, "__dict__"):
+            dumped = dict(payload.__dict__)
+            return dumped
+        return {}
+
+    @staticmethod
+    def _supports_tools(record: dict[str, Any]) -> bool | None:
+        details = record.get("details") if isinstance(record.get("details"), dict) else {}
+        capabilities = record.get("capabilities")
+        if not isinstance(capabilities, list):
+            capabilities = details.get("capabilities") if isinstance(details, dict) else None
+
+        if isinstance(capabilities, list):
+            normalized = {str(item).lower() for item in capabilities}
+            return "tools" in normalized
+        return None
+
+    @classmethod
+    def _extract_model_infos(cls, payload: Any) -> list[ModelInfo]:
+        root = cls._to_dict(payload)
+        models = root.get("models", []) if isinstance(root, dict) else []
+        if not isinstance(models, list):
+            models = []
+
+        infos: list[ModelInfo] = []
+        for item in models:
+            record = cls._to_dict(item)
+            if not record:
+                names = cls._extract_model_names(item)
+                for name in names:
+                    infos.append(ModelInfo(name=name))
+                continue
+
+            details = record.get("details") if isinstance(record.get("details"), dict) else {}
+            name = str(record.get("name") or record.get("model") or "").strip()
+            if not name:
+                continue
+
+            size_value = record.get("size")
+            size_bytes = int(size_value) if isinstance(size_value, (int, float)) else None
+
+            infos.append(
+                ModelInfo(
+                    name=name,
+                    size_bytes=size_bytes,
+                    family=str(details.get("family", "unknown")),
+                    parameter_size=str(details.get("parameter_size", "unknown")),
+                    quantization=str(details.get("quantization_level", "unknown")),
+                    supports_tools=cls._supports_tools(record),
+                )
+            )
+
+        deduped: list[ModelInfo] = []
+        seen: set[str] = set()
+        for info in infos:
+            if info.name and info.name not in seen:
+                deduped.append(info)
+                seen.add(info.name)
+        return deduped
+
+    def list_local_models_detailed(self) -> tuple[bool, list[ModelInfo], str]:
         try:
             client = self._get_client()
             payload = client.list()
+            infos = self._extract_model_infos(payload)
+            if infos:
+                return True, infos, ""
+
             names = self._extract_model_names(payload)
-            return CommandResult(True, "\n".join(names) if names else "No local models found.")
+            fallback_infos = [ModelInfo(name=name) for name in names]
+            return True, fallback_infos, ""
         except Exception as exc:  # noqa: BLE001
-            return CommandResult(False, str(exc))
+            return False, [], str(exc)
+
+    def list_local_models(self) -> CommandResult:
+        ok, infos, error = self.list_local_models_detailed()
+        if not ok:
+            return CommandResult(False, error)
+        names = [info.name for info in infos]
+        return CommandResult(True, "\n".join(names) if names else "No local models found.")
 
     def list_loaded_models(self) -> CommandResult:
         try:
