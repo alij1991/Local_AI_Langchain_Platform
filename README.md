@@ -38,6 +38,8 @@ python app.py
 
 ## Notes
 - Since SDK APIs can vary by LM Studio version, the controller uses a compatibility strategy that tries common and fuzzy-matched method names across module/client/namespaces.
+- Local model extraction now prefers SDK fields like `model_key` to avoid dropdown values like `DownloadedLlm(...)` repr strings.
+- If your SDK version does not expose start/stop server methods, the UI now shows a guidance message instead of a hard error.
 - If SDK calls fail, upgrade LM Studio and the `lmstudio` package.
 
 ## Latest libraries
