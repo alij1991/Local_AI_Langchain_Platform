@@ -37,7 +37,7 @@ python app.py
 - `GRADIO_SERVER_PORT` (default `7860`)
 
 ## Notes
-- Since SDK APIs can vary by LM Studio version, the controller uses a compatibility strategy that tries common method names.
+- Since SDK APIs can vary by LM Studio version, the controller uses a compatibility strategy that tries common and fuzzy-matched method names across module/client/namespaces.
 - If SDK calls fail, upgrade LM Studio and the `lmstudio` package.
 
 ## Latest libraries
