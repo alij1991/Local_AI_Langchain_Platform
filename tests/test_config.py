@@ -26,5 +26,5 @@ def test_load_config_defaults(monkeypatch):
     assert config.lm_studio_cli_bin == "lms"
     assert config.lm_studio_cli_server_start == "server start"
     assert config.lm_studio_cli_server_stop == "server stop"
-    assert config.lm_studio_cli_model_load_template == "load {model}"
+    assert config.lm_studio_cli_model_load_template == 'load "{model}"'
     assert config.lm_studio_cli_list_models == "ls"

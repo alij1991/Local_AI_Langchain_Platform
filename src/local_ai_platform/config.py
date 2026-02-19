@@ -30,7 +30,7 @@ def load_config() -> AppConfig:
         lm_studio_cli_server_start=os.getenv("LM_STUDIO_CLI_SERVER_START", "server start"),
         lm_studio_cli_server_stop=os.getenv("LM_STUDIO_CLI_SERVER_STOP", "server stop"),
         lm_studio_cli_model_load_template=os.getenv(
-            "LM_STUDIO_CLI_MODEL_LOAD_TEMPLATE", "load {model}"
+            "LM_STUDIO_CLI_MODEL_LOAD_TEMPLATE", 'load "{model}"'
         ),
         lm_studio_cli_list_models=os.getenv("LM_STUDIO_CLI_LIST_MODELS", "ls"),
     )

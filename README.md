@@ -1,18 +1,20 @@
 # Local AI LangChain Platform
 
-Self-hosted Python UI for **LangChain + LM Studio** with multi-agent orchestration.
+Self-hosted Python UI for building and running agentic systems with **LM Studio + LangChain + LangGraph**.
 
-## What you get
-- Gradio UI (no subscription required for deployment).
-- Planner/Worker agent orchestration with separate model assignments.
-- Tool-enabled agents via LangGraph (`create_react_agent`).
-- Per-agent conversation memory.
-- LM Studio control panel in UI for:
-  - starting/stopping the LM Studio server (CLI)
-  - listing local models (CLI)
-  - listing loaded server models (HTTP API)
-  - loading a selected model (CLI)
-- Runtime model switching for planner/worker agents directly from UI.
+## Features
+- Gradio UI (deploy locally/VPS/Docker; no subscription requirement).
+- Multi-agent chat (`planner`, `worker`, plus custom agents you create in UI).
+- Runtime model switching per agent.
+- LM Studio operations from UI:
+  - start/stop local server,
+  - list local models from CLI,
+  - load selected model,
+  - list loaded models from server API.
+- Tool builder:
+  - instruction tools,
+  - delegate tools that call another agent.
+- Graph workflow panel using LangGraph state graph over a custom agent sequence.
 
 ## Project Structure
 
@@ -28,71 +30,54 @@ Self-hosted Python UI for **LangChain + LM Studio** with multi-agent orchestrati
 │   ├── lmstudio.py
 │   └── tools.py
 └── tests
-    └── test_config.py
+    ├── test_config.py
+    └── test_lmstudio.py
 ```
 
 ## Quick Start
 
-1. Create and activate your virtual environment.
-2. Install dependencies:
-
 ```bash
 python -m pip install --upgrade pip setuptools wheel
 pip install -e .[dev]
-```
-
-3. Copy and load environment values:
-
-```bash
 cp .env.example .env
 set -a
 source .env
 set +a
-```
-
-4. Run app:
-
-```bash
 python app.py
 ```
 
 ## Environment Variables
 
-### LM Studio server + model defaults
+### Core
 - `LM_STUDIO_BASE_URL` (default: `http://127.0.0.1:1234/v1`)
 - `LM_STUDIO_API_KEY` (default: `lm-studio`)
 - `LM_STUDIO_DEFAULT_MODEL` (default: `qwen/qwen3-4b`)
 - `LM_STUDIO_PLANNER_MODEL` (default: `qwen/qwen3-4b`)
 - `LM_STUDIO_WORKER_MODEL` (default: `liquid/lfm2.5-1.2b`)
 
-### LM Studio CLI control commands
+### CLI Controls
 - `LM_STUDIO_CLI_BIN` (default: `lms`)
 - `LM_STUDIO_CLI_SERVER_START` (default: `server start`)
 - `LM_STUDIO_CLI_SERVER_STOP` (default: `server stop`)
-- `LM_STUDIO_CLI_MODEL_LOAD_TEMPLATE` (default: `load {model}`)
+- `LM_STUDIO_CLI_MODEL_LOAD_TEMPLATE` (default: `load "{model}"`)
 - `LM_STUDIO_CLI_LIST_MODELS` (default: `ls`)
 
-> You can override command templates if your LM Studio CLI version uses different subcommands.
+## Why the LM Studio section was failing before
+The CLI list output contained non-model lines and rich table text. That text was being passed directly into `load`, creating errors like “too many arguments”.
+
+Fixes implemented:
+- robust parsing (`parse_model_lines`) that extracts clean model IDs,
+- model normalization before load (`normalize_model_name`),
+- quoted load template default: `load "{model}"`.
 
 ## Latest libraries
-To use the newest releases:
 
 ```bash
 python -m pip install -U gradio langchain langchain-openai langchain-community langgraph httpx pydantic pytest ruff
-# optional SDK if you want to experiment with LM Studio python package APIs
-python -m pip install -U lmstudio
+python -m pip install -U lmstudio  # optional LM Studio SDK
 ```
 
-## Notes on compatibility
-- Gradio chat uses `gr.Chatbot(label="Conversation")` + tuple history for broad compatibility.
-- Agent runtime uses LangGraph prebuilt APIs to avoid unstable `langchain.agents` imports.
-
-## Troubleshooting
-- If `lms` command is not found, verify LM Studio CLI installation and `PATH`, or set `LM_STUDIO_CLI_BIN`.
-- If `/models` request fails, make sure LM Studio local server is started and `LM_STUDIO_BASE_URL` is correct.
-- If dependency install fails behind proxy, configure `HTTP_PROXY` / `HTTPS_PROXY`.
-
-## Validation commands
+## Validation
 
 ```bash
 python -m compileall app.py src tests
