@@ -20,6 +20,7 @@ class ModelInfo:
     parameter_size: str = "unknown"
     quantization: str = "unknown"
     supports_tools: bool | None = None
+    supports_generate: bool | None = None
 
 
 class OllamaController:
@@ -97,16 +98,28 @@ class OllamaController:
         return {}
 
     @staticmethod
-    def _supports_tools(record: dict[str, Any]) -> bool | None:
+    def _capabilities(record: dict[str, Any]) -> set[str]:
         details = record.get("details") if isinstance(record.get("details"), dict) else {}
         capabilities = record.get("capabilities")
         if not isinstance(capabilities, list):
             capabilities = details.get("capabilities") if isinstance(details, dict) else None
+        if not isinstance(capabilities, list):
+            return set()
+        return {str(item).lower() for item in capabilities}
 
-        if isinstance(capabilities, list):
-            normalized = {str(item).lower() for item in capabilities}
-            return "tools" in normalized
-        return None
+    @classmethod
+    def _supports_tools(cls, record: dict[str, Any]) -> bool | None:
+        capabilities = cls._capabilities(record)
+        if not capabilities:
+            return None
+        return "tools" in capabilities
+
+    @classmethod
+    def _supports_generate(cls, record: dict[str, Any]) -> bool | None:
+        capabilities = cls._capabilities(record)
+        if not capabilities:
+            return None
+        return bool({"completion", "generate", "chat"} & capabilities)
 
     @classmethod
     def _extract_model_infos(cls, payload: Any) -> list[ModelInfo]:
@@ -140,6 +153,7 @@ class OllamaController:
                     parameter_size=str(details.get("parameter_size", "unknown")),
                     quantization=str(details.get("quantization_level", "unknown")),
                     supports_tools=cls._supports_tools(record),
+                    supports_generate=cls._supports_generate(record),
                 )
             )
 
@@ -188,7 +202,16 @@ class OllamaController:
                 return CommandResult(False, "Select a model first.")
             client = self._get_client()
             client.pull(clean)
-            client.generate(model=clean, prompt="hello", options={"num_predict": 1})
-            return CommandResult(True, f"Model ready: {clean}")
+            try:
+                client.generate(model=clean, prompt="hello", options={"num_predict": 1})
+                return CommandResult(True, f"Model ready: {clean}")
+            except Exception as generate_exc:  # noqa: BLE001
+                message = str(generate_exc).lower()
+                if "does not support generate" in message:
+                    return CommandResult(
+                        True,
+                        f"Model downloaded: {clean}. This is likely an embedding-only model and cannot be used for chat generation.",
+                    )
+                return CommandResult(False, str(generate_exc))
         except Exception as exc:  # noqa: BLE001
             return CommandResult(False, str(exc))
