@@ -7,8 +7,6 @@ import subprocess
 from dataclasses import dataclass
 from typing import Any
 
-import httpx
-
 from .config import AppConfig
 
 
@@ -27,7 +25,14 @@ class LMStudioController:
     def _run_cli(self, command: str) -> CommandResult:
         full_command = [self.config.lm_studio_cli_bin, *shlex.split(command)]
         try:
-            proc = subprocess.run(full_command, capture_output=True, text=True, check=False)
+            proc = subprocess.run(
+                full_command,
+                capture_output=True,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+                check=False,
+            )
         except FileNotFoundError:
             return CommandResult(False, f"CLI not found: {self.config.lm_studio_cli_bin}")
 
@@ -52,6 +57,8 @@ class LMStudioController:
         return self._run_cli(self.config.lm_studio_cli_list_models)
 
     def list_loaded_models(self) -> CommandResult:
+        import httpx
+
         url = f"{self.config.lm_studio_base_url.rstrip('/')}/models"
         try:
             with httpx.Client(timeout=5.0) as client:
@@ -69,7 +76,6 @@ class LMStudioController:
         if not lines:
             return []
 
-        # Try JSON first for CLIs that support --json output.
         try:
             payload = json.loads(output)
             if isinstance(payload, dict) and isinstance(payload.get("data"), list):
@@ -91,7 +97,6 @@ class LMStudioController:
 
     @staticmethod
     def normalize_model_name(value: str) -> str:
-        """Extract a clean model identifier from noisy CLI list output lines."""
         candidate = value.strip()
         if not candidate:
             return candidate
@@ -99,9 +104,6 @@ class LMStudioController:
         if "(" in candidate:
             candidate = candidate.split("(", 1)[0].strip()
 
-        # Keep only first token if users pass full table-like line.
         candidate = candidate.split()[0].strip()
-
-        # Safety clean for common control characters.
         candidate = re.sub(r"\s+", "", candidate)
         return candidate

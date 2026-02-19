@@ -3,8 +3,13 @@
 Self-hosted Python UI for building and running agentic systems with **LM Studio + LangChain + LangGraph**.
 
 ## Features
-- Gradio UI (deploy locally/VPS/Docker; no subscription requirement).
-- Multi-agent chat (`planner`, `worker`, plus custom agents you create in UI).
+- Clean multi-tab Gradio UX with dedicated workspaces:
+  - **Chat Workspace**
+  - **LM Studio Control**
+  - **Agent Builder**
+  - **Tool Builder**
+  - **Graph Workflow**
+- Multi-agent chat (`planner`, `worker`, and custom agents you create in UI).
 - Runtime model switching per agent.
 - LM Studio operations from UI:
   - start/stop local server,
@@ -14,25 +19,7 @@ Self-hosted Python UI for building and running agentic systems with **LM Studio 
 - Tool builder:
   - instruction tools,
   - delegate tools that call another agent.
-- Graph workflow panel using LangGraph state graph over a custom agent sequence.
-
-## Project Structure
-
-```text
-.
-├── app.py
-├── pyproject.toml
-├── .env.example
-├── src/local_ai_platform
-│   ├── __init__.py
-│   ├── agents.py
-│   ├── config.py
-│   ├── lmstudio.py
-│   └── tools.py
-└── tests
-    ├── test_config.py
-    └── test_lmstudio.py
-```
+- Graph workflow runner using LangGraph state graph over a custom agent sequence.
 
 ## Quick Start
 
@@ -62,13 +49,33 @@ python app.py
 - `LM_STUDIO_CLI_MODEL_LOAD_TEMPLATE` (default: `load "{model}"`)
 - `LM_STUDIO_CLI_LIST_MODELS` (default: `ls`)
 
-## Why the LM Studio section was failing before
-The CLI list output contained non-model lines and rich table text. That text was being passed directly into `load`, creating errors like “too many arguments”.
+### Gradio Runtime
+- `GRADIO_SHARE` (default: `false`) → set `true` to generate a public share link.
+- `GRADIO_SERVER_PORT` (default: `7860`)
 
-Fixes implemented:
-- robust parsing (`parse_model_lines`) that extracts clean model IDs,
-- model normalization before load (`normalize_model_name`),
-- quoted load template default: `load "{model}"`.
+## Fixes for your reported issues
+
+### 1) `load` received too many arguments
+The UI now sanitizes model list output before loading:
+- parse CLI output into clean IDs (`parse_model_lines`)
+- normalize selected value (`normalize_model_name`)
+- load with quoted model template (`load "{model}"`)
+
+### 2) Windows UnicodeDecodeError (cp1252) from CLI output
+CLI subprocess reading now uses:
+- `encoding="utf-8"`
+- `errors="replace"`
+
+This prevents crashes when LM Studio outputs bytes not representable in cp1252.
+
+### 3) Public link support
+`launch()` now reads `GRADIO_SHARE`; set:
+
+```bash
+export GRADIO_SHARE=true
+```
+
+(or in `.env`) to enable Gradio share links.
 
 ## Latest libraries
 

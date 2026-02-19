@@ -24,7 +24,6 @@ dev = [
   "pytest",
   "ruff",
 ]
-
 lmstudio = [
   "lmstudio",
 ]

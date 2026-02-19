@@ -13,6 +13,8 @@ def test_load_config_defaults(monkeypatch):
         "LM_STUDIO_CLI_SERVER_STOP",
         "LM_STUDIO_CLI_MODEL_LOAD_TEMPLATE",
         "LM_STUDIO_CLI_LIST_MODELS",
+        "GRADIO_SHARE",
+        "GRADIO_SERVER_PORT",
     ]:
         monkeypatch.delenv(key, raising=False)
 
@@ -28,3 +30,5 @@ def test_load_config_defaults(monkeypatch):
     assert config.lm_studio_cli_server_stop == "server stop"
     assert config.lm_studio_cli_model_load_template == 'load "{model}"'
     assert config.lm_studio_cli_list_models == "ls"
+    assert config.gradio_share is False
+    assert config.gradio_server_port == 7860
