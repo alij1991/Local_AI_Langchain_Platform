@@ -1,18 +1,18 @@
 # Local AI LangChain Platform
 
-Starter project for a **Python UI app** backed by **LangChain** using **LM Studio models**.
+Self-hosted Python UI for **LangChain + LM Studio** with multi-agent orchestration.
 
-This scaffold gives you:
-- A Gradio interface for chatting with agents.
-- LM Studio integration (OpenAI-compatible API endpoint).
-- Two built-in agents using different lightweight models (`planner` and `worker`).
-- Conversation memory per agent.
-- Tool support (example tools included).
-- Combined mode to run multiple agents on the same prompt.
-
-> ✅ The code uses LangGraph's `create_react_agent` + message-history pattern,
-> which is compatible with current LangChain/LangGraph releases and avoids
-> fragile imports from older `langchain.agents` paths.
+## What you get
+- Gradio UI (no subscription required for deployment).
+- Planner/Worker agent orchestration with separate model assignments.
+- Tool-enabled agents via LangGraph (`create_react_agent`).
+- Per-agent conversation memory.
+- LM Studio control panel in UI for:
+  - starting/stopping the LM Studio server (CLI)
+  - listing local models (CLI)
+  - listing loaded server models (HTTP API)
+  - loading a selected model (CLI)
+- Runtime model switching for planner/worker agents directly from UI.
 
 ## Project Structure
 
@@ -25,171 +25,76 @@ This scaffold gives you:
 │   ├── __init__.py
 │   ├── agents.py
 │   ├── config.py
+│   ├── lmstudio.py
 │   └── tools.py
 └── tests
     └── test_config.py
 ```
 
-## Recommended Models for 16GB RAM Laptops
-
-The defaults are intentionally set to smaller models for better local speed:
-- `qwen/qwen3-4b` (good general purpose default/planner)
-- `liquid/lfm2.5-1.2b` (fast worker model)
-
-If your laptop is slower or has less VRAM/shared memory, try:
-- `llama-3.2-3b-instruct`
-- `gemma-2-2b-it`
-
-Tip: in LM Studio, prefer **4-bit quantized variants** (for example `Q4_K_M`) for much better performance.
-
 ## Quick Start
 
-1. Create and activate a virtual environment.
-2. Upgrade packaging tools first:
+1. Create and activate your virtual environment.
+2. Install dependencies:
 
 ```bash
 python -m pip install --upgrade pip setuptools wheel
-```
-
-3. Install dependencies:
-
-```bash
 pip install -e .[dev]
 ```
 
-To force-upgrade to the newest releases in your environment:
-
-```bash
-python -m pip install -U gradio langchain langchain-openai langchain-community langgraph pydantic pytest ruff
-```
-
-4. Copy env template:
+3. Copy and load environment values:
 
 ```bash
 cp .env.example .env
-
-# load the values for this shell session
 set -a
 source .env
 set +a
 ```
 
-5. In LM Studio:
-   - Start the local server.
-   - Load the models referenced in your `.env`.
-
-6. Run the UI (fully self-hosted, no subscription required):
+4. Run app:
 
 ```bash
 python app.py
 ```
-
-### Why this UI is better for standalone deployment
-
-- Gradio runs as a local web server and can be deployed on your own VPS, local machine,
-  Docker, or internal network without any required paid hosted service.
-- You retain full Python-level control over layouts, callbacks, components, and routing logic.
-- The chat component is implemented with a compatibility-safe `gr.Chatbot(...)` signature (without `type="messages"`) to work across current Gradio versions.
 
 ## Environment Variables
 
-- `LM_STUDIO_BASE_URL`: LM Studio OpenAI-compatible base URL (default `http://127.0.0.1:1234/v1`).
-- `LM_STUDIO_API_KEY`: Any value accepted by your local setup (default `lm-studio`).
-- `LM_STUDIO_DEFAULT_MODEL`: Default model name (default `qwen/qwen3-4b`).
-- `LM_STUDIO_PLANNER_MODEL`: Model for planning agent (default `qwen/qwen3-4b`).
-- `LM_STUDIO_WORKER_MODEL`: Model for worker agent (default `liquid/lfm2.5-1.2b`).
+### LM Studio server + model defaults
+- `LM_STUDIO_BASE_URL` (default: `http://127.0.0.1:1234/v1`)
+- `LM_STUDIO_API_KEY` (default: `lm-studio`)
+- `LM_STUDIO_DEFAULT_MODEL` (default: `qwen/qwen3-4b`)
+- `LM_STUDIO_PLANNER_MODEL` (default: `qwen/qwen3-4b`)
+- `LM_STUDIO_WORKER_MODEL` (default: `liquid/lfm2.5-1.2b`)
 
-## Add Your Own Tools
+### LM Studio CLI control commands
+- `LM_STUDIO_CLI_BIN` (default: `lms`)
+- `LM_STUDIO_CLI_SERVER_START` (default: `server start`)
+- `LM_STUDIO_CLI_SERVER_STOP` (default: `server stop`)
+- `LM_STUDIO_CLI_MODEL_LOAD_TEMPLATE` (default: `load {model}`)
+- `LM_STUDIO_CLI_LIST_MODELS` (default: `ls`)
 
-Edit `src/local_ai_platform/tools.py` and register more tools in `build_default_tools()`.
+> You can override command templates if your LM Studio CLI version uses different subcommands.
 
-## Combine More Agents
-
-Add definitions in `AgentOrchestrator.definitions` and expand routing logic in `combined_response()`.
-
-## Fixing Common Testing/Setup Issues
-
-If you saw install/test failures like I did in a restricted environment, use this checklist:
-
-1. **Proxy/network issues while installing**
-   - Ensure your shell has proper internet access.
-   - If you are behind a proxy, set:
+## Latest libraries
+To use the newest releases:
 
 ```bash
-export HTTPS_PROXY=http://<proxy-host>:<proxy-port>
-export HTTP_PROXY=http://<proxy-host>:<proxy-port>
+python -m pip install -U gradio langchain langchain-openai langchain-community langgraph httpx pydantic pytest ruff
+# optional SDK if you want to experiment with LM Studio python package APIs
+python -m pip install -U lmstudio
 ```
 
-2. **Missing packaging/build tools**
+## Notes on compatibility
+- Gradio chat uses `gr.Chatbot(label="Conversation")` + tuple history for broad compatibility.
+- Agent runtime uses LangGraph prebuilt APIs to avoid unstable `langchain.agents` imports.
 
-```bash
-python -m pip install --upgrade pip setuptools wheel
-```
+## Troubleshooting
+- If `lms` command is not found, verify LM Studio CLI installation and `PATH`, or set `LM_STUDIO_CLI_BIN`.
+- If `/models` request fails, make sure LM Studio local server is started and `LM_STUDIO_BASE_URL` is correct.
+- If dependency install fails behind proxy, configure `HTTP_PROXY` / `HTTPS_PROXY`.
 
-3. **Run validation locally**
+## Validation commands
 
 ```bash
 python -m compileall app.py src tests
-pytest
-```
-
-4. **Gradio not found**
-   - Install dependencies in the active venv first:
-
-```bash
-pip install -e .[dev]
-```
-
-Then launch:
-
-```bash
-python app.py
-```
-
-5. **`TypeError: Chatbot.__init__() got an unexpected keyword argument 'type'`**
-   - This happens on Gradio builds where `gr.Chatbot(type="messages")` is unsupported.
-   - The app code now uses `gr.Chatbot(label="Conversation")` and tuple-style history for wider compatibility.
-   - Upgrade if needed:
-
-```bash
-python -m pip install -U gradio
-```
-
-6. **`ImportError` for symbols from `langchain.agents` (like `AgentExecutor` or `create_tool_calling_agent`)**
-   - Newer LangChain releases have moved/changed parts of `langchain.agents`.
-   - This project now uses `langgraph.prebuilt.create_react_agent` to avoid those brittle imports.
-   - Then reinstall/upgrade dependencies:
-
-```bash
-python -m pip install -U langchain langchain-openai langchain-community
-pip install -e .[dev]
-```
-
-7. **Have we updated the code for latest libraries?**
-   - Yes. This repo now uses:
-     - `langgraph.prebuilt.create_react_agent`
-     - prompt-driven `chat_history` with `HumanMessage`/`AIMessage`
-   - Keep your environment up to date with:
-
-```bash
-python -m pip install -U gradio langchain langchain-openai langchain-community langgraph pydantic pytest ruff
-pip install -e .[dev]
-```
-
-## Create a New GitHub Repository
-
-From your local machine (with `gh` CLI authenticated):
-
-```bash
-git init
-git add .
-git commit -m "Initial scaffold: Gradio + LangChain + LM Studio multi-agent app"
-gh repo create <your-org-or-user>/<repo-name> --private --source=. --push
-```
-
-Or create an empty repo on GitHub first and then:
-
-```bash
-git remote add origin git@github.com:<your-org-or-user>/<repo-name>.git
-git push -u origin main
+python -m pytest
 ```

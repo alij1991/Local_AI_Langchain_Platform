@@ -8,6 +8,11 @@ def test_load_config_defaults(monkeypatch):
         "LM_STUDIO_DEFAULT_MODEL",
         "LM_STUDIO_PLANNER_MODEL",
         "LM_STUDIO_WORKER_MODEL",
+        "LM_STUDIO_CLI_BIN",
+        "LM_STUDIO_CLI_SERVER_START",
+        "LM_STUDIO_CLI_SERVER_STOP",
+        "LM_STUDIO_CLI_MODEL_LOAD_TEMPLATE",
+        "LM_STUDIO_CLI_LIST_MODELS",
     ]:
         monkeypatch.delenv(key, raising=False)
 
@@ -18,3 +23,8 @@ def test_load_config_defaults(monkeypatch):
     assert config.default_model == "qwen/qwen3-4b"
     assert config.planner_model == "qwen/qwen3-4b"
     assert config.worker_model == "liquid/lfm2.5-1.2b"
+    assert config.lm_studio_cli_bin == "lms"
+    assert config.lm_studio_cli_server_start == "server start"
+    assert config.lm_studio_cli_server_stop == "server stop"
+    assert config.lm_studio_cli_model_load_template == "load {model}"
+    assert config.lm_studio_cli_list_models == "ls"

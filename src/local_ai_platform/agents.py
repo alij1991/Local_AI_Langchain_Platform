@@ -43,6 +43,12 @@ class AgentOrchestrator:
         }
         self.chat_histories: dict[str, list[BaseMessage]] = {name: [] for name in self.definitions}
 
+    def set_agent_model(self, agent_name: str, model_name: str) -> None:
+        self.definitions[agent_name].model_name = model_name
+
+    def get_agent_models(self) -> dict[str, str]:
+        return {name: definition.model_name for name, definition in self.definitions.items()}
+
     def _build_agent_graph(self, definition: AgentDefinition):
         llm = ChatOpenAI(
             model=definition.model_name,
