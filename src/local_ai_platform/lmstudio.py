@@ -18,22 +18,29 @@ class LMStudioController:
     def __init__(self, config: AppConfig) -> None:
         self.config = config
         self._client: Any | None = None
+        self._module: Any | None = None
+
+    def _get_module(self) -> Any:
+        if self._module is None:
+            import lmstudio  # type: ignore
+
+            self._module = lmstudio
+        return self._module
 
     def _build_client(self) -> Any:
-        import lmstudio  # type: ignore
-
+        module = self._get_module()
         constructors = [
-            lambda: lmstudio.Client(base_url=self.config.lm_studio_base_url, api_key=self.config.lm_studio_api_key),
-            lambda: lmstudio.Client(),
-            lambda: lmstudio.LMStudio(base_url=self.config.lm_studio_base_url, api_key=self.config.lm_studio_api_key),
-            lambda: lmstudio.LMStudio(),
+            lambda: module.Client(base_url=self.config.lm_studio_base_url, api_key=self.config.lm_studio_api_key),
+            lambda: module.Client(),
+            lambda: module.LMStudio(base_url=self.config.lm_studio_base_url, api_key=self.config.lm_studio_api_key),
+            lambda: module.LMStudio(),
         ]
         for constructor in constructors:
             try:
                 return constructor()
             except Exception:  # noqa: BLE001
                 continue
-        raise RuntimeError("Could not initialize LM Studio SDK client.")
+        return None
 
     def _get_client(self) -> Any:
         if self._client is None:
@@ -41,16 +48,76 @@ class LMStudioController:
         return self._client
 
     @staticmethod
-    def _call_first(target: Any, method_names: list[str], *args: Any, **kwargs: Any) -> Any:
+    def _available_callables(target: Any) -> list[str]:
+        names: list[str] = []
+        for name in dir(target):
+            if name.startswith("_"):
+                continue
+            try:
+                if callable(getattr(target, name)):
+                    names.append(name)
+            except Exception:  # noqa: BLE001
+                continue
+        return names
+
+    @staticmethod
+    def _call_method_if_exists(target: Any, name: str, *args: Any, **kwargs: Any) -> tuple[bool, Any]:
+        method = getattr(target, name, None)
+        if not callable(method):
+            return False, None
+        try:
+            return True, method(*args, **kwargs)
+        except TypeError:
+            return False, None
+
+    @classmethod
+    def _call_candidates(cls, target: Any, method_names: list[str], *args: Any, **kwargs: Any) -> tuple[bool, Any]:
+        # 1) exact candidate names
         for name in method_names:
-            method = getattr(target, name, None)
-            if callable(method):
-                try:
-                    return method(*args, **kwargs)
-                except TypeError:
-                    # Signature mismatch; continue trying alternative names.
-                    continue
-        raise AttributeError(f"No supported method from: {', '.join(method_names)}")
+            ok, result = cls._call_method_if_exists(target, name, *args, **kwargs)
+            if ok:
+                return True, result
+
+        # 2) fuzzy candidate names by keyword overlap (handles SDK naming drift)
+        callables = cls._available_callables(target)
+        requested_keywords = {kw for name in method_names for kw in name.lower().split("_")}
+        fuzzy = [
+            name
+            for name in callables
+            if requested_keywords.intersection(name.lower().replace("-", "_").split("_"))
+        ]
+        for name in fuzzy:
+            ok, result = cls._call_method_if_exists(target, name, *args, **kwargs)
+            if ok:
+                return True, result
+
+        return False, None
+
+    def _call_sdk(self, method_names: list[str], *args: Any, **kwargs: Any) -> Any:
+        module = self._get_module()
+        client = self._get_client()
+
+        targets: list[Any] = [module]
+        if client is not None:
+            targets.append(client)
+            for namespace in ["models", "server", "runtime", "api"]:
+                nested = getattr(client, namespace, None)
+                if nested is not None:
+                    targets.append(nested)
+
+        for target in targets:
+            ok, result = self._call_candidates(target, method_names, *args, **kwargs)
+            if ok:
+                return result
+
+        discovered = []
+        for target in targets:
+            discovered.extend(self._available_callables(target))
+        discovered = sorted(set(discovered))
+        raise AttributeError(
+            "No supported method from "
+            f"{method_names}. Available SDK callables sample: {', '.join(discovered[:25])}"
+        )
 
     @staticmethod
     def _extract_model_names(payload: Any) -> list[str]:
@@ -84,12 +151,7 @@ class LMStudioController:
 
     def list_local_models(self) -> CommandResult:
         try:
-            client = self._get_client()
-            models_namespace = getattr(client, "models", client)
-            payload = self._call_first(
-                models_namespace,
-                ["list_local", "list_downloaded", "list", "all"],
-            )
+            payload = self._call_sdk(["list_local_models", "list_downloaded_models", "list_models", "list"])
             names = self._extract_model_names(payload)
             return CommandResult(True, "\n".join(names) if names else "No local models found.")
         except Exception as exc:  # noqa: BLE001
@@ -97,9 +159,7 @@ class LMStudioController:
 
     def list_loaded_models(self) -> CommandResult:
         try:
-            client = self._get_client()
-            models_namespace = getattr(client, "models", client)
-            payload = self._call_first(models_namespace, ["list_loaded", "loaded", "active", "list"])
+            payload = self._call_sdk(["list_loaded_models", "loaded_models", "active_models", "list_loaded"])
             names = self._extract_model_names(payload)
             return CommandResult(True, "\n".join(names) if names else "No loaded models found.")
         except Exception as exc:  # noqa: BLE001
@@ -111,27 +171,21 @@ class LMStudioController:
             if not clean:
                 return CommandResult(False, "Select a model before loading.")
 
-            client = self._get_client()
-            models_namespace = getattr(client, "models", client)
-            self._call_first(models_namespace, ["load", "load_model", "activate"], clean)
+            self._call_sdk(["load_model", "load", "activate_model", "activate"], clean)
             return CommandResult(True, f"Requested load for model: {clean}")
         except Exception as exc:  # noqa: BLE001
             return CommandResult(False, str(exc))
 
     def start_server(self) -> CommandResult:
         try:
-            client = self._get_client()
-            server_namespace = getattr(client, "server", client)
-            self._call_first(server_namespace, ["start", "start_server", "up"])
+            self._call_sdk(["start_server", "server_start", "start", "up"])
             return CommandResult(True, "LM Studio server start requested via SDK.")
         except Exception as exc:  # noqa: BLE001
             return CommandResult(False, str(exc))
 
     def stop_server(self) -> CommandResult:
         try:
-            client = self._get_client()
-            server_namespace = getattr(client, "server", client)
-            self._call_first(server_namespace, ["stop", "stop_server", "down"])
+            self._call_sdk(["stop_server", "server_stop", "stop", "down"])
             return CommandResult(True, "LM Studio server stop requested via SDK.")
         except Exception as exc:  # noqa: BLE001
             return CommandResult(False, str(exc))
