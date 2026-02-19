@@ -128,8 +128,12 @@ class LMStudioController:
         if isinstance(payload, dict):
             if "id" in payload and payload["id"]:
                 return [str(payload["id"])]
+            if "model_key" in payload and payload["model_key"]:
+                return [str(payload["model_key"])]
             if "name" in payload and payload["name"]:
                 return [str(payload["name"])]
+            if "path" in payload and payload["path"]:
+                return [str(payload["path"])]
             if "data" in payload:
                 return LMStudioController._extract_model_names(payload["data"])
             return []
@@ -145,8 +149,12 @@ class LMStudioController:
 
         if hasattr(payload, "id") and getattr(payload, "id"):
             return [str(getattr(payload, "id"))]
+        if hasattr(payload, "model_key") and getattr(payload, "model_key"):
+            return [str(getattr(payload, "model_key"))]
         if hasattr(payload, "name") and getattr(payload, "name"):
             return [str(getattr(payload, "name"))]
+        if hasattr(payload, "path") and getattr(payload, "path"):
+            return [str(getattr(payload, "path"))]
         return [str(payload)]
 
     def list_local_models(self) -> CommandResult:
@@ -180,6 +188,12 @@ class LMStudioController:
         try:
             self._call_sdk(["start_server", "server_start", "start", "up"])
             return CommandResult(True, "LM Studio server start requested via SDK.")
+        except AttributeError:
+            return CommandResult(
+                True,
+                "LM Studio Python SDK does not expose server start in this version. "
+                "Start server from LM Studio app (Developer tab), then use list/load actions here.",
+            )
         except Exception as exc:  # noqa: BLE001
             return CommandResult(False, str(exc))
 
@@ -187,5 +201,11 @@ class LMStudioController:
         try:
             self._call_sdk(["stop_server", "server_stop", "stop", "down"])
             return CommandResult(True, "LM Studio server stop requested via SDK.")
+        except AttributeError:
+            return CommandResult(
+                True,
+                "LM Studio Python SDK does not expose server stop in this version. "
+                "Stop server from LM Studio app if needed.",
+            )
         except Exception as exc:  # noqa: BLE001
             return CommandResult(False, str(exc))
