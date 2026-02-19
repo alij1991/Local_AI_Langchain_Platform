@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import re
 import shlex
 import subprocess
 from dataclasses import dataclass
@@ -43,7 +44,8 @@ class LMStudioController:
         return self._run_cli(self.config.lm_studio_cli_server_stop)
 
     def load_model(self, model_name: str) -> CommandResult:
-        cmd = self.config.lm_studio_cli_model_load_template.format(model=model_name)
+        clean = self.normalize_model_name(model_name)
+        cmd = self.config.lm_studio_cli_model_load_template.format(model=clean)
         return self._run_cli(cmd)
 
     def list_local_models(self) -> CommandResult:
@@ -77,4 +79,29 @@ class LMStudioController:
         except json.JSONDecodeError:
             pass
 
-        return lines
+        model_ids: list[str] = []
+        for line in lines:
+            if "/" not in line:
+                continue
+            candidate = line.split("(", 1)[0].strip()
+            candidate = candidate.split()[0].strip()
+            if "/" in candidate and candidate not in model_ids:
+                model_ids.append(candidate)
+        return model_ids or lines
+
+    @staticmethod
+    def normalize_model_name(value: str) -> str:
+        """Extract a clean model identifier from noisy CLI list output lines."""
+        candidate = value.strip()
+        if not candidate:
+            return candidate
+
+        if "(" in candidate:
+            candidate = candidate.split("(", 1)[0].strip()
+
+        # Keep only first token if users pass full table-like line.
+        candidate = candidate.split()[0].strip()
+
+        # Safety clean for common control characters.
+        candidate = re.sub(r"\s+", "", candidate)
+        return candidate
