@@ -5,18 +5,18 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "local-ai-langchain-platform"
 version = "0.1.0"
-description = "Starter UI + backend for LangChain agents powered by LM Studio."
+description = "Starter UI + backend for LangChain agents powered by Ollama."
 readme = "README.md"
 requires-python = ">=3.10"
 authors = [{ name = "Local AI Team" }]
 dependencies = [
   "gradio",
   "langchain",
-  "langchain-openai",
+  "langchain-ollama",
   "langchain-community",
   "langgraph",
   "pydantic",
-  "lmstudio",
+  "ollama",
 ]
 
 [project.optional-dependencies]

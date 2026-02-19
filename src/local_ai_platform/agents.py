@@ -6,7 +6,7 @@ from typing import TypedDict
 from langchain_core.messages import AIMessage, BaseMessage, HumanMessage
 from langchain_core.prompts import ChatPromptTemplate
 from langchain_core.tools import StructuredTool
-from langchain_openai import ChatOpenAI
+from langchain_ollama import ChatOllama
 from langgraph.graph import END, START, StateGraph
 from langgraph.prebuilt import create_react_agent
 
@@ -76,13 +76,7 @@ class AgentOrchestrator:
         return [tool.name for tool in self.tools]
 
     def generate_system_prompt(self, description: str) -> str:
-        """Built-in helper agent that drafts a system prompt from a short description."""
-        llm = ChatOpenAI(
-            model=self.config.prompt_builder_model,
-            base_url=self.config.lm_studio_base_url,
-            api_key=self.config.lm_studio_api_key,
-            temperature=0.2,
-        )
+        llm = ChatOllama(model=self.config.prompt_builder_model, base_url=self.config.ollama_base_url, temperature=0.2)
         prompt = ChatPromptTemplate.from_messages(
             [
                 (
@@ -101,12 +95,7 @@ class AgentOrchestrator:
         return str(getattr(result, "content", ""))
 
     def _build_agent_graph(self, definition: AgentDefinition):
-        llm = ChatOpenAI(
-            model=definition.model_name,
-            base_url=self.config.lm_studio_base_url,
-            api_key=self.config.lm_studio_api_key,
-            temperature=0.2,
-        )
+        llm = ChatOllama(model=definition.model_name, base_url=self.config.ollama_base_url, temperature=0.2)
         return create_react_agent(model=llm, tools=self.tools, prompt=definition.system_prompt)
 
     def chat_with_agent(self, agent_name: str, user_input: str) -> str:
