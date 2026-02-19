@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 from collections.abc import Callable
+import inspect
+from typing import Any
 
 import gradio as gr
 
@@ -9,18 +11,26 @@ from local_ai_platform.agents import AgentOrchestrator
 from local_ai_platform.ollama import ModelInfo, OllamaController
 
 
-def build_chat_handler(orchestrator: AgentOrchestrator) -> Callable:
-    def chat(message: str, history: list[tuple[str, str]] | None, agent_name: str):
-        if not message.strip():
+def build_chat_handler(orchestrator: AgentOrchestrator, messages_format: bool) -> Callable:
+    def chat(message: str, history, agent_name: str):
+        clean = message.strip()
+        if not clean:
             return "", history or []
-        if not agent_name:
-            return "", (history or []) + [(message, "❌ Create/select an agent first.")]
 
         try:
-            response = orchestrator.chat_with_agent(agent_name, message)
+            if not agent_name:
+                response = "❌ Create/select an agent first."
+            else:
+                response = orchestrator.chat_with_agent(agent_name, clean)
         except Exception as exc:  # noqa: BLE001
             response = f"❌ Agent error: {exc}"
-        return "", (history or []) + [(message, response)]
+
+        turns = list(history or [])
+        if messages_format:
+            turns.extend([{"role": "user", "content": clean}, {"role": "assistant", "content": response}])
+        else:
+            turns.append((clean, response))
+        return "", turns
 
     return chat
 
@@ -52,19 +62,28 @@ def _model_label(info: ModelInfo) -> str:
     )
 
 
-def _model_choices(infos: list[ModelInfo]) -> list[tuple[str, str]]:
+def _load_model_choices(infos: list[ModelInfo]) -> list[tuple[str, str]]:
     return [(_model_label(info), info.name) for info in infos]
+
+
+def _agent_model_choices(infos: list[ModelInfo]) -> list[str]:
+    chat_models = [
+        info.name
+        for info in infos
+        if info.supports_generate is not False and "embedding" not in info.name.lower()
+    ]
+    return chat_models or [info.name for info in infos]
 
 
 def _models_markdown(infos: list[ModelInfo]) -> str:
     if not infos:
         return "No local models found."
 
-    header = "| Model | Size | Family | Params | Quantization | Tool support |\n|---|---:|---|---|---|---|"
+    header = "| Model | Size | Family | Params | Quantization | Generate | Tool support |\n|---|---:|---|---|---|---|---|"
     rows = [
         (
             f"| `{info.name}` | {_human_size(info.size_bytes)} | {info.family} | "
-            f"{info.parameter_size} | {info.quantization} | {_format_tool_support(info.supports_tools)} |"
+            f"{info.parameter_size} | {info.quantization} | {_format_tool_support(info.supports_generate)} | {_format_tool_support(info.supports_tools)} |"
         )
         for info in infos
     ]
@@ -75,7 +94,8 @@ def build_app() -> gr.Blocks:
     config = load_config()
     orchestrator = AgentOrchestrator(config)
     controller = OllamaController(config)
-    chat_fn = build_chat_handler(orchestrator)
+    messages_format = "type" in inspect.signature(gr.Chatbot).parameters
+    chat_fn = build_chat_handler(orchestrator, messages_format=messages_format)
 
     def _local_model_infos() -> list[ModelInfo]:
         ok, infos, _ = controller.list_local_models_detailed()
@@ -103,7 +123,7 @@ def build_app() -> gr.Blocks:
         system_prompt="You are a practical AI assistant. Be concise, accurate, and tool-aware.",
     )
 
-    def _agent_choices(default: str | None = None) -> dict:
+    def _agent_choices(default: str | None = None) -> dict[str, Any]:
         agents = orchestrator.list_agents()
         value = default if default in agents else (agents[0] if agents else None)
         return gr.update(choices=agents, value=value)
@@ -116,27 +136,30 @@ def build_app() -> gr.Blocks:
         rows = [f"- `{name}`" for name in orchestrator.get_tool_names()]
         return "\n".join(rows) if rows else "No custom tools yet."
 
-    def refresh_models() -> tuple[str, str, dict, dict, dict]:
+    def refresh_models() -> tuple[str, str, dict[str, Any], dict[str, Any], dict[str, Any]]:
         ok, infos, error = controller.list_local_models_detailed()
         if not ok:
             return f"❌ {error}", "", gr.update(), gr.update(), gr.update()
         if not infos:
             return "No models returned by Ollama SDK.", "", gr.update(), gr.update(), gr.update()
 
-        choices = _model_choices(infos)
-        names = [item[1] for item in choices]
-        chosen = startup_model if startup_model in names else names[0]
+        load_choices = _load_model_choices(infos)
+        agent_choices = _agent_model_choices(infos)
+        chosen = startup_model if startup_model in agent_choices else agent_choices[0]
+
         return (
             f"✅ Found {len(infos)} model(s).",
             _models_markdown(infos),
-            gr.update(choices=choices, value=chosen),
-            gr.update(choices=choices, value=chosen),
-            gr.update(choices=choices, value=chosen),
+            gr.update(choices=load_choices, value=chosen),
+            gr.update(choices=agent_choices, value=chosen),
+            gr.update(choices=agent_choices, value=chosen),
         )
 
     def load_selected_model(model_name: str) -> str:
         result = controller.load_model(model_name)
-        return result.output if result.ok else f"❌ {result.output}"
+        if result.ok:
+            return result.output
+        return f"❌ {result.output}"
 
     def list_loaded_models() -> str:
         result = controller.list_loaded_models()
@@ -211,11 +234,9 @@ def build_app() -> gr.Blocks:
             return "❌ No valid agents in sequence."
         return "\n\n".join([f"## {name}\n{text}" for name, text in outputs.items()])
 
-    with gr.Blocks(title="Local AI LangChain Platform", theme=gr.themes.Soft()) as demo:
+    with gr.Blocks(title="Local AI LangChain Platform") as demo:
         gr.Markdown("# 🤖 Local AI Studio")
-        gr.Markdown(
-            "A ChatGPT-style workspace: chat on the left, build agents/tools/workflows on the right."
-        )
+        gr.Markdown("A ChatGPT-style workspace: chat on the left, build agents/tools/workflows on the right.")
 
         with gr.Row():
             with gr.Column(scale=7):
@@ -226,7 +247,10 @@ def build_app() -> gr.Blocks:
                         choices=orchestrator.list_agents(),
                         value=orchestrator.list_agents()[0],
                     )
-                    chat = gr.Chatbot(label="Conversation", height=520)
+                    if messages_format:
+                        chat = gr.Chatbot(label="Conversation", height=520, type="messages")
+                    else:
+                        chat = gr.Chatbot(label="Conversation", height=520)
                     prompt = gr.Textbox(label="Message", placeholder="Ask your assistant...")
                     with gr.Row():
                         send_btn = gr.Button("Send", variant="primary")
@@ -270,11 +294,7 @@ def build_app() -> gr.Blocks:
                         "\nTip: give tools very specific names and instructions so the model knows when to call them."
                     )
                     tool_map = gr.Markdown(value=_tool_map_text(), label="Registered tools")
-                    tool_type = gr.Radio(
-                        label="Tool type",
-                        choices=["instruction", "delegate_agent"],
-                        value="instruction",
-                    )
+                    tool_type = gr.Radio(label="Tool type", choices=["instruction", "delegate_agent"], value="instruction")
                     tool_name = gr.Textbox(label="Tool name", placeholder="summarize_for_exec")
                     tool_instructions = gr.Textbox(label="Instructions", lines=4)
                     delegate_target = gr.Dropdown(
@@ -347,4 +367,5 @@ if __name__ == "__main__":
         server_name="0.0.0.0",
         server_port=app_config.gradio_server_port,
         share=app_config.gradio_share,
+        theme=gr.themes.Soft(),
     )

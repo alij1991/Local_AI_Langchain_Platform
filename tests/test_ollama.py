@@ -11,6 +11,22 @@ class _ModelsEnvelope:
         self.models = models
 
 
+class _ClientGenerateUnsupported:
+    def pull(self, _model):
+        return None
+
+    def generate(self, **_kwargs):
+        raise RuntimeError("does not support generate (status code: 400)")
+
+
+class _ClientGenerateOk:
+    def pull(self, _model):
+        return None
+
+    def generate(self, **_kwargs):
+        return {"response": "ok"}
+
+
 def test_extract_model_names_from_mixed_payload():
     payload = {
         "models": [
@@ -62,5 +78,27 @@ def test_extract_model_infos_with_size_and_features():
     assert infos[0].name == "gemma3:1b"
     assert infos[0].size_bytes == 815_000_000
     assert infos[0].supports_tools is False
+    assert infos[0].supports_generate is True
     assert infos[1].name == "qwen2.5:7b"
     assert infos[1].supports_tools is True
+    assert infos[1].supports_generate is True
+
+
+def test_load_model_generate_unsupported_is_non_fatal(monkeypatch):
+    controller = OllamaController(config=type("C", (), {"ollama_base_url": "http://127.0.0.1:11434"})())
+    monkeypatch.setattr(controller, "_get_client", lambda: _ClientGenerateUnsupported())
+
+    result = controller.load_model("qwen3-embedding:latest")
+
+    assert result.ok is True
+    assert "embedding-only" in result.output
+
+
+def test_load_model_generate_ok(monkeypatch):
+    controller = OllamaController(config=type("C", (), {"ollama_base_url": "http://127.0.0.1:11434"})())
+    monkeypatch.setattr(controller, "_get_client", lambda: _ClientGenerateOk())
+
+    result = controller.load_model("gemma3:1b")
+
+    assert result.ok is True
+    assert result.output == "Model ready: gemma3:1b"
