@@ -16,7 +16,10 @@ def build_chat_handler(orchestrator: AgentOrchestrator) -> Callable:
         if not agent_name:
             return "", (history or []) + [(message, "❌ Create/select an agent first.")]
 
-        response = orchestrator.chat_with_agent(agent_name, message)
+        try:
+            response = orchestrator.chat_with_agent(agent_name, message)
+        except Exception as exc:  # noqa: BLE001
+            response = f"❌ Agent error: {exc}"
         return "", (history or []) + [(message, response)]
 
     return chat
@@ -28,10 +31,35 @@ def build_app() -> gr.Blocks:
     controller = OllamaController(config)
     chat_fn = build_chat_handler(orchestrator)
 
-    # starter agent for immediate use (not planner/worker pattern)
+    def _local_models() -> list[str]:
+        result = controller.list_local_models()
+        if not result.ok:
+            return []
+        return [line.strip() for line in result.output.splitlines() if line.strip()]
+
+    def _pick_startup_model() -> str:
+        models = _local_models()
+        if not models:
+            return config.default_model
+        preferred = [
+            "gemma3:1b",
+            "qwen2.5:1.5b",
+            "llama3.2:3b",
+            config.default_model,
+        ]
+        for model in preferred:
+            if model in models:
+                return model
+        return models[0]
+
+    startup_model = _pick_startup_model()
+    if config.prompt_builder_model not in _local_models() and startup_model:
+        config.prompt_builder_model = startup_model
+
+    # default always-on lightweight assistant
     orchestrator.add_agent(
         name="assistant",
-        model_name=config.default_model,
+        model_name=startup_model,
         system_prompt="You are a practical AI assistant. Be concise, accurate, and tool-aware.",
     )
 
@@ -48,17 +76,21 @@ def build_app() -> gr.Blocks:
         rows = [f"- `{name}`" for name in orchestrator.get_tool_names()]
         return "\n".join(rows) if rows else "No custom tools yet."
 
-    def list_models() -> tuple[str, dict, dict]:
+    def list_models() -> tuple[str, dict, dict, dict]:
         result = controller.list_local_models()
         if not result.ok:
-            return f"❌ {result.output}", gr.update(), gr.update()
+            return f"❌ {result.output}", gr.update(), gr.update(), gr.update()
+
         models = [line for line in result.output.splitlines() if line.strip()]
         if not models:
-            return "No models returned by Ollama SDK.", gr.update(), gr.update()
+            return "No models returned by Ollama SDK.", gr.update(), gr.update(), gr.update()
+
+        chosen = startup_model if startup_model in models else models[0]
         return (
             f"✅ Found {len(models)} model(s).",
-            gr.update(choices=models, value=models[0]),
-            gr.update(choices=models, value=models[0]),
+            gr.update(choices=models, value=chosen),
+            gr.update(choices=models, value=chosen),
+            gr.update(choices=models, value=chosen),
         )
 
     def load_selected_model(model_name: str) -> str:
@@ -75,6 +107,8 @@ def build_app() -> gr.Blocks:
             return "❌ Agent name is required.", gr.update(), gr.update(), gr.update(), gr.update()
         if clean in orchestrator.definitions:
             return "❌ Agent already exists.", gr.update(), gr.update(), gr.update(), gr.update()
+        if not model_name.strip():
+            return "❌ Select or type a model name.", gr.update(), gr.update(), gr.update(), gr.update()
         orchestrator.add_agent(clean, model_name.strip(), system_prompt.strip())
         return (
             f"✅ Agent `{clean}` created.",
@@ -87,13 +121,23 @@ def build_app() -> gr.Blocks:
     def update_agent_model(agent_name: str, model_name: str):
         if not agent_name:
             return "❌ Select an agent.", gr.update()
+        if not model_name.strip():
+            return "❌ Select or type a model name.", gr.update()
         orchestrator.set_agent_model(agent_name, model_name)
         return f"✅ Updated `{agent_name}` model to `{model_name}`.", gr.update(value=_agent_map_text())
 
     def draft_prompt(description: str) -> str:
         if not description.strip():
             return ""
-        return orchestrator.generate_system_prompt(description)
+        try:
+            return orchestrator.generate_system_prompt(description)
+        except Exception as exc:  # noqa: BLE001
+            models = _local_models()
+            hint = (
+                f"Prompt-builder model `{config.prompt_builder_model}` is unavailable. "
+                f"Try one of: {', '.join(models[:5])}" if models else "No local Ollama models found."
+            )
+            return f"❌ {exc}\n\n{hint}"
 
     def add_tool(tool_name: str, tool_type: str, instructions: str, target_agent: str):
         clean = tool_name.strip().lower().replace(" ", "_")
@@ -122,7 +166,9 @@ def build_app() -> gr.Blocks:
 
     with gr.Blocks(title="Local AI LangChain Platform") as demo:
         gr.Markdown("# 🤖 Local AI System Builder")
-        gr.Markdown("Create agents, generate prompts, register tools, and run graph workflows.")
+        gr.Markdown(
+            "Create agents, generate prompts, register tools, and run graph workflows."
+        )
 
         with gr.Row():
             with gr.Column(scale=2):
@@ -158,8 +204,8 @@ def build_app() -> gr.Blocks:
                     new_agent_name = gr.Textbox(label="Agent name", placeholder="legal-reviewer")
                     new_agent_model = gr.Dropdown(
                         label="Model",
-                        choices=[config.default_model],
-                        value=config.default_model,
+                        choices=[startup_model],
+                        value=startup_model,
                         allow_custom_value=True,
                     )
                 new_agent_prompt = gr.Textbox(label="System prompt", lines=6)
@@ -175,8 +221,8 @@ def build_app() -> gr.Blocks:
                     )
                     update_agent_model_name = gr.Dropdown(
                         label="New model",
-                        choices=[config.default_model],
-                        value=config.default_model,
+                        choices=[startup_model],
+                        value=startup_model,
                         allow_custom_value=True,
                     )
                 update_agent_btn = gr.Button("Apply Model Update")
@@ -216,7 +262,10 @@ def build_app() -> gr.Blocks:
                 wf_output = gr.Markdown()
 
         list_loaded_btn.click(list_loaded_models, outputs=lm_output)
-        list_models_btn.click(list_models, outputs=[status, sdk_model_dropdown, new_agent_model])
+        list_models_btn.click(
+            list_models,
+            outputs=[status, sdk_model_dropdown, new_agent_model, update_agent_model_name],
+        )
         load_btn.click(load_selected_model, inputs=sdk_model_dropdown, outputs=lm_output)
 
         draft_btn.click(draft_prompt, inputs=prompt_desc, outputs=drafted_prompt)

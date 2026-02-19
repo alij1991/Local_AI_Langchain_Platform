@@ -14,7 +14,7 @@ def test_load_config_defaults(monkeypatch):
     config = load_config()
 
     assert config.ollama_base_url == "http://127.0.0.1:11434"
-    assert config.default_model == "qwen3:4b"
-    assert config.prompt_builder_model == "llama3.2:3b"
+    assert config.default_model == "gemma3:1b"
+    assert config.prompt_builder_model == "gemma3:1b"
     assert config.gradio_share is False
     assert config.gradio_server_port == 7860
