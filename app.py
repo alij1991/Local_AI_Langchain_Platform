@@ -6,7 +6,7 @@ import gradio as gr
 
 from local_ai_platform import load_config
 from local_ai_platform.agents import AgentOrchestrator
-from local_ai_platform.lmstudio import LMStudioController
+from local_ai_platform.lmstudio import OllamaController
 
 
 def build_chat_handler(orchestrator: AgentOrchestrator) -> Callable:
@@ -25,7 +25,7 @@ def build_chat_handler(orchestrator: AgentOrchestrator) -> Callable:
 def build_app() -> gr.Blocks:
     config = load_config()
     orchestrator = AgentOrchestrator(config)
-    controller = LMStudioController(config)
+    controller = OllamaController(config)
     chat_fn = build_chat_handler(orchestrator)
 
     # starter agent for immediate use (not planner/worker pattern)
@@ -54,7 +54,7 @@ def build_app() -> gr.Blocks:
             return f"❌ {result.output}", gr.update(), gr.update()
         models = [line for line in result.output.splitlines() if line.strip()]
         if not models:
-            return "No models returned by LM Studio SDK.", gr.update(), gr.update()
+            return "No models returned by Ollama SDK.", gr.update(), gr.update()
         return (
             f"✅ Found {len(models)} model(s).",
             gr.update(choices=models, value=models[0]),
@@ -139,7 +139,7 @@ def build_app() -> gr.Blocks:
                 tool_map = gr.Markdown(value=_tool_map_text(), label="Tools")
 
         with gr.Tabs():
-            with gr.Tab("1) LM Studio"):
+            with gr.Tab("1) Ollama"):
                 status = gr.Markdown("Use SDK actions below.")
                 with gr.Row():
                     start_btn = gr.Button("Start Server")
@@ -149,7 +149,7 @@ def build_app() -> gr.Blocks:
                 with gr.Row():
                     sdk_model_dropdown = gr.Dropdown(label="Local models", choices=[])
                     load_btn = gr.Button("Load Selected Model", variant="primary")
-                lm_output = gr.Textbox(label="LM Studio output", lines=8)
+                lm_output = gr.Textbox(label="Ollama output", lines=8)
 
             with gr.Tab("2) Prompt Builder (built-in)"):
                 gr.Markdown(

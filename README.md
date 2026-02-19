@@ -1,20 +1,19 @@
 # Local AI LangChain Platform
 
-Self-hosted Python UI for building agentic systems with **LM Studio Python SDK + LangChain + LangGraph**.
+Self-hosted Python UI for building agentic systems with **Ollama + LangChain + LangGraph**.
 
 ## What changed
-- LM Studio integration now uses **LM Studio Python library** APIs (not CLI shell commands).
-- Removed hardcoded planner/worker architecture.
-- Added built-in **Prompt Builder Agent** (default model: `liquid/lfm2.5-1.2b`) to generate high-quality system prompts from descriptions.
-- UI redesigned into a simple step-by-step flow.
+- Replaced LM Studio controls with **Ollama Python SDK** integration.
+- Kept the custom-agent architecture (no fixed planner/worker dependency).
+- Added built-in prompt-builder agent support using an Ollama model.
 
-## UX Layout (easy flow)
-1. **LM Studio**: connect/start/list/load models.
-2. **Prompt Builder**: describe agent behavior and generate a system prompt.
-3. **Agent Builder**: create agents and update models.
-4. **Tool Builder**: create instruction/delegate tools.
-5. **Chat**: talk to a selected agent.
-6. **Graph Workflow**: run a sequence of agents with LangGraph.
+## UX Flow
+1. **Ollama**: list local/running models and ensure a selected model is available.
+2. **Prompt Builder**: draft a strong system prompt from description.
+3. **Agent Builder**: create custom agents and set model assignments.
+4. **Tool Builder**: build instruction and agent-delegate tools.
+5. **Chat**: talk with any created agent.
+6. **Graph Workflow**: run ordered agent pipelines with LangGraph.
 
 ## Quick Start
 
@@ -29,23 +28,20 @@ python app.py
 ```
 
 ## Environment Variables
-- `LM_STUDIO_BASE_URL` (default `http://127.0.0.1:1234/v1`)
-- `LM_STUDIO_API_KEY` (default `lm-studio`)
-- `LM_STUDIO_DEFAULT_MODEL` (default `qwen/qwen3-4b`)
-- `LM_STUDIO_PROMPT_BUILDER_MODEL` (default `liquid/lfm2.5-1.2b`)
-- `GRADIO_SHARE` (default `false`, set `true` to enable public share links)
+- `OLLAMA_BASE_URL` (default `http://127.0.0.1:11434`)
+- `OLLAMA_DEFAULT_MODEL` (default `qwen3:4b`)
+- `OLLAMA_PROMPT_BUILDER_MODEL` (default `llama3.2:3b`)
+- `GRADIO_SHARE` (default `false`, set `true` for public share links)
 - `GRADIO_SERVER_PORT` (default `7860`)
 
 ## Notes
-- Since SDK APIs can vary by LM Studio version, the controller uses a compatibility strategy that tries common and fuzzy-matched method names across module/client/namespaces.
-- Local model extraction now prefers SDK fields like `model_key` to avoid dropdown values like `DownloadedLlm(...)` repr strings.
-- If your SDK version does not expose start/stop server methods, the UI now shows a guidance message instead of a hard error.
-- If SDK calls fail, upgrade LM Studio and the `lmstudio` package.
+- Ollama SDK does not reliably expose start/stop service controls across platforms, so start/stop buttons provide guidance while model list/load actions use SDK APIs.
+- If model list/load fails, confirm Ollama daemon is running (`ollama serve`) and your model exists (`ollama list`).
 
 ## Latest libraries
 
 ```bash
-python -m pip install -U gradio langchain langchain-openai langchain-community langgraph pydantic lmstudio pytest ruff
+python -m pip install -U gradio langchain langchain-ollama langchain-community langgraph pydantic ollama pytest ruff
 ```
 
 ## Validation
