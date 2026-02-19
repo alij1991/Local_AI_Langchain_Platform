@@ -35,8 +35,8 @@ python app.py
 - `GRADIO_SERVER_PORT` (default `7860`)
 
 ## Notes
-- Ollama SDK does not reliably expose start/stop service controls across platforms, so start/stop buttons provide guidance while model list/load actions use SDK APIs.
-- If model list/load fails, confirm Ollama daemon is running (`ollama serve`) and your model exists (`ollama list`).
+- Ollama daemon is managed externally; start it with `ollama serve`.
+- If model list/load fails, confirm daemon is running and your model exists (`ollama list`).
 
 ## Latest libraries
 

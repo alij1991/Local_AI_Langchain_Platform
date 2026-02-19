@@ -6,7 +6,7 @@ import gradio as gr
 
 from local_ai_platform import load_config
 from local_ai_platform.agents import AgentOrchestrator
-from local_ai_platform.lmstudio import OllamaController
+from local_ai_platform.ollama import OllamaController
 
 
 def build_chat_handler(orchestrator: AgentOrchestrator) -> Callable:
@@ -63,14 +63,6 @@ def build_app() -> gr.Blocks:
 
     def load_selected_model(model_name: str) -> str:
         result = controller.load_model(model_name)
-        return result.output if result.ok else f"❌ {result.output}"
-
-    def start_server() -> str:
-        result = controller.start_server()
-        return result.output if result.ok else f"❌ {result.output}"
-
-    def stop_server() -> str:
-        result = controller.stop_server()
         return result.output if result.ok else f"❌ {result.output}"
 
     def list_loaded_models() -> str:
@@ -142,8 +134,6 @@ def build_app() -> gr.Blocks:
             with gr.Tab("1) Ollama"):
                 status = gr.Markdown("Use SDK actions below.")
                 with gr.Row():
-                    start_btn = gr.Button("Start Server")
-                    stop_btn = gr.Button("Stop Server")
                     list_loaded_btn = gr.Button("List Loaded Models")
                     list_models_btn = gr.Button("List Local Models")
                 with gr.Row():
@@ -225,8 +215,6 @@ def build_app() -> gr.Blocks:
                 run_wf_btn = gr.Button("Run Workflow", variant="primary")
                 wf_output = gr.Markdown()
 
-        start_btn.click(start_server, outputs=lm_output)
-        stop_btn.click(stop_server, outputs=lm_output)
         list_loaded_btn.click(list_loaded_models, outputs=lm_output)
         list_models_btn.click(list_models, outputs=[status, sdk_model_dropdown, new_agent_model])
         load_btn.click(load_selected_model, inputs=sdk_model_dropdown, outputs=lm_output)
