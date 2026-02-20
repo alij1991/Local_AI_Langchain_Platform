@@ -1,3 +1,7 @@
+import pytest
+
+pytest.importorskip("gradio")
+
 from app import _agent_model_choices
 from local_ai_platform.ollama import ModelInfo
 

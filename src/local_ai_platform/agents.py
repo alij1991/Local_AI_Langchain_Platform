@@ -11,6 +11,7 @@ from langgraph.graph import END, START, StateGraph
 from langgraph.prebuilt import create_react_agent
 
 from .config import AppConfig
+from .huggingface import HuggingFaceController
 from .tools import build_default_tools
 
 
@@ -19,6 +20,7 @@ class AgentDefinition:
     name: str
     model_name: str
     system_prompt: str
+    provider: str = "ollama"
 
 
 class WorkflowState(TypedDict):
@@ -35,19 +37,30 @@ class AgentOrchestrator:
         self.definitions: dict[str, AgentDefinition] = {}
         self.chat_histories: dict[str, list[BaseMessage]] = {}
         self._models_without_tool_support: set[str] = set()
+        self.hf = HuggingFaceController(config)
 
-    def add_agent(self, name: str, model_name: str, system_prompt: str) -> None:
-        self.definitions[name] = AgentDefinition(name=name, model_name=model_name, system_prompt=system_prompt)
+    def add_agent(self, name: str, model_name: str, system_prompt: str, provider: str = "ollama") -> None:
+        self.definitions[name] = AgentDefinition(
+            name=name,
+            model_name=model_name,
+            system_prompt=system_prompt,
+            provider=provider,
+        )
         self.chat_histories[name] = []
 
     def list_agents(self) -> list[str]:
         return list(self.definitions.keys())
 
-    def set_agent_model(self, agent_name: str, model_name: str) -> None:
+    def set_agent_model(self, agent_name: str, model_name: str, provider: str | None = None) -> None:
         self.definitions[agent_name].model_name = model_name
+        if provider:
+            self.definitions[agent_name].provider = provider
 
     def get_agent_models(self) -> dict[str, str]:
-        return {name: definition.model_name for name, definition in self.definitions.items()}
+        return {
+            name: f"{definition.provider}:{definition.model_name}"
+            for name, definition in self.definitions.items()
+        }
 
     def add_instruction_tool(self, name: str, instructions: str) -> None:
         def instruction_tool(task: str) -> str:
@@ -82,13 +95,11 @@ class AgentOrchestrator:
             [
                 (
                     "system",
-                    "You are a senior AI architect. Create concise, production-ready system prompts "
-                    "for autonomous agents.",
+                    "You are a senior AI architect. Create concise, production-ready system prompts for autonomous agents.",
                 ),
                 (
                     "human",
-                    "Given this agent description, generate a clean system prompt with goals, constraints, "
-                    "and output style.\n\nDescription: {description}",
+                    "Given this agent description, generate a clean system prompt with goals, constraints, and output style.\n\nDescription: {description}",
                 ),
             ]
         )
@@ -104,14 +115,10 @@ class AgentOrchestrator:
 
     @staticmethod
     def _is_tool_support_error(exc: Exception) -> bool:
-        message = str(exc).lower()
-        return "does not support tools" in message
+        return "does not support tools" in str(exc).lower()
 
-    def chat_with_agent(self, agent_name: str, user_input: str) -> str:
-        definition = self.definitions[agent_name]
+    def _chat_with_ollama(self, definition: AgentDefinition, user_input: str, history: list[BaseMessage]) -> str:
         graph = self._build_agent_graph(definition)
-        history = self.chat_histories[agent_name]
-
         payload = {"messages": [*history, HumanMessage(content=user_input)]}
         try:
             result = graph.invoke(payload)
@@ -119,11 +126,31 @@ class AgentOrchestrator:
             if not self._is_tool_support_error(exc):
                 raise
             self._models_without_tool_support.add(definition.model_name)
-            graph = self._build_agent_graph(definition, allow_tools=False)
-            result = graph.invoke(payload)
+            result = self._build_agent_graph(definition, allow_tools=False).invoke(payload)
+
         messages = result.get("messages", [])
         final_message = next((msg for msg in reversed(messages) if isinstance(msg, AIMessage)), None)
-        output = str(getattr(final_message, "content", "No response returned."))
+        return str(getattr(final_message, "content", "No response returned."))
+
+    def _chat_with_hf(self, definition: AgentDefinition, user_input: str, history: list[BaseMessage]) -> str:
+        compact = []
+        user_turn = ""
+        for msg in history:
+            if isinstance(msg, HumanMessage):
+                user_turn = str(msg.content)
+            elif isinstance(msg, AIMessage):
+                compact.append((user_turn, str(msg.content)))
+                user_turn = ""
+        return self.hf.chat(definition.model_name, definition.system_prompt, compact, user_input)
+
+    def chat_with_agent(self, agent_name: str, user_input: str) -> str:
+        definition = self.definitions[agent_name]
+        history = self.chat_histories[agent_name]
+
+        if definition.provider == "huggingface":
+            output = self._chat_with_hf(definition, user_input, history)
+        else:
+            output = self._chat_with_ollama(definition, user_input, history)
 
         history.append(HumanMessage(content=user_input))
         history.append(AIMessage(content=output))
@@ -157,6 +184,5 @@ class AgentOrchestrator:
             builder.add_edge(filtered[index], filtered[index + 1])
         builder.add_edge(filtered[-1], END)
 
-        workflow = builder.compile()
-        result = workflow.invoke({"user_input": user_input, "outputs": {}})
+        result = builder.compile().invoke({"user_input": user_input, "outputs": {}})
         return result.get("outputs", {})
