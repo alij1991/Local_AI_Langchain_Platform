@@ -70,7 +70,7 @@ def test_extract_model_infos_with_size_and_features():
                     "family": "gemma3",
                     "parameter_size": "1B",
                     "quantization_level": "Q4_K_M",
-                    "capabilities": ["completion"],
+                    "capabilities": ["completion", "vision"],
                 },
             },
             {
@@ -93,6 +93,7 @@ def test_extract_model_infos_with_size_and_features():
     assert infos[0].size_bytes == 815_000_000
     assert infos[0].supports_tools is False
     assert infos[0].supports_generate is True
+    assert infos[0].supports_vision is True
     assert infos[1].name == "qwen2.5:7b"
     assert infos[1].supports_tools is True
     assert infos[1].supports_generate is True

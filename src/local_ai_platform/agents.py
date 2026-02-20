@@ -1,9 +1,12 @@
 from __future__ import annotations
 
+import base64
+import mimetypes
 from dataclasses import dataclass
-from typing import TypedDict
+from pathlib import Path
+from typing import Generator, TypedDict
 
-from langchain_core.messages import AIMessage, BaseMessage, HumanMessage
+from langchain_core.messages import AIMessage, BaseMessage, HumanMessage, SystemMessage
 from langchain_core.prompts import ChatPromptTemplate
 from langchain_core.tools import StructuredTool
 from langchain_ollama import ChatOllama
@@ -57,10 +60,7 @@ class AgentOrchestrator:
             self.definitions[agent_name].provider = provider
 
     def get_agent_models(self) -> dict[str, str]:
-        return {
-            name: f"{definition.provider}:{definition.model_name}"
-            for name, definition in self.definitions.items()
-        }
+        return {name: f"{definition.provider}:{definition.model_name}" for name, definition in self.definitions.items()}
 
     def add_instruction_tool(self, name: str, instructions: str) -> None:
         def instruction_tool(task: str) -> str:
@@ -117,7 +117,29 @@ class AgentOrchestrator:
     def _is_tool_support_error(exc: Exception) -> bool:
         return "does not support tools" in str(exc).lower()
 
-    def _chat_with_ollama(self, definition: AgentDefinition, user_input: str, history: list[BaseMessage]) -> str:
+    @staticmethod
+    def _to_data_url(file_path: str) -> str:
+        path = Path(file_path)
+        mime = mimetypes.guess_type(path.name)[0] or "application/octet-stream"
+        raw = path.read_bytes()
+        encoded = base64.b64encode(raw).decode("utf-8")
+        return f"data:{mime};base64,{encoded}"
+
+    def _chat_with_ollama(
+        self,
+        definition: AgentDefinition,
+        user_input: str,
+        history: list[BaseMessage],
+        image_paths: list[str] | None = None,
+    ) -> str:
+        if image_paths:
+            llm = ChatOllama(model=definition.model_name, base_url=self.config.ollama_base_url, temperature=0.2)
+            content = [{"type": "text", "text": user_input}]
+            for file_path in image_paths:
+                content.append({"type": "image_url", "image_url": self._to_data_url(file_path)})
+            result = llm.invoke([SystemMessage(content=definition.system_prompt), HumanMessage(content=content)])
+            return str(getattr(result, "content", "No response returned."))
+
         graph = self._build_agent_graph(definition)
         payload = {"messages": [*history, HumanMessage(content=user_input)]}
         try:
@@ -132,6 +154,20 @@ class AgentOrchestrator:
         final_message = next((msg for msg in reversed(messages) if isinstance(msg, AIMessage)), None)
         return str(getattr(final_message, "content", "No response returned."))
 
+    def _stream_with_ollama(self, definition: AgentDefinition, user_input: str) -> Generator[str, None, str]:
+        llm = ChatOllama(model=definition.model_name, base_url=self.config.ollama_base_url, temperature=0.2)
+        prompt = [SystemMessage(content=definition.system_prompt), HumanMessage(content=user_input)]
+        acc = ""
+        for chunk in llm.stream(prompt):
+            text = str(getattr(chunk, "content", ""))
+            if text:
+                acc += text
+                yield acc
+        if not acc:
+            acc = "No response returned."
+            yield acc
+        return acc
+
     def _chat_with_hf(self, definition: AgentDefinition, user_input: str, history: list[BaseMessage]) -> str:
         compact = []
         user_turn = ""
@@ -143,18 +179,33 @@ class AgentOrchestrator:
                 user_turn = ""
         return self.hf.chat(definition.model_name, definition.system_prompt, compact, user_input)
 
-    def chat_with_agent(self, agent_name: str, user_input: str) -> str:
+    def chat_with_agent(self, agent_name: str, user_input: str, image_paths: list[str] | None = None) -> str:
         definition = self.definitions[agent_name]
         history = self.chat_histories[agent_name]
 
         if definition.provider == "huggingface":
             output = self._chat_with_hf(definition, user_input, history)
         else:
-            output = self._chat_with_ollama(definition, user_input, history)
+            output = self._chat_with_ollama(definition, user_input, history, image_paths=image_paths)
 
         history.append(HumanMessage(content=user_input))
         history.append(AIMessage(content=output))
         return output
+
+    def stream_chat_with_agent(self, agent_name: str, user_input: str) -> Generator[str, None, None]:
+        definition = self.definitions[agent_name]
+        if definition.provider != "ollama":
+            yield self.chat_with_agent(agent_name, user_input)
+            return
+
+        history = self.chat_histories[agent_name]
+        final = ""
+        for partial in self._stream_with_ollama(definition, user_input):
+            final = partial
+            yield partial
+
+        history.append(HumanMessage(content=user_input))
+        history.append(AIMessage(content=final))
 
     def run_agent_workflow(self, user_input: str, sequence: list[str]) -> dict[str, str]:
         if not sequence:

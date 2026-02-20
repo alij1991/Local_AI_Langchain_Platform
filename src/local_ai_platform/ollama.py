@@ -21,6 +21,7 @@ class ModelInfo:
     quantization: str = "unknown"
     supports_tools: bool | None = None
     supports_generate: bool | None = None
+    supports_vision: bool | None = None
 
 
 class OllamaController:
@@ -121,6 +122,13 @@ class OllamaController:
         return bool({"completion", "generate", "chat"} & capabilities)
 
     @classmethod
+    def _supports_vision(cls, record: dict[str, Any]) -> bool | None:
+        capabilities = cls._capabilities(record)
+        if not capabilities:
+            return None
+        return bool({"vision", "image", "images", "multimodal"} & capabilities)
+
+    @classmethod
     def _extract_model_infos(cls, payload: Any) -> list[ModelInfo]:
         root = cls._to_dict(payload)
         models = root.get("models", []) if isinstance(root, dict) else []
@@ -151,6 +159,7 @@ class OllamaController:
                     quantization=str(details.get("quantization_level", "unknown")),
                     supports_tools=cls._supports_tools(record),
                     supports_generate=cls._supports_generate(record),
+                    supports_vision=cls._supports_vision(record),
                 )
             )
 
@@ -200,6 +209,13 @@ class OllamaController:
                 if supports_tools is None:
                     supports_tools = inferred_tools
 
+            supports_vision = info.supports_vision
+            if supports_vision is None:
+                supports_vision = self._supports_vision(data) if "data" in locals() else None
+                if supports_vision is None:
+                    lowered = info.name.lower()
+                    supports_vision = any(tok in lowered for tok in ["llava", "vision", "vl"])
+
             enriched.append(
                 ModelInfo(
                     name=info.name,
@@ -209,6 +225,7 @@ class OllamaController:
                     quantization=info.quantization,
                     supports_tools=supports_tools,
                     supports_generate=supports_generate,
+                    supports_vision=supports_vision,
                 )
             )
         return enriched

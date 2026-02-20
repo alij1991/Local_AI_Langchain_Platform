@@ -20,6 +20,9 @@ dependencies = [
   "langchain-huggingface",
   "transformers",
   "accelerate",
+  "tavily-python",
+  "langchain-tavily",
+  "langchain-mcp-adapters",
 ]
 
 [project.optional-dependencies]
