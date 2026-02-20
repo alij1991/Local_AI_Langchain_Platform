@@ -104,7 +104,11 @@ def build_app() -> gr.Blocks:
         return models[0]
 
     startup_model = _pick_startup_model()
-    if config.prompt_builder_model not in [m.name for m in _local_infos()]:
+    initial_infos = _local_infos()
+    initial_model_choices = _agent_model_choices(initial_infos) if initial_infos else [startup_model]
+    if startup_model not in initial_model_choices:
+        initial_model_choices = [startup_model, *initial_model_choices]
+    if config.prompt_builder_model not in [m.name for m in initial_infos]:
         config.prompt_builder_model = startup_model
 
     orchestrator.add_agent(
@@ -127,7 +131,7 @@ def build_app() -> gr.Blocks:
 
     def refresh_models() -> tuple[str, str, dict[str, Any], dict[str, Any], dict[str, Any]]:
         ok, infos, error = controller.list_local_models_detailed()
-        fallback = gr.update(choices=[startup_model], value=startup_model)
+        fallback = gr.update(choices=initial_model_choices, value=startup_model)
         if not ok:
             return f"❌ {error}", "", fallback, fallback, fallback
         if not infos:
@@ -247,7 +251,7 @@ def build_app() -> gr.Blocks:
                         with gr.Row():
                             list_models_btn = gr.Button("Refresh Models", variant="primary")
                             list_loaded_btn = gr.Button("List Loaded / Running")
-                        sdk_model_dropdown = gr.Dropdown(label="Load model", choices=[startup_model], value=startup_model)
+                        sdk_model_dropdown = gr.Dropdown(label="Load model", choices=initial_model_choices, value=startup_model)
                         load_btn = gr.Button("Load Selected Model")
                         lm_output = gr.Textbox(label="Ollama output", lines=7)
 
@@ -255,13 +259,13 @@ def build_app() -> gr.Blocks:
                         agent_map = gr.Markdown(value=_agent_map_text())
                         gr.Markdown("Create role-specific agents and map each to a model.")
                         new_agent_name = gr.Textbox(label="New agent name", placeholder="legal-reviewer")
-                        new_agent_model = gr.Dropdown(label="Model", choices=[startup_model], value=startup_model, allow_custom_value=True)
+                        new_agent_model = gr.Dropdown(label="Model", choices=initial_model_choices, value=startup_model, allow_custom_value=True)
                         new_agent_prompt = gr.Textbox(label="System prompt", lines=5)
                         create_agent_btn = gr.Button("Create Agent", variant="primary")
                         create_agent_status = gr.Markdown()
                         gr.Markdown("---")
                         update_agent_name = gr.Dropdown(label="Agent", choices=orchestrator.list_agents(), value="assistant")
-                        update_agent_model_name = gr.Dropdown(label="New model", choices=[startup_model], value=startup_model, allow_custom_value=True)
+                        update_agent_model_name = gr.Dropdown(label="New model", choices=initial_model_choices, value=startup_model, allow_custom_value=True)
                         update_agent_btn = gr.Button("Apply Model Update")
                         update_agent_status = gr.Markdown()
 

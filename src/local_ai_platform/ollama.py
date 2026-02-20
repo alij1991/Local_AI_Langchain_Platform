@@ -162,12 +162,63 @@ class OllamaController:
                 seen.add(info.name)
         return deduped
 
+
+    @classmethod
+    def _infer_capabilities_from_name(cls, name: str) -> tuple[bool | None, bool | None]:
+        lowered = name.lower()
+        if "embed" in lowered or "embedding" in lowered:
+            return False, False
+        return True, None
+
+    def _enrich_capabilities_from_show(self, infos: list[ModelInfo]) -> list[ModelInfo]:
+        try:
+            client = self._get_client()
+        except Exception:  # noqa: BLE001
+            return infos
+
+        enriched: list[ModelInfo] = []
+        for info in infos:
+            supports_generate = info.supports_generate
+            supports_tools = info.supports_tools
+
+            if supports_generate is not None and supports_tools is not None:
+                enriched.append(info)
+                continue
+
+            try:
+                payload = client.show(info.name)
+                data = self._to_dict(payload)
+                supports_generate = supports_generate if supports_generate is not None else self._supports_generate(data)
+                supports_tools = supports_tools if supports_tools is not None else self._supports_tools(data)
+            except Exception:  # noqa: BLE001
+                pass
+
+            if supports_generate is None or supports_tools is None:
+                inferred_generate, inferred_tools = self._infer_capabilities_from_name(info.name)
+                if supports_generate is None:
+                    supports_generate = inferred_generate
+                if supports_tools is None:
+                    supports_tools = inferred_tools
+
+            enriched.append(
+                ModelInfo(
+                    name=info.name,
+                    size_bytes=info.size_bytes,
+                    family=info.family,
+                    parameter_size=info.parameter_size,
+                    quantization=info.quantization,
+                    supports_tools=supports_tools,
+                    supports_generate=supports_generate,
+                )
+            )
+        return enriched
+
     def list_local_models_detailed(self) -> tuple[bool, list[ModelInfo], str]:
         try:
             payload = self._get_client().list()
             infos = self._extract_model_infos(payload)
             if infos:
-                return True, infos, ""
+                return True, self._enrich_capabilities_from_show(infos), ""
             names = self._extract_model_names(payload)
             return True, [ModelInfo(name=name) for name in names], ""
         except Exception as exc:  # noqa: BLE001
