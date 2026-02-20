@@ -27,6 +27,20 @@ class _ClientGenerateOk:
         return {"response": "ok"}
 
 
+class _ClientLoadedModels:
+    def __init__(self):
+        self.running = [{"model": "gemma3:1b"}]
+
+    def pull(self, _model):
+        return None
+
+    def generate(self, **_kwargs):
+        return {"response": "ok"}
+
+    def ps(self):
+        return {"models": self.running}
+
+
 def test_extract_model_names_from_mixed_payload():
     payload = {
         "models": [
@@ -102,3 +116,18 @@ def test_load_model_generate_ok(monkeypatch):
 
     assert result.ok is True
     assert result.output == "Model ready: gemma3:1b"
+
+
+def test_list_loaded_models_includes_running_and_recent(monkeypatch):
+    controller = OllamaController(config=type("C", (), {"ollama_base_url": "http://127.0.0.1:11434"})())
+    fake_client = _ClientLoadedModels()
+    monkeypatch.setattr(controller, "_get_client", lambda: fake_client)
+
+    controller.load_model("qwen3:8b")
+    result = controller.list_loaded_models()
+
+    assert result.ok is True
+    assert "Running now:" in result.output
+    assert "gemma3:1b" in result.output
+    assert "Loaded in this app session:" in result.output
+    assert "qwen3:8b" in result.output

@@ -29,6 +29,7 @@ class OllamaController:
     def __init__(self, config: AppConfig) -> None:
         self.config = config
         self._client: Any | None = None
+        self._recent_loaded: list[str] = []
 
     def _get_client(self) -> Any:
         if self._client is None:
@@ -64,7 +65,6 @@ class OllamaController:
                     deduped.append(name)
             return deduped
 
-        # SDK object patterns
         for attr in ("model", "name"):
             if hasattr(payload, attr):
                 value = getattr(payload, attr)
@@ -93,8 +93,7 @@ class OllamaController:
             if isinstance(dumped, dict):
                 return dumped
         if hasattr(payload, "__dict__"):
-            dumped = dict(payload.__dict__)
-            return dumped
+            return dict(payload.__dict__)
         return {}
 
     @staticmethod
@@ -132,8 +131,7 @@ class OllamaController:
         for item in models:
             record = cls._to_dict(item)
             if not record:
-                names = cls._extract_model_names(item)
-                for name in names:
+                for name in cls._extract_model_names(item):
                     infos.append(ModelInfo(name=name))
                 continue
 
@@ -144,7 +142,6 @@ class OllamaController:
 
             size_value = record.get("size")
             size_bytes = int(size_value) if isinstance(size_value, (int, float)) else None
-
             infos.append(
                 ModelInfo(
                     name=name,
@@ -167,15 +164,12 @@ class OllamaController:
 
     def list_local_models_detailed(self) -> tuple[bool, list[ModelInfo], str]:
         try:
-            client = self._get_client()
-            payload = client.list()
+            payload = self._get_client().list()
             infos = self._extract_model_infos(payload)
             if infos:
                 return True, infos, ""
-
             names = self._extract_model_names(payload)
-            fallback_infos = [ModelInfo(name=name) for name in names]
-            return True, fallback_infos, ""
+            return True, [ModelInfo(name=name) for name in names], ""
         except Exception as exc:  # noqa: BLE001
             return False, [], str(exc)
 
@@ -188,10 +182,19 @@ class OllamaController:
 
     def list_loaded_models(self) -> CommandResult:
         try:
-            client = self._get_client()
-            payload = client.ps()
-            names = self._extract_model_names(payload)
-            return CommandResult(True, "\n".join(names) if names else "No running models found.")
+            running = self._extract_model_names(self._get_client().ps())
+            lines: list[str] = []
+            if running:
+                lines.append("Running now:")
+                lines.extend([f"- {name}" for name in running])
+            if self._recent_loaded:
+                if lines:
+                    lines.append("")
+                lines.append("Loaded in this app session:")
+                lines.extend([f"- {name}" for name in self._recent_loaded])
+            if not lines:
+                return CommandResult(True, "No running models found.")
+            return CommandResult(True, "\n".join(lines))
         except Exception as exc:  # noqa: BLE001
             return CommandResult(False, str(exc))
 
@@ -202,12 +205,15 @@ class OllamaController:
                 return CommandResult(False, "Select a model first.")
             client = self._get_client()
             client.pull(clean)
+
+            if clean not in self._recent_loaded:
+                self._recent_loaded.append(clean)
+
             try:
                 client.generate(model=clean, prompt="hello", options={"num_predict": 1})
                 return CommandResult(True, f"Model ready: {clean}")
             except Exception as generate_exc:  # noqa: BLE001
-                message = str(generate_exc).lower()
-                if "does not support generate" in message:
+                if "does not support generate" in str(generate_exc).lower():
                     return CommandResult(
                         True,
                         f"Model downloaded: {clean}. This is likely an embedding-only model and cannot be used for chat generation.",
