@@ -1,4 +1,4 @@
-from local_ai_platform.ollama import OllamaController
+from local_ai_platform.ollama import ModelInfo, OllamaController
 
 
 class _ModelObj:
@@ -131,3 +131,31 @@ def test_list_loaded_models_includes_running_and_recent(monkeypatch):
     assert "gemma3:1b" in result.output
     assert "Loaded in this app session:" in result.output
     assert "qwen3:8b" in result.output
+
+
+class _ClientShowCapabilities:
+    def __init__(self):
+        self.running = []
+
+    def show(self, model_name):
+        if model_name == "qwen3:8b":
+            return {"capabilities": ["completion", "tools"]}
+        if model_name == "nomic-embed-text:latest":
+            return {"capabilities": ["embedding"]}
+        return {}
+
+
+def test_enrich_capabilities_from_show(monkeypatch):
+    controller = OllamaController(config=type("C", (), {"ollama_base_url": "http://127.0.0.1:11434"})())
+    monkeypatch.setattr(controller, "_get_client", lambda: _ClientShowCapabilities())
+
+    infos = [
+        ModelInfo(name="qwen3:8b"),
+        ModelInfo(name="nomic-embed-text:latest"),
+    ]
+
+    out = controller._enrich_capabilities_from_show(infos)
+
+    assert out[0].supports_generate is True
+    assert out[0].supports_tools is True
+    assert out[1].supports_generate is False
