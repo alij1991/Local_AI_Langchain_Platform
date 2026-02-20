@@ -17,6 +17,9 @@ dependencies = [
   "langgraph",
   "pydantic",
   "ollama",
+  "langchain-huggingface",
+  "transformers",
+  "accelerate",
 ]
 
 [project.optional-dependencies]

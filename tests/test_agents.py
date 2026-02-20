@@ -1,3 +1,8 @@
+import pytest
+
+pytest.importorskip("langchain_core")
+pytest.importorskip("langgraph")
+
 from local_ai_platform.agents import AgentOrchestrator
 from local_ai_platform.config import AppConfig
 
@@ -24,6 +29,9 @@ def _config() -> AppConfig:
         ollama_base_url="http://127.0.0.1:11434",
         default_model="gemma3:1b",
         prompt_builder_model="gemma3:1b",
+        hf_default_model="google/flan-t5-base",
+        hf_model_catalog="google/flan-t5-base",
+        hf_device="auto",
         gradio_share=False,
         gradio_server_port=7860,
     )
@@ -57,8 +65,5 @@ def test_chat_with_agent_non_tool_error_is_raised(monkeypatch):
     bad = _Graph(exc=RuntimeError("network down"))
     monkeypatch.setattr(orchestrator, "_build_agent_graph", lambda *_args, **_kwargs: bad)
 
-    try:
+    with pytest.raises(RuntimeError, match="network down"):
         orchestrator.chat_with_agent("assistant", "Hello")
-        assert False, "Expected RuntimeError"
-    except RuntimeError as exc:
-        assert "network down" in str(exc)

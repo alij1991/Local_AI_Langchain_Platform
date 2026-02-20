@@ -1,19 +1,13 @@
 # Local AI LangChain Platform
 
-Self-hosted Python UI for building agentic systems with **Ollama + LangChain + LangGraph**.
+Self-hosted Python UI for building agentic systems with **Ollama + Hugging Face + LangChain + LangGraph**.
 
-## What changed
-- Replaced LM Studio controls with **Ollama Python SDK** integration.
-- Kept the custom-agent architecture (no fixed planner/worker dependency).
-- Added built-in prompt-builder agent support using a lightweight default model.
-
-## UX Flow
-1. **Ollama**: list local/running models and ensure a selected model is available.
-2. **Prompt Builder**: draft a strong system prompt from description.
-3. **Agent Builder**: create custom agents and set model assignments.
-4. **Tool Builder**: build instruction and agent-delegate tools.
-5. **Chat**: talk with any created agent.
-6. **Graph Workflow**: run ordered agent pipelines with LangGraph.
+## Highlights
+- Multi-provider agent support: **Ollama** and **Hugging Face**.
+- Chat-first workspace with model management, agent builder, tools, and workflows.
+- Provider-aware agent creation/update (choose provider + model per agent).
+- Ollama capability table (generate/tool support, size, quantization).
+- Hugging Face catalog list from env-configured model IDs.
 
 ## Quick Start
 
@@ -31,19 +25,30 @@ python app.py
 - `OLLAMA_BASE_URL` (default `http://127.0.0.1:11434`)
 - `OLLAMA_DEFAULT_MODEL` (default `gemma3:1b`)
 - `OLLAMA_PROMPT_BUILDER_MODEL` (default `gemma3:1b`)
-- `GRADIO_SHARE` (default `false`, set `true` for public share links)
+- `HF_DEFAULT_MODEL` (default `google/flan-t5-base`)
+- `HF_MODEL_CATALOG` (comma-separated model IDs for UI catalog)
+- `HF_DEVICE` (default `auto`)
+- `GRADIO_SHARE` (default `false`)
 - `GRADIO_SERVER_PORT` (default `7860`)
 
+## UX Flow
+1. **Models tab**
+   - Refresh provider catalogs.
+   - Inspect Ollama model metadata and HF model catalog.
+   - Load/pull Ollama models.
+2. **Agents tab**
+   - Create/update agent with provider + model.
+3. **Tools tab**
+   - Register instruction/delegate tools.
+4. **Workflow tab**
+   - Run sequential multi-agent pipelines.
+5. **Chat**
+   - Select any agent and chat.
+
 ## Notes
-- Ollama daemon is managed externally; start it with `ollama serve`.
-- If prompt-builder model is missing, the app now falls back to available local models and returns actionable guidance in the prompt panel instead of a generic error.
-- If model list/load fails, confirm daemon is running and your model exists (`ollama list`).
-
-## Latest libraries
-
-```bash
-python -m pip install -U gradio langchain langchain-ollama langchain-community langgraph pydantic ollama pytest ruff
-```
+- Ollama daemon is external (`ollama serve`).
+- HF local models use `transformers` pipelines through `langchain-huggingface`.
+- Very large HF models may require substantial RAM/VRAM and longer load time.
 
 ## Validation
 
