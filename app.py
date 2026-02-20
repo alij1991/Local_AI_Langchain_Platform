@@ -36,11 +36,9 @@ def build_chat_handler(orchestrator: AgentOrchestrator, messages_format: bool) -
 
 
 def _chatbot_uses_messages_format() -> bool:
-    try:
-        gr.Chatbot(type="messages")
-    except TypeError:
-        return False
-    return True
+    chatbot = gr.Chatbot()
+    data_model_name = getattr(getattr(chatbot, "data_model", None), "__name__", "")
+    return "Messages" in data_model_name
 
 def _human_size(size_bytes: int | None) -> str:
     if size_bytes is None:
@@ -69,8 +67,8 @@ def _model_label(info: ModelInfo) -> str:
     )
 
 
-def _load_model_choices(infos: list[ModelInfo]) -> list[tuple[str, str]]:
-    return [(_model_label(info), info.name) for info in infos]
+def _load_model_choices(infos: list[ModelInfo]) -> list[str]:
+    return [info.name for info in infos]
 
 
 def _agent_model_choices(infos: list[ModelInfo]) -> list[str]:
@@ -165,11 +163,12 @@ def build_app() -> gr.Blocks:
         load_choices = _load_model_choices(infos)
         agent_choices = _agent_model_choices(infos)
         chosen = startup_model if startup_model in agent_choices else agent_choices[0]
+        load_chosen = startup_model if startup_model in load_choices else load_choices[0]
 
         return (
             f"✅ Found {len(infos)} model(s).",
             _models_markdown(infos),
-            gr.update(choices=load_choices, value=chosen),
+            gr.update(choices=load_choices, value=load_chosen),
             gr.update(choices=agent_choices, value=chosen),
             gr.update(choices=agent_choices, value=chosen),
         )
@@ -268,10 +267,7 @@ def build_app() -> gr.Blocks:
                         choices=orchestrator.list_agents(),
                         value=orchestrator.list_agents()[0],
                     )
-                    if messages_format:
-                        chat = gr.Chatbot(label="Conversation", height=520, type="messages")
-                    else:
-                        chat = gr.Chatbot(label="Conversation", height=520)
+                    chat = gr.Chatbot(label="Conversation", height=520)
                     prompt = gr.Textbox(label="Message", placeholder="Ask your assistant...")
                     with gr.Row():
                         send_btn = gr.Button("Send", variant="primary")
@@ -284,7 +280,7 @@ def build_app() -> gr.Blocks:
                     with gr.Row():
                         list_models_btn = gr.Button("Refresh Models", variant="primary")
                         list_loaded_btn = gr.Button("List Loaded")
-                    sdk_model_dropdown = gr.Dropdown(label="Load model", choices=[])
+                    sdk_model_dropdown = gr.Dropdown(label="Load model", choices=[startup_model], value=startup_model)
                     load_btn = gr.Button("Load Selected Model")
                     lm_output = gr.Textbox(label="Ollama output", lines=6)
 
