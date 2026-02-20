@@ -3,11 +3,13 @@
 Self-hosted Python UI for building agentic systems with **Ollama + Hugging Face + LangChain + LangGraph**.
 
 ## Highlights
-- Multi-provider agent support: **Ollama** and **Hugging Face**.
-- Chat-first workspace with model management, agent builder, tools, and workflows.
-- Provider-aware agent creation/update (choose provider + model per agent).
-- Ollama capability table (generate/tool support, size, quantization).
-- Hugging Face catalog list from env-configured model IDs.
+- Multi-provider agents (`ollama` and `huggingface`) with provider-aware model routing.
+- Streaming chat for Ollama where supported.
+- Chat attachments: upload **images/documents**; images can be passed to Ollama vision-capable models.
+- Rich model catalog with generate/tool/vision capability columns.
+- Built-in tools include:
+  - `tavily_web_search` (web search)
+  - `mcp_query` (calls configured MCP JSON-RPC endpoint)
 
 ## Quick Start
 
@@ -26,29 +28,17 @@ python app.py
 - `OLLAMA_DEFAULT_MODEL` (default `gemma3:1b`)
 - `OLLAMA_PROMPT_BUILDER_MODEL` (default `gemma3:1b`)
 - `HF_DEFAULT_MODEL` (default `google/flan-t5-base`)
-- `HF_MODEL_CATALOG` (comma-separated model IDs for UI catalog)
+- `HF_MODEL_CATALOG` (comma-separated model IDs)
 - `HF_DEVICE` (default `auto`)
+- `TAVILY_API_KEY` (required for Tavily search tool)
+- `MCP_SERVER_URL` (HTTP JSON-RPC MCP endpoint)
+- `MCP_TOOL_METHOD` (default `tools/call`)
 - `GRADIO_SHARE` (default `false`)
 - `GRADIO_SERVER_PORT` (default `7860`)
 
-## UX Flow
-1. **Models tab**
-   - Refresh provider catalogs.
-   - Inspect Ollama model metadata and HF model catalog.
-   - Load/pull Ollama models.
-2. **Agents tab**
-   - Create/update agent with provider + model.
-3. **Tools tab**
-   - Register instruction/delegate tools.
-4. **Workflow tab**
-   - Run sequential multi-agent pipelines.
-5. **Chat**
-   - Select any agent and chat.
-
-## Notes
-- Ollama daemon is external (`ollama serve`).
-- HF local models use `transformers` pipelines through `langchain-huggingface`.
-- Very large HF models may require substantial RAM/VRAM and longer load time.
+## UX Layout
+- Left: provider/model/tool/workflow management tabs.
+- Right: chat area (agent selector + attachments + conversation).
 
 ## Validation
 
