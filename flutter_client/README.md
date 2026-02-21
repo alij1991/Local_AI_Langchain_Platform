@@ -1,14 +1,20 @@
 # Flutter Client (Web/Windows)
 
-This is a Flutter UI that mirrors the chat design and calls the Python API.
+This is the full Flutter application UI (Chat, Models, Agents, Tools, Systems) backed by the Python API.
+
+## Project structure
+- `lib/main.dart` bootstraps the app
+- `lib/app/` app shell and section navigation
+- `lib/services/` API integration layer
+- `lib/models/` domain models
 
 ## Run
 
 ```bash
-# from repo root
+# terminal 1 (repo root)
 python api_server.py
 
-# in another terminal
+# terminal 2
 cd flutter_client
 flutter pub get
 flutter run -d chrome --dart-define=API_URL=http://127.0.0.1:8000
@@ -17,5 +23,6 @@ flutter run -d windows --dart-define=API_URL=http://127.0.0.1:8000
 ```
 
 ## Notes
-- The Flutter app uses `/agents` and `/chat` from `api_server.py`.
-- Existing Python agent/model classes remain the runtime backend.
+- Windows platform files are included under `windows/`.
+- Build/ephemeral/generated Flutter files are ignored via `.gitignore`.
+- Existing Python runtime classes remain the backend engine.
