@@ -2,12 +2,12 @@
 
 Self-hosted AI workspace with a Python backend and two UI options:
 - **Gradio app** (`app.py`)
-- **Flutter app** (`flutter_client/`) for the **full application UI** (Chat, Models, Agents, Tools, Systems) on web/windows
+- **Flutter app** (`flutter_client/`) for the **full application UI** (Chat, Models, Agents, Prompt Builder, Tools, Systems) on web/windows
 
 ## Highlights
 - Multi-provider agents (`ollama` and `huggingface`) with provider-aware model routing.
 - Existing runtime classes in `src/local_ai_platform/*` remain the core engine.
-- New **FastAPI bridge** (`api_server.py`) exposes chat/models/agents/tools/systems/workflow APIs for Flutter.
+- New **FastAPI bridge** (`api_server.py`) exposes chat (with attachments), models, agents, prompt builder, tools, systems, and workflow APIs for Flutter.
 - Browser mic dictation is available in the Gradio UI.
 
 ## Quick Start (Gradio)

@@ -1,4 +1,4 @@
-enum AppSection { chat, models, agents, tools, systems }
+enum AppSection { chat, models, agents, promptBuilder, tools, systems }
 
 class ChatTurn {
   ChatTurn({required this.user, required this.assistant});

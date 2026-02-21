@@ -1,7 +1,15 @@
 import 'dart:convert';
+import 'dart:typed_data';
 
 import 'package:local_ai_flutter_client/models/studio_models.dart';
 import 'package:http/http.dart' as http;
+
+class PendingAttachment {
+  PendingAttachment({required this.name, this.bytes, this.path});
+  final String name;
+  final Uint8List? bytes;
+  final String? path;
+}
 
 class StudioApi {
   StudioApi({required this.baseUrl});
@@ -9,9 +17,7 @@ class StudioApi {
 
   Future<Map<String, dynamic>> _get(String path) async {
     final r = await http.get(Uri.parse('$baseUrl$path'));
-    if (r.statusCode < 200 || r.statusCode > 299) {
-      throw Exception(r.body);
-    }
+    if (r.statusCode < 200 || r.statusCode > 299) throw Exception(r.body);
     return jsonDecode(r.body) as Map<String, dynamic>;
   }
 
@@ -21,9 +27,7 @@ class StudioApi {
       headers: {'Content-Type': 'application/json'},
       body: jsonEncode(body),
     );
-    if (r.statusCode < 200 || r.statusCode > 299) {
-      throw Exception(r.body);
-    }
+    if (r.statusCode < 200 || r.statusCode > 299) throw Exception(r.body);
     return jsonDecode(r.body) as Map<String, dynamic>;
   }
 
@@ -33,9 +37,7 @@ class StudioApi {
       headers: {'Content-Type': 'application/json'},
       body: jsonEncode(body),
     );
-    if (r.statusCode < 200 || r.statusCode > 299) {
-      throw Exception(r.body);
-    }
+    if (r.statusCode < 200 || r.statusCode > 299) throw Exception(r.body);
     return jsonDecode(r.body) as Map<String, dynamic>;
   }
 
@@ -44,19 +46,41 @@ class StudioApi {
     return ((body['agents'] as List<dynamic>?) ?? []).cast<String>();
   }
 
-  Future<Map<String, dynamic>> getAgentMap() async => _get('/agents');
+  Future<Map<String, List<String>>> getAvailableModels() async {
+    final body = await _get('/models/available');
+    return {
+      'ollama': ((body['ollama'] as List<dynamic>?) ?? []).cast<String>(),
+      'huggingface': ((body['huggingface'] as List<dynamic>?) ?? []).cast<String>(),
+    };
+  }
 
-  Future<String> sendChat({required String agent, required String message}) async {
-    final body = await _post('/chat', {'agent': agent, 'message': message});
+  Future<String> sendChat({required String agent, required String message, List<PendingAttachment> attachments = const []}) async {
+    if (attachments.isEmpty) {
+      final body = await _post('/chat', {'agent': agent, 'message': message});
+      return body['reply'] as String? ?? '';
+    }
+
+    final req = http.MultipartRequest('POST', Uri.parse('$baseUrl/chat/attachments'));
+    req.fields['agent'] = agent;
+    req.fields['message'] = message;
+    for (final attachment in attachments) {
+      if (attachment.bytes != null) {
+        req.files.add(http.MultipartFile.fromBytes('files', attachment.bytes!, filename: attachment.name));
+      } else if (attachment.path != null) {
+        req.files.add(await http.MultipartFile.fromPath('files', attachment.path!, filename: attachment.name));
+      }
+    }
+    final streamed = await req.send();
+    final response = await http.Response.fromStream(streamed);
+    if (response.statusCode < 200 || response.statusCode > 299) throw Exception(response.body);
+    final body = jsonDecode(response.body) as Map<String, dynamic>;
     return body['reply'] as String? ?? '';
   }
 
   Future<List<LocalModelInfo>> getLocalModels() async {
     final body = await _get('/models/local');
     final items = (body['models'] as List<dynamic>?) ?? [];
-    return items
-        .map((item) => LocalModelInfo.fromJson(item as Map<String, dynamic>))
-        .toList();
+    return items.map((item) => LocalModelInfo.fromJson(item as Map<String, dynamic>)).toList();
   }
 
   Future<List<String>> getHfModels() async {
@@ -82,8 +106,8 @@ class StudioApi {
     await _patch('/agents/$agent/model', {'provider': provider, 'model_name': modelName});
   }
 
-  Future<String> draftPrompt(String description) async {
-    final body = await _post('/agents/prompt-draft', {'description': description});
+  Future<String> draftPrompt({required String description, String? modelName}) async {
+    final body = await _post('/agents/prompt-draft', {'description': description, 'model_name': modelName});
     return body['prompt'] as String? ?? '';
   }
 
@@ -97,12 +121,8 @@ class StudioApi {
     return {'name': body['name'] as String? ?? '', 'instructions': body['instructions'] as String? ?? ''};
   }
 
-  Future<void> createTool({required String name, required String toolType, required String instructions, required String targetAgent}) async {
-    await _post('/tools', {'name': name, 'tool_type': toolType, 'instructions': instructions, 'target_agent': targetAgent});
-  }
-
-  Future<Map<String, dynamic>> runWorkflow({required String prompt, required String sequenceCsv}) async {
-    return _post('/workflow/run', {'prompt': prompt, 'sequence_csv': sequenceCsv});
+  Future<void> createTool({required String name, required String toolType, required String instructions, required String targetAgent, required bool includeTavily}) async {
+    await _post('/tools', {'name': name, 'tool_type': toolType, 'instructions': instructions, 'target_agent': targetAgent, 'include_tavily': includeTavily});
   }
 
   Future<Map<String, dynamic>> getSystems() async => _get('/systems');
