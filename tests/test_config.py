@@ -11,6 +11,7 @@ def test_load_config_defaults(monkeypatch):
         "HF_DEVICE",
         "GRADIO_SHARE",
         "GRADIO_SERVER_PORT",
+        "API_SERVER_PORT",
     ]:
         monkeypatch.delenv(key, raising=False)
 
@@ -24,3 +25,9 @@ def test_load_config_defaults(monkeypatch):
     assert config.hf_device == "auto"
     assert config.gradio_share is False
     assert config.gradio_server_port == 7860
+
+
+def test_api_port_default(monkeypatch):
+    monkeypatch.delenv("API_SERVER_PORT", raising=False)
+    config = load_config()
+    assert config.api_server_port == 8000

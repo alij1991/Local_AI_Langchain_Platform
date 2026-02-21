@@ -23,6 +23,8 @@ dependencies = [
   "tavily-python",
   "langchain-tavily",
   "langchain-mcp-adapters",
+  "fastapi",
+  "uvicorn",
 ]
 
 [project.optional-dependencies]

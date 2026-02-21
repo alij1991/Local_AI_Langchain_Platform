@@ -1,17 +1,16 @@
 # Local AI LangChain Platform
 
-Self-hosted Python UI for building agentic systems with **Ollama + Hugging Face + LangChain + LangGraph**.
+Self-hosted AI workspace with a Python backend and two UI options:
+- **Gradio app** (`app.py`) for all-in-one management
+- **Flutter client** (`flutter_client/`) for web/windows chat UI
 
 ## Highlights
 - Multi-provider agents (`ollama` and `huggingface`) with provider-aware model routing.
-- Streaming chat for Ollama where supported.
-- Chat attachments: upload **images/documents**; images can be passed to Ollama vision-capable models.
-- Rich model catalog with generate/tool/vision capability columns.
-- Built-in tools include:
-  - `tavily_web_search` (web search)
-  - `mcp_query` (calls configured MCP JSON-RPC endpoint)
+- Existing runtime classes in `src/local_ai_platform/*` remain the core engine.
+- New **FastAPI bridge** (`api_server.py`) exposes agents/chat/models for non-Python UIs.
+- Browser mic dictation is available in the Gradio UI.
 
-## Quick Start
+## Quick Start (Gradio)
 
 ```bash
 python -m pip install --upgrade pip setuptools wheel
@@ -21,6 +20,20 @@ set -a
 source .env
 set +a
 python app.py
+```
+
+## Quick Start (Flutter + Python API)
+
+```bash
+# terminal 1
+python api_server.py
+
+# terminal 2
+cd flutter_client
+flutter pub get
+flutter run -d chrome --dart-define=API_URL=http://127.0.0.1:8000
+# or
+flutter run -d windows --dart-define=API_URL=http://127.0.0.1:8000
 ```
 
 ## Environment Variables
@@ -35,14 +48,18 @@ python app.py
 - `MCP_TOOL_METHOD` (default `tools/call`)
 - `GRADIO_SHARE` (default `false`)
 - `GRADIO_SERVER_PORT` (default `7860`)
+- `API_SERVER_PORT` (default `8000`)
 
-## UX Layout
-- Left: provider/model/tool/workflow management tabs.
-- Right: chat area (agent selector + attachments + conversation).
+## API Endpoints
+- `GET /health`
+- `GET /agents`
+- `POST /agents`
+- `GET /models/local`
+- `POST /chat`
 
 ## Validation
 
 ```bash
-python -m compileall app.py src tests
-python -m pytest
+python -m compileall app.py api_server.py src tests
+python -m pytest -q
 ```
