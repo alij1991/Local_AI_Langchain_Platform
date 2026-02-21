@@ -20,6 +20,7 @@ class AppConfig:
     hf_device: str
     gradio_share: bool
     gradio_server_port: int
+    api_server_port: int
 
 
 def load_config() -> AppConfig:
@@ -35,4 +36,5 @@ def load_config() -> AppConfig:
         hf_device=os.getenv("HF_DEVICE", "auto"),
         gradio_share=_as_bool(os.getenv("GRADIO_SHARE"), default=False),
         gradio_server_port=int(os.getenv("GRADIO_SERVER_PORT", "7860")),
+        api_server_port=int(os.getenv("API_SERVER_PORT", "8000")),
     )

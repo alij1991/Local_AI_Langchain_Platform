@@ -34,6 +34,7 @@ def _config() -> AppConfig:
         hf_device="auto",
         gradio_share=False,
         gradio_server_port=7860,
+        api_server_port=8000,
     )
 
 
