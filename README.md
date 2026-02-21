@@ -1,8 +1,8 @@
 # Local AI LangChain Platform
 
 Self-hosted AI workspace with a Python backend and two UI options:
-- **Gradio app** (`app.py`) for all-in-one management
-- **Flutter client** (`flutter_client/`) for web/windows chat UI
+- **Gradio app** (`app.py`)
+- **Flutter app** (`flutter_client/`) for the **full application UI** (Chat, Models, Agents, Tools, Systems) on web/windows
 
 ## Highlights
 - Multi-provider agents (`ollama` and `huggingface`) with provider-aware model routing.
@@ -52,9 +52,11 @@ flutter run -d windows --dart-define=API_URL=http://127.0.0.1:8000
 
 ## API Endpoints
 - `GET /health`
-- `GET /agents`
-- `POST /agents`
-- `GET /models/local`
+- `GET /config`
+- `GET /models/local`, `GET /models/hf`, `GET /models/loaded`, `POST /models/load`
+- `GET /agents`, `POST /agents`, `PATCH /agents/{agent_name}/model`
+- `GET /tools`, `POST /tools`
+- `GET /systems`, `POST /systems`, `POST /systems/run`
 - `POST /chat`
 
 ## Validation
