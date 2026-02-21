@@ -1,6 +1,12 @@
 # Flutter Client (Web/Windows)
 
-This is the full Flutter application UI (Chat, Models, Agents, Tools, Systems) backed by the Python API.
+This is the full Flutter application UI backed by the Python API:
+- Chat (with attachments)
+- Models
+- Agents
+- Prompt Builder
+- Tools
+- Systems
 
 ## Project structure
 - `lib/main.dart` bootstraps the app

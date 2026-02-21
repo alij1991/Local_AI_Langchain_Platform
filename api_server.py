@@ -1,9 +1,11 @@
 from __future__ import annotations
 
+import tempfile
 from dataclasses import asdict
+from pathlib import Path
 from typing import Any
 
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, File, Form, HTTPException, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
 
@@ -38,6 +40,7 @@ class ToolCreateRequest(BaseModel):
     tool_type: str = Field(default="instruction", pattern="^(instruction|delegate_agent)$")
     instructions: str = "General helper tool"
     target_agent: str = "assistant"
+    include_tavily: bool = False
 
 
 class SystemCreateRequest(BaseModel):
@@ -55,21 +58,28 @@ class SystemRunRequest(BaseModel):
 
 class PromptDraftRequest(BaseModel):
     description: str
+    model_name: str | None = None
 
 
 class WorkflowRunRequest(BaseModel):
     prompt: str
     sequence_csv: str
 
+
 config = load_config()
 orchestrator = AgentOrchestrator(config)
 controller = OllamaController(config)
 systems_registry: dict[str, dict[str, str]] = {}
 
-startup_model = config.default_model
+# Hide simplistic defaults from UI/runtime by default for cleaner tool UX.
+orchestrator.tools = [t for t in orchestrator.tools if t.name not in {"multiply_numbers", "utc_now"}]
+
+ok, infos, _ = controller.list_local_models_detailed()
+available_local_models = [m.name for m in infos] if ok and infos else []
+startup_model = available_local_models[0] if available_local_models else config.default_model
 orchestrator.add_agent("assistant", startup_model, "You are a practical AI assistant.", provider="ollama")
 
-app = FastAPI(title="Local AI Platform API", version="0.2.0")
+app = FastAPI(title="Local AI Platform API", version="0.3.0")
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -81,6 +91,27 @@ app.add_middleware(
 
 def _clean_slug(value: str) -> str:
     return value.strip().lower().replace(" ", "-")
+
+
+def _attachment_context(file_paths: list[Path]) -> tuple[str, list[str]]:
+    if not file_paths:
+        return "", []
+    text_parts: list[str] = []
+    image_paths: list[str] = []
+    for path in file_paths:
+        suffix = path.suffix.lower()
+        if suffix in {".png", ".jpg", ".jpeg", ".webp", ".bmp"}:
+            image_paths.append(str(path))
+            continue
+        try:
+            if suffix in {".txt", ".md", ".csv", ".json", ".py", ".log", ".html"}:
+                content = path.read_text(encoding="utf-8", errors="ignore")
+                text_parts.append(f"[From {path.name}]\n{content[:3500]}")
+            else:
+                text_parts.append(f"[Attached file: {path.name} ({path.stat().st_size} bytes)]")
+        except Exception as exc:  # noqa: BLE001
+            text_parts.append(f"[Attached file unreadable: {path.name} ({exc})]")
+    return "\n\n".join(text_parts), image_paths
 
 
 @app.get("/health")
@@ -95,8 +126,8 @@ def read_config() -> dict[str, Any]:
 
 @app.get("/models/local")
 def list_local_models() -> dict[str, Any]:
-    ok, infos, error = controller.list_local_models_detailed()
-    if not ok:
+    ok_models, local_infos, error = controller.list_local_models_detailed()
+    if not ok_models:
         raise HTTPException(status_code=502, detail=error)
     return {
         "models": [
@@ -109,7 +140,7 @@ def list_local_models() -> dict[str, Any]:
                 "supports_vision": info.supports_vision,
                 "supports_tools": info.supports_tools,
             }
-            for info in infos
+            for info in local_infos
         ]
     }
 
@@ -117,6 +148,13 @@ def list_local_models() -> dict[str, Any]:
 @app.get("/models/hf")
 def list_hf_models() -> dict[str, list[str]]:
     return {"models": orchestrator.hf.configured_models()}
+
+
+@app.get("/models/available")
+def list_available_models() -> dict[str, list[str]]:
+    local = [m.name for m in controller.list_local_models_detailed()[1]]
+    hf = orchestrator.hf.configured_models()
+    return {"ollama": local, "huggingface": hf}
 
 
 @app.get("/models/loaded")
@@ -140,10 +178,7 @@ def load_model(payload: dict[str, str]) -> dict[str, str]:
 
 @app.get("/agents")
 def list_agents() -> dict[str, Any]:
-    return {
-        "agents": orchestrator.list_agents(),
-        "agent_models": orchestrator.get_agent_models(),
-    }
+    return {"agents": orchestrator.list_agents(), "agent_models": orchestrator.get_agent_models()}
 
 
 @app.post("/agents")
@@ -156,7 +191,6 @@ def create_agent(payload: AgentCreateRequest) -> dict[str, str]:
         raise HTTPException(status_code=409, detail="Agent already exists")
     if not model_name:
         raise HTTPException(status_code=400, detail="model_name is required")
-
     orchestrator.add_agent(clean_name, model_name, payload.system_prompt.strip(), provider=payload.provider)
     return {"status": "created", "agent": clean_name}
 
@@ -172,13 +206,13 @@ def update_agent_model(agent_name: str, payload: AgentUpdateModelRequest) -> dic
     return {"status": "updated", "agent": agent_name, "model": f"{payload.provider}:{selected}"}
 
 
-
-
 @app.post("/agents/prompt-draft")
 def draft_prompt(payload: PromptDraftRequest) -> dict[str, str]:
     description = payload.description.strip()
     if not description:
         return {"prompt": ""}
+    # model override is accepted for frontend parity; runtime currently uses prompt builder model config.
+    _ = payload.model_name
     try:
         prompt = orchestrator.generate_system_prompt(description)
     except Exception as exc:  # noqa: BLE001
@@ -192,11 +226,10 @@ def run_workflow(payload: WorkflowRunRequest) -> dict[str, Any]:
     outputs = orchestrator.run_agent_workflow(payload.prompt.strip(), sequence)
     return {"outputs": outputs}
 
+
 @app.get("/tools")
 def list_tools() -> dict[str, list[str]]:
     return {"tools": orchestrator.get_tool_names()}
-
-
 
 
 @app.get("/tools/template")
@@ -205,6 +238,7 @@ def tool_template(mode: str = "instruction") -> dict[str, str]:
         return {"name": "summarize_for_exec", "instructions": "Summarize output into 5 bullets."}
     return {"name": "delegate_to_assistant", "instructions": "Delegate task."}
 
+
 @app.post("/tools")
 def add_tool(payload: ToolCreateRequest) -> dict[str, str]:
     clean_name = payload.name.strip().lower().replace(" ", "_")
@@ -212,7 +246,10 @@ def add_tool(payload: ToolCreateRequest) -> dict[str, str]:
         raise HTTPException(status_code=400, detail="Tool name is required")
 
     if payload.tool_type == "instruction":
-        orchestrator.add_instruction_tool(clean_name, payload.instructions.strip() or "General helper tool")
+        instructions = payload.instructions.strip() or "General helper tool"
+        if payload.include_tavily:
+            instructions = f"{instructions}\nUse tavily_web_search when external info is needed."
+        orchestrator.add_instruction_tool(clean_name, instructions)
         return {"status": "created", "tool": clean_name}
 
     if payload.target_agent not in orchestrator.definitions:
@@ -223,7 +260,7 @@ def add_tool(payload: ToolCreateRequest) -> dict[str, str]:
 
 @app.get("/systems")
 def list_systems() -> dict[str, Any]:
-    return {"systems": systems_registry}
+    return {"systems": systems_registry, "agents": orchestrator.list_agents(), "tools": orchestrator.get_tool_names()}
 
 
 @app.post("/systems")
@@ -257,9 +294,40 @@ def chat(payload: ChatRequest) -> ChatResponse:
         raise HTTPException(status_code=404, detail=f"Unknown agent: {payload.agent}")
     if not message:
         raise HTTPException(status_code=400, detail="Message cannot be empty")
-
     try:
         reply = orchestrator.chat_with_agent(payload.agent, message)
+    except Exception as exc:  # noqa: BLE001
+        raise HTTPException(status_code=500, detail=f"Agent error: {exc}") from exc
+    return ChatResponse(reply=reply)
+
+
+@app.post("/chat/attachments", response_model=ChatResponse)
+async def chat_with_attachments(
+    agent: str = Form(...),
+    message: str = Form(""),
+    files: list[UploadFile] = File(default=[]),
+) -> ChatResponse:
+    if agent not in orchestrator.definitions:
+        raise HTTPException(status_code=404, detail=f"Unknown agent: {agent}")
+
+    uploaded_paths: list[Path] = []
+    tmp_dir = Path(tempfile.mkdtemp(prefix="local_ai_attach_"))
+    for f in files:
+        target = tmp_dir / (f.filename or "file.bin")
+        data = await f.read()
+        target.write_bytes(data)
+        uploaded_paths.append(target)
+
+    clean = message.strip()
+    attachment_text, image_paths = _attachment_context(uploaded_paths)
+    composed = clean
+    if attachment_text:
+        composed = f"{clean}\n\nAttachment context:\n{attachment_text}" if clean else attachment_text
+    if not composed:
+        raise HTTPException(status_code=400, detail="Message or attachments required")
+
+    try:
+        reply = orchestrator.chat_with_agent(agent, composed, image_paths=image_paths)
     except Exception as exc:  # noqa: BLE001
         raise HTTPException(status_code=500, detail=f"Agent error: {exc}") from exc
     return ChatResponse(reply=reply)
