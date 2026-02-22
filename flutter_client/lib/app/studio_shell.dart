@@ -328,7 +328,7 @@ class _StudioShellState extends State<StudioShell> {
         Card(
           child: Padding(
             padding: const EdgeInsets.all(12),
-            child: Row(children: [Expanded(child: Container(height: 80, alignment: Alignment.center, color: Colors.blueGrey.shade900, child: Text(_agent))), const Icon(Icons.arrow_forward), Expanded(child: Container(height: 80, alignment: Alignment.center, color: Colors.blueGrey.shade800, child: const Text('Output'))]),
+            child: Row(children: [Expanded(child: Container(height: 80, alignment: Alignment.center, color: Colors.blueGrey.shade900, child: Text(_agent))), const Icon(Icons.arrow_forward), Expanded(child: Container(height: 80, alignment: Alignment.center, color: Colors.blueGrey.shade800, child: const Text('Output')))]),
           ),
         ),
         TextField(controller: _systemName, decoration: const InputDecoration(labelText: 'System name')),
