@@ -46,6 +46,50 @@ def init_db() -> None:
                 created_at TEXT NOT NULL,
                 updated_at TEXT NOT NULL
             );
+
+            CREATE TABLE IF NOT EXISTS model_entries (
+                provider TEXT NOT NULL,
+                model_id TEXT NOT NULL,
+                pinned INTEGER NOT NULL DEFAULT 0,
+                notes TEXT,
+                task_hint TEXT,
+                revision TEXT,
+                added_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL,
+                PRIMARY KEY(provider, model_id)
+            );
+
+            CREATE TABLE IF NOT EXISTS agents (
+                name TEXT PRIMARY KEY,
+                json_definition TEXT NOT NULL,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL,
+                is_enabled INTEGER NOT NULL DEFAULT 1
+            );
+
+            CREATE TABLE IF NOT EXISTS tools (
+                tool_id TEXT PRIMARY KEY,
+                name TEXT NOT NULL,
+                type TEXT NOT NULL,
+                description TEXT,
+                config_json TEXT NOT NULL,
+                is_enabled INTEGER NOT NULL DEFAULT 1,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+            );
+
+            CREATE TABLE IF NOT EXISTS mcp_servers (
+                id TEXT PRIMARY KEY,
+                name TEXT NOT NULL,
+                transport TEXT NOT NULL,
+                endpoint TEXT,
+                command TEXT,
+                args_json TEXT,
+                env_json TEXT,
+                enabled INTEGER NOT NULL DEFAULT 1,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+            );
             """
         )
         conn.commit()

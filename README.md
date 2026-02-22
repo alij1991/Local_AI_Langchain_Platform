@@ -1,90 +1,96 @@
 # Local AI LangChain Platform
 
-Self-hosted AI workspace with a Python backend and two UI options:
-- **Gradio app** (`app.py`)
-- **Flutter app** (`flutter_client/`) for the full desktop/web application UI
+FastAPI + LangChain backend with a Flutter desktop/web UI.
 
-## Highlights
-- Multi-provider agents (`ollama` and `huggingface`) with provider-aware model routing.
-- FastAPI bridge for chat, conversations, models, agents, prompt builder, tools, workflows, and systems.
-- Persistent SQLite storage for conversations/messages/systems.
-- LangChain-native attachment ingestion via document loaders + chunking.
+## What exists now
+- Chat with persisted conversations/memory in SQLite
+- Model Catalog (Ollama + Hugging Face + LM Studio placeholder)
+- Agent CRUD with runtime settings
+- Tool Registry (builtin/tavily/mcp/agent_tool)
+- MCP server management and tool discovery refresh
+- Systems graph persistence + DAG validation + execution
 
-## Data storage
-- SQLite DB path: `./data/app.db`
-- Uploaded files path: `./data/uploads/{conversation_id}/`
-- Reset local state:
+## Data
+- DB: `./data/app.db`
+- Uploads: `./data/uploads/{conversation_id}/`
+- Reset:
 
 ```bash
 rm -rf data
 ```
 
-## Quick Start (Backend)
+## Configuration
+- `OLLAMA_BASE_URL` (default `http://127.0.0.1:11434`)
+- `HF_MODEL_CATALOG` (comma-separated IDs)
+- `HF_DEFAULT_MODEL`
+- `TAVILY_API_KEY` (optional; if missing Tavily tool appears disabled in status)
+- `API_SERVER_PORT` (default `8000`)
+
+## Run backend
 
 ```bash
 python -m pip install --upgrade pip setuptools wheel
 pip install -e .[dev]
-cp .env.example .env
-set -a
-source .env
-set +a
 python api_server.py
 ```
 
-## Quick Start (Flutter)
+## Run Flutter
 
 ```bash
 cd flutter_client
 flutter pub get
 flutter run -d windows --dart-define=API_URL=http://127.0.0.1:8000
-# or
-flutter run -d chrome --dart-define=API_URL=http://127.0.0.1:8000
 ```
 
-## API examples (curl)
+## API examples
 
-### Create conversation
+### Model catalog
 ```bash
-curl -X POST http://127.0.0.1:8000/conversations \
+curl "http://127.0.0.1:8000/model-catalog?provider=ollama&supports_tools=true"
+curl "http://127.0.0.1:8000/model-catalog/huggingface/Qwen%2FQwen2.5-7B-Instruct/details"
+curl -X POST http://127.0.0.1:8000/model-catalog/huggingface/add \
   -H 'Content-Type: application/json' \
-  -d '{"title":"Research chat"}'
+  -d '{"model_id":"Qwen/Qwen2.5-7B-Instruct","task_hint":"chat"}'
 ```
 
-### Send chat message (JSON)
+### Agents
 ```bash
-curl -X POST http://127.0.0.1:8000/chat \
+curl -X POST http://127.0.0.1:8000/agents \
   -H 'Content-Type: application/json' \
-  -d '{"conversation_id":"<id>","agent":"assistant","message":"Hello"}'
+  -d '{"name":"support-agent","provider":"ollama","model_id":"llama3.2:latest","description":"Support bot","system_prompt":"You are helpful.","tool_ids":[],"settings":{"temperature":0.2,"max_tokens":1024},"resource_limits":{"max_context_messages":40}}'
+
+curl http://127.0.0.1:8000/agents/support-agent/effective-config
+curl -X POST http://127.0.0.1:8000/agents/support-agent/test -H 'Content-Type: application/json' -d '{"message":"hello"}'
 ```
 
-### Send chat with attachments (multipart)
+### Tools + MCP
 ```bash
-curl -X POST http://127.0.0.1:8000/chat \
-  -F conversation_id=<id> \
-  -F agent=assistant \
-  -F message='Summarize this PDF' \
-  -F files=@./sample.pdf
-```
+curl http://127.0.0.1:8000/tools/status
 
-### Prompt builder
-```bash
-curl -X POST http://127.0.0.1:8000/agents/prompt-draft \
+curl -X POST http://127.0.0.1:8000/tools \
   -H 'Content-Type: application/json' \
-  -d '{"goal":"Build a support triage assistant","requirements":["classify severity","give next steps"],"constraints":["never reveal secrets"]}'
+  -d '{"name":"call_support","type":"agent_tool","description":"Delegate to support agent","config_json":{"target_agent":"support-agent","strict_output":true},"is_enabled":true}'
+
+curl -X POST http://127.0.0.1:8000/tools/mcp/servers \
+  -H 'Content-Type: application/json' \
+  -d '{"name":"local-mcp","transport":"http","endpoint":"http://127.0.0.1:8123","enabled":true}'
+
+curl -X POST http://127.0.0.1:8000/tools/mcp/servers/<server_id>/refresh
 ```
 
-### Save system
+### Systems and workflow connectivity
+Systems graph `nodes` can reference:
+- `type=agent` + `agent=<agent_name>`
+- tool/model IDs in node metadata (future-ready for richer executors)
+
 ```bash
 curl -X POST http://127.0.0.1:8000/systems \
   -H 'Content-Type: application/json' \
-  -d '{"name":"triage-pipeline","definition":{"nodes":[{"id":"n1","type":"agent","agent":"assistant"}],"edges":[]}}'
-```
+  -d '{"name":"triage","definition":{"nodes":[{"id":"n1","type":"agent","agent":"support-agent"}],"edges":[]}}'
 
-### Run system
-```bash
-curl -X POST http://127.0.0.1:8000/systems/triage-pipeline/run \
+curl -X POST http://127.0.0.1:8000/systems/triage/run \
   -H 'Content-Type: application/json' \
-  -d '{"prompt":"Analyze this outage report"}'
+  -d '{"prompt":"Investigate this outage."}'
 ```
 
 ## Validation
