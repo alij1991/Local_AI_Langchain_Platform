@@ -8,6 +8,7 @@ Self-hosted AI workspace with a Python backend and two UI options:
 - Multi-provider agents (`ollama` and `huggingface`) with provider-aware model routing.
 - Existing runtime classes in `src/local_ai_platform/*` remain the core engine.
 - New **FastAPI bridge** (`api_server.py`) exposes chat (with attachments), models, agents, prompt builder, tools, systems, and workflow APIs for Flutter.
+- Attachment ingestion uses LangChain document loaders/chunking for richer doc context and multimodal image routing.
 - Browser mic dictation is available in the Gradio UI.
 
 ## Quick Start (Gradio)

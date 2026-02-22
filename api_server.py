@@ -9,6 +9,8 @@ from fastapi import FastAPI, File, Form, HTTPException, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
 
+from langchain_text_splitters import RecursiveCharacterTextSplitter
+
 from local_ai_platform import load_config
 from local_ai_platform.agents import AgentOrchestrator
 from local_ai_platform.ollama import OllamaController
@@ -93,6 +95,40 @@ def _clean_slug(value: str) -> str:
     return value.strip().lower().replace(" ", "-")
 
 
+def _extract_document_with_langchain(path: Path) -> str:
+    suffix = path.suffix.lower()
+    docs = []
+    if suffix == ".pdf":
+        from langchain_community.document_loaders import PyPDFLoader
+
+        docs = PyPDFLoader(str(path)).load()
+    elif suffix in {".txt", ".md", ".py", ".log", ".html"}:
+        from langchain_community.document_loaders import TextLoader
+
+        docs = TextLoader(str(path), encoding="utf-8").load()
+    elif suffix == ".csv":
+        from langchain_community.document_loaders import CSVLoader
+
+        docs = CSVLoader(str(path)).load()
+    elif suffix == ".json":
+        import json
+
+        docs = [{"page_content": json.dumps(json.loads(path.read_text(encoding="utf-8", errors="ignore")), ensure_ascii=False)}]
+    else:
+        return ""
+
+    splitter = RecursiveCharacterTextSplitter(chunk_size=1400, chunk_overlap=120)
+    chunks = []
+    for d in docs:
+        if hasattr(d, "page_content"):
+            chunks.append(d.page_content)
+        else:
+            chunks.append(str(d.get("page_content", "")))
+    joined = "\n".join(chunks)
+    split_docs = splitter.split_text(joined)
+    return "\n".join(split_docs[:4]).strip()
+
+
 def _attachment_context(file_paths: list[Path]) -> tuple[str, list[str]]:
     if not file_paths:
         return "", []
@@ -104,9 +140,9 @@ def _attachment_context(file_paths: list[Path]) -> tuple[str, list[str]]:
             image_paths.append(str(path))
             continue
         try:
-            if suffix in {".txt", ".md", ".csv", ".json", ".py", ".log", ".html"}:
-                content = path.read_text(encoding="utf-8", errors="ignore")
-                text_parts.append(f"[From {path.name}]\n{content[:3500]}")
+            extracted = _extract_document_with_langchain(path)
+            if extracted:
+                text_parts.append(f"[From {path.name}]\n{extracted[:6000]}")
             else:
                 text_parts.append(f"[Attached file: {path.name} ({path.stat().st_size} bytes)]")
         except Exception as exc:  # noqa: BLE001
@@ -323,6 +359,9 @@ async def chat_with_attachments(
     composed = clean
     if attachment_text:
         composed = f"{clean}\n\nAttachment context:\n{attachment_text}" if clean else attachment_text
+    if image_paths:
+        image_notice = f"You have {len(image_paths)} image attachment(s). Analyze them directly when answering."
+        composed = f"{composed}\n\n{image_notice}" if composed else image_notice
     if not composed:
         raise HTTPException(status_code=400, detail="Message or attachments required")
 

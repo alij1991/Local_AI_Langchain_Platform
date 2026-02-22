@@ -58,3 +58,59 @@ def test_prompt_workflow_tools_systems(monkeypatch):
     run = client.post('/systems/run', json={'name': 'demo', 'prompt': 'hi'})
     assert run.status_code == 200
     assert 'assistant' in run.json()['outputs']
+
+
+def test_chat_attachments_endpoint(monkeypatch):
+    calls = {}
+
+    monkeypatch.setitem(api_server.orchestrator.definitions, 'assistant', object())
+
+    def fake_chat(agent, message, image_paths=None):
+        calls['agent'] = agent
+        calls['message'] = message
+        calls['image_paths'] = image_paths or []
+        return 'ok-with-attachments'
+
+    monkeypatch.setattr(api_server.orchestrator, 'chat_with_agent', fake_chat)
+
+    response = client.post(
+        '/chat/attachments',
+        data={'agent': 'assistant', 'message': 'read this'},
+        files=[('files', ('note.txt', b'hello from attachment', 'text/plain'))],
+    )
+
+    assert response.status_code == 200
+    assert response.json()['reply'] == 'ok-with-attachments'
+    assert calls['agent'] == 'assistant'
+    assert 'Attachment context' in calls['message']
+
+
+
+def test_chat_attachments_with_image_notice(monkeypatch):
+    calls = {}
+
+    monkeypatch.setitem(api_server.orchestrator.definitions, 'assistant', object())
+
+    def fake_chat(agent, message, image_paths=None):
+        calls['agent'] = agent
+        calls['message'] = message
+        calls['image_paths'] = image_paths or []
+        return 'ok-image'
+
+    monkeypatch.setattr(api_server.orchestrator, 'chat_with_agent', fake_chat)
+
+    tiny_png = (
+        b'\x89PNG\r\n\x1a\n\x00\x00\x00\rIHDR\x00\x00\x00\x01\x00\x00\x00\x01\x08\x02\x00\x00\x00\x90wS\xde'
+        b'\x00\x00\x00\x0bIDATx\x9cc```\x00\x00\x00\x05\x00\x01\x0d\n-\xb4\x00\x00\x00\x00IEND\xaeB`\x82'
+    )
+
+    response = client.post(
+        '/chat/attachments',
+        data={'agent': 'assistant', 'message': 'describe this image'},
+        files=[('files', ('tiny.png', tiny_png, 'image/png'))],
+    )
+
+    assert response.status_code == 200
+    assert response.json()['reply'] == 'ok-image'
+    assert calls['image_paths']
+    assert 'Analyze them directly' in calls['message']

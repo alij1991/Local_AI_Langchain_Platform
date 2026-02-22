@@ -118,6 +118,23 @@ class AgentOrchestrator:
         return "does not support tools" in str(exc).lower()
 
     @staticmethod
+    def _stringify_content(content: object) -> str:
+        if isinstance(content, str):
+            return content
+        if isinstance(content, list):
+            parts: list[str] = []
+            for item in content:
+                if isinstance(item, dict):
+                    if item.get("type") == "text":
+                        parts.append(str(item.get("text", "")))
+                    else:
+                        parts.append(str(item))
+                else:
+                    parts.append(str(item))
+            return "\n".join([part for part in parts if part]).strip()
+        return str(content)
+
+    @staticmethod
     def _to_data_url(file_path: str) -> str:
         path = Path(file_path)
         mime = mimetypes.guess_type(path.name)[0] or "application/octet-stream"
@@ -138,7 +155,7 @@ class AgentOrchestrator:
             for file_path in image_paths:
                 content.append({"type": "image_url", "image_url": self._to_data_url(file_path)})
             result = llm.invoke([SystemMessage(content=definition.system_prompt), HumanMessage(content=content)])
-            return str(getattr(result, "content", "No response returned."))
+            return self._stringify_content(getattr(result, "content", "No response returned."))
 
         graph = self._build_agent_graph(definition)
         payload = {"messages": [*history, HumanMessage(content=user_input)]}
@@ -152,7 +169,7 @@ class AgentOrchestrator:
 
         messages = result.get("messages", [])
         final_message = next((msg for msg in reversed(messages) if isinstance(msg, AIMessage)), None)
-        return str(getattr(final_message, "content", "No response returned."))
+        return self._stringify_content(getattr(final_message, "content", "No response returned."))
 
     def _stream_with_ollama(self, definition: AgentDefinition, user_input: str) -> Generator[str, None, str]:
         llm = ChatOllama(model=definition.model_name, base_url=self.config.ollama_base_url, temperature=0.2)

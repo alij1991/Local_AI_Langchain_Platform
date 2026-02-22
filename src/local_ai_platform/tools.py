@@ -33,13 +33,20 @@ def utc_now() -> str:
 
 def tavily_web_search(query: str, max_results: int = 5) -> str:
     try:
-        from langchain_community.tools.tavily_search import TavilySearchResults
+        from langchain_tavily import TavilySearch
 
-        tool = TavilySearchResults(max_results=max_results)
+        tool = TavilySearch(max_results=max_results)
         result = tool.invoke({"query": query})
         return str(result)
-    except Exception as exc:  # noqa: BLE001
-        return f"Tavily search unavailable: {exc}"
+    except Exception:
+        try:
+            from langchain_community.tools.tavily_search import TavilySearchResults
+
+            tool = TavilySearchResults(max_results=max_results)
+            result = tool.invoke({"query": query})
+            return str(result)
+        except Exception as exc:  # noqa: BLE001
+            return f"Tavily search unavailable: {exc}"
 
 
 def mcp_query(prompt: str) -> str:
