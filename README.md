@@ -2,16 +2,24 @@
 
 Self-hosted AI workspace with a Python backend and two UI options:
 - **Gradio app** (`app.py`)
-- **Flutter app** (`flutter_client/`) for the **full application UI** (Chat, Models, Agents, Prompt Builder, Tools, Systems) on web/windows
+- **Flutter app** (`flutter_client/`) for the full desktop/web application UI
 
 ## Highlights
 - Multi-provider agents (`ollama` and `huggingface`) with provider-aware model routing.
-- Existing runtime classes in `src/local_ai_platform/*` remain the core engine.
-- New **FastAPI bridge** (`api_server.py`) exposes chat (with attachments), models, agents, prompt builder, tools, systems, and workflow APIs for Flutter.
-- Attachment ingestion uses LangChain document loaders/chunking for richer doc context and multimodal image routing.
-- Browser mic dictation is available in the Gradio UI.
+- FastAPI bridge for chat, conversations, models, agents, prompt builder, tools, workflows, and systems.
+- Persistent SQLite storage for conversations/messages/systems.
+- LangChain-native attachment ingestion via document loaders + chunking.
 
-## Quick Start (Gradio)
+## Data storage
+- SQLite DB path: `./data/app.db`
+- Uploaded files path: `./data/uploads/{conversation_id}/`
+- Reset local state:
+
+```bash
+rm -rf data
+```
+
+## Quick Start (Backend)
 
 ```bash
 python -m pip install --upgrade pip setuptools wheel
@@ -20,46 +28,64 @@ cp .env.example .env
 set -a
 source .env
 set +a
-python app.py
+python api_server.py
 ```
 
-## Quick Start (Flutter + Python API)
+## Quick Start (Flutter)
 
 ```bash
-# terminal 1
-python api_server.py
-
-# terminal 2
 cd flutter_client
 flutter pub get
-flutter run -d chrome --dart-define=API_URL=http://127.0.0.1:8000
-# or
 flutter run -d windows --dart-define=API_URL=http://127.0.0.1:8000
+# or
+flutter run -d chrome --dart-define=API_URL=http://127.0.0.1:8000
 ```
 
-## Environment Variables
-- `OLLAMA_BASE_URL` (default `http://127.0.0.1:11434`)
-- `OLLAMA_DEFAULT_MODEL` (default `gemma3:1b`)
-- `OLLAMA_PROMPT_BUILDER_MODEL` (default `gemma3:1b`)
-- `HF_DEFAULT_MODEL` (default `google/flan-t5-base`)
-- `HF_MODEL_CATALOG` (comma-separated model IDs)
-- `HF_DEVICE` (default `auto`)
-- `TAVILY_API_KEY` (required for Tavily search tool)
-- `MCP_SERVER_URL` (HTTP JSON-RPC MCP endpoint)
-- `MCP_TOOL_METHOD` (default `tools/call`)
-- `GRADIO_SHARE` (default `false`)
-- `GRADIO_SERVER_PORT` (default `7860`)
-- `API_SERVER_PORT` (default `8000`)
+## API examples (curl)
 
-## API Endpoints
-- `GET /health`
-- `GET /config`
-- `GET /models/local`, `GET /models/hf`, `GET /models/loaded`, `POST /models/load`
-- `GET /agents`, `POST /agents`, `PATCH /agents/{agent_name}/model`, `POST /agents/prompt-draft`
-- `GET /tools`, `GET /tools/template`, `POST /tools`
-- `POST /workflow/run`
-- `GET /systems`, `POST /systems`, `POST /systems/run`
-- `POST /chat`
+### Create conversation
+```bash
+curl -X POST http://127.0.0.1:8000/conversations \
+  -H 'Content-Type: application/json' \
+  -d '{"title":"Research chat"}'
+```
+
+### Send chat message (JSON)
+```bash
+curl -X POST http://127.0.0.1:8000/chat \
+  -H 'Content-Type: application/json' \
+  -d '{"conversation_id":"<id>","agent":"assistant","message":"Hello"}'
+```
+
+### Send chat with attachments (multipart)
+```bash
+curl -X POST http://127.0.0.1:8000/chat \
+  -F conversation_id=<id> \
+  -F agent=assistant \
+  -F message='Summarize this PDF' \
+  -F files=@./sample.pdf
+```
+
+### Prompt builder
+```bash
+curl -X POST http://127.0.0.1:8000/agents/prompt-draft \
+  -H 'Content-Type: application/json' \
+  -d '{"goal":"Build a support triage assistant","requirements":["classify severity","give next steps"],"constraints":["never reveal secrets"]}'
+```
+
+### Save system
+```bash
+curl -X POST http://127.0.0.1:8000/systems \
+  -H 'Content-Type: application/json' \
+  -d '{"name":"triage-pipeline","definition":{"nodes":[{"id":"n1","type":"agent","agent":"assistant"}],"edges":[]}}'
+```
+
+### Run system
+```bash
+curl -X POST http://127.0.0.1:8000/systems/triage-pipeline/run \
+  -H 'Content-Type: application/json' \
+  -d '{"prompt":"Analyze this outage report"}'
+```
 
 ## Validation
 
