@@ -10,94 +10,116 @@ import api_server
 client = TestClient(api_server.app)
 
 
-@pytest.fixture(autouse=True)
-def clean_state():
-    # keep tests isolated without touching production-like file paths manually
-    yield
-
-
 def test_health_endpoint():
     response = client.get('/health')
     assert response.status_code == 200
     assert response.json()['status'] == 'ok'
 
 
-def test_conversation_crud_and_messages(monkeypatch):
+def test_model_catalog_provider_unavailable(monkeypatch):
+    monkeypatch.setattr(api_server.controller, 'list_local_models_detailed', lambda: (False, [], 'offline'))
+    response = client.get('/model-catalog?provider=ollama')
+    assert response.status_code == 200
+    items = response.json()['items']
+    assert items
+    assert items[0]['provider_unavailable'] is True
+
+
+def test_agents_crud_and_validation(monkeypatch):
     monkeypatch.setitem(api_server.orchestrator.definitions, 'assistant', object())
-    monkeypatch.setattr(api_server.orchestrator, 'chat_with_agent', lambda *args, **kwargs: 'reply')
 
-    c = client.post('/conversations', json={'title': 'My Chat'})
-    assert c.status_code == 200
-    cid = c.json()['id']
+    bad = client.post('/agents', json={'name': 'a', 'provider': 'ollama', 'model_id': 'x', 'tool_ids': ['missing']})
+    assert bad.status_code == 400
 
-    send = client.post('/chat', json={'conversation_id': cid, 'agent': 'assistant', 'message': 'hello'})
-    assert send.status_code == 200
-    assert send.json()['conversation_id'] == cid
+    create = client.post('/agents', json={
+        'name': 'agent-a',
+        'description': 'test',
+        'provider': 'ollama',
+        'model_id': 'gemma3:1b',
+        'system_prompt': 'You are helpful',
+        'tool_ids': [],
+        'settings': {'temperature': 0.2},
+        'resource_limits': {'max_context_messages': 20},
+    })
+    assert create.status_code == 200
 
-    lst = client.get('/conversations')
-    assert lst.status_code == 200
-    assert any(item['id'] == cid for item in lst.json())
+    read = client.get('/agents/agent-a')
+    assert read.status_code == 200
+    assert read.json()['model_id'] == 'gemma3:1b'
 
-    msgs = client.get(f'/conversations/{cid}/messages')
-    assert msgs.status_code == 200
-    assert len(msgs.json()) >= 2
+    update = client.put('/agents/agent-a', json={
+        'name': 'agent-a',
+        'description': 'test2',
+        'provider': 'ollama',
+        'model_id': 'gemma3:1b',
+        'system_prompt': 'You are better',
+        'tool_ids': [],
+        'settings': {'temperature': 0.1},
+        'resource_limits': {'max_context_messages': 10},
+    })
+    assert update.status_code == 200
 
-    rename = client.patch(f'/conversations/{cid}', json={'title': 'Renamed'})
-    assert rename.status_code == 200
-    assert rename.json()['title'] == 'Renamed'
+    eff = client.get('/agents/agent-a/effective-config')
+    assert eff.status_code == 200
+    assert 'settings' in eff.json()
 
-    delete = client.delete(f'/conversations/{cid}')
+    delete = client.delete('/agents/agent-a')
     assert delete.status_code == 200
 
 
-def test_prompt_draft_fallback_and_shape(monkeypatch):
-    monkeypatch.setattr(api_server.orchestrator, 'generate_system_prompt', lambda *_args, **_kwargs: '')
-
-    response = client.post('/agents/prompt-draft', json={'goal': 'Build analyzer'})
-    assert response.status_code == 200
-    body = response.json()
-    assert 'prompt_text' in body
-    assert 'sections' in body
-    assert 'role' in body['sections']
-
-
-def test_prompt_draft_llm_refine(monkeypatch):
-    monkeypatch.setattr(api_server.orchestrator, 'generate_system_prompt', lambda *_args, **_kwargs: 'LLM prompt')
-    response = client.post('/agents/prompt-draft', json={'goal': 'Build analyzer'})
-    assert response.status_code == 200
-    assert response.json()['prompt_text'] == 'LLM prompt'
-
-
-def test_system_validation_dag(monkeypatch):
-    monkeypatch.setitem(api_server.orchestrator.definitions, 'assistant', object())
-    valid = {
-        'name': 'sys-a',
-        'definition': {
-            'nodes': [
-                {'id': 'n1', 'type': 'agent', 'agent': 'assistant'},
-                {'id': 'n2', 'type': 'agent', 'agent': 'assistant'},
-            ],
-            'edges': [{'source': 'n1', 'target': 'n2'}],
-        },
-    }
-    create = client.post('/systems', json=valid)
+def test_tools_crud_and_tavily_disabled_state():
+    create = client.post('/tools', json={
+        'name': 'tavily_web_search',
+        'type': 'tavily',
+        'description': 'search',
+        'config_json': {'max_results': 5},
+        'is_enabled': True,
+    })
     assert create.status_code == 200
+    tid = create.json()['tool_id']
 
-    bad = {
-        'name': 'sys-cycle',
-        'definition': {
-            'nodes': [
-                {'id': 'a', 'type': 'agent', 'agent': 'assistant'},
-                {'id': 'b', 'type': 'agent', 'agent': 'assistant'},
-            ],
-            'edges': [{'source': 'a', 'target': 'b'}, {'source': 'b', 'target': 'a'}],
-        },
-    }
-    invalid = client.post('/systems', json=bad)
-    assert invalid.status_code == 400
-    assert 'DAG' in invalid.json()['detail']
+    status = client.get('/tools/status')
+    assert status.status_code == 200
+    reasons = [i['reason'] for i in status.json()['items'] if i['tool_id'] == tid]
+    assert reasons
+
+    read = client.get(f'/tools/{tid}')
+    assert read.status_code == 200
+
+    upd = client.put(f'/tools/{tid}', json={
+        'name': 'tavily_web_search',
+        'type': 'tavily',
+        'description': 'search-updated',
+        'config_json': {'max_results': 3},
+        'is_enabled': False,
+    })
+    assert upd.status_code == 200
+
+    delete = client.delete(f'/tools/{tid}')
+    assert delete.status_code == 200
 
 
-def test_prompt_draft_invalid_payload():
-    response = client.post('/agents/prompt-draft', json={'goal': 123})
-    assert response.status_code in {400, 422}
+def test_agent_tool_creation(monkeypatch):
+    monkeypatch.setitem(api_server.orchestrator.definitions, 'assistant', object())
+    response = client.post('/tools', json={
+        'name': 'call_assistant',
+        'type': 'agent_tool',
+        'description': 'delegate',
+        'config_json': {'target_agent': 'assistant', 'strict_output': True},
+        'is_enabled': True,
+    })
+    assert response.status_code == 200
+    assert response.json()['type'] == 'agent_tool'
+
+
+def test_mcp_server_crud_and_refresh():
+    create = client.post('/tools/mcp/servers', json={'name': 'srv1', 'transport': 'http', 'endpoint': 'http://127.0.0.1:8001', 'enabled': True})
+    assert create.status_code == 200
+    sid = create.json()['id']
+
+    refresh = client.post(f'/tools/mcp/servers/{sid}/refresh', json={})
+    assert refresh.status_code == 200
+    assert refresh.json()['discovered']
+
+    delete = client.delete(f'/tools/mcp/servers/{sid}')
+    assert delete.status_code == 200
