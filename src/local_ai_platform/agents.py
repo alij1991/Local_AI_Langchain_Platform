@@ -196,17 +196,29 @@ class AgentOrchestrator:
                 user_turn = ""
         return self.hf.chat(definition.model_name, definition.system_prompt, compact, user_input)
 
-    def chat_with_agent(self, agent_name: str, user_input: str, image_paths: list[str] | None = None) -> str:
+    def chat_with_agent(
+        self,
+        agent_name: str,
+        user_input: str,
+        image_paths: list[str] | None = None,
+        history_override: list[BaseMessage] | None = None,
+        persist_history: bool = True,
+    ) -> str:
         definition = self.definitions[agent_name]
-        history = self.chat_histories[agent_name]
+        history = history_override if history_override is not None else self.chat_histories[agent_name]
 
         if definition.provider == "huggingface":
             output = self._chat_with_hf(definition, user_input, history)
         else:
             output = self._chat_with_ollama(definition, user_input, history, image_paths=image_paths)
 
-        history.append(HumanMessage(content=user_input))
-        history.append(AIMessage(content=output))
+        if persist_history:
+            if history_override is not None:
+                self.chat_histories[agent_name].append(HumanMessage(content=user_input))
+                self.chat_histories[agent_name].append(AIMessage(content=output))
+            else:
+                history.append(HumanMessage(content=user_input))
+                history.append(AIMessage(content=output))
         return output
 
     def stream_chat_with_agent(self, agent_name: str, user_input: str) -> Generator[str, None, None]:

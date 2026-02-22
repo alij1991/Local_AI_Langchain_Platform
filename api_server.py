@@ -1,11 +1,17 @@
 from __future__ import annotations
 
-import tempfile
+import json
+import logging
+import os
+import re
+import shutil
+import uuid
 from dataclasses import asdict
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-from fastapi import FastAPI, File, Form, HTTPException, UploadFile
+from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
 
@@ -13,16 +19,41 @@ from langchain_text_splitters import RecursiveCharacterTextSplitter
 
 from local_ai_platform import load_config
 from local_ai_platform.agents import AgentOrchestrator
+from local_ai_platform.db import init_db
+from local_ai_platform.memory import db_messages_to_langchain
 from local_ai_platform.ollama import OllamaController
+from local_ai_platform.repositories.conversations import (
+    add_message,
+    create_conversation,
+    delete_conversation,
+    get_conversation,
+    list_conversations,
+    list_messages,
+    rename_conversation,
+)
+from local_ai_platform.repositories.systems import (
+    delete_system,
+    get_system,
+    list_systems,
+    upsert_system,
+)
+
+logger = logging.getLogger("local_ai_platform.api")
+logging.basicConfig(level=logging.INFO)
 
 
 class ChatRequest(BaseModel):
     message: str = Field(default="", min_length=0)
     agent: str = Field(default="assistant")
+    conversation_id: str | None = None
 
 
-class ChatResponse(BaseModel):
-    reply: str
+class ConversationCreateRequest(BaseModel):
+    title: str | None = None
+
+
+class ConversationRenameRequest(BaseModel):
+    title: str
 
 
 class AgentCreateRequest(BaseModel):
@@ -47,19 +78,16 @@ class ToolCreateRequest(BaseModel):
 
 class SystemCreateRequest(BaseModel):
     name: str
-    objective: str = ""
-    sequence: str = "assistant"
-    tools: str = ""
-    notes: str = ""
-
-
-class SystemRunRequest(BaseModel):
-    name: str
-    prompt: str
+    definition: dict[str, Any]
 
 
 class PromptDraftRequest(BaseModel):
-    description: str
+    goal: str = ""
+    context: str = ""
+    requirements: list[str] = Field(default_factory=list)
+    constraints: list[str] = Field(default_factory=list)
+    target_stack: str | None = None
+    output_format: str | None = None
     model_name: str | None = None
 
 
@@ -68,20 +96,23 @@ class WorkflowRunRequest(BaseModel):
     sequence_csv: str
 
 
+class SystemRunRequest(BaseModel):
+    prompt: str
+
+
 config = load_config()
+init_db()
 orchestrator = AgentOrchestrator(config)
 controller = OllamaController(config)
-systems_registry: dict[str, dict[str, str]] = {}
 
-# Hide simplistic defaults from UI/runtime by default for cleaner tool UX.
+# keep UI-focused tool set clean
 orchestrator.tools = [t for t in orchestrator.tools if t.name not in {"multiply_numbers", "utc_now"}]
 
 ok, infos, _ = controller.list_local_models_detailed()
-available_local_models = [m.name for m in infos] if ok and infos else []
-startup_model = available_local_models[0] if available_local_models else config.default_model
+startup_model = (infos[0].name if ok and infos else config.default_model)
 orchestrator.add_agent("assistant", startup_model, "You are a practical AI assistant.", provider="ollama")
 
-app = FastAPI(title="Local AI Platform API", version="0.3.0")
+app = FastAPI(title="Local AI Platform API", version="0.4.0")
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -90,9 +121,17 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+UPLOAD_ROOT = Path("data/uploads")
+UPLOAD_ROOT.mkdir(parents=True, exist_ok=True)
+
 
 def _clean_slug(value: str) -> str:
     return value.strip().lower().replace(" ", "-")
+
+
+def _safe_name(name: str) -> str:
+    cleaned = re.sub(r"[^a-zA-Z0-9._-]", "_", name)
+    return cleaned[:140] or f"file_{uuid.uuid4().hex}.bin"
 
 
 def _extract_document_with_langchain(path: Path) -> str:
@@ -111,27 +150,22 @@ def _extract_document_with_langchain(path: Path) -> str:
 
         docs = CSVLoader(str(path)).load()
     elif suffix == ".json":
-        import json
-
-        docs = [{"page_content": json.dumps(json.loads(path.read_text(encoding="utf-8", errors="ignore")), ensure_ascii=False)}]
+        docs = [{"page_content": path.read_text(encoding="utf-8", errors="ignore")}]
     else:
         return ""
 
     splitter = RecursiveCharacterTextSplitter(chunk_size=1400, chunk_overlap=120)
-    chunks = []
+    chunks: list[str] = []
     for d in docs:
         if hasattr(d, "page_content"):
-            chunks.append(d.page_content)
+            chunks.append(str(d.page_content))
         else:
             chunks.append(str(d.get("page_content", "")))
-    joined = "\n".join(chunks)
-    split_docs = splitter.split_text(joined)
+    split_docs = splitter.split_text("\n".join(chunks))
     return "\n".join(split_docs[:4]).strip()
 
 
 def _attachment_context(file_paths: list[Path]) -> tuple[str, list[str]]:
-    if not file_paths:
-        return "", []
     text_parts: list[str] = []
     image_paths: list[str] = []
     for path in file_paths:
@@ -139,15 +173,106 @@ def _attachment_context(file_paths: list[Path]) -> tuple[str, list[str]]:
         if suffix in {".png", ".jpg", ".jpeg", ".webp", ".bmp"}:
             image_paths.append(str(path))
             continue
-        try:
-            extracted = _extract_document_with_langchain(path)
-            if extracted:
-                text_parts.append(f"[From {path.name}]\n{extracted[:6000]}")
-            else:
-                text_parts.append(f"[Attached file: {path.name} ({path.stat().st_size} bytes)]")
-        except Exception as exc:  # noqa: BLE001
-            text_parts.append(f"[Attached file unreadable: {path.name} ({exc})]")
+        extracted = _extract_document_with_langchain(path)
+        if extracted:
+            text_parts.append(f"[From {path.name}]\n{extracted[:6000]}")
+        else:
+            text_parts.append(f"[Attached file: {path.name} ({path.stat().st_size} bytes)]")
     return "\n\n".join(text_parts), image_paths
+
+
+def _conversation_title_from_message(msg: str) -> str:
+    clean = msg.strip() or "New chat"
+    return clean[:42]
+
+
+def _agent_model(agent_name: str) -> tuple[str | None, str | None]:
+    definition = orchestrator.definitions.get(agent_name)
+    if not definition:
+        return None, None
+    return definition.name, definition.model_name
+
+
+def _build_prompt_fallback(payload: PromptDraftRequest) -> dict[str, Any]:
+    goal = payload.goal.strip() or "Define a robust AI assistant behavior"
+    context = payload.context.strip() or "No additional context provided."
+    requirements = payload.requirements or ["Respond clearly", "Handle edge cases", "Be concise and accurate"]
+    constraints = payload.constraints or ["Do not hallucinate", "Ask clarifying questions when missing inputs"]
+    output_format = payload.output_format or "Markdown"
+
+    sections = {
+        "role": f"You are an expert AI agent designed to: {goal}.",
+        "context": context,
+        "requirements": requirements,
+        "constraints": constraints,
+        "steps": [
+            "Understand user intent and required output.",
+            "Validate available context and missing information.",
+            "Execute tasks in a deterministic, testable order.",
+            "Return output in the required format.",
+        ],
+        "acceptance_criteria": [
+            "Output satisfies all explicit requirements.",
+            "No contradiction with constraints.",
+            f"Output is formatted as {output_format}.",
+        ],
+    }
+
+    prompt_text = "\n\n".join(
+        [
+            "## Role\n" + sections["role"],
+            "## Context\n" + sections["context"],
+            "## Requirements\n" + "\n".join([f"- {r}" for r in sections["requirements"]]),
+            "## Constraints\n" + "\n".join([f"- {c}" for c in sections["constraints"]]),
+            "## Steps\n" + "\n".join([f"{i+1}. {s}" for i, s in enumerate(sections["steps"])]),
+            "## Acceptance Criteria\n" + "\n".join([f"- {a}" for a in sections["acceptance_criteria"]]),
+        ]
+    )
+    return {"prompt_text": prompt_text, "sections": sections}
+
+
+def _validate_system_graph(definition: dict[str, Any]) -> list[str]:
+    nodes = definition.get("nodes", [])
+    edges = definition.get("edges", [])
+    if not nodes:
+        raise HTTPException(status_code=400, detail="System definition must include nodes.")
+
+    ids = {n.get("id") for n in nodes}
+    agent_nodes = [n for n in nodes if n.get("type") == "agent"]
+    for n in agent_nodes:
+        agent_name = n.get("agent")
+        if agent_name not in orchestrator.definitions:
+            raise HTTPException(status_code=400, detail=f"Unknown agent in node '{n.get('id')}': {agent_name}")
+
+    graph: dict[str, set[str]] = {str(i): set() for i in ids if i}
+    indeg: dict[str, int] = {str(i): 0 for i in ids if i}
+    for e in edges:
+        src = str(e.get("source"))
+        dst = str(e.get("target"))
+        if src not in graph or dst not in graph:
+            raise HTTPException(status_code=400, detail=f"Invalid edge {src}->{dst}")
+        if dst not in graph[src]:
+            graph[src].add(dst)
+            indeg[dst] += 1
+
+    queue = [n for n, d in indeg.items() if d == 0]
+    ordered: list[str] = []
+    while queue:
+        cur = queue.pop(0)
+        ordered.append(cur)
+        for nxt in graph[cur]:
+            indeg[nxt] -= 1
+            if indeg[nxt] == 0:
+                queue.append(nxt)
+
+    if len(ordered) != len(graph):
+        raise HTTPException(status_code=400, detail="System graph must be a DAG (cycle detected).")
+
+    id_to_node = {str(n.get("id")): n for n in nodes}
+    sequence = [id_to_node[n].get("agent") for n in ordered if id_to_node[n].get("type") == "agent" and id_to_node[n].get("agent")]
+    if not sequence:
+        raise HTTPException(status_code=400, detail="System graph must include at least one agent node.")
+    return sequence
 
 
 @app.get("/health")
@@ -160,25 +285,51 @@ def read_config() -> dict[str, Any]:
     return asdict(config)
 
 
+# Conversations
+@app.post("/conversations")
+def create_conversation_route(payload: ConversationCreateRequest) -> dict[str, Any]:
+    return create_conversation(payload.title)
+
+
+@app.get("/conversations")
+def list_conversations_route() -> list[dict]:
+    return list_conversations()
+
+
+@app.get("/conversations/{conversation_id}")
+def get_conversation_route(conversation_id: str) -> dict[str, Any]:
+    conversation = get_conversation(conversation_id)
+    if not conversation:
+        raise HTTPException(status_code=404, detail="Conversation not found")
+    return conversation
+
+
+@app.patch("/conversations/{conversation_id}")
+def rename_conversation_route(conversation_id: str, payload: ConversationRenameRequest) -> dict[str, Any]:
+    conversation = rename_conversation(conversation_id, payload.title.strip())
+    if not conversation:
+        raise HTTPException(status_code=404, detail="Conversation not found")
+    return conversation
+
+
+@app.delete("/conversations/{conversation_id}")
+def delete_conversation_route(conversation_id: str) -> dict[str, str]:
+    delete_conversation(conversation_id)
+    return {"status": "deleted"}
+
+
+@app.get("/conversations/{conversation_id}/messages")
+def list_conversation_messages(conversation_id: str, limit: int = 100, before: str | None = None) -> list[dict]:
+    return list_messages(conversation_id, limit=limit, before=before)
+
+
+# Existing models/agents/tools endpoints
 @app.get("/models/local")
 def list_local_models() -> dict[str, Any]:
     ok_models, local_infos, error = controller.list_local_models_detailed()
     if not ok_models:
         raise HTTPException(status_code=502, detail=error)
-    return {
-        "models": [
-            {
-                "name": info.name,
-                "family": info.family,
-                "parameter_size": info.parameter_size,
-                "quantization": info.quantization,
-                "supports_generate": info.supports_generate,
-                "supports_vision": info.supports_vision,
-                "supports_tools": info.supports_tools,
-            }
-            for info in local_infos
-        ]
-    }
+    return {"models": [asdict(info) for info in local_infos]}
 
 
 @app.get("/models/hf")
@@ -188,9 +339,10 @@ def list_hf_models() -> dict[str, list[str]]:
 
 @app.get("/models/available")
 def list_available_models() -> dict[str, list[str]]:
-    local = [m.name for m in controller.list_local_models_detailed()[1]]
-    hf = orchestrator.hf.configured_models()
-    return {"ollama": local, "huggingface": hf}
+    return {
+        "ollama": [m.name for m in controller.list_local_models_detailed()[1]],
+        "huggingface": orchestrator.hf.configured_models(),
+    }
 
 
 @app.get("/models/loaded")
@@ -243,24 +395,21 @@ def update_agent_model(agent_name: str, payload: AgentUpdateModelRequest) -> dic
 
 
 @app.post("/agents/prompt-draft")
-def draft_prompt(payload: PromptDraftRequest) -> dict[str, str]:
-    description = payload.description.strip()
-    if not description:
-        return {"prompt": ""}
-    # model override is accepted for frontend parity; runtime currently uses prompt builder model config.
-    _ = payload.model_name
+def draft_prompt(payload: PromptDraftRequest) -> dict[str, Any]:
+    fallback = _build_prompt_fallback(payload)
+    if not payload.goal.strip() and not payload.context.strip() and not payload.requirements:
+        return fallback
+
     try:
-        prompt = orchestrator.generate_system_prompt(description)
+        llm_text = orchestrator.generate_system_prompt(
+            f"Goal: {payload.goal}\nContext: {payload.context}\nRequirements: {payload.requirements}\n"
+            f"Constraints: {payload.constraints}\nOutput format: {payload.output_format}\n"
+        )
+        if llm_text.strip():
+            fallback["prompt_text"] = llm_text.strip()
     except Exception as exc:  # noqa: BLE001
-        raise HTTPException(status_code=500, detail=f"Prompt generation failed: {exc}") from exc
-    return {"prompt": prompt}
-
-
-@app.post("/workflow/run")
-def run_workflow(payload: WorkflowRunRequest) -> dict[str, Any]:
-    sequence = [part.strip() for part in payload.sequence_csv.split(",") if part.strip()]
-    outputs = orchestrator.run_agent_workflow(payload.prompt.strip(), sequence)
-    return {"outputs": outputs}
+        logger.exception("Prompt builder refinement failed: %s", exc)
+    return fallback
 
 
 @app.get("/tools")
@@ -294,82 +443,144 @@ def add_tool(payload: ToolCreateRequest) -> dict[str, str]:
     return {"status": "created", "tool": clean_name}
 
 
-@app.get("/systems")
-def list_systems() -> dict[str, Any]:
-    return {"systems": systems_registry, "agents": orchestrator.list_agents(), "tools": orchestrator.get_tool_names()}
-
-
-@app.post("/systems")
-def save_system(payload: SystemCreateRequest) -> dict[str, str]:
-    clean_name = _clean_slug(payload.name)
-    if not clean_name:
-        raise HTTPException(status_code=400, detail="System name is required")
-    systems_registry[clean_name] = {
-        "objective": payload.objective.strip(),
-        "sequence": payload.sequence.strip(),
-        "tools": payload.tools.strip(),
-        "notes": payload.notes.strip(),
-    }
-    return {"status": "saved", "system": clean_name}
-
-
-@app.post("/systems/run")
-def run_system(payload: SystemRunRequest) -> dict[str, Any]:
-    if payload.name not in systems_registry:
-        raise HTTPException(status_code=404, detail="Unknown system")
-    sequence_csv = systems_registry[payload.name]["sequence"]
-    sequence = [part.strip() for part in sequence_csv.split(",") if part.strip()]
+@app.post("/workflow/run")
+def run_workflow(payload: WorkflowRunRequest) -> dict[str, Any]:
+    sequence = [part.strip() for part in payload.sequence_csv.split(",") if part.strip()]
     outputs = orchestrator.run_agent_workflow(payload.prompt.strip(), sequence)
     return {"outputs": outputs}
 
 
-@app.post("/chat", response_model=ChatResponse)
-def chat(payload: ChatRequest) -> ChatResponse:
-    message = payload.message.strip()
-    if payload.agent not in orchestrator.definitions:
-        raise HTTPException(status_code=404, detail=f"Unknown agent: {payload.agent}")
-    if not message:
-        raise HTTPException(status_code=400, detail="Message cannot be empty")
-    try:
-        reply = orchestrator.chat_with_agent(payload.agent, message)
-    except Exception as exc:  # noqa: BLE001
-        raise HTTPException(status_code=500, detail=f"Agent error: {exc}") from exc
-    return ChatResponse(reply=reply)
+# Systems persistence & validation
+@app.get("/systems")
+def list_systems_route() -> list[dict]:
+    return list_systems()
 
 
-@app.post("/chat/attachments", response_model=ChatResponse)
-async def chat_with_attachments(
-    agent: str = Form(...),
-    message: str = Form(""),
-    files: list[UploadFile] = File(default=[]),
-) -> ChatResponse:
+@app.post("/systems")
+def create_system_route(payload: SystemCreateRequest) -> dict[str, Any]:
+    _validate_system_graph(payload.definition)
+    return upsert_system(payload.name, payload.definition)
+
+
+@app.put("/systems/{name}")
+def update_system_route(name: str, payload: SystemCreateRequest) -> dict[str, Any]:
+    if name != payload.name:
+        raise HTTPException(status_code=400, detail="Path name and payload name must match")
+    _validate_system_graph(payload.definition)
+    return upsert_system(name, payload.definition)
+
+
+@app.delete("/systems/{name}")
+def delete_system_route(name: str) -> dict[str, str]:
+    delete_system(name)
+    return {"status": "deleted"}
+
+
+@app.post("/systems/{name}/run")
+def run_system_graph(name: str, payload: SystemRunRequest) -> dict[str, Any]:
+    item = get_system(name)
+    if not item:
+        raise HTTPException(status_code=404, detail="Unknown system")
+    definition = json.loads(item["definition_json"])
+    sequence = _validate_system_graph(definition)
+    outputs = orchestrator.run_agent_workflow(payload.prompt.strip(), sequence)
+    return {"outputs": outputs, "sequence": sequence}
+
+
+# Backward compatibility endpoint
+@app.post("/systems/run")
+def run_system_legacy(payload: dict[str, str]) -> dict[str, Any]:
+    name = payload.get("name", "")
+    prompt = payload.get("prompt", "")
+    return run_system_graph(name, SystemRunRequest(prompt=prompt))
+
+
+def _parse_json_chat_payload(payload: dict[str, Any]) -> tuple[str, str, str | None]:
+    agent = (payload.get("agent") or "assistant").strip()
+    message = (payload.get("message") or "").strip()
+    conversation_id = payload.get("conversation_id")
+    return agent, message, conversation_id
+
+
+@app.post("/chat")
+async def chat(request: Request) -> dict[str, Any]:
+    content_type = request.headers.get("content-type", "")
+
+    attachments_meta: list[dict] = []
+    stored_paths: list[Path] = []
+
+    if "multipart/form-data" in content_type:
+        form = await request.form()
+        agent = str(form.get("agent", "assistant")).strip()
+        message = str(form.get("message", "")).strip()
+        conversation_id = form.get("conversation_id")
+        if conversation_id:
+            conversation_id = str(conversation_id)
+        raw_files = form.getlist("files")
+    else:
+        payload = await request.json()
+        agent, message, conversation_id = _parse_json_chat_payload(payload)
+        raw_files = []
+
     if agent not in orchestrator.definitions:
         raise HTTPException(status_code=404, detail=f"Unknown agent: {agent}")
 
-    uploaded_paths: list[Path] = []
-    tmp_dir = Path(tempfile.mkdtemp(prefix="local_ai_attach_"))
-    for f in files:
-        target = tmp_dir / (f.filename or "file.bin")
-        data = await f.read()
-        target.write_bytes(data)
-        uploaded_paths.append(target)
+    if not conversation_id:
+        created = create_conversation(_conversation_title_from_message(message))
+        conversation_id = created["id"]
 
-    clean = message.strip()
-    attachment_text, image_paths = _attachment_context(uploaded_paths)
-    composed = clean
+    if not get_conversation(conversation_id):
+        raise HTTPException(status_code=404, detail="Conversation not found")
+
+    conv_dir = UPLOAD_ROOT / conversation_id
+    conv_dir.mkdir(parents=True, exist_ok=True)
+
+    for upload in raw_files:
+        filename = _safe_name(getattr(upload, "filename", "upload.bin"))
+        target = conv_dir / f"{uuid.uuid4().hex}_{filename}"
+        with target.open("wb") as f:
+            shutil.copyfileobj(upload.file, f)
+        stored_paths.append(target)
+        attachments_meta.append(
+            {
+                "filename": filename,
+                "path": str(target),
+                "size": target.stat().st_size,
+                "mime": getattr(upload, "content_type", None),
+            }
+        )
+
+    attachment_text, image_paths = _attachment_context(stored_paths)
+    composed = message
     if attachment_text:
-        composed = f"{clean}\n\nAttachment context:\n{attachment_text}" if clean else attachment_text
+        composed = f"{composed}\n\nAttachment context:\n{attachment_text}" if composed else attachment_text
     if image_paths:
-        image_notice = f"You have {len(image_paths)} image attachment(s). Analyze them directly when answering."
-        composed = f"{composed}\n\n{image_notice}" if composed else image_notice
+        note = f"You have {len(image_paths)} image attachment(s). Analyze them directly when answering."
+        composed = f"{composed}\n\n{note}" if composed else note
+
     if not composed:
         raise HTTPException(status_code=400, detail="Message or attachments required")
 
+    existing = list_messages(conversation_id, limit=40)
+    history = db_messages_to_langchain(existing)
+
+    agent_name, model_name = _agent_model(agent)
+    add_message(conversation_id, role="user", agent=agent_name, model=model_name, content=message or "(attachment)", attachments=attachments_meta)
+
     try:
-        reply = orchestrator.chat_with_agent(agent, composed, image_paths=image_paths)
+        reply = orchestrator.chat_with_agent(agent, composed, image_paths=image_paths, history_override=history, persist_history=False)
     except Exception as exc:  # noqa: BLE001
+        logger.exception("Chat failed")
         raise HTTPException(status_code=500, detail=f"Agent error: {exc}") from exc
-    return ChatResponse(reply=reply)
+
+    assistant_row = add_message(conversation_id, role="assistant", agent=agent_name, model=model_name, content=reply)
+
+    return {
+        "conversation_id": conversation_id,
+        "assistant_message": assistant_row,
+        "assistant_reply": reply,
+        "messages": list_messages(conversation_id, limit=100),
+    }
 
 
 if __name__ == "__main__":
