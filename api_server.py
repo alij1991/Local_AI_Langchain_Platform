@@ -201,6 +201,7 @@ def _attachment_context(file_paths: list[Path]) -> tuple[str, list[str]]:
 
 
 def _serialize_model(provider: str, model_id: str, display_name: str, installed: bool, **kwargs: Any) -> dict[str, Any]:
+    supports = kwargs.get("supports", {})
     return {
         "provider": provider,
         "model_id": model_id,
@@ -209,7 +210,12 @@ def _serialize_model(provider: str, model_id: str, display_name: str, installed:
         "parameters": kwargs.get("parameters"),
         "quantization": kwargs.get("quantization"),
         "context_length": kwargs.get("context_length"),
-        "supports": kwargs.get("supports", {}),
+        "supports": supports,
+        "supports_tools": bool(supports.get("tools")),
+        "tool_calling": bool(supports.get("tools")),
+        "supports_vision": bool(supports.get("vision")),
+        "supports_embeddings": bool(supports.get("embeddings")),
+        "supports_json": bool(supports.get("json_mode")),
         "license": kwargs.get("license"),
         "tags": kwargs.get("tags", []),
         "local_status": {
@@ -465,18 +471,80 @@ def add_hf_model(payload: HFAddRequest) -> dict[str, Any]:
     return row
 
 
+def _default_assistant_definition() -> dict[str, Any]:
+    d = orchestrator.definitions.get("assistant")
+    if d:
+        return {
+            "name": "assistant",
+            "description": "Default assistant agent.",
+            "system_prompt": d.system_prompt,
+            "provider": d.provider,
+            "model_id": d.model_name,
+            "tool_ids": [],
+            "settings": {},
+            "resource_limits": {},
+            "is_default": True,
+        }
+    return {
+        "name": "assistant",
+        "description": "Default assistant agent.",
+        "system_prompt": "You are a practical AI assistant.",
+        "provider": "ollama",
+        "model_id": config.default_model,
+        "tool_ids": [],
+        "settings": {},
+        "resource_limits": {},
+        "is_default": True,
+    }
+
+
+def _all_agent_definitions() -> list[dict[str, Any]]:
+    merged: dict[str, dict[str, Any]] = {"assistant": _default_assistant_definition()}
+    for row in list_agents_db():
+        definition = dict(row["json_definition"])
+        definition.setdefault("is_default", definition.get("name") == "assistant")
+        merged[definition["name"]] = definition
+    return list(merged.values())
+
+
+def _normalized_tools() -> list[dict[str, Any]]:
+    rows = list_tools_db()
+    by_name = {row["name"]: row for row in rows}
+    normalized = list(rows)
+    for tool in orchestrator.tools:
+        if tool.name in by_name:
+            continue
+        lowered = tool.name.lower()
+        tool_type = "tavily" if "tavily" in lowered else "mcp" if "mcp" in lowered else "builtin"
+        normalized.append(
+            {
+                "tool_id": tool.name,
+                "name": tool.name,
+                "type": tool_type,
+                "description": tool.description or "Built-in LangChain tool",
+                "config_json": {},
+                "is_enabled": False,
+                "builtin": True,
+            }
+        )
+    return normalized
+
+
 # Agent endpoints
 @app.get("/agents")
 def list_agents_endpoint() -> dict[str, Any]:
+    definitions = _all_agent_definitions()
     return {
-        "agents": orchestrator.list_agents(),
-        "agent_models": orchestrator.get_agent_models(),
-        "definitions": [row["json_definition"] for row in list_agents_db()],
+        "agents": [d["name"] for d in definitions],
+        "agent_models": {d["name"]: f"{d.get('provider', 'ollama')}:{d.get('model_id', '')}" for d in definitions},
+        "definitions": definitions,
     }
 
 
 @app.get("/agents/{name}")
 def get_agent_endpoint(name: str) -> dict[str, Any]:
+    if _clean_slug(name) == "assistant":
+        return _default_assistant_definition()
     row = get_agent_db(name)
     if not row:
         raise error_response("not_found", "Agent not found", status=404)
@@ -515,6 +583,8 @@ def update_agent(name: str, payload: AgentCreateRequest) -> dict[str, Any]:
 
 @app.delete("/agents/{name}")
 def delete_agent(name: str) -> dict[str, str]:
+    if _clean_slug(name) == "assistant":
+        raise error_response("protected_agent", "Default assistant cannot be deleted", status=400)
     delete_agent_db(name)
     orchestrator.definitions.pop(name, None)
     orchestrator.chat_histories.pop(name, None)
@@ -567,13 +637,13 @@ def draft_prompt(payload: PromptDraftRequest) -> dict[str, Any]:
 # Tools endpoints
 @app.get("/tools")
 def list_tools_endpoint() -> dict[str, Any]:
-    items = list_tools_db()
-    return {"tools": [item["name"] for item in items], "items": items}
+    items = _normalized_tools()
+    return {"tools": items, "tool_names": [item["name"] for item in items], "items": items}
 
 
 @app.get("/tools/status")
 def tools_status() -> dict[str, Any]:
-    items = list_tools_db()
+    items = _normalized_tools()
     has_tavily_key = bool((__import__("os").environ.get("TAVILY_API_KEY", "")).strip())
     status = []
     for item in items:

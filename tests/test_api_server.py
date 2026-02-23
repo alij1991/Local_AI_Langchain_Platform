@@ -123,3 +123,33 @@ def test_mcp_server_crud_and_refresh():
 
     delete = client.delete(f'/tools/mcp/servers/{sid}')
     assert delete.status_code == 200
+
+
+def test_agents_list_includes_default_assistant_and_protects_delete():
+    response = client.get('/agents')
+    assert response.status_code == 200
+    names = response.json()['agents']
+    assert 'assistant' in names
+
+    protected = client.delete('/agents/assistant')
+    assert protected.status_code == 400
+    assert protected.json()['detail']['error']['code'] == 'protected_agent'
+
+
+def test_tools_list_includes_builtin_tools_even_without_db_rows():
+    response = client.get('/tools')
+    assert response.status_code == 200
+    items = response.json()['items']
+    assert any(item['name'] == 'tavily_web_search' for item in items)
+    assert any(item['name'] == 'mcp_query' for item in items)
+
+
+def test_model_catalog_exposes_capability_flags():
+    response = client.get('/model-catalog')
+    assert response.status_code == 200
+    items = response.json()['items']
+    assert items
+    sample = items[0]
+    assert 'supports_tools' in sample
+    assert 'tool_calling' in sample
+    assert 'supports_vision' in sample
