@@ -277,3 +277,39 @@ def test_tool_test_endpoint_returns_output(monkeypatch):
     response = client.post('/tools/tavily_web_search/test', json={'input': {'query': 'hello'}})
     assert response.status_code == 200
     assert response.json()['status'] == 'ok'
+
+
+def test_mcp_alias_endpoints_work(monkeypatch):
+    create = client.post('/mcp/servers', json={'name': 'alias-srv', 'transport': 'http', 'endpoint': 'http://127.0.0.1:9001', 'enabled': True})
+    assert create.status_code == 200
+    sid = create.json()['id']
+
+    listed = client.get('/mcp/servers')
+    assert listed.status_code == 200
+    assert any(s['id'] == sid for s in listed.json()['servers'])
+
+    monkeypatch.setattr(api_server, '_discover_mcp_tools', lambda server: ([{
+        'tool_id': f"mcp:{server['name']}:x",
+        'name': f"{server['name']}:x",
+        'description': 'x',
+        'type': 'mcp_tool',
+        'config_json': {'server_id': server['id'], 'tool_name': 'x'},
+        'is_enabled': True,
+    }], None))
+
+    discover = client.post(f'/mcp/servers/{sid}/discover', json={})
+    assert discover.status_code == 200
+
+
+def test_mcp_tools_select_persists_tools(monkeypatch):
+    create = client.post('/mcp/servers', json={'name': 'select-srv', 'transport': 'http', 'endpoint': 'http://127.0.0.1:9002', 'enabled': True})
+    sid = create.json()['id']
+
+    response = client.post('/mcp/tools', json={
+        'server_id': sid,
+        'selected_tools': [
+            {'tool_name': 'search', 'name': 'select-srv:search', 'description': 'search tool', 'schema': {'type': 'object'}, 'enabled': True}
+        ]
+    })
+    assert response.status_code == 200
+    assert response.json()['items']

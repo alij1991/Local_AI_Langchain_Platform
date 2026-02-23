@@ -532,7 +532,9 @@ def _normalize_tool_type(raw_type: str) -> str:
     mapping = {
         "tavily": "builtin_tavily",
         "builtin": "custom",
-        "mcp": "mcp",
+        "mcp": "mcp_tool",
+        "mcp_tool": "mcp_tool",
+        "mcp_server": "mcp_server",
         "agent_tool": "agent_tool",
         "builtin_tavily": "builtin_tavily",
         "custom": "custom",
@@ -587,7 +589,7 @@ def _discover_mcp_tools(server: dict[str, Any]) -> tuple[list[dict[str, Any]], s
                 "tool_id": f"mcp:{server_name}:{tname}",
                 "name": f"{server_name}:{tname}",
                 "description": str(getattr(t, "description", "MCP discovered tool")),
-                "type": "mcp",
+                "type": "mcp_tool",
                 "config_json": {"server_id": server_id, "server_name": server_name, "tool_name": tname},
                 "is_enabled": bool(server.get("enabled", 1)),
             }
@@ -637,6 +639,28 @@ def _normalized_tools() -> list[dict[str, Any]]:
         item["status"] = _tool_status(item)
         normalized.append(item)
         by_id[canonical] = item
+
+    # Expose MCP server configs in unified tools list as mcp_server entries
+    for server in list_mcp_servers():
+        sid = str(server.get("id"))
+        server_item = {
+            "tool_id": f"mcp_server:{sid}",
+            "name": str(server.get("name") or sid),
+            "type": "mcp_server",
+            "description": f"MCP server ({server.get('transport', 'unknown')})",
+            "config_json": {
+                "server_id": sid,
+                "transport": server.get("transport"),
+                "endpoint": server.get("endpoint"),
+                "command": server.get("command"),
+                "args": server.get("args_json", []),
+                "env": server.get("env_json", {}),
+            },
+            "is_enabled": bool(server.get("enabled", 1)),
+            "enabled": bool(server.get("enabled", 1)),
+        }
+        server_item["status"] = "enabled" if server_item["is_enabled"] else "disabled"
+        normalized.append(server_item)
 
     if "tavily_web_search" not in by_id:
         item = {
@@ -909,7 +933,7 @@ def mcp_server_refresh(server_id: str) -> dict[str, Any]:
     discovered, err = _discover_mcp_tools(server)
     rows: list[dict[str, Any]] = []
     for tool in discovered:
-        rows.append(upsert_tool(tool["tool_id"], tool["name"], "mcp", tool["description"], tool["config_json"], bool(tool.get("is_enabled", True))))
+        rows.append(upsert_tool(tool["tool_id"], tool["name"], "mcp_tool", tool["description"], tool["config_json"], bool(tool.get("is_enabled", True))))
     return {"discovered": rows, "error": err}
 
 
@@ -940,7 +964,7 @@ def mcp_import(payload: MCPImportRequest) -> dict[str, Any]:
         if err:
             errors.append({"server": str(server_name), "error": err})
         for tool in tools:
-            discovered_tools.append(upsert_tool(tool["tool_id"], tool["name"], "mcp", tool["description"], tool["config_json"], bool(tool.get("is_enabled", True))))
+            discovered_tools.append(upsert_tool(tool["tool_id"], tool["name"], "mcp_tool", tool["description"], tool["config_json"], bool(tool.get("is_enabled", True))))
 
     return {"imported_servers": imported_servers, "discovered_tools": discovered_tools, "errors": errors, "description": payload.description}
 
@@ -948,6 +972,69 @@ def mcp_import(payload: MCPImportRequest) -> dict[str, Any]:
 @app.post("/tools/{tool_id}/test")
 def test_tool_endpoint(tool_id: str, payload: ToolTestRequest) -> dict[str, Any]:
     return _execute_tool(tool_id, payload.input)
+
+
+@app.get("/mcp/servers")
+def mcp_servers_list_alias() -> dict[str, Any]:
+    return mcp_servers_list()
+
+
+@app.post("/mcp/servers")
+def mcp_server_create_alias(payload: MCPServerRequest) -> dict[str, Any]:
+    return mcp_server_create(payload)
+
+
+@app.put("/mcp/servers/{server_id}")
+def mcp_server_update_alias(server_id: str, payload: MCPServerRequest) -> dict[str, Any]:
+    return mcp_server_update(server_id, payload)
+
+
+@app.delete("/mcp/servers/{server_id}")
+def mcp_server_delete_alias(server_id: str) -> dict[str, str]:
+    return mcp_server_delete(server_id)
+
+
+@app.post("/mcp/servers/{server_id}/discover")
+def mcp_server_discover_alias(server_id: str) -> dict[str, Any]:
+    return mcp_server_refresh(server_id)
+
+
+@app.post("/mcp/tools")
+def mcp_tools_select(payload: dict[str, Any]) -> dict[str, Any]:
+    server_id = str(payload.get("server_id") or "")
+    selected_tools = payload.get("selected_tools") or []
+    if not server_id:
+        raise error_response("invalid_server", "server_id is required")
+    servers = {s["id"]: s for s in list_mcp_servers()}
+    if server_id not in servers:
+        raise error_response("not_found", "MCP server not found", status=404)
+
+    rows: list[dict[str, Any]] = []
+    for item in selected_tools:
+        tool_name = str(item.get("tool_name") or item.get("name") or "").strip()
+        if not tool_name:
+            continue
+        tool_id = f"mcp:{servers[server_id]['name']}:{tool_name}"
+        row = upsert_tool(
+            tool_id,
+            str(item.get("name") or tool_name),
+            "mcp_tool",
+            str(item.get("description") or "MCP tool"),
+            {
+                "server_id": server_id,
+                "server_name": servers[server_id]["name"],
+                "tool_name": tool_name,
+                "schema": item.get("schema") or item.get("input_schema") or {},
+            },
+            bool(item.get("enabled", True)),
+        )
+        rows.append(row)
+    return {"items": rows}
+
+
+@app.post("/mcp/tools/{tool_id}/test")
+def mcp_tool_test_alias(tool_id: str, payload: ToolTestRequest) -> dict[str, Any]:
+    return test_tool_endpoint(tool_id, payload)
 
 
 @app.get("/tools/template")

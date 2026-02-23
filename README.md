@@ -195,3 +195,36 @@ curl -X POST http://127.0.0.1:8000/tools/mcp/import \
 ```
 
 Security note: env values inside imported MCP config are stored locally in `./data/app.db` through `mcp_servers.env_json`.
+
+
+### MCP server + discovery (structured endpoints)
+Create server:
+
+```bash
+curl -X POST http://127.0.0.1:8000/mcp/servers \
+  -H 'Content-Type: application/json' \
+  -d '{"name":"travel_server","transport":"http","endpoint":"https://mcp.kiwi.com","enabled":true}'
+```
+
+Discover tools:
+
+```bash
+curl -X POST http://127.0.0.1:8000/mcp/servers/<server_id>/discover -H 'Content-Type: application/json' -d '{}'
+```
+
+Select discovered tools into registry:
+
+```bash
+curl -X POST http://127.0.0.1:8000/mcp/tools \
+  -H 'Content-Type: application/json' \
+  -d '{"server_id":"<server_id>","selected_tools":[{"tool_name":"search","name":"travel_server:search","description":"search","schema":{}}]}'
+```
+
+### Agent tools (subagent-as-a-tool)
+Create a tool that calls another agent:
+
+```bash
+curl -X POST http://127.0.0.1:8000/tools \
+  -H 'Content-Type: application/json' \
+  -d '{"name":"call_assistant","type":"agent_tool","description":"Call assistant","config_json":{"target_agent":"assistant","raw_passthrough":true,"template":"{input}","output_mode":"text","timeout_s":60},"is_enabled":true}'
+```

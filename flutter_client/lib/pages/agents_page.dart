@@ -225,8 +225,10 @@ class _AgentsPageState extends State<AgentsPage> {
                 final id = (t['tool_id'] ?? t['name']).toString();
                 final selected = _toolIds.contains(id);
                 final enabled = t['is_enabled'] == true;
+                final type = (t['type'] ?? 'custom').toString();
+                final status = (t['status'] ?? (enabled ? 'enabled' : 'disabled')).toString();
                 return FilterChip(
-                  label: Text('${t['name']}${enabled ? '' : ' (disabled)'}'),
+                  label: Text('${t['name']} [$type] ${status == 'enabled' ? '' : '($status)'}'),
                   selected: selected,
                   onSelected: (v) => setState(() {
                     if (v) {
