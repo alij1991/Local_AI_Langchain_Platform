@@ -10,6 +10,7 @@ from pathlib import Path
 from typing import Any
 
 from fastapi import FastAPI, HTTPException, Request
+from fastapi.responses import StreamingResponse
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
 
@@ -73,6 +74,12 @@ class AgentCreateRequest(BaseModel):
 
 class AgentTestRequest(BaseModel):
     message: str
+
+
+class ChatStreamRequest(BaseModel):
+    agent: str = 'assistant'
+    message: str = Field(..., min_length=1)
+    conversation_id: str | None = None
 
 
 class PromptDraftRequest(BaseModel):
@@ -280,8 +287,11 @@ def _validate_agent_payload(payload: AgentCreateRequest) -> None:
         raise error_response("invalid_agent_name", "Agent name is required")
     if not payload.model_id.strip():
         raise error_response("invalid_model", "Model is required")
+
+    available = _available_tool_ids()
     for tid in payload.tool_ids:
-        if tid and not get_tool_db(tid):
+        canonical = _canonical_tool_id(str(tid).strip())
+        if canonical and canonical not in available:
             raise error_response("invalid_tool", f"Tool does not exist: {tid}")
 
 
@@ -502,6 +512,7 @@ def _all_agent_definitions() -> list[dict[str, Any]]:
     merged: dict[str, dict[str, Any]] = {"assistant": _default_assistant_definition()}
     for row in list_agents_db():
         definition = dict(row["json_definition"])
+        definition["tool_ids"] = [_canonical_tool_id(str(tid)) for tid in ((definition.get("tool_ids") or []))]
         definition.setdefault("is_default", definition.get("name") == "assistant")
         merged[definition["name"]] = definition
     return list(merged.values())
@@ -528,6 +539,17 @@ def _normalized_tools() -> list[dict[str, Any]]:
             }
         )
     return normalized
+
+
+def _canonical_tool_id(tool_id: str) -> str:
+    alias_map = {
+        "tavily": "tavily_web_search",
+    }
+    return alias_map.get(tool_id, tool_id)
+
+
+def _available_tool_ids() -> set[str]:
+    return {_canonical_tool_id(str(item.get("tool_id") or item.get("name") or "")) for item in _normalized_tools()}
 
 
 # Agent endpoints
@@ -561,7 +583,7 @@ def create_agent(payload: AgentCreateRequest) -> dict[str, Any]:
         "system_prompt": payload.system_prompt,
         "provider": payload.provider,
         "model_id": payload.model_id,
-        "tool_ids": payload.tool_ids,
+        "tool_ids": [_canonical_tool_id(tid) for tid in payload.tool_ids],
         "settings": payload.settings,
         "resource_limits": payload.resource_limits,
     }
@@ -618,6 +640,23 @@ def agent_effective_config(name: str) -> dict[str, Any]:
     settings = {**defaults, **d.get("settings", {})}
     return {**d, "settings": settings}
 
+
+
+
+@app.get("/agents/{name}/capabilities")
+def agent_capabilities(name: str) -> dict[str, Any]:
+    if name not in orchestrator.definitions:
+        raise error_response("not_found", "Agent not found", status=404)
+    definition = orchestrator.definitions[name]
+    supports_streaming = definition.provider == "ollama"
+    supports_tools = definition.provider == "ollama"
+    return {
+        "agent": name,
+        "provider": definition.provider,
+        "model_id": definition.model_name,
+        "supports_streaming": supports_streaming,
+        "supports_tools": supports_tools,
+    }
 
 @app.post("/agents/prompt-draft")
 def draft_prompt(payload: PromptDraftRequest) -> dict[str, Any]:
@@ -855,6 +894,49 @@ async def _chat_impl(request: Request) -> dict[str, Any]:
         "messages": list_messages(conversation_id, limit=100),
     }
 
+
+
+
+@app.post("/chat/stream")
+def chat_stream(payload: ChatStreamRequest):
+    agent = payload.agent.strip() or "assistant"
+    if agent not in orchestrator.definitions:
+        raise error_response("unknown_agent", f"Unknown agent: {agent}", status=404)
+
+    definition = orchestrator.definitions[agent]
+    if definition.provider != "ollama":
+        raise error_response("stream_not_supported", f"Streaming is not supported for provider: {definition.provider}", status=400)
+
+    conversation_id = payload.conversation_id
+    if not conversation_id:
+        title = (payload.message or "New chat")[:42]
+        conversation_id = create_conversation(title).get("id")
+
+    if not get_conversation(conversation_id):
+        raise error_response("not_found", "Conversation not found", status=404)
+
+    history = db_messages_to_langchain(list_messages(conversation_id, limit=40))
+    model_name = definition.model_name
+    add_message(conversation_id, role="user", content=payload.message, agent=agent, model=model_name, attachments=[])
+
+    def event_stream():
+        try:
+            start = json.dumps({"conversation_id": conversation_id, "agent": agent})
+            yield f"event: start\ndata: {start}\n\n"
+            final = ""
+            for partial in orchestrator.stream_chat_with_agent(agent, payload.message):
+                delta = partial[len(final):] if partial.startswith(final) else partial
+                final = partial
+                if delta:
+                    yield f"event: token\ndata: {json.dumps({'text': delta})}\n\n"
+            assistant_message = add_message(conversation_id, role="assistant", content=final, agent=agent, model=model_name)
+            end = json.dumps({"conversation_id": conversation_id, "assistant_reply": final, "assistant_message": assistant_message})
+            yield f"event: end\ndata: {end}\n\n"
+        except Exception as exc:  # noqa: BLE001
+            err = json.dumps({"error": {"code": "stream_failed", "message": str(exc)}})
+            yield f"event: error\ndata: {err}\n\n"
+
+    return StreamingResponse(event_stream(), media_type="text/event-stream")
 
 @app.post("/chat")
 async def chat(request: Request) -> dict[str, Any]:

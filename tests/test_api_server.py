@@ -189,3 +189,43 @@ def test_prompt_draft_fallback_path(monkeypatch):
     response = client.post('/agents/prompt-draft', json={'goal': 'Need deterministic fallback'})
     assert response.status_code == 200
     assert response.json()['used_fallback'] is True
+
+
+def test_agent_create_with_valid_builtin_tool_id_succeeds(monkeypatch):
+    monkeypatch.setattr(api_server.orchestrator, 'chat_with_agent', lambda *args, **kwargs: 'ok')
+    response = client.post('/agents', json={
+        'name': 'tool-agent',
+        'description': 'test',
+        'provider': 'ollama',
+        'model_id': 'gemma3:1b',
+        'system_prompt': 'You are helpful',
+        'tool_ids': ['tavily_web_search'],
+        'settings': {'temperature': 0.2},
+        'resource_limits': {'max_context_messages': 20},
+    })
+    assert response.status_code == 200
+
+
+def test_agent_create_with_unknown_tool_id_fails():
+    response = client.post('/agents', json={
+        'name': 'bad-tool-agent',
+        'description': 'test',
+        'provider': 'ollama',
+        'model_id': 'gemma3:1b',
+        'system_prompt': 'You are helpful',
+        'tool_ids': ['not_real_tool'],
+        'settings': {'temperature': 0.2},
+        'resource_limits': {'max_context_messages': 20},
+    })
+    assert response.status_code == 400
+    assert response.json()['detail']['error']['code'] == 'invalid_tool'
+
+
+def test_chat_stream_endpoint_emits_events(monkeypatch):
+    monkeypatch.setattr(api_server.orchestrator, 'stream_chat_with_agent', lambda *args, **kwargs: iter(['Hi', 'Hi there']))
+    response = client.post('/chat/stream', json={'agent': 'assistant', 'message': 'hello'})
+    assert response.status_code == 200
+    assert response.headers['content-type'].startswith('text/event-stream')
+    body = response.text
+    assert 'event: start' in body
+    assert 'event: end' in body

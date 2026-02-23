@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:convert';
 
 import 'package:file_picker/file_picker.dart';
@@ -22,12 +23,23 @@ class _ChatPageState extends State<ChatPage> {
 
   final _messageController = TextEditingController();
   bool _loading = false;
+  bool _isSending = false;
+  bool _isStreaming = false;
+  String _error = '';
+  bool _supportsStreaming = false;
   final List<PlatformFile> _pendingAttachments = [];
+  StreamSubscription<Map<String, dynamic>>? _streamSub;
 
   @override
   void initState() {
     super.initState();
     _load();
+  }
+
+  @override
+  void dispose() {
+    _streamSub?.cancel();
+    super.dispose();
   }
 
   Future<void> _load() async {
@@ -48,6 +60,7 @@ class _ChatPageState extends State<ChatPage> {
         messages = body.cast<Map<String, dynamic>>();
       }
 
+      if (!mounted) return;
       setState(() {
         _conversations = convs;
         _agents = agents;
@@ -57,10 +70,22 @@ class _ChatPageState extends State<ChatPage> {
         _conversationId = selected;
         _messages = messages;
       });
+      await _refreshCapabilities();
     } finally {
       if (mounted) {
         setState(() => _loading = false);
       }
+    }
+  }
+
+  Future<void> _refreshCapabilities() async {
+    try {
+      final caps = await widget.api.get('/agents/$_selectedAgent/capabilities') as Map<String, dynamic>;
+      if (!mounted) return;
+      setState(() => _supportsStreaming = caps['supports_streaming'] == true);
+    } catch (_) {
+      if (!mounted) return;
+      setState(() => _supportsStreaming = false);
     }
   }
 
@@ -72,6 +97,7 @@ class _ChatPageState extends State<ChatPage> {
       allowedExtensions: ['png', 'jpg', 'jpeg', 'webp', 'txt', 'md', 'pdf', 'json', 'csv'],
     );
     if (result == null || result.files.isEmpty) return;
+    if (!mounted) return;
     setState(() {
       _pendingAttachments.addAll(result.files);
     });
@@ -86,37 +112,110 @@ class _ChatPageState extends State<ChatPage> {
   Future<void> _sendMessage() async {
     final text = _messageController.text.trim();
     if (text.isEmpty && _pendingAttachments.isEmpty) return;
+    if (_isSending || _isStreaming) return;
 
-    if (_pendingAttachments.isEmpty) {
+    setState(() {
+      _error = '';
+      _isSending = true;
+    });
+
+    try {
+      if (_pendingAttachments.isEmpty && _supportsStreaming) {
+        await _sendStreaming(text);
+      } else if (_pendingAttachments.isEmpty) {
+        await widget.api.post('/chat', {
+          'agent': _selectedAgent,
+          'message': text,
+          'conversation_id': _conversationId,
+        });
+      } else {
+        await widget.api.postMultipart(
+          '/chat_with_attachments',
+          fields: {
+            'agent': _selectedAgent,
+            'message': text,
+            if (_conversationId != null) 'conversation_id': _conversationId!,
+          },
+          files: _pendingAttachments
+              .map(
+                (f) => MultipartAttachment(
+                  fieldName: 'files',
+                  fileName: f.name,
+                  path: f.path,
+                  bytes: f.bytes,
+                ),
+              )
+              .toList(),
+        );
+      }
+
+      _messageController.clear();
+      if (mounted) setState(() => _pendingAttachments.clear());
+      await _load();
+    } catch (e) {
+      if (!mounted) return;
+      setState(() => _error = '$e');
+    } finally {
+      if (mounted) setState(() => _isSending = false);
+    }
+  }
+
+  Future<void> _sendStreaming(String text) async {
+    setState(() {
+      _isStreaming = true;
+      _messages = [
+        ..._messages,
+        {'role': 'assistant', 'content': '', 'attachments_json': '[]', '_streaming': true}
+      ];
+    });
+
+    final stream = widget.api.postSse('/chat/stream', {
+      'agent': _selectedAgent,
+      'message': text,
+      'conversation_id': _conversationId,
+    });
+
+    _streamSub = stream.listen((event) {
+      if (!mounted) return;
+      final type = event['event']?.toString() ?? '';
+      if (type == 'start') {
+        setState(() => _conversationId = event['conversation_id']?.toString() ?? _conversationId);
+      } else if (type == 'token') {
+        final token = event['text']?.toString() ?? '';
+        setState(() {
+          final last = Map<String, dynamic>.from(_messages.last);
+          last['content'] = '${last['content'] ?? ''}$token';
+          _messages[_messages.length - 1] = last;
+        });
+      } else if (type == 'end') {
+        setState(() => _isStreaming = false);
+      } else if (type == 'error') {
+        setState(() {
+          _error = event['error']?.toString() ?? 'stream error';
+          _isStreaming = false;
+        });
+      }
+    }, onError: (e) async {
+      if (!mounted) return;
+      setState(() {
+        _error = '$e';
+        _isStreaming = false;
+      });
       await widget.api.post('/chat', {
         'agent': _selectedAgent,
         'message': text,
         'conversation_id': _conversationId,
       });
-    } else {
-      await widget.api.postMultipart(
-        '/chat_with_attachments',
-        fields: {
-          'agent': _selectedAgent,
-          'message': text,
-          if (_conversationId != null) 'conversation_id': _conversationId!,
-        },
-        files: _pendingAttachments
-            .map(
-              (f) => MultipartAttachment(
-                fieldName: 'files',
-                fileName: f.name,
-                path: f.path,
-                bytes: f.bytes,
-              ),
-            )
-            .toList(),
-      );
-    }
+    }, onDone: () {
+      if (mounted) setState(() => _isStreaming = false);
+    });
 
-    _messageController.clear();
-    setState(() => _pendingAttachments.clear());
-    await _load();
+    await _streamSub?.asFuture<void>();
+  }
+
+  void _stopStreaming() {
+    _streamSub?.cancel();
+    setState(() => _isStreaming = false);
   }
 
   List<Map<String, dynamic>> _attachmentsForMessage(Map<String, dynamic> m) {
@@ -157,6 +256,7 @@ class _ChatPageState extends State<ChatPage> {
                   setState(() => _conversationId = v);
                   if (v != null) {
                     final messages = await widget.api.get('/conversations/$v/messages') as List<dynamic>;
+                    if (!mounted) return;
                     setState(() => _messages = messages.cast<Map<String, dynamic>>());
                   }
                 },
@@ -169,15 +269,25 @@ class _ChatPageState extends State<ChatPage> {
                 value: _agents.contains(_selectedAgent) ? _selectedAgent : null,
                 decoration: const InputDecoration(labelText: 'Agent'),
                 items: _agents.map((a) => DropdownMenuItem(value: a, child: Text(a))).toList(),
-                onChanged: (v) {
+                onChanged: (v) async {
                   if (v != null) {
                     setState(() => _selectedAgent = v);
+                    await _refreshCapabilities();
                   }
                 },
               ),
             ),
           ],
         ),
+        if (_isSending || _isStreaming || _loading)
+          const Padding(
+            padding: EdgeInsets.only(top: 8),
+            child: Row(children: [SizedBox(width: 16, height: 16, child: CircularProgressIndicator(strokeWidth: 2)), SizedBox(width: 8), Text('Assistant is thinking...')]),
+          ),
+        if (_error.isNotEmpty) ...[
+          const SizedBox(height: 6),
+          Text(_error, style: const TextStyle(color: Colors.red)),
+        ],
         const SizedBox(height: 12),
         Expanded(
           child: Card(
@@ -238,7 +348,7 @@ class _ChatPageState extends State<ChatPage> {
         Row(
           children: [
             IconButton.filledTonal(
-              onPressed: _pickAttachments,
+              onPressed: _isSending || _isStreaming ? null : _pickAttachments,
               icon: const Icon(Icons.add),
               tooltip: 'Attach files',
             ),
@@ -246,13 +356,16 @@ class _ChatPageState extends State<ChatPage> {
             Expanded(
               child: TextField(
                 controller: _messageController,
-                decoration: const InputDecoration(labelText: 'Message'),
+                decoration: InputDecoration(labelText: _supportsStreaming ? 'Message (streaming available)' : 'Message'),
                 minLines: 1,
                 maxLines: 4,
               ),
             ),
             const SizedBox(width: 8),
-            FilledButton(onPressed: _sendMessage, child: const Text('Send')),
+            if (_isStreaming)
+              FilledButton.tonal(onPressed: _stopStreaming, child: const Text('Stop'))
+            else
+              FilledButton(onPressed: _isSending ? null : _sendMessage, child: const Text('Send')),
           ],
         ),
       ],

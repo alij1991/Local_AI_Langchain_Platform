@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:convert';
 import 'dart:typed_data';
 
@@ -40,7 +41,6 @@ class ApiClient {
     return jsonDecode(r.body);
   }
 
-
   Future<dynamic> postMultipart(String path, {required Map<String, String> fields, required List<MultipartAttachment> files}) async {
     final req = http.MultipartRequest('POST', Uri.parse('$baseUrl$path'));
     req.fields.addAll(fields);
@@ -55,6 +55,41 @@ class ApiClient {
     final response = await http.Response.fromStream(streamed);
     if (response.statusCode < 200 || response.statusCode > 299) throw Exception(response.body);
     return jsonDecode(response.body);
+  }
+
+  Stream<Map<String, dynamic>> postSse(String path, Map<String, dynamic> body) async* {
+    final client = http.Client();
+    try {
+      final req = http.Request('POST', Uri.parse('$baseUrl$path'));
+      req.headers['Content-Type'] = 'application/json';
+      req.headers['Accept'] = 'text/event-stream';
+      req.body = jsonEncode(body);
+      final resp = await client.send(req);
+      if (resp.statusCode < 200 || resp.statusCode > 299) {
+        final text = await resp.stream.bytesToString();
+        throw Exception(text);
+      }
+
+      String? currentEvent;
+      await for (final line in resp.stream.transform(utf8.decoder).transform(const LineSplitter())) {
+        if (line.startsWith('event:')) {
+          currentEvent = line.substring(6).trim();
+        } else if (line.startsWith('data:')) {
+          final data = line.substring(5).trim();
+          dynamic parsed = {};
+          if (data.isNotEmpty) {
+            parsed = jsonDecode(data);
+          }
+          if (parsed is Map<String, dynamic>) {
+            yield {'event': currentEvent ?? 'message', ...parsed};
+          } else {
+            yield {'event': currentEvent ?? 'message', 'data': parsed};
+          }
+        }
+      }
+    } finally {
+      client.close();
+    }
   }
 
   Future<void> delete(String path) async {

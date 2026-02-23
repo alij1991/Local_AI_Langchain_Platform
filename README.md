@@ -133,3 +133,27 @@ curl -X POST http://127.0.0.1:8000/systems/triage/run \
 python -m compileall app.py api_server.py src tests
 python -m pytest -q
 ```
+
+
+### Streaming chat (SSE)
+Enable streaming by using an Ollama-backed agent (capability `supports_streaming=true`).
+
+```bash
+curl -N -X POST http://127.0.0.1:8000/chat/stream \
+  -H 'Content-Type: application/json' \
+  -H 'Accept: text/event-stream' \
+  -d '{"agent":"assistant","message":"Stream this response"}'
+```
+
+The stream emits `start`, `token`, `end`, and `error` events.
+
+### Tavily configuration
+- Set `TAVILY_API_KEY` in your environment.
+- `tavily_web_search` remains visible in `/tools` even when key is missing, but status reports missing key through `/tools/status`.
+
+### Troubleshooting
+- `invalid_tool` while saving agent:
+  - refresh tools from `/tools` and use `tool_id` values returned by backend (canonical Tavily ID: `tavily_web_search`).
+  - legacy ID `tavily` is mapped to `tavily_web_search` server-side for compatibility.
+- `stream_not_supported`:
+  - selected provider/model does not support streaming; UI falls back to standard `/chat`.

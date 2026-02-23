@@ -27,6 +27,12 @@ class _AgentsPageState extends State<AgentsPage> {
   bool _streaming = true;
   final _testMsg = TextEditingController(text: 'hello');
   String _testOut = '';
+  String _error = '';
+
+  bool _isLoading = false;
+  bool _isSaving = false;
+  bool _isTesting = false;
+  int _loadVersion = 0;
 
   @override
   void initState() {
@@ -37,20 +43,38 @@ class _AgentsPageState extends State<AgentsPage> {
   List<String> get _models => _provider == 'huggingface' ? _hf : _ollama;
 
   Future<void> _load() async {
-    final a = await widget.api.get('/agents') as Map<String, dynamic>;
-    final m = await widget.api.get('/models/available') as Map<String, dynamic>;
-    final t = await widget.api.get('/tools') as Map<String, dynamic>;
-    setState(() {
-      _agents = ((a['definitions'] as List<dynamic>?) ?? []).cast<Map<String, dynamic>>();
-      _ollama = ((m['ollama'] as List<dynamic>?) ?? []).cast<String>();
-      _hf = ((m['huggingface'] as List<dynamic>?) ?? []).cast<String>();
-      _tools = ((t['items'] as List<dynamic>?) ?? const []).cast<Map<String, dynamic>>();
-      if (_model.isEmpty && _models.isNotEmpty) _model = _models.first;
-      if (_selected == null && _agents.isNotEmpty) _apply(_agents.first);
-    });
+    final version = ++_loadVersion;
+    if (mounted) {
+      setState(() {
+        _isLoading = true;
+        _error = '';
+      });
+    }
+    try {
+      final a = await widget.api.get('/agents') as Map<String, dynamic>;
+      final m = await widget.api.get('/models/available') as Map<String, dynamic>;
+      final t = await widget.api.get('/tools') as Map<String, dynamic>;
+      if (!mounted || version != _loadVersion) return;
+      setState(() {
+        _agents = ((a['definitions'] as List<dynamic>?) ?? []).cast<Map<String, dynamic>>();
+        _ollama = ((m['ollama'] as List<dynamic>?) ?? []).cast<String>();
+        _hf = ((m['huggingface'] as List<dynamic>?) ?? []).cast<String>();
+        _tools = ((t['items'] as List<dynamic>?) ?? const []).cast<Map<String, dynamic>>();
+        if (_model.isEmpty && _models.isNotEmpty) _model = _models.first;
+        if (_selected == null && _agents.isNotEmpty) _apply(_agents.first);
+      });
+    } catch (e) {
+      if (!mounted || version != _loadVersion) return;
+      setState(() => _error = '$e');
+    } finally {
+      if (mounted && version == _loadVersion) {
+        setState(() => _isLoading = false);
+      }
+    }
   }
 
   void _apply(Map<String, dynamic> a) {
+    if (!mounted) return;
     setState(() {
       _selected = a;
       _name.text = (a['name'] ?? '').toString();
@@ -67,38 +91,70 @@ class _AgentsPageState extends State<AgentsPage> {
   }
 
   Future<void> _save() async {
-    final payload = {
-      'name': _name.text,
-      'description': _desc.text,
-      'system_prompt': _prompt.text,
-      'provider': _provider,
-      'model_id': _model,
-      'tool_ids': _toolIds,
-      'settings': {
-        'temperature': double.tryParse(_temperature.text) ?? 0.2,
-        'max_tokens': int.tryParse(_maxTokens.text) ?? 1024,
-        'streaming': _streaming,
-      },
-      'resource_limits': {'max_context_messages': 40},
-    };
-    if (_selected == null) {
-      await widget.api.post('/agents', payload);
-    } else {
-      await widget.api.put('/agents/${_name.text}', payload);
+    setState(() {
+      _isSaving = true;
+      _error = '';
+    });
+    try {
+      final payload = {
+        'name': _name.text,
+        'description': _desc.text,
+        'system_prompt': _prompt.text,
+        'provider': _provider,
+        'model_id': _model,
+        'tool_ids': _toolIds,
+        'settings': {
+          'temperature': double.tryParse(_temperature.text) ?? 0.2,
+          'max_tokens': int.tryParse(_maxTokens.text) ?? 1024,
+          'streaming': _streaming,
+        },
+        'resource_limits': {'max_context_messages': 40},
+      };
+      if (_selected == null) {
+        await widget.api.post('/agents', payload);
+      } else {
+        await widget.api.put('/agents/${_name.text}', payload);
+      }
+      if (!mounted) return;
+      await _load();
+    } catch (e) {
+      if (!mounted) return;
+      setState(() => _error = '$e');
+      await _load();
+    } finally {
+      if (mounted) setState(() => _isSaving = false);
     }
-    await _load();
   }
 
   Future<void> _remove() async {
     if (_selected == null) return;
-    await widget.api.delete('/agents/${_name.text}');
-    setState(() => _selected = null);
-    await _load();
+    setState(() => _error = '');
+    try {
+      await widget.api.delete('/agents/${_name.text}');
+      if (!mounted) return;
+      setState(() => _selected = null);
+      await _load();
+    } catch (e) {
+      if (!mounted) return;
+      setState(() => _error = '$e');
+    }
   }
 
   Future<void> _test() async {
-    final out = await widget.api.post('/agents/${_name.text}/test', {'message': _testMsg.text}) as Map<String, dynamic>;
-    setState(() => _testOut = '${out['response']}\n\nLatency: ${out['latency_ms']} ms');
+    setState(() {
+      _isTesting = true;
+      _error = '';
+    });
+    try {
+      final out = await widget.api.post('/agents/${_name.text}/test', {'message': _testMsg.text}) as Map<String, dynamic>;
+      if (!mounted) return;
+      setState(() => _testOut = '${out['response']}\n\nLatency: ${out['latency_ms']} ms');
+    } catch (e) {
+      if (!mounted) return;
+      setState(() => _error = '$e');
+    } finally {
+      if (mounted) setState(() => _isTesting = false);
+    }
   }
 
   @override
@@ -107,8 +163,42 @@ class _AgentsPageState extends State<AgentsPage> {
       SizedBox(
         width: 320,
         child: Column(children: [
-          Row(children: [Expanded(child: FilledButton(onPressed: () { setState(() { _selected = null; _name.clear(); _desc.clear(); _prompt.text = 'You are a helpful AI assistant.'; _provider = 'ollama'; _model = _ollama.isNotEmpty ? _ollama.first : ''; _toolIds = []; }); }, child: const Text('New Agent'))), IconButton(onPressed: _load, icon: const Icon(Icons.refresh))]),
-          Expanded(child: ListView.builder(itemCount: _agents.length, itemBuilder: (_, i) { final a = _agents[i]; return ListTile(title: Text(a['name'].toString()), subtitle: Text('${a['provider']} • ${a['model_id']}'), selected: _selected?['name'] == a['name'], onTap: () => _apply(a)); })),
+          Row(children: [
+            Expanded(
+              child: FilledButton(
+                onPressed: _isLoading
+                    ? null
+                    : () {
+                        setState(() {
+                          _selected = null;
+                          _name.clear();
+                          _desc.clear();
+                          _prompt.text = 'You are a helpful AI assistant.';
+                          _provider = 'ollama';
+                          _model = _ollama.isNotEmpty ? _ollama.first : '';
+                          _toolIds = [];
+                        });
+                      },
+                child: const Text('New Agent'),
+              ),
+            ),
+            IconButton(onPressed: _isLoading ? null : _load, icon: const Icon(Icons.refresh)),
+            if (_isLoading) const SizedBox(width: 16, height: 16, child: CircularProgressIndicator(strokeWidth: 2)),
+          ]),
+          Expanded(
+            child: ListView.builder(
+              itemCount: _agents.length,
+              itemBuilder: (_, i) {
+                final a = _agents[i];
+                return ListTile(
+                  title: Text(a['name'].toString()),
+                  subtitle: Text('${a['provider']} • ${a['model_id']}'),
+                  selected: _selected?['name'] == a['name'],
+                  onTap: () => _apply(a),
+                );
+              },
+            ),
+          ),
         ]),
       ),
       const SizedBox(width: 12),
@@ -116,6 +206,10 @@ class _AgentsPageState extends State<AgentsPage> {
         child: SelectionArea(
           child: ListView(children: [
             Text(_selected == null ? 'Create Agent' : 'Edit Agent', style: Theme.of(context).textTheme.headlineSmall),
+            if (_error.isNotEmpty) ...[
+              const SizedBox(height: 8),
+              Text(_error, style: const TextStyle(color: Colors.red)),
+            ],
             TextField(controller: _name, decoration: const InputDecoration(labelText: 'Name')),
             const SizedBox(height: 8),
             TextField(controller: _desc, decoration: const InputDecoration(labelText: 'Description')),
@@ -125,16 +219,34 @@ class _AgentsPageState extends State<AgentsPage> {
             TextField(controller: _prompt, minLines: 4, maxLines: 8, decoration: const InputDecoration(labelText: 'System Prompt')),
             const SizedBox(height: 8),
             Text('Tools', style: Theme.of(context).textTheme.titleMedium),
-            Wrap(spacing: 8, children: _tools.map((t) { final id = t['tool_id'].toString(); final selected = _toolIds.contains(id); return FilterChip(label: Text(t['name'].toString()), selected: selected, onSelected: (v) => setState(() { if (v) { _toolIds.add(id); } else { _toolIds.remove(id); } })); }).toList()),
+            Wrap(
+              spacing: 8,
+              children: _tools.map((t) {
+                final id = (t['tool_id'] ?? t['name']).toString();
+                final selected = _toolIds.contains(id);
+                final enabled = t['is_enabled'] == true;
+                return FilterChip(
+                  label: Text('${t['name']}${enabled ? '' : ' (disabled)'}'),
+                  selected: selected,
+                  onSelected: (v) => setState(() {
+                    if (v) {
+                      _toolIds.add(id);
+                    } else {
+                      _toolIds.remove(id);
+                    }
+                  }),
+                );
+              }).toList(),
+            ),
             const SizedBox(height: 8),
             Row(children: [Expanded(child: TextField(controller: _temperature, decoration: const InputDecoration(labelText: 'Temperature'))), const SizedBox(width: 8), Expanded(child: TextField(controller: _maxTokens, decoration: const InputDecoration(labelText: 'Max tokens'))), const SizedBox(width: 8), Checkbox(value: _streaming, onChanged: (v) => setState(() => _streaming = v ?? true)), const Text('Streaming')]),
             const SizedBox(height: 8),
-            Row(children: [FilledButton(onPressed: _save, child: const Text('Save')), const SizedBox(width: 8), FilledButton.tonal(onPressed: _remove, child: const Text('Delete'))]),
+            Row(children: [FilledButton(onPressed: _isSaving ? null : _save, child: _isSaving ? const SizedBox(width: 16, height: 16, child: CircularProgressIndicator(strokeWidth: 2)) : const Text('Save')), const SizedBox(width: 8), FilledButton.tonal(onPressed: _isSaving ? null : _remove, child: const Text('Delete'))]),
             const Divider(height: 24),
             Text('Quick Test', style: Theme.of(context).textTheme.titleMedium),
             TextField(controller: _testMsg, decoration: const InputDecoration(labelText: 'Message')),
             const SizedBox(height: 8),
-            FilledButton.tonal(onPressed: _test, child: const Text('Test Agent')),
+            FilledButton.tonal(onPressed: _isTesting ? null : _test, child: _isTesting ? const SizedBox(width: 16, height: 16, child: CircularProgressIndicator(strokeWidth: 2)) : const Text('Test Agent')),
             const SizedBox(height: 8),
             SelectableText(_testOut),
           ]),
