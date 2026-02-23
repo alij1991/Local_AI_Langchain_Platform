@@ -32,21 +32,18 @@ def utc_now() -> str:
 
 
 def tavily_web_search(query: str, max_results: int = 5) -> str:
+    key = os.getenv("TAVILY_API_KEY", "").strip()
+    if not key:
+        return "Tavily API key missing. Set TAVILY_API_KEY in backend environment/.env."
+
     try:
         from langchain_tavily import TavilySearch
 
         tool = TavilySearch(max_results=max_results)
         result = tool.invoke({"query": query})
         return str(result)
-    except Exception:
-        try:
-            from langchain_community.tools.tavily_search import TavilySearchResults
-
-            tool = TavilySearchResults(max_results=max_results)
-            result = tool.invoke({"query": query})
-            return str(result)
-        except Exception as exc:  # noqa: BLE001
-            return f"Tavily search unavailable: {exc}"
+    except Exception as exc:  # noqa: BLE001
+        return f"Tavily search unavailable: {exc}"
 
 
 def mcp_query(prompt: str) -> str:
