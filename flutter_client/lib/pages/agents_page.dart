@@ -44,7 +44,7 @@ class _AgentsPageState extends State<AgentsPage> {
       _agents = ((a['definitions'] as List<dynamic>?) ?? []).cast<Map<String, dynamic>>();
       _ollama = ((m['ollama'] as List<dynamic>?) ?? []).cast<String>();
       _hf = ((m['huggingface'] as List<dynamic>?) ?? []).cast<String>();
-      _tools = ((t['tools'] as List<dynamic>?) ?? []).cast<Map<String, dynamic>>();
+      _tools = ((t['items'] as List<dynamic>?) ?? const []).cast<Map<String, dynamic>>();
       if (_model.isEmpty && _models.isNotEmpty) _model = _models.first;
       if (_selected == null && _agents.isNotEmpty) _apply(_agents.first);
     });
