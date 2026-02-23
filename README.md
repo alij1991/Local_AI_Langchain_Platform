@@ -78,6 +78,40 @@ curl -X POST http://127.0.0.1:8000/tools/mcp/servers \
 curl -X POST http://127.0.0.1:8000/tools/mcp/servers/<server_id>/refresh
 ```
 
+
+### Chat with attachments
+```bash
+# Plain JSON chat (existing endpoint)
+curl -X POST http://127.0.0.1:8000/chat \
+  -H 'Content-Type: application/json' \
+  -d '{"agent":"assistant","message":"hello"}'
+
+# Multipart chat with files
+curl -X POST http://127.0.0.1:8000/chat_with_attachments \
+  -F agent=assistant \
+  -F message='Summarize attached notes' \
+  -F files=@./notes.txt \
+  -F files=@./diagram.png
+```
+
+Attachments are stored in `./data/uploads/{conversation_id}/` and message rows persist metadata in `messages.attachments_json`.
+
+### Prompt draft
+```bash
+curl -X POST http://127.0.0.1:8000/agents/prompt-draft \
+  -H 'Content-Type: application/json' \
+  -d '{
+    "goal":"Design a customer support agent",
+    "context":"SaaS support for billing + outages",
+    "requirements":["Answer concisely","Use markdown bullets"],
+    "constraints":["Do not invent unavailable data"],
+    "target_stack":"python-fastapi",
+    "output_format":"markdown"
+  }'
+```
+
+Response includes `prompt_text`, structured `sections`, and `used_fallback` to indicate whether deterministic fallback was used.
+
 ### Systems and workflow connectivity
 Systems graph `nodes` can reference:
 - `type=agent` + `agent=<agent_name>`

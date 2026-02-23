@@ -153,3 +153,39 @@ def test_model_catalog_exposes_capability_flags():
     assert 'supports_tools' in sample
     assert 'tool_calling' in sample
     assert 'supports_vision' in sample
+
+
+def test_chat_multipart_with_attachment(monkeypatch):
+    monkeypatch.setattr(api_server.orchestrator, 'chat_with_agent', lambda *args, **kwargs: 'mocked reply')
+    response = client.post(
+        '/chat_with_attachments',
+        data={'agent': 'assistant', 'message': 'Summarize attachment'},
+        files=[('files', ('note.txt', b'Attachment says hello world', 'text/plain'))],
+    )
+    assert response.status_code == 200
+    body = response.json()
+    assert body['conversation_id']
+    user_msgs = [m for m in body['messages'] if m['role'] == 'user']
+    assert user_msgs
+    assert 'note.txt' in user_msgs[-1]['attachments_json']
+
+
+def test_prompt_draft_minimal_payload_returns_200():
+    response = client.post('/agents/prompt-draft', json={'goal': 'Build a bug triage agent'})
+    assert response.status_code == 200
+    payload = response.json()
+    assert 'prompt_text' in payload
+    assert 'sections' in payload
+    assert 'used_fallback' in payload
+
+
+def test_prompt_draft_missing_goal_returns_422():
+    response = client.post('/agents/prompt-draft', json={})
+    assert response.status_code == 422
+
+
+def test_prompt_draft_fallback_path(monkeypatch):
+    monkeypatch.setattr(api_server.orchestrator, 'generate_system_prompt', lambda *_args, **_kwargs: (_ for _ in ()).throw(RuntimeError('offline')))
+    response = client.post('/agents/prompt-draft', json={'goal': 'Need deterministic fallback'})
+    assert response.status_code == 200
+    assert response.json()['used_fallback'] is True

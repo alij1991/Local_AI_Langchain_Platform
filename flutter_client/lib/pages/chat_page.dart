@@ -1,3 +1,6 @@
+import 'dart:convert';
+
+import 'package:file_picker/file_picker.dart';
 import 'package:flutter/material.dart';
 import 'package:local_ai_flutter_client/services/api_client.dart';
 
@@ -19,6 +22,7 @@ class _ChatPageState extends State<ChatPage> {
 
   final _messageController = TextEditingController();
   bool _loading = false;
+  final List<PlatformFile> _pendingAttachments = [];
 
   @override
   void initState() {
@@ -60,6 +64,19 @@ class _ChatPageState extends State<ChatPage> {
     }
   }
 
+  Future<void> _pickAttachments() async {
+    final result = await FilePicker.platform.pickFiles(
+      allowMultiple: true,
+      withData: true,
+      type: FileType.custom,
+      allowedExtensions: ['png', 'jpg', 'jpeg', 'webp', 'txt', 'md', 'pdf', 'json', 'csv'],
+    );
+    if (result == null || result.files.isEmpty) return;
+    setState(() {
+      _pendingAttachments.addAll(result.files);
+    });
+  }
+
   Future<void> _createConversation() async {
     final body = await widget.api.post('/conversations', {'title': 'New chat'}) as Map<String, dynamic>;
     _conversationId = body['id']?.toString();
@@ -68,14 +85,49 @@ class _ChatPageState extends State<ChatPage> {
 
   Future<void> _sendMessage() async {
     final text = _messageController.text.trim();
-    if (text.isEmpty) return;
-    await widget.api.post('/chat', {
-      'agent': _selectedAgent,
-      'message': text,
-      'conversation_id': _conversationId,
-    });
+    if (text.isEmpty && _pendingAttachments.isEmpty) return;
+
+    if (_pendingAttachments.isEmpty) {
+      await widget.api.post('/chat', {
+        'agent': _selectedAgent,
+        'message': text,
+        'conversation_id': _conversationId,
+      });
+    } else {
+      await widget.api.postMultipart(
+        '/chat_with_attachments',
+        fields: {
+          'agent': _selectedAgent,
+          'message': text,
+          if (_conversationId != null) 'conversation_id': _conversationId!,
+        },
+        files: _pendingAttachments
+            .map(
+              (f) => MultipartAttachment(
+                fieldName: 'files',
+                fileName: f.name,
+                path: f.path,
+                bytes: f.bytes,
+              ),
+            )
+            .toList(),
+      );
+    }
+
     _messageController.clear();
+    setState(() => _pendingAttachments.clear());
     await _load();
+  }
+
+  List<Map<String, dynamic>> _attachmentsForMessage(Map<String, dynamic> m) {
+    final raw = m['attachments_json'];
+    if (raw == null) return const [];
+    if (raw is List) return raw.cast<Map<String, dynamic>>();
+    if (raw is String && raw.isNotEmpty) {
+      final parsed = jsonDecode(raw);
+      if (parsed is List) return parsed.cast<Map<String, dynamic>>();
+    }
+    return const [];
   }
 
   @override
@@ -133,25 +185,64 @@ class _ChatPageState extends State<ChatPage> {
                 ? const Center(child: CircularProgressIndicator())
                 : ListView(
                     padding: const EdgeInsets.all(12),
-                    children: _messages
-                        .map((m) => Padding(
-                              padding: const EdgeInsets.symmetric(vertical: 4),
-                              child: Column(
-                                crossAxisAlignment: CrossAxisAlignment.start,
-                                children: [
-                                  Text((m['role'] ?? 'unknown').toString(), style: const TextStyle(fontWeight: FontWeight.bold)),
-                                  const SizedBox(height: 2),
-                                  Text((m['content'] ?? '').toString()),
-                                ],
+                    children: _messages.map((m) {
+                      final attachments = _attachmentsForMessage(m);
+                      return Padding(
+                        padding: const EdgeInsets.symmetric(vertical: 6),
+                        child: Column(
+                          crossAxisAlignment: CrossAxisAlignment.start,
+                          children: [
+                            Text((m['role'] ?? 'unknown').toString(), style: const TextStyle(fontWeight: FontWeight.bold)),
+                            const SizedBox(height: 2),
+                            SelectableText((m['content'] ?? '').toString()),
+                            if (attachments.isNotEmpty) ...[
+                              const SizedBox(height: 6),
+                              Wrap(
+                                spacing: 6,
+                                runSpacing: 4,
+                                children: attachments
+                                    .map(
+                                      (a) => Chip(
+                                        avatar: const Icon(Icons.attach_file, size: 16),
+                                        label: Text(a['filename']?.toString() ?? 'attachment'),
+                                      ),
+                                    )
+                                    .toList(),
                               ),
-                            ))
-                        .toList(),
+                            ]
+                          ],
+                        ),
+                      );
+                    }).toList(),
                   ),
           ),
         ),
+        if (_pendingAttachments.isNotEmpty) ...[
+          const SizedBox(height: 8),
+          Wrap(
+            spacing: 8,
+            runSpacing: 6,
+            children: _pendingAttachments.asMap().entries.map((entry) {
+              final i = entry.key;
+              final file = entry.value;
+              final kb = ((file.size) / 1024).toStringAsFixed(1);
+              return InputChip(
+                avatar: const Icon(Icons.insert_drive_file, size: 16),
+                label: Text('${file.name} (${kb} KB)'),
+                onDeleted: () => setState(() => _pendingAttachments.removeAt(i)),
+              );
+            }).toList(),
+          ),
+        ],
         const SizedBox(height: 8),
         Row(
           children: [
+            IconButton.filledTonal(
+              onPressed: _pickAttachments,
+              icon: const Icon(Icons.add),
+              tooltip: 'Attach files',
+            ),
+            const SizedBox(width: 8),
             Expanded(
               child: TextField(
                 controller: _messageController,
