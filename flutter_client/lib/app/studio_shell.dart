@@ -1,8 +1,10 @@
 import 'package:flutter/material.dart';
 import 'package:local_ai_flutter_client/models/studio_models.dart';
 import 'package:local_ai_flutter_client/pages/agents_page.dart';
+import 'package:local_ai_flutter_client/pages/chat_page.dart';
 import 'package:local_ai_flutter_client/pages/models_page.dart';
 import 'package:local_ai_flutter_client/pages/tools_page.dart';
+import 'package:local_ai_flutter_client/pages/systems_page.dart';
 import 'package:local_ai_flutter_client/services/api_client.dart';
 
 class StudioShell extends StatefulWidget {
@@ -19,12 +21,12 @@ class _StudioShellState extends State<StudioShell> {
   @override
   Widget build(BuildContext context) {
     final pages = {
-      AppSection.chat: const Center(child: Text('Chat page remains available; conversations and memory API are ready.')),
+      AppSection.chat: ChatPage(api: api),
       AppSection.models: ModelsPage(api: api),
       AppSection.agents: AgentsPage(api: api),
       AppSection.promptBuilder: const Center(child: Text('Prompt Builder page still available in backend endpoint /agents/prompt-draft.')),
       AppSection.tools: ToolsPage(api: api),
-      AppSection.systems: const Center(child: Text('Systems page uses persisted graph endpoints /systems and /systems/{name}/run.')),
+      AppSection.systems: SystemsPage(api: api),
     };
 
     return Scaffold(
