@@ -19,7 +19,7 @@ class _ToolsPageState extends State<ToolsPage> with SingleTickerProviderStateMix
 
   final _toolName = TextEditingController();
   final _toolDesc = TextEditingController();
-  String _toolType = 'tavily';
+  String _toolType = 'agent_tool';
   String _targetAgent = 'assistant';
   bool _enabled = true;
 
@@ -41,7 +41,9 @@ class _ToolsPageState extends State<ToolsPage> with SingleTickerProviderStateMix
       _tools = ((tools['items'] as List<dynamic>?) ?? []).cast<Map<String, dynamic>>();
       _servers = ((servers['servers'] as List<dynamic>?) ?? []).cast<Map<String, dynamic>>();
       _agents = ((agents['agents'] as List<dynamic>?) ?? []).cast<String>();
-      if (_agents.isNotEmpty) _targetAgent = _agents.first;
+      if (_agents.isNotEmpty && !_agents.contains(_targetAgent)) {
+        _targetAgent = _agents.first;
+      }
       _status = status;
     });
   }
@@ -118,9 +120,30 @@ class _ToolsPageState extends State<ToolsPage> with SingleTickerProviderStateMix
             Row(children: [Expanded(child: TextField(controller: _toolName, decoration: const InputDecoration(labelText: 'Tool name'))), const SizedBox(width: 8), Expanded(child: TextField(controller: _toolDesc, decoration: const InputDecoration(labelText: 'Description')))]),
             const SizedBox(height: 8),
             Row(children: [
-              Expanded(child: DropdownButtonFormField<String>(value: _toolType, items: const [DropdownMenuItem(value: 'agent_tool', child: Text('agent_tool')), DropdownMenuItem(value: 'builtin', child: Text('builtin'))], onChanged: (v) => setState(() => _toolType = v ?? 'agent_tool'))),
+              Expanded(
+                child: DropdownButtonFormField<String>(
+                  value: _toolType,
+                  items: const [
+                    DropdownMenuItem(value: 'agent_tool', child: Text('agent_tool')),
+                    DropdownMenuItem(value: 'builtin', child: Text('builtin')),
+                    DropdownMenuItem(value: 'tavily', child: Text('tavily')),
+                    DropdownMenuItem(value: 'mcp', child: Text('mcp')),
+                  ],
+                  onChanged: (v) => setState(() => _toolType = v ?? 'agent_tool'),
+                ),
+              ),
               const SizedBox(width: 8),
-              Expanded(child: DropdownButtonFormField<String>(value: _targetAgent, items: _agents.map((a) => DropdownMenuItem(value: a, child: Text(a))).toList(), onChanged: (v) => setState(() => _targetAgent = v ?? _targetAgent))),
+              Expanded(
+                child: DropdownButtonFormField<String>(
+                  value: _agents.contains(_targetAgent) ? _targetAgent : null,
+                  items: _agents.map((a) => DropdownMenuItem(value: a, child: Text(a))).toList(),
+                  onChanged: (v) {
+                    if (v != null) {
+                      setState(() => _targetAgent = v);
+                    }
+                  },
+                ),
+              ),
               const SizedBox(width: 8),
               Checkbox(value: _enabled, onChanged: (v) => setState(() => _enabled = v ?? true)),
               const Text('Enabled'),
