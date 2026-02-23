@@ -1,0 +1,123 @@
+Metadata-Version: 2.4
+Name: local-ai-langchain-platform
+Version: 0.1.0
+Summary: Starter UI + backend for LangChain agents powered by Ollama.
+Author: Local AI Team
+Requires-Python: >=3.10
+Description-Content-Type: text/markdown
+Requires-Dist: gradio
+Requires-Dist: langchain
+Requires-Dist: langchain-ollama
+Requires-Dist: langchain-community
+Requires-Dist: langchain-text-splitters
+Requires-Dist: langgraph
+Requires-Dist: pydantic
+Requires-Dist: ollama
+Requires-Dist: langchain-huggingface
+Requires-Dist: transformers
+Requires-Dist: accelerate
+Requires-Dist: tavily-python
+Requires-Dist: langchain-tavily
+Requires-Dist: langchain-mcp-adapters
+Requires-Dist: fastapi
+Requires-Dist: uvicorn
+Requires-Dist: pypdf
+Provides-Extra: dev
+Requires-Dist: pytest; extra == "dev"
+Requires-Dist: ruff; extra == "dev"
+
+# Local AI LangChain Platform
+
+Self-hosted AI workspace with a Python backend and two UI options:
+- **Gradio app** (`app.py`)
+- **Flutter app** (`flutter_client/`) for the full desktop/web application UI
+
+## Highlights
+- Multi-provider agents (`ollama` and `huggingface`) with provider-aware model routing.
+- FastAPI bridge for chat, conversations, models, agents, prompt builder, tools, workflows, and systems.
+- Persistent SQLite storage for conversations/messages/systems.
+- LangChain-native attachment ingestion via document loaders + chunking.
+
+## Data storage
+- SQLite DB path: `./data/app.db`
+- Uploaded files path: `./data/uploads/{conversation_id}/`
+- Reset local state:
+
+```bash
+rm -rf data
+```
+
+## Quick Start (Backend)
+
+```bash
+python -m pip install --upgrade pip setuptools wheel
+pip install -e .[dev]
+cp .env.example .env
+set -a
+source .env
+set +a
+python api_server.py
+```
+
+## Quick Start (Flutter)
+
+```bash
+cd flutter_client
+flutter pub get
+flutter run -d windows --dart-define=API_URL=http://127.0.0.1:8000
+# or
+flutter run -d chrome --dart-define=API_URL=http://127.0.0.1:8000
+```
+
+## API examples (curl)
+
+### Create conversation
+```bash
+curl -X POST http://127.0.0.1:8000/conversations \
+  -H 'Content-Type: application/json' \
+  -d '{"title":"Research chat"}'
+```
+
+### Send chat message (JSON)
+```bash
+curl -X POST http://127.0.0.1:8000/chat \
+  -H 'Content-Type: application/json' \
+  -d '{"conversation_id":"<id>","agent":"assistant","message":"Hello"}'
+```
+
+### Send chat with attachments (multipart)
+```bash
+curl -X POST http://127.0.0.1:8000/chat \
+  -F conversation_id=<id> \
+  -F agent=assistant \
+  -F message='Summarize this PDF' \
+  -F files=@./sample.pdf
+```
+
+### Prompt builder
+```bash
+curl -X POST http://127.0.0.1:8000/agents/prompt-draft \
+  -H 'Content-Type: application/json' \
+  -d '{"goal":"Build a support triage assistant","requirements":["classify severity","give next steps"],"constraints":["never reveal secrets"]}'
+```
+
+### Save system
+```bash
+curl -X POST http://127.0.0.1:8000/systems \
+  -H 'Content-Type: application/json' \
+  -d '{"name":"triage-pipeline","definition":{"nodes":[{"id":"n1","type":"agent","agent":"assistant"}],"edges":[]}}'
+```
+
+### Run system
+```bash
+curl -X POST http://127.0.0.1:8000/systems/triage-pipeline/run \
+  -H 'Content-Type: application/json' \
+  -d '{"prompt":"Analyze this outage report"}'
+```
+
+## Validation
+
+```bash
+python -m compileall app.py api_server.py src tests
+python -m pytest -q
+```
