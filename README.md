@@ -157,3 +157,41 @@ The stream emits `start`, `token`, `end`, and `error` events.
   - legacy ID `tavily` is mapped to `tavily_web_search` server-side for compatibility.
 - `stream_not_supported`:
   - selected provider/model does not support streaming; UI falls back to standard `/chat`.
+
+
+### Tools page quickstart
+- Open **Tools** in Flutter Studio.
+- Use the unified list with filters (All / Built-in / MCP / Agent tools).
+- Click **Add Tool** to create Tavily, MCP-imported, or Agent Tool entries.
+
+### Tavily setup
+- Add in backend `.env` (project root):
+
+```env
+TAVILY_API_KEY=your_key_here
+```
+
+- Restart backend after editing `.env`.
+- If missing, Tavily appears in `/tools` with `status=missing_key`.
+
+### MCP import
+Import JSON config via API:
+
+```bash
+curl -X POST http://127.0.0.1:8000/tools/mcp/import \
+  -H 'Content-Type: application/json' \
+  -d '{
+    "description":"Local MCP import",
+    "config":{
+      "mcpServers":{
+        "amap-maps":{
+          "command":"npx",
+          "args":["-y","@amap/amap-maps-mcp-server"],
+          "env":{"AMAP_MAPS_API_KEY":"api_key"}
+        }
+      }
+    }
+  }'
+```
+
+Security note: env values inside imported MCP config are stored locally in `./data/app.db` through `mcp_servers.env_json`.

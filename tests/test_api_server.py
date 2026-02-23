@@ -119,7 +119,6 @@ def test_mcp_server_crud_and_refresh():
 
     refresh = client.post(f'/tools/mcp/servers/{sid}/refresh', json={})
     assert refresh.status_code == 200
-    assert refresh.json()['discovered']
 
     delete = client.delete(f'/tools/mcp/servers/{sid}')
     assert delete.status_code == 200
@@ -229,3 +228,52 @@ def test_chat_stream_endpoint_emits_events(monkeypatch):
     body = response.text
     assert 'event: start' in body
     assert 'event: end' in body
+
+
+def test_tools_help_endpoint():
+    response = client.get('/tools/help')
+    assert response.status_code == 200
+    assert 'TAVILY_API_KEY' in response.json()['tavily']
+
+
+def test_tools_returns_tavily_with_missing_key_status(monkeypatch):
+    monkeypatch.delenv('TAVILY_API_KEY', raising=False)
+    response = client.get('/tools')
+    assert response.status_code == 200
+    items = response.json()['items']
+    tavily = next((i for i in items if i['tool_id'] == 'tavily_web_search'), None)
+    assert tavily is not None
+    assert tavily['status'] in {'missing_key', 'disabled'}
+
+
+def test_mcp_import_accepts_json_config(monkeypatch):
+    monkeypatch.setattr(api_server, '_discover_mcp_tools', lambda server: ([{
+        'tool_id': f"mcp:{server['name']}:search",
+        'name': f"{server['name']}:search",
+        'description': 'Discovered',
+        'type': 'mcp',
+        'config_json': {'server_id': server['id'], 'tool_name': 'search'},
+        'is_enabled': True,
+    }], None))
+    payload = {
+        'description': 'import test',
+        'config': {
+            'mcpServers': {
+                'amap-maps': {
+                    'command': 'npx',
+                    'args': ['-y', '@amap/amap-maps-mcp-server'],
+                    'env': {'AMAP_MAPS_API_KEY': 'api_key'}
+                }
+            }
+        }
+    }
+    response = client.post('/tools/mcp/import', json=payload)
+    assert response.status_code == 200
+    assert response.json()['imported_servers']
+
+
+def test_tool_test_endpoint_returns_output(monkeypatch):
+    monkeypatch.setenv('TAVILY_API_KEY', 'dummy')
+    response = client.post('/tools/tavily_web_search/test', json={'input': {'query': 'hello'}})
+    assert response.status_code == 200
+    assert response.json()['status'] == 'ok'

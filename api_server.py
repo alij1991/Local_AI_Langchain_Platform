@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import re
 import shutil
 import uuid
@@ -124,6 +125,15 @@ class MCPServerRequest(BaseModel):
     args: list[str] = Field(default_factory=list)
     env: dict[str, str] = Field(default_factory=dict)
     enabled: bool = True
+
+
+class MCPImportRequest(BaseModel):
+    description: str = ""
+    config: dict[str, Any]
+
+
+class ToolTestRequest(BaseModel):
+    input: Any = ""
 
 
 class HFAddRequest(BaseModel):
@@ -518,27 +528,16 @@ def _all_agent_definitions() -> list[dict[str, Any]]:
     return list(merged.values())
 
 
-def _normalized_tools() -> list[dict[str, Any]]:
-    rows = list_tools_db()
-    by_name = {row["name"]: row for row in rows}
-    normalized = list(rows)
-    for tool in orchestrator.tools:
-        if tool.name in by_name:
-            continue
-        lowered = tool.name.lower()
-        tool_type = "tavily" if "tavily" in lowered else "mcp" if "mcp" in lowered else "builtin"
-        normalized.append(
-            {
-                "tool_id": tool.name,
-                "name": tool.name,
-                "type": tool_type,
-                "description": tool.description or "Built-in LangChain tool",
-                "config_json": {},
-                "is_enabled": False,
-                "builtin": True,
-            }
-        )
-    return normalized
+def _normalize_tool_type(raw_type: str) -> str:
+    mapping = {
+        "tavily": "builtin_tavily",
+        "builtin": "custom",
+        "mcp": "mcp",
+        "agent_tool": "agent_tool",
+        "builtin_tavily": "builtin_tavily",
+        "custom": "custom",
+    }
+    return mapping.get(raw_type, raw_type)
 
 
 def _canonical_tool_id(tool_id: str) -> str:
@@ -548,8 +547,154 @@ def _canonical_tool_id(tool_id: str) -> str:
     return alias_map.get(tool_id, tool_id)
 
 
+def _discover_mcp_tools(server: dict[str, Any]) -> tuple[list[dict[str, Any]], str | None]:
+    server_name = str(server.get("name") or "mcp")
+    server_id = str(server.get("id") or "")
+    cmd = str(server.get("command") or "")
+    args = server.get("args_json") or server.get("args") or []
+    env = server.get("env_json") or server.get("env") or {}
+    endpoint = str(server.get("endpoint") or "")
+
+    try:
+        from langchain_mcp_adapters.client import MultiServerMCPClient
+    except Exception as exc:  # noqa: BLE001
+        return [], f"mcp_adapter_unavailable: {exc}"
+
+    server_cfg: dict[str, Any]
+    if endpoint:
+        server_cfg = {"url": endpoint, "transport": "streamable_http"}
+    elif cmd:
+        server_cfg = {"command": cmd, "args": list(args), "env": dict(env), "transport": "stdio"}
+    else:
+        return [], "missing_server_transport_config"
+
+    try:
+        import asyncio
+
+        async def _run() -> list[Any]:
+            client = MultiServerMCPClient({server_name: server_cfg})
+            return await client.get_tools()
+
+        tools = asyncio.run(_run())
+    except Exception as exc:  # noqa: BLE001
+        return [], f"unreachable: {exc}"
+
+    discovered: list[dict[str, Any]] = []
+    for t in tools:
+        tname = str(getattr(t, "name", "mcp_tool"))
+        discovered.append(
+            {
+                "tool_id": f"mcp:{server_name}:{tname}",
+                "name": f"{server_name}:{tname}",
+                "description": str(getattr(t, "description", "MCP discovered tool")),
+                "type": "mcp",
+                "config_json": {"server_id": server_id, "server_name": server_name, "tool_name": tname},
+                "is_enabled": bool(server.get("enabled", 1)),
+            }
+        )
+    return discovered, None
+
+
+def _tool_status(item: dict[str, Any]) -> str:
+    ttype = _normalize_tool_type(str(item.get("type", "")))
+    enabled = bool(item.get("is_enabled"))
+    if not enabled:
+        return "disabled"
+    if ttype == "builtin_tavily" and not os.getenv("TAVILY_API_KEY", "").strip():
+        return "missing_key"
+    return "enabled"
+
+
+def _normalized_tools() -> list[dict[str, Any]]:
+    rows = list_tools_db()
+    normalized: list[dict[str, Any]] = []
+    by_id: dict[str, dict[str, Any]] = {}
+
+    for row in rows:
+        item = dict(row)
+        item["tool_id"] = _canonical_tool_id(str(item.get("tool_id") or ""))
+        item["type"] = _normalize_tool_type(str(item.get("type") or "custom"))
+        item["enabled"] = bool(item.get("is_enabled"))
+        item["status"] = _tool_status(item)
+        normalized.append(item)
+        by_id[item["tool_id"]] = item
+
+    for tool in orchestrator.tools:
+        canonical = _canonical_tool_id(tool.name)
+        if canonical in by_id:
+            continue
+        ttype = "builtin_tavily" if canonical == "tavily_web_search" else "custom"
+        item = {
+            "tool_id": canonical,
+            "name": tool.name,
+            "type": ttype,
+            "description": tool.description or "Built-in LangChain tool",
+            "config_json": {},
+            "is_enabled": True if ttype != "builtin_tavily" else bool(os.getenv("TAVILY_API_KEY", "").strip()),
+            "enabled": True if ttype != "builtin_tavily" else bool(os.getenv("TAVILY_API_KEY", "").strip()),
+            "builtin": True,
+        }
+        item["status"] = _tool_status(item)
+        normalized.append(item)
+        by_id[canonical] = item
+
+    if "tavily_web_search" not in by_id:
+        item = {
+            "tool_id": "tavily_web_search",
+            "name": "tavily_web_search",
+            "type": "builtin_tavily",
+            "description": "Search the web using Tavily.",
+            "config_json": {"max_results": 5},
+            "is_enabled": bool(os.getenv("TAVILY_API_KEY", "").strip()),
+            "enabled": bool(os.getenv("TAVILY_API_KEY", "").strip()),
+            "builtin": True,
+        }
+        item["status"] = _tool_status(item)
+        normalized.append(item)
+
+    return normalized
+
+
 def _available_tool_ids() -> set[str]:
     return {_canonical_tool_id(str(item.get("tool_id") or item.get("name") or "")) for item in _normalized_tools()}
+
+
+def _tool_entry(tool_id: str) -> dict[str, Any] | None:
+    canonical = _canonical_tool_id(tool_id)
+    for item in _normalized_tools():
+        if str(item.get("tool_id")) == canonical:
+            return item
+    return None
+
+
+def _execute_tool(tool_id: str, tool_input: Any) -> dict[str, Any]:
+    entry = _tool_entry(tool_id)
+    if not entry:
+        raise error_response("not_found", "Tool not found", status=404)
+    status = entry.get("status")
+    if status == "missing_key":
+        raise error_response("missing_key", "Tool is missing required API key", status=400)
+    if status in {"disabled"}:
+        raise error_response("disabled_tool", "Tool is disabled", status=400)
+
+    canonical = _canonical_tool_id(str(entry.get("tool_id")))
+    payload = tool_input if isinstance(tool_input, dict) else {"query": str(tool_input)}
+
+    for t in orchestrator.tools:
+        if _canonical_tool_id(t.name) == canonical:
+            try:
+                return {"tool_id": canonical, "output": t.invoke(payload), "status": "ok"}
+            except Exception as exc:  # noqa: BLE001
+                raise error_response("tool_execution_error", str(exc), status=500)
+
+    if str(entry.get("type")) == "agent_tool":
+        target = (entry.get("config_json") or {}).get("target_agent")
+        if target not in orchestrator.definitions:
+            raise error_response("invalid_agent", f"Unknown target agent: {target}", status=400)
+        message = tool_input if isinstance(tool_input, str) else json.dumps(tool_input)
+        return {"tool_id": canonical, "output": orchestrator.chat_with_agent(target, message), "status": "ok"}
+
+    raise error_response("tool_unavailable", "Tool runtime is unavailable", status=400)
 
 
 # Agent endpoints
@@ -681,34 +826,43 @@ def list_tools_endpoint() -> dict[str, Any]:
     return {"tools": items, "tool_names": [item["name"] for item in items], "items": items}
 
 
+@app.get("/tools/help")
+def tools_help() -> dict[str, Any]:
+    return {
+        "tavily": "Set TAVILY_API_KEY in .env (backend) or as environment variable before running api_server.py",
+        "mcp": "Use POST /tools/mcp/import with JSON config containing mcpServers map.",
+    }
+
+
 @app.get("/tools/status")
 def tools_status() -> dict[str, Any]:
     items = _normalized_tools()
-    has_tavily_key = bool((__import__("os").environ.get("TAVILY_API_KEY", "")).strip())
     status = []
     for item in items:
-        if item["type"] == "tavily" and not has_tavily_key:
-            status.append({"tool_id": item["tool_id"], "ok": False, "reason": "missing_tavily_api_key"})
-        else:
-            status.append({"tool_id": item["tool_id"], "ok": bool(item["is_enabled"]), "reason": "enabled" if item["is_enabled"] else "disabled"})
+        st = str(item.get("status", "disabled"))
+        status.append({"tool_id": item["tool_id"], "ok": st == "enabled", "reason": st})
     return {"items": status}
 
 
 @app.get("/tools/{tool_id}")
 def get_tool_endpoint(tool_id: str) -> dict[str, Any]:
-    row = get_tool_db(tool_id)
-    if not row:
+    entry = _tool_entry(tool_id)
+    if not entry:
         raise error_response("not_found", "Tool not found", status=404)
-    return row
+    return entry
 
 
 @app.post("/tools")
 def create_tool(payload: ToolCreateRequest) -> dict[str, Any]:
+    payload.type = _normalize_tool_type(payload.type)
+    payload.tool_id = _canonical_tool_id(payload.tool_id or payload.name)
     if payload.type == "agent_tool":
         target = payload.config_json.get("target_agent")
         if target not in orchestrator.definitions:
             raise error_response("invalid_agent", f"Unknown target agent: {target}")
     row = upsert_tool(payload.tool_id, payload.name, payload.type, payload.description, payload.config_json, payload.is_enabled)
+    row["type"] = _normalize_tool_type(str(row.get("type") or "custom"))
+    row["status"] = _tool_status(row)
     return row
 
 
@@ -748,24 +902,52 @@ def mcp_server_delete(server_id: str) -> dict[str, str]:
 
 @app.post("/tools/mcp/servers/{server_id}/refresh")
 def mcp_server_refresh(server_id: str) -> dict[str, Any]:
-    # lightweight offline-safe discovery placeholder
     servers = {s["id"]: s for s in list_mcp_servers()}
     if server_id not in servers:
         raise error_response("not_found", "MCP server not found", status=404)
     server = servers[server_id]
-    discovered = [
-        {
-            "tool_id": f"mcp_{server_id}_query",
-            "name": f"{server['name']} query",
-            "description": "Discovered MCP tool",
-            "type": "mcp",
-            "config_json": {"server_id": server_id, "method": "tools/call"},
-            "is_enabled": bool(server.get("enabled")),
-        }
-    ]
+    discovered, err = _discover_mcp_tools(server)
+    rows: list[dict[str, Any]] = []
     for tool in discovered:
-        upsert_tool(tool["tool_id"], tool["name"], tool["type"], tool["description"], tool["config_json"], tool["is_enabled"])
-    return {"discovered": discovered}
+        rows.append(upsert_tool(tool["tool_id"], tool["name"], "mcp", tool["description"], tool["config_json"], bool(tool.get("is_enabled", True))))
+    return {"discovered": rows, "error": err}
+
+
+@app.post("/tools/mcp/import")
+def mcp_import(payload: MCPImportRequest) -> dict[str, Any]:
+    servers = payload.config.get("mcpServers") if isinstance(payload.config, dict) else None
+    if not isinstance(servers, dict) or not servers:
+        raise error_response("invalid_config", "config.mcpServers must be a non-empty object")
+
+    imported_servers: list[dict[str, Any]] = []
+    discovered_tools: list[dict[str, Any]] = []
+    errors: list[dict[str, str]] = []
+
+    for server_name, cfg in servers.items():
+        cfg = cfg or {}
+        row = upsert_mcp_server(
+            None,
+            str(server_name),
+            str(cfg.get("transport") or ("http" if cfg.get("url") else "stdio")),
+            str(cfg.get("url") or cfg.get("endpoint") or ""),
+            str(cfg.get("command") or ""),
+            list(cfg.get("args") or []),
+            dict(cfg.get("env") or {}),
+            True,
+        )
+        imported_servers.append(row)
+        tools, err = _discover_mcp_tools(row)
+        if err:
+            errors.append({"server": str(server_name), "error": err})
+        for tool in tools:
+            discovered_tools.append(upsert_tool(tool["tool_id"], tool["name"], "mcp", tool["description"], tool["config_json"], bool(tool.get("is_enabled", True))))
+
+    return {"imported_servers": imported_servers, "discovered_tools": discovered_tools, "errors": errors, "description": payload.description}
+
+
+@app.post("/tools/{tool_id}/test")
+def test_tool_endpoint(tool_id: str, payload: ToolTestRequest) -> dict[str, Any]:
+    return _execute_tool(tool_id, payload.input)
 
 
 @app.get("/tools/template")
