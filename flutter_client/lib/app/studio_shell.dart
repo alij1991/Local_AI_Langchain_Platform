@@ -3,6 +3,7 @@ import 'package:local_ai_flutter_client/models/studio_models.dart';
 import 'package:local_ai_flutter_client/pages/agents_page.dart';
 import 'package:local_ai_flutter_client/pages/chat_page.dart';
 import 'package:local_ai_flutter_client/pages/models_page.dart';
+import 'package:local_ai_flutter_client/pages/prompt_builder_page.dart';
 import 'package:local_ai_flutter_client/pages/tools_page.dart';
 import 'package:local_ai_flutter_client/pages/systems_page.dart';
 import 'package:local_ai_flutter_client/services/api_client.dart';
@@ -24,7 +25,7 @@ class _StudioShellState extends State<StudioShell> {
       AppSection.chat: ChatPage(api: api),
       AppSection.models: ModelsPage(api: api),
       AppSection.agents: AgentsPage(api: api),
-      AppSection.promptBuilder: const Center(child: Text('Prompt Builder page still available in backend endpoint /agents/prompt-draft.')),
+      AppSection.promptBuilder: PromptBuilderPage(api: api),
       AppSection.tools: ToolsPage(api: api),
       AppSection.systems: SystemsPage(api: api),
     };

@@ -76,7 +76,7 @@ class AgentTestRequest(BaseModel):
 
 
 class PromptDraftRequest(BaseModel):
-    goal: str = ""
+    goal: str = Field(..., min_length=1)
     context: str = ""
     requirements: list[str] = Field(default_factory=list)
     constraints: list[str] = Field(default_factory=list)
@@ -272,7 +272,7 @@ def _build_prompt_fallback(payload: PromptDraftRequest) -> dict[str, Any]:
             "## Acceptance Criteria\n" + "\n".join([f"- {x}" for x in sections["acceptance_criteria"]]),
         ]
     )
-    return {"prompt_text": prompt_text, "sections": sections}
+    return {"prompt_text": prompt_text, "sections": sections, "used_fallback": True}
 
 
 def _validate_agent_payload(payload: AgentCreateRequest) -> None:
@@ -629,6 +629,7 @@ def draft_prompt(payload: PromptDraftRequest) -> dict[str, Any]:
         )
         if llm_text.strip():
             fallback["prompt_text"] = llm_text.strip()
+            fallback["used_fallback"] = False
     except Exception as exc:  # noqa: BLE001
         logger.warning("Prompt refine fallback due to: %s", exc)
     return fallback
@@ -787,8 +788,7 @@ def systems_run_legacy(payload: dict[str, str]) -> dict[str, Any]:
 
 
 # unified chat
-@app.post("/chat")
-async def chat(request: Request) -> dict[str, Any]:
+async def _chat_impl(request: Request) -> dict[str, Any]:
     content_type = request.headers.get("content-type", "")
     attachments_meta: list[dict] = []
     stored_paths: list[Path] = []
@@ -854,6 +854,16 @@ async def chat(request: Request) -> dict[str, Any]:
         "assistant_reply": reply,
         "messages": list_messages(conversation_id, limit=100),
     }
+
+
+@app.post("/chat")
+async def chat(request: Request) -> dict[str, Any]:
+    return await _chat_impl(request)
+
+
+@app.post("/chat_with_attachments")
+async def chat_with_attachments(request: Request) -> dict[str, Any]:
+    return await _chat_impl(request)
 
 
 if __name__ == "__main__":
