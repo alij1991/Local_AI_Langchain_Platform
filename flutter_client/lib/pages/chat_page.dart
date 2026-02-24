@@ -3,7 +3,6 @@ import 'dart:convert';
 
 import 'package:file_picker/file_picker.dart';
 import 'package:flutter/material.dart';
-import 'package:flutter/rendering.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_markdown/flutter_markdown.dart';
 import 'package:local_ai_flutter_client/services/api_client.dart';
@@ -61,6 +60,7 @@ class _ChatPageState extends State<ChatPage> {
   bool _supportsStreaming = false;
   bool _autoScroll = true;
   bool _showJumpToLatest = false;
+  bool _tracingEnabled = false;
 
   String _error = '';
   final List<PlatformFile> _pendingAttachments = [];
@@ -108,6 +108,7 @@ class _ChatPageState extends State<ChatPage> {
         _messages = messages;
       });
       await _refreshCapabilities();
+      await _refreshTraceStatus();
       _scheduleAutoScroll(force: true);
     } finally {
       if (mounted) {
@@ -488,7 +489,7 @@ class _ChatPageState extends State<ChatPage> {
                     onPressed: () => _sendMessage(overrideText: m.retryMessage, overrideAttachments: m.retryAttachments, retryLocalId: m.localId),
                     child: const Text('Retry'),
                   ),
-                if (!m.isUser && m.runId != null)
+                if (!m.isUser && m.runId != null && _tracingEnabled)
                   TextButton(
                     onPressed: () => _openTrace(m.runId!),
                     child: const Text('View Trace'),
@@ -504,52 +505,76 @@ class _ChatPageState extends State<ChatPage> {
 
 
   Future<void> _openTrace(String runId) async {
-    Map<String, dynamic>? trace;
-    String error = '';
-    try {
-      trace = await widget.api.get('/traces/$runId') as Map<String, dynamic>;
-    } catch (e) {
-      error = '$e';
+    Future<Map<String, dynamic>?> _fetch() async {
+      try {
+        return await widget.api.get('/traces/$runId') as Map<String, dynamic>;
+      } catch (_) {
+        return null;
+      }
     }
+
     if (!mounted) return;
     await showModalBottomSheet(
       context: context,
       isScrollControlled: true,
       builder: (_) => SizedBox(
         height: MediaQuery.of(context).size.height * 0.8,
-        child: Padding(
-          padding: const EdgeInsets.all(12),
-          child: error.isNotEmpty
-              ? Text(error)
-              : Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
-                  Text('Trace $runId', style: Theme.of(context).textTheme.titleMedium),
-                  const SizedBox(height: 8),
-                  Text('Agent: ${trace?['agent_name']} • Model: ${trace?['model_provider']}:${trace?['model_id']} • Duration: ${trace?['duration_ms']} ms'),
-                  const SizedBox(height: 8),
-                  Align(
-                    alignment: Alignment.centerRight,
-                    child: FilledButton.tonal(
-                      onPressed: () => Clipboard.setData(ClipboardData(text: const JsonEncoder.withIndent('  ').convert(trace ?? {}))),
-                      child: const Text('Copy trace JSON'),
-                    ),
-                  ),
-                  const SizedBox(height: 8),
-                  Expanded(
-                    child: ListView(
-                      children: ((trace?['events'] as List<dynamic>?) ?? []).map((e) {
-                        final m = e as Map<String, dynamic>;
-                        return ExpansionTile(
-                          title: Text('${m['event_type']} • ${m['name']}'),
-                          subtitle: Text('duration: ${m['duration_ms'] ?? '-'} ms'),
-                          children: [
-                            if (m['inputs'] != null) SelectableText('inputs: ${const JsonEncoder.withIndent('  ').convert(m['inputs'])}'),
-                            if (m['outputs'] != null) SelectableText('outputs: ${const JsonEncoder.withIndent('  ').convert(m['outputs'])}'),
-                          ],
-                        );
-                      }).toList(),
-                    ),
+        child: FutureBuilder<Map<String, dynamic>?>(
+          future: _fetch(),
+          builder: (context, snapshot) {
+            if (snapshot.connectionState != ConnectionState.done) {
+              return const Center(child: CircularProgressIndicator());
+            }
+            final trace = snapshot.data;
+            if (trace == null) {
+              return Padding(
+                padding: const EdgeInsets.all(12),
+                child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+                  const Text('Trace not available. Enable TRACE_ENABLED=true on backend and retry.'),
+                  const SizedBox(height: 12),
+                  FilledButton.tonal(
+                    onPressed: () => (context as Element).markNeedsBuild(),
+                    child: const Text('Recheck / Refresh'),
                   ),
                 ]),
+              );
+            }
+            return Padding(
+              padding: const EdgeInsets.all(12),
+              child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+                Text('Trace $runId', style: Theme.of(context).textTheme.titleMedium),
+                const SizedBox(height: 8),
+                Text('Agent: ${trace['agent_name']} • Model: ${trace['model_provider']}:${trace['model_id']} • Duration: ${trace['duration_ms']} ms'),
+                const SizedBox(height: 8),
+                Wrap(spacing: 8, children: [
+                  FilledButton.tonal(
+                    onPressed: () => Clipboard.setData(ClipboardData(text: const JsonEncoder.withIndent('  ').convert(trace))),
+                    child: const Text('Copy trace JSON'),
+                  ),
+                  FilledButton.tonal(
+                    onPressed: () => (context as Element).markNeedsBuild(),
+                    child: const Text('Recheck / Refresh'),
+                  ),
+                ]),
+                const SizedBox(height: 8),
+                Expanded(
+                  child: ListView(
+                    children: ((trace['events'] as List<dynamic>?) ?? []).map((e) {
+                      final m = e as Map<String, dynamic>;
+                      return ExpansionTile(
+                        title: Text('${m['event_type']} • ${m['name']}'),
+                        subtitle: Text('duration: ${m['duration_ms'] ?? '-'} ms'),
+                        children: [
+                          if (m['inputs'] != null) SelectableText('inputs: ${const JsonEncoder.withIndent('  ').convert(m['inputs'])}'),
+                          if (m['outputs'] != null) SelectableText('outputs: ${const JsonEncoder.withIndent('  ').convert(m['outputs'])}'),
+                        ],
+                      );
+                    }).toList(),
+                  ),
+                ),
+              ]),
+            );
+          },
         ),
       ),
     );

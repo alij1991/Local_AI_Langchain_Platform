@@ -6,6 +6,7 @@ import 'package:local_ai_flutter_client/pages/models_page.dart';
 import 'package:local_ai_flutter_client/pages/prompt_builder_page.dart';
 import 'package:local_ai_flutter_client/pages/tools_page.dart';
 import 'package:local_ai_flutter_client/pages/systems_page.dart';
+import 'package:local_ai_flutter_client/pages/runs_page.dart';
 import 'package:local_ai_flutter_client/services/api_client.dart';
 
 class StudioShell extends StatefulWidget {
@@ -28,6 +29,7 @@ class _StudioShellState extends State<StudioShell> {
       AppSection.promptBuilder: PromptBuilderPage(api: api),
       AppSection.tools: ToolsPage(api: api),
       AppSection.systems: SystemsPage(api: api),
+      AppSection.runs: RunsPage(api: api),
     };
 
     return Scaffold(
@@ -44,6 +46,7 @@ class _StudioShellState extends State<StudioShell> {
               NavigationRailDestination(icon: Icon(Icons.edit_note), label: Text('Prompt')),
               NavigationRailDestination(icon: Icon(Icons.handyman), label: Text('Tools')),
               NavigationRailDestination(icon: Icon(Icons.account_tree), label: Text('Systems')),
+              NavigationRailDestination(icon: Icon(Icons.receipt_long), label: Text('Runs')),
             ],
           ),
           const VerticalDivider(width: 1),
