@@ -10,23 +10,24 @@ readme = "README.md"
 requires-python = ">=3.10"
 authors = [{ name = "Local AI Team" }]
 dependencies = [
-  "gradio",
-  "langchain",
-  "langchain-ollama",
-  "langchain-community",
-  "langchain-text-splitters",
-  "langgraph",
-  "pydantic",
-  "ollama",
-  "langchain-huggingface",
-  "transformers",
-  "accelerate",
-  "tavily-python",
-  "langchain-tavily",
-  "langchain-mcp-adapters",
-  "fastapi",
-  "uvicorn",
-  "pypdf",
+  "gradio>=5.0.0",
+  "langchain>=0.3.0",
+  "langchain-core>=0.3.0",
+  "langchain-ollama>=0.2.0",
+  "langchain-community>=0.3.0",
+  "langchain-text-splitters>=0.3.0",
+  "langgraph>=0.2.0",
+  "pydantic>=2.7.0",
+  "ollama>=0.4.0",
+  "langchain-huggingface>=0.1.0",
+  "transformers>=4.45.0",
+  "accelerate>=0.34.0",
+  "tavily-python>=0.5.0",
+  "langchain-tavily>=0.1.0",
+  "langchain-mcp-adapters>=0.1.0",
+  "fastapi>=0.115.0",
+  "uvicorn>=0.30.0",
+  "pypdf>=5.0.0",
 ]
 
 [project.optional-dependencies]
@@ -39,7 +40,7 @@ dev = [
 where = ["src"]
 
 [tool.pytest.ini_options]
-pythonpath = ["src"]
+pythonpath = [".", "src"]
 addopts = "-q"
 
 [tool.ruff]

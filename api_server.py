@@ -1269,7 +1269,7 @@ def agent_definition(name: str) -> dict[str, Any]:
         "from langchain_ollama import ChatOllama\n"
         f"llm = ChatOllama(model={agent_json.get('model_id')!r}, base_url={config.ollama_base_url!r}, temperature={agent_json.get('settings', {}).get('temperature', 0.2)!r})\n"
         f"tools = [{', '.join([repr(t.get('name')) for t in resolved_tools])}]\n"
-        f"agent = create_react_agent(model=llm, tools=tools, prompt={agent_json.get('system_prompt', '')!r})"
+        f"agent = create_agent(model=llm, tools=tools, system_prompt={agent_json.get('system_prompt', '')!r})"
     )
     return {
         "agent_json": agent_json,
