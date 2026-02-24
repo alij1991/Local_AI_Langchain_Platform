@@ -6,6 +6,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Generator, TypedDict
 
+from langchain.agents import create_agent
 from langchain_core.messages import AIMessage, BaseMessage, HumanMessage, SystemMessage
 from langchain_core.prompts import ChatPromptTemplate
 from langchain_core.tools import StructuredTool
@@ -15,7 +16,7 @@ try:
     from langchain.agents import create_agent as create_langchain_agent
 except Exception:  # noqa: BLE001
     create_langchain_agent = None
-from langgraph.prebuilt import create_react_agent
+
 
 from .config import AppConfig
 from .huggingface import HuggingFaceController
@@ -131,7 +132,7 @@ class AgentOrchestrator:
             tools = []
         if create_langchain_agent is not None:
             return create_langchain_agent(model=llm, tools=tools, system_prompt=definition.system_prompt)
-        return create_react_agent(model=llm, tools=tools, prompt=definition.system_prompt)
+        return create_agent(model=llm, tools=tools, prompt=definition.system_prompt)
 
     @staticmethod
     def _is_tool_support_error(exc: Exception) -> bool:

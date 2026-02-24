@@ -14,8 +14,12 @@ src/local_ai_platform/lmstudio.py
 src/local_ai_platform/memory.py
 src/local_ai_platform/ollama.py
 src/local_ai_platform/tools.py
+src/local_ai_platform/tracing.py
+src/local_ai_platform/repositories/agents_repo.py
 src/local_ai_platform/repositories/conversations.py
+src/local_ai_platform/repositories/models.py
 src/local_ai_platform/repositories/systems.py
+src/local_ai_platform/repositories/tools_repo.py
 tests/test_agents.py
 tests/test_api_server.py
 tests/test_app_helpers.py
