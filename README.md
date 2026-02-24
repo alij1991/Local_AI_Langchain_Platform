@@ -235,3 +235,44 @@ Windows PowerShell quick debug:
 ```powershell
 python -c "import os; print('TAVILY_API_KEY' in os.environ)"
 ```
+
+## Tracing and run debugging
+
+The API now supports local LangChain callback-based tracing for chat runs.
+
+### Configure tracing
+
+Set environment variables (optional):
+
+- `TRACE_ENABLED=true|false` (default: `true`)
+- `TRACE_VERBOSE=true|false` (default: `false`)
+- `TRACE_STORE_DIR=./data/traces`
+
+When `TRACE_VERBOSE=false`, long prompts/tool payloads are truncated and secret-like keys are redacted.
+
+### Trace APIs
+
+- `GET /traces?conversation_id=<id>&limit=20`
+- `GET /traces/{run_id}`
+- `POST /traces/{run_id}/purge`
+
+Chat responses include `run_id` and `X-Run-Id` response header for correlation.
+
+### Optional LangSmith export
+
+If LangSmith is configured, LangChain tracing can also be exported:
+
+- `LANGSMITH_TRACING=true`
+- `LANGSMITH_API_KEY=...`
+- `LANGSMITH_PROJECT=...`
+
+This keeps local trace files while enabling hosted run inspection.
+
+### Agent definition/debug endpoints
+
+- `GET /agents/{name}/definition` returns:
+  - `agent_json` (stored canonical config)
+  - `resolved_tools` (redacted tool configs)
+  - `resolved_model`
+  - `python_snippet` showing LangChain wiring
+- `GET /tools/{tool_id}/definition` returns structured tool definition + snippet.

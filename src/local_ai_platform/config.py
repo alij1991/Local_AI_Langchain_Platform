@@ -21,6 +21,9 @@ class AppConfig:
     gradio_share: bool
     gradio_server_port: int
     api_server_port: int
+    trace_enabled: bool = True
+    trace_verbose: bool = False
+    trace_store_dir: str = "./data/traces"
 
 
 def load_config() -> AppConfig:
@@ -37,4 +40,7 @@ def load_config() -> AppConfig:
         gradio_share=_as_bool(os.getenv("GRADIO_SHARE"), default=False),
         gradio_server_port=int(os.getenv("GRADIO_SERVER_PORT", "7860")),
         api_server_port=int(os.getenv("API_SERVER_PORT", "8000")),
+        trace_enabled=_as_bool(os.getenv("TRACE_ENABLED"), default=True),
+        trace_verbose=_as_bool(os.getenv("TRACE_VERBOSE"), default=False),
+        trace_store_dir=os.getenv("TRACE_STORE_DIR", "./data/traces"),
     )

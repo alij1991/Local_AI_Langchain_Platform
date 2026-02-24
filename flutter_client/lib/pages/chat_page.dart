@@ -3,6 +3,7 @@ import 'dart:convert';
 
 import 'package:file_picker/file_picker.dart';
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:flutter_markdown/flutter_markdown.dart';
 import 'package:local_ai_flutter_client/services/api_client.dart';
 
@@ -18,6 +19,7 @@ class ChatUiMessage {
     this.createdAt,
     this.retryMessage,
     this.retryAttachments = const [],
+    this.runId,
   });
 
   final String localId;
@@ -28,6 +30,7 @@ class ChatUiMessage {
   final DateTime? createdAt;
   final String? retryMessage;
   final List<PlatformFile> retryAttachments;
+  String? runId;
 
   bool get isUser => role == 'user';
 }
@@ -119,6 +122,7 @@ class _ChatPageState extends State<ChatPage> {
       content: (m['content'] ?? '').toString(),
       attachments: _attachmentsForMessage(m),
       status: ChatMessageStatus.complete,
+      runId: m['run_id']?.toString(),
     );
   }
 
@@ -225,6 +229,7 @@ class _ChatPageState extends State<ChatPage> {
         final body = response as Map<String, dynamic>;
         final assistantReply = (body['assistant_reply'] ?? '').toString();
         final conversationId = body['conversation_id']?.toString();
+        final runId = body['run_id']?.toString();
 
         if (!mounted) return;
         setState(() {
@@ -235,6 +240,7 @@ class _ChatPageState extends State<ChatPage> {
           final assistant = _messages.firstWhere((m) => m.localId == assistantPlaceholder.localId);
           assistant.content = assistantReply;
           assistant.status = ChatMessageStatus.complete;
+          assistant.runId = runId;
         });
         _scheduleAutoScroll();
       }
@@ -268,6 +274,8 @@ class _ChatPageState extends State<ChatPage> {
       if (type == 'start') {
         setState(() {
           _conversationId = event['conversation_id']?.toString() ?? _conversationId;
+          final assistant = _messages.firstWhere((m) => m.localId == assistantLocalId);
+          assistant.runId = event['run_id']?.toString() ?? assistant.runId;
           final user = _messages.firstWhere((m) => m.localId == userLocalId);
           user.status = ChatMessageStatus.sent;
         });
@@ -283,6 +291,7 @@ class _ChatPageState extends State<ChatPage> {
         setState(() {
           final assistant = _messages.firstWhere((m) => m.localId == assistantLocalId);
           assistant.status = ChatMessageStatus.complete;
+          assistant.runId = runId;
           _isStreaming = false;
         });
       } else if (type == 'error') {
@@ -439,9 +448,68 @@ class _ChatPageState extends State<ChatPage> {
                     onPressed: () => _sendMessage(overrideText: m.retryMessage, overrideAttachments: m.retryAttachments, retryLocalId: m.localId),
                     child: const Text('Retry'),
                   ),
+                if (!m.isUser && m.runId != null)
+                  TextButton(
+                    onPressed: () => _openTrace(m.runId!),
+                    child: const Text('View Trace'),
+                  ),
               ],
             ),
           ],
+        ),
+      ),
+    );
+  }
+
+
+
+  Future<void> _openTrace(String runId) async {
+    Map<String, dynamic>? trace;
+    String error = '';
+    try {
+      trace = await widget.api.get('/traces/$runId') as Map<String, dynamic>;
+    } catch (e) {
+      error = '$e';
+    }
+    if (!mounted) return;
+    await showModalBottomSheet(
+      context: context,
+      isScrollControlled: true,
+      builder: (_) => SizedBox(
+        height: MediaQuery.of(context).size.height * 0.8,
+        child: Padding(
+          padding: const EdgeInsets.all(12),
+          child: error.isNotEmpty
+              ? Text(error)
+              : Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+                  Text('Trace $runId', style: Theme.of(context).textTheme.titleMedium),
+                  const SizedBox(height: 8),
+                  Text('Agent: ${trace?['agent_name']} • Model: ${trace?['model_provider']}:${trace?['model_id']} • Duration: ${trace?['duration_ms']} ms'),
+                  const SizedBox(height: 8),
+                  Align(
+                    alignment: Alignment.centerRight,
+                    child: FilledButton.tonal(
+                      onPressed: () => Clipboard.setData(ClipboardData(text: const JsonEncoder.withIndent('  ').convert(trace ?? {}))),
+                      child: const Text('Copy trace JSON'),
+                    ),
+                  ),
+                  const SizedBox(height: 8),
+                  Expanded(
+                    child: ListView(
+                      children: ((trace?['events'] as List<dynamic>?) ?? []).map((e) {
+                        final m = e as Map<String, dynamic>;
+                        return ExpansionTile(
+                          title: Text('${m['event_type']} • ${m['name']}'),
+                          subtitle: Text('duration: ${m['duration_ms'] ?? '-'} ms'),
+                          children: [
+                            if (m['inputs'] != null) SelectableText('inputs: ${const JsonEncoder.withIndent('  ').convert(m['inputs'])}'),
+                            if (m['outputs'] != null) SelectableText('outputs: ${const JsonEncoder.withIndent('  ').convert(m['outputs'])}'),
+                          ],
+                        );
+                      }).toList(),
+                    ),
+                  ),
+                ]),
         ),
       ),
     );
