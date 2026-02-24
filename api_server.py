@@ -11,6 +11,7 @@ from pathlib import Path
 from typing import Any
 
 from fastapi import FastAPI, HTTPException, Request
+from dotenv import load_dotenv
 from fastapi.responses import StreamingResponse
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
@@ -40,6 +41,9 @@ from local_ai_platform.repositories.tools_repo import (
     get_tool_db,
     list_mcp_servers,
     list_tools_db,
+    list_mcp_discovered_tools,
+    upsert_mcp_discovered_tools,
+    delete_mcp_discovered_tools,
     upsert_mcp_server,
     upsert_tool,
 )
@@ -136,6 +140,12 @@ class ToolTestRequest(BaseModel):
     input: Any = ""
 
 
+class MCPServerJsonRequest(BaseModel):
+    name: str
+    description: str = ""
+    config_json: dict[str, Any]
+
+
 class HFAddRequest(BaseModel):
     model_id: str
     revision: str = ""
@@ -147,13 +157,15 @@ def error_response(code: str, message: str, details: Any = None, status: int = 4
     return HTTPException(status_code=status, detail={"error": {"code": code, "message": message, "details": details}})
 
 
+load_dotenv()
 config = load_config()
 init_db()
 orchestrator = AgentOrchestrator(config)
 controller = OllamaController(config)
 
 # Hide simplistic defaults from UI/runtime by default.
-orchestrator.tools = [t for t in orchestrator.tools if t.name not in {"multiply_numbers", "utc_now"}]
+orchestrator.tools = [t for t in orchestrator.tools if t.name not in {"multiply_numbers", "utc_now", "mcp_query"}]
+delete_tool_db("mcp_query")
 
 ok, infos, _ = controller.list_local_models_detailed()
 startup_model = infos[0].name if ok and infos else config.default_model
@@ -616,6 +628,8 @@ def _normalized_tools() -> list[dict[str, Any]]:
         item = dict(row)
         item["tool_id"] = _canonical_tool_id(str(item.get("tool_id") or ""))
         item["type"] = _normalize_tool_type(str(item.get("type") or "custom"))
+        if item["tool_id"] == "mcp_query" or item["type"] == "mcp_tool":
+            continue
         item["enabled"] = bool(item.get("is_enabled"))
         item["status"] = _tool_status(item)
         normalized.append(item)
@@ -643,6 +657,7 @@ def _normalized_tools() -> list[dict[str, Any]]:
     # Expose MCP server configs in unified tools list as mcp_server entries
     for server in list_mcp_servers():
         sid = str(server.get("id"))
+        discovered = list_mcp_discovered_tools(sid)
         server_item = {
             "tool_id": f"mcp_server:{sid}",
             "name": str(server.get("name") or sid),
@@ -655,6 +670,10 @@ def _normalized_tools() -> list[dict[str, Any]]:
                 "command": server.get("command"),
                 "args": server.get("args_json", []),
                 "env": server.get("env_json", {}),
+                "discovered_tools": [
+                    {"tool_name": d.get("tool_name"), "description": d.get("description"), "input_schema": d.get("schema_json", {})}
+                    for d in discovered
+                ],
             },
             "is_enabled": bool(server.get("enabled", 1)),
             "enabled": bool(server.get("enabled", 1)),
@@ -850,6 +869,16 @@ def list_tools_endpoint() -> dict[str, Any]:
     return {"tools": items, "tool_names": [item["name"] for item in items], "items": items}
 
 
+@app.get("/tools/tavily/status")
+def tavily_status() -> dict[str, Any]:
+    key = os.getenv("TAVILY_API_KEY", "").strip()
+    return {
+        "present": bool(key),
+        "source": "env" if bool(key) else "unknown",
+        "masked_key": ("****" + key[-4:]) if len(key) >= 4 else ("****" if key else None),
+    }
+
+
 @app.get("/tools/help")
 def tools_help() -> dict[str, Any]:
     return {
@@ -931,10 +960,11 @@ def mcp_server_refresh(server_id: str) -> dict[str, Any]:
         raise error_response("not_found", "MCP server not found", status=404)
     server = servers[server_id]
     discovered, err = _discover_mcp_tools(server)
-    rows: list[dict[str, Any]] = []
-    for tool in discovered:
-        rows.append(upsert_tool(tool["tool_id"], tool["name"], "mcp_tool", tool["description"], tool["config_json"], bool(tool.get("is_enabled", True))))
-    return {"discovered": rows, "error": err}
+    cached = upsert_mcp_discovered_tools(server_id, [
+        {"tool_name": t["config_json"].get("tool_name") or t["name"], "description": t.get("description", ""), "input_schema": t["config_json"].get("schema", {})}
+        for t in discovered
+    ])
+    return {"discovered": cached, "error": err}
 
 
 @app.post("/tools/mcp/import")
@@ -963,8 +993,11 @@ def mcp_import(payload: MCPImportRequest) -> dict[str, Any]:
         tools, err = _discover_mcp_tools(row)
         if err:
             errors.append({"server": str(server_name), "error": err})
-        for tool in tools:
-            discovered_tools.append(upsert_tool(tool["tool_id"], tool["name"], "mcp_tool", tool["description"], tool["config_json"], bool(tool.get("is_enabled", True))))
+        cached = upsert_mcp_discovered_tools(row["id"], [
+            {"tool_name": t["config_json"].get("tool_name") or t["name"], "description": t.get("description", ""), "input_schema": t["config_json"].get("schema", {})}
+            for t in tools
+        ])
+        discovered_tools.extend(cached)
 
     return {"imported_servers": imported_servers, "discovered_tools": discovered_tools, "errors": errors, "description": payload.description}
 
@@ -982,6 +1015,26 @@ def mcp_servers_list_alias() -> dict[str, Any]:
 @app.post("/mcp/servers")
 def mcp_server_create_alias(payload: MCPServerRequest) -> dict[str, Any]:
     return mcp_server_create(payload)
+
+
+@app.post("/mcp/servers/json")
+def mcp_server_create_from_json(payload: MCPServerJsonRequest) -> dict[str, Any]:
+    cfg = payload.config_json or {}
+    if "mcpServers" in cfg and isinstance(cfg.get("mcpServers"), dict):
+        first_name, first_cfg = next(iter(cfg["mcpServers"].items()))
+        if not payload.name:
+            payload.name = str(first_name)
+        cfg = first_cfg or {}
+
+    transport = str(cfg.get("transport") or ("http" if cfg.get("url") else "stdio"))
+    endpoint = str(cfg.get("url") or cfg.get("endpoint") or "")
+    command = str(cfg.get("command") or "")
+    args = list(cfg.get("args") or [])
+    env = dict(cfg.get("env") or {})
+    if payload.description:
+        env = {**env, "__description": payload.description}
+
+    return upsert_mcp_server(None, payload.name, transport, endpoint, command, args, env, True)
 
 
 @app.put("/mcp/servers/{server_id}")
@@ -1009,27 +1062,30 @@ def mcp_tools_select(payload: dict[str, Any]) -> dict[str, Any]:
     if server_id not in servers:
         raise error_response("not_found", "MCP server not found", status=404)
 
-    rows: list[dict[str, Any]] = []
-    for item in selected_tools:
-        tool_name = str(item.get("tool_name") or item.get("name") or "").strip()
-        if not tool_name:
-            continue
-        tool_id = f"mcp:{servers[server_id]['name']}:{tool_name}"
-        row = upsert_tool(
-            tool_id,
-            str(item.get("name") or tool_name),
-            "mcp_tool",
-            str(item.get("description") or "MCP tool"),
-            {
-                "server_id": server_id,
-                "server_name": servers[server_id]["name"],
-                "tool_name": tool_name,
-                "schema": item.get("schema") or item.get("input_schema") or {},
-            },
-            bool(item.get("enabled", True)),
-        )
-        rows.append(row)
-    return {"items": rows}
+    cached = upsert_mcp_discovered_tools(server_id, [
+        {
+            "tool_name": str(item.get("tool_name") or item.get("name") or ""),
+            "description": str(item.get("description") or "MCP tool"),
+            "input_schema": item.get("schema") or item.get("input_schema") or {},
+        }
+        for item in selected_tools
+    ])
+    return {"items": cached}
+
+
+@app.post("/mcp/servers/{server_id}/tools/{tool_name}/invoke")
+def mcp_server_tool_invoke(server_id: str, tool_name: str, payload: ToolTestRequest) -> dict[str, Any]:
+    servers = {s["id"]: s for s in list_mcp_servers()}
+    if server_id not in servers:
+        raise error_response("not_found", "MCP server not found", status=404)
+    server = servers[server_id]
+    discovered, err = _discover_mcp_tools(server)
+    if err:
+        raise error_response("unreachable", err, status=502)
+    found = next((t for t in discovered if str(t["config_json"].get("tool_name") or t["name"]) == tool_name), None)
+    if not found:
+        raise error_response("not_found", "MCP tool not found", status=404)
+    return {"status": "ok", "server_id": server_id, "tool_name": tool_name, "output": {"note": "Invoke wiring ready", "input": payload.input}}
 
 
 @app.post("/mcp/tools/{tool_id}/test")
