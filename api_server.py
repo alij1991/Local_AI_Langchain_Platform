@@ -10,7 +10,7 @@ from dataclasses import asdict
 from pathlib import Path
 from typing import Any
 
-from fastapi import FastAPI, HTTPException, Request
+from fastapi import FastAPI, HTTPException, Request, Response
 from dotenv import load_dotenv
 from fastapi.responses import StreamingResponse
 from fastapi.middleware.cors import CORSMiddleware
@@ -23,6 +23,7 @@ from local_ai_platform.agents import AgentOrchestrator
 from local_ai_platform.db import init_db
 from local_ai_platform.memory import db_messages_to_langchain
 from local_ai_platform.ollama import ModelInfo, OllamaController
+from local_ai_platform.tracing import LocalTraceCallbackHandler, TraceRecorder, TraceStore
 from local_ai_platform.repositories.agents_repo import delete_agent_db, get_agent_db, list_agents_db, save_agent
 from local_ai_platform.repositories.conversations import (
     add_message,
@@ -162,6 +163,13 @@ config = load_config()
 init_db()
 orchestrator = AgentOrchestrator(config)
 controller = OllamaController(config)
+trace_store = TraceStore(cfg=type("Cfg", (), {"enabled": config.trace_enabled, "verbose": config.trace_verbose, "store_dir": config.trace_store_dir})())
+if os.getenv("LANGSMITH_TRACING", "").strip().lower() in {"1", "true", "yes", "on"}:
+    os.environ.setdefault("LANGCHAIN_TRACING_V2", "true")
+    if os.getenv("LANGSMITH_API_KEY"):
+        os.environ.setdefault("LANGCHAIN_API_KEY", os.getenv("LANGSMITH_API_KEY", ""))
+    if os.getenv("LANGSMITH_PROJECT"):
+        os.environ.setdefault("LANGCHAIN_PROJECT", os.getenv("LANGSMITH_PROJECT", ""))
 
 # Hide simplistic defaults from UI/runtime by default.
 orchestrator.tools = [t for t in orchestrator.tools if t.name not in {"multiply_numbers", "utc_now", "mcp_query"}]
@@ -174,6 +182,7 @@ orchestrator.add_agent("assistant", startup_model, "You are a practical AI assis
 for item in list_agents_db():
     d = item["json_definition"]
     orchestrator.add_agent(d["name"], d["model_id"], d.get("system_prompt", ""), provider=d.get("provider", "ollama"))
+    orchestrator.set_agent_tools(d["name"], [str(t) for t in d.get("tool_ids", [])])
 
 app = FastAPI(title="Local AI Platform API", version="0.5.0")
 app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_credentials=True, allow_methods=["*"], allow_headers=["*"])
@@ -190,6 +199,37 @@ def _safe_name(name: str) -> str:
     cleaned = re.sub(r"[^a-zA-Z0-9._-]", "_", name)
     return cleaned[:140] or f"file_{uuid.uuid4().hex}.bin"
 
+
+
+
+def _build_trace(agent: str, conversation_id: str | None) -> tuple[str, TraceRecorder, list[Any]]:
+    run_id = str(uuid.uuid4())
+    definition = orchestrator.definitions.get(agent)
+    provider = definition.provider if definition else "unknown"
+    model_id = definition.model_name if definition else ""
+    recorder = TraceRecorder(
+        cfg=type("Cfg", (), {"enabled": config.trace_enabled, "verbose": config.trace_verbose, "store_dir": config.trace_store_dir})(),
+        run_id=run_id,
+        conversation_id=conversation_id,
+        agent_name=agent,
+        model_provider=provider,
+        model_id=model_id,
+    )
+    callbacks: list[Any] = [LocalTraceCallbackHandler(recorder)] if config.trace_enabled else []
+    return run_id, recorder, callbacks
+
+
+def _finalize_trace(recorder: TraceRecorder, success: bool, error: str | None = None) -> None:
+    if not config.trace_enabled:
+        return
+    trace_store.save(recorder.finalize(success=success, error=error))
+
+
+def _redacted_env(data: dict[str, Any]) -> dict[str, Any]:
+    out: dict[str, Any] = {}
+    for k, v in data.items():
+        out[k] = "[REDACTED]" if any(x in k.lower() for x in ["key", "token", "secret", "password", "auth"]) else v
+    return out
 
 def _extract_document_with_langchain(path: Path) -> str:
     suffix = path.suffix.lower()
@@ -781,6 +821,7 @@ def create_agent(payload: AgentCreateRequest) -> dict[str, Any]:
         orchestrator.definitions[name].system_prompt = payload.system_prompt
     else:
         orchestrator.add_agent(name, payload.model_id, payload.system_prompt, provider=payload.provider)
+    orchestrator.set_agent_tools(name, definition["tool_ids"])
     return definition
 
 
@@ -1146,13 +1187,100 @@ def systems_run(name: str, payload: SystemRunRequest) -> dict[str, Any]:
     return {"outputs": orchestrator.run_agent_workflow(payload.prompt, sequence), "sequence": sequence}
 
 
+
+
 @app.post("/systems/run")
 def systems_run_legacy(payload: dict[str, str]) -> dict[str, Any]:
     return systems_run(payload.get("name", ""), SystemRunRequest(prompt=payload.get("prompt", "")))
 
+@app.get("/traces")
+def list_traces(conversation_id: str | None = None, limit: int = 20) -> dict[str, Any]:
+    if not config.trace_enabled:
+        return {"enabled": False, "items": []}
+    return {"enabled": True, "items": trace_store.list(conversation_id=conversation_id, limit=limit)}
+
+
+@app.get("/traces/{run_id}")
+def get_trace(run_id: str) -> dict[str, Any]:
+    if not config.trace_enabled:
+        return {"enabled": False}
+    trace = trace_store.get(run_id)
+    if not trace:
+        raise error_response("not_found", "Trace not found", status=404)
+    return trace
+
+
+@app.post("/traces/{run_id}/purge")
+def purge_trace(run_id: str) -> dict[str, Any]:
+    return {"deleted": trace_store.purge(run_id)}
+
+
+def _tool_python_snippet(tool: dict[str, Any]) -> str:
+    ttype = str(tool.get("type") or "custom")
+    cfg = tool.get("config_json") or {}
+    if ttype == "builtin_tavily" or str(tool.get("tool_id")) == "tavily_web_search":
+        return "from langchain_tavily import TavilySearch\ntool = TavilySearch(max_results=5)  # uses TAVILY_API_KEY from env"
+    if ttype == "mcp_server":
+        redacted = _redacted_env(dict(cfg.get("env") or {}))
+        return f"from langchain_mcp_adapters.client import MultiServerMCPClient\nclient = MultiServerMCPClient({{{repr(tool.get('name'))}: {{'transport': {repr(cfg.get('transport'))}, 'endpoint': {repr(cfg.get('endpoint'))}, 'command': {repr(cfg.get('command'))}, 'args': {repr(cfg.get('args'))}, 'env': {repr(redacted)}}}}})"
+    if ttype == "agent_tool":
+        target = (cfg or {}).get("target_agent", "assistant")
+        return f"# agent delegate tool\ndef delegate(task: str) -> str:\n    return orchestrator.chat_with_agent({target!r}, task)"
+    return "# custom tool\n# provide LangChain StructuredTool wiring for this tool type"
+
+
+@app.get("/tools/{tool_id}/definition")
+def tool_definition(tool_id: str) -> dict[str, Any]:
+    entry = _tool_entry(tool_id)
+    if not entry:
+        raise error_response("not_found", "Tool not found", status=404)
+    cfg = dict(entry.get("config_json") or {})
+    if "env" in cfg and isinstance(cfg["env"], dict):
+        cfg["env"] = _redacted_env(cfg["env"])
+    return {"tool": {**entry, "config_json": cfg}, "python_snippet": _tool_python_snippet({**entry, "config_json": cfg})}
+
+
+@app.get("/agents/{name}/definition")
+def agent_definition(name: str) -> dict[str, Any]:
+    if _clean_slug(name) == "assistant":
+        agent_json = _default_assistant_definition()
+    else:
+        row = get_agent_db(name)
+        if not row:
+            raise error_response("not_found", "Agent not found", status=404)
+        agent_json = row["json_definition"]
+    resolved_tools = []
+    for tid in agent_json.get("tool_ids", []):
+        tool = _tool_entry(str(tid))
+        if tool:
+            tcfg = dict(tool.get("config_json") or {})
+            if "env" in tcfg and isinstance(tcfg["env"], dict):
+                tcfg["env"] = _redacted_env(tcfg["env"])
+            resolved_tools.append({**tool, "config_json": tcfg})
+    definition = orchestrator.definitions.get(agent_json["name"])
+    resolved_model = {
+        "provider": agent_json.get("provider", "ollama"),
+        "model_id": agent_json.get("model_id"),
+        "settings": agent_json.get("settings", {}),
+        "supports_streaming": agent_json.get("provider", "ollama") == "ollama",
+        "supports_tools": agent_json.get("provider", "ollama") == "ollama",
+    }
+    snippet = (
+        "from langchain_ollama import ChatOllama\n"
+        f"llm = ChatOllama(model={agent_json.get('model_id')!r}, base_url={config.ollama_base_url!r}, temperature={agent_json.get('settings', {}).get('temperature', 0.2)!r})\n"
+        f"tools = [{', '.join([repr(t.get('name')) for t in resolved_tools])}]\n"
+        f"agent = create_react_agent(model=llm, tools=tools, prompt={agent_json.get('system_prompt', '')!r})"
+    )
+    return {
+        "agent_json": agent_json,
+        "resolved_tools": resolved_tools,
+        "resolved_model": resolved_model,
+        "python_snippet": snippet,
+    }
+
 
 # unified chat
-async def _chat_impl(request: Request) -> dict[str, Any]:
+async def _chat_impl(request: Request) -> tuple[dict[str, Any], str]:
     content_type = request.headers.get("content-type", "")
     attachments_meta: list[dict] = []
     stored_paths: list[Path] = []
@@ -1209,7 +1337,13 @@ async def _chat_impl(request: Request) -> dict[str, Any]:
 
     add_message(conversation_id, role="user", content=message or "(attachment)", agent=agent, model=model_name, attachments=attachments_meta)
 
-    reply = orchestrator.chat_with_agent(agent, composed, image_paths=image_paths, history_override=history, persist_history=False)
+    run_id, recorder, callbacks = _build_trace(agent, conversation_id)
+    try:
+        reply = orchestrator.chat_with_agent(agent, composed, image_paths=image_paths, history_override=history, persist_history=False, callbacks=callbacks, run_id=run_id)
+        _finalize_trace(recorder, success=True)
+    except Exception as exc:
+        _finalize_trace(recorder, success=False, error=str(exc))
+        raise
 
     assistant_message = add_message(conversation_id, role="assistant", content=reply, agent=agent, model=model_name)
     return {
@@ -1217,7 +1351,8 @@ async def _chat_impl(request: Request) -> dict[str, Any]:
         "assistant_message": assistant_message,
         "assistant_reply": reply,
         "messages": list_messages(conversation_id, limit=100),
-    }
+        "run_id": run_id,
+    }, run_id
 
 
 
@@ -1244,33 +1379,43 @@ def chat_stream(payload: ChatStreamRequest):
     model_name = definition.model_name
     add_message(conversation_id, role="user", content=payload.message, agent=agent, model=model_name, attachments=[])
 
+    run_id, recorder, callbacks = _build_trace(agent, conversation_id)
+
     def event_stream():
         try:
-            start = json.dumps({"conversation_id": conversation_id, "agent": agent})
+            start = json.dumps({"conversation_id": conversation_id, "agent": agent, "run_id": run_id})
             yield f"event: start\ndata: {start}\n\n"
             final = ""
-            for partial in orchestrator.stream_chat_with_agent(agent, payload.message):
+            for partial in orchestrator.stream_chat_with_agent(agent, payload.message, callbacks=callbacks):
                 delta = partial[len(final):] if partial.startswith(final) else partial
                 final = partial
                 if delta:
                     yield f"event: token\ndata: {json.dumps({'text': delta})}\n\n"
             assistant_message = add_message(conversation_id, role="assistant", content=final, agent=agent, model=model_name)
-            end = json.dumps({"conversation_id": conversation_id, "assistant_reply": final, "assistant_message": assistant_message})
+            end = json.dumps({"conversation_id": conversation_id, "assistant_reply": final, "assistant_message": assistant_message, "run_id": run_id})
+            _finalize_trace(recorder, success=True)
             yield f"event: end\ndata: {end}\n\n"
         except Exception as exc:  # noqa: BLE001
-            err = json.dumps({"error": {"code": "stream_failed", "message": str(exc)}})
+            _finalize_trace(recorder, success=False, error=str(exc))
+            err = json.dumps({"error": {"code": "stream_failed", "message": str(exc)}, "run_id": run_id})
             yield f"event: error\ndata: {err}\n\n"
 
-    return StreamingResponse(event_stream(), media_type="text/event-stream")
+    resp = StreamingResponse(event_stream(), media_type="text/event-stream")
+    resp.headers["X-Run-Id"] = run_id
+    return resp
 
 @app.post("/chat")
-async def chat(request: Request) -> dict[str, Any]:
-    return await _chat_impl(request)
+async def chat(request: Request, response: Response) -> dict[str, Any]:
+    body, run_id = await _chat_impl(request)
+    response.headers["X-Run-Id"] = run_id
+    return body
 
 
 @app.post("/chat_with_attachments")
-async def chat_with_attachments(request: Request) -> dict[str, Any]:
-    return await _chat_impl(request)
+async def chat_with_attachments(request: Request, response: Response) -> dict[str, Any]:
+    body, run_id = await _chat_impl(request)
+    response.headers["X-Run-Id"] = run_id
+    return body
 
 
 if __name__ == "__main__":

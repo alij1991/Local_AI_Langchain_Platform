@@ -1,4 +1,6 @@
+import 'dart:convert';
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:local_ai_flutter_client/services/api_client.dart';
 
 class AgentsPage extends StatefulWidget {
@@ -33,6 +35,9 @@ class _AgentsPageState extends State<AgentsPage> {
   bool _isSaving = false;
   bool _isTesting = false;
   int _loadVersion = 0;
+  int _tab = 0;
+  Map<String, dynamic>? _definition;
+  Map<String, dynamic>? _toolDefinition;
 
   @override
   void initState() {
@@ -87,7 +92,53 @@ class _AgentsPageState extends State<AgentsPage> {
       _temperature.text = (settings['temperature'] ?? 0.2).toString();
       _maxTokens.text = (settings['max_tokens'] ?? 1024).toString();
       _streaming = settings['streaming'] != false;
+      _definition = null;
     });
+    _loadDefinition();
+  }
+
+
+
+  Future<void> _loadDefinition() async {
+    if (_name.text.trim().isEmpty) return;
+    try {
+      final d = await widget.api.get('/agents/${_name.text}/definition') as Map<String, dynamic>;
+      if (!mounted) return;
+      setState(() => _definition = d);
+    } catch (e) {
+      if (!mounted) return;
+      setState(() => _error = '$e');
+    }
+  }
+
+  Future<void> _openToolDefinition(String toolId) async {
+    try {
+      final d = await widget.api.get('/tools/$toolId/definition') as Map<String, dynamic>;
+      if (!mounted) return;
+      setState(() => _toolDefinition = d);
+      await showDialog(
+        context: context,
+        builder: (_) => AlertDialog(
+          title: Text('Tool: $toolId'),
+          content: SizedBox(
+            width: 700,
+            child: SingleChildScrollView(
+              child: SelectableText(const JsonEncoder.withIndent('  ').convert(d)),
+            ),
+          ),
+          actions: [
+            TextButton(
+              onPressed: () => Clipboard.setData(ClipboardData(text: const JsonEncoder.withIndent('  ').convert(d))),
+              child: const Text('Copy'),
+            ),
+            TextButton(onPressed: () => Navigator.of(context).pop(), child: const Text('Close')),
+          ],
+        ),
+      );
+    } catch (e) {
+      if (!mounted) return;
+      setState(() => _error = '$e');
+    }
   }
 
   Future<void> _save() async {
@@ -206,10 +257,20 @@ class _AgentsPageState extends State<AgentsPage> {
         child: SelectionArea(
           child: ListView(children: [
             Text(_selected == null ? 'Create Agent' : 'Edit Agent', style: Theme.of(context).textTheme.headlineSmall),
+            const SizedBox(height: 8),
+            SegmentedButton<int>(
+              segments: const [ButtonSegment(value: 0, label: Text('Settings')), ButtonSegment(value: 1, label: Text('Definition'))],
+              selected: {_tab},
+              onSelectionChanged: (s) {
+                setState(() => _tab = s.first);
+                if (_tab == 1) _loadDefinition();
+              },
+            ),
             if (_error.isNotEmpty) ...[
               const SizedBox(height: 8),
               Text(_error, style: const TextStyle(color: Colors.red)),
             ],
+            if (_tab == 0) ...[
             TextField(controller: _name, decoration: const InputDecoration(labelText: 'Name')),
             const SizedBox(height: 8),
             TextField(controller: _desc, decoration: const InputDecoration(labelText: 'Description')),
@@ -244,6 +305,36 @@ class _AgentsPageState extends State<AgentsPage> {
             Row(children: [Expanded(child: TextField(controller: _temperature, decoration: const InputDecoration(labelText: 'Temperature'))), const SizedBox(width: 8), Expanded(child: TextField(controller: _maxTokens, decoration: const InputDecoration(labelText: 'Max tokens'))), const SizedBox(width: 8), Checkbox(value: _streaming, onChanged: (v) => setState(() => _streaming = v ?? true)), const Text('Streaming')]),
             const SizedBox(height: 8),
             Row(children: [FilledButton(onPressed: _isSaving ? null : _save, child: _isSaving ? const SizedBox(width: 16, height: 16, child: CircularProgressIndicator(strokeWidth: 2)) : const Text('Save')), const SizedBox(width: 8), FilledButton.tonal(onPressed: _isSaving ? null : _remove, child: const Text('Delete'))]),
+            ],
+            if (_tab == 1) ...[
+              FilledButton.tonal(onPressed: _loadDefinition, child: const Text('Refresh Definition')),
+              const SizedBox(height: 8),
+              if (_definition == null) const Text('No definition loaded yet.'),
+              if (_definition != null) ...[
+                Row(children: [
+                  FilledButton.tonal(
+                    onPressed: () => Clipboard.setData(ClipboardData(text: const JsonEncoder.withIndent('  ').convert(_definition!['agent_json'] ?? {}))),
+                    child: const Text('Copy JSON'),
+                  ),
+                  const SizedBox(width: 8),
+                  FilledButton.tonal(
+                    onPressed: () => Clipboard.setData(ClipboardData(text: (_definition!['python_snippet'] ?? '').toString())),
+                    child: const Text('Copy Snippet'),
+                  ),
+                ]),
+                const SizedBox(height: 8),
+                SelectableText(const JsonEncoder.withIndent('  ').convert(_definition!['agent_json'] ?? {})),
+                const SizedBox(height: 8),
+                SelectableText((_definition!['python_snippet'] ?? '').toString()),
+                const SizedBox(height: 8),
+                Text('Resolved tools', style: Theme.of(context).textTheme.titleMedium),
+                ...(((_definition!['resolved_tools'] as List<dynamic>?) ?? []).map((t) {
+                  final m = t as Map<String, dynamic>;
+                  final tid = (m['tool_id'] ?? '').toString();
+                  return ListTile(title: Text((m['name'] ?? tid).toString()), subtitle: Text(tid), trailing: TextButton(onPressed: tid.isEmpty ? null : () => _openToolDefinition(tid), child: const Text('Open definition')));
+                })),
+              ],
+            ],
             const Divider(height: 24),
             Text('Quick Test', style: Theme.of(context).textTheme.titleMedium),
             TextField(controller: _testMsg, decoration: const InputDecoration(labelText: 'Message')),

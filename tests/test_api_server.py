@@ -347,3 +347,28 @@ def test_mcp_discover_does_not_create_top_level_mcp_tool(monkeypatch):
     server_item = next((t for t in tools if t.get('type') == 'mcp_server' and t.get('config_json', {}).get('server_id') == sid), None)
     assert server_item is not None
     assert server_item['config_json']['discovered_tools']
+
+
+def test_chat_returns_run_id_and_trace_list(monkeypatch):
+    monkeypatch.setattr(api_server.orchestrator, 'chat_with_agent', lambda *args, **kwargs: 'trace reply')
+    response = client.post('/chat', json={'agent': 'assistant', 'message': 'trace me'})
+    assert response.status_code == 200
+    body = response.json()
+    assert body.get('run_id')
+    assert response.headers.get('x-run-id')
+
+    traces = client.get(f"/traces?conversation_id={body['conversation_id']}&limit=5")
+    assert traces.status_code == 200
+    assert traces.json()['enabled'] in {True, False}
+
+
+def test_agent_and_tool_definition_endpoints():
+    tool_resp = client.get('/tools/tavily_web_search/definition')
+    assert tool_resp.status_code == 200
+    assert 'python_snippet' in tool_resp.json()
+
+    agent_resp = client.get('/agents/assistant/definition')
+    assert agent_resp.status_code == 200
+    payload = agent_resp.json()
+    assert 'agent_json' in payload
+    assert 'python_snippet' in payload
