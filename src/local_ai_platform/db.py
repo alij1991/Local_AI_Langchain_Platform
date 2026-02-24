@@ -37,6 +37,7 @@ def init_db() -> None:
                 content TEXT NOT NULL,
                 created_at TEXT NOT NULL,
                 attachments_json TEXT,
+                run_id TEXT,
                 FOREIGN KEY(conversation_id) REFERENCES conversations(id) ON DELETE CASCADE
             );
 
@@ -102,6 +103,11 @@ def init_db() -> None:
             );
             """
         )
+        # Backward-compatible migrations
+        cols = [r[1] for r in conn.execute("PRAGMA table_info(messages)").fetchall()]
+        if "run_id" not in cols:
+            conn.execute("ALTER TABLE messages ADD COLUMN run_id TEXT")
+
         conn.commit()
     finally:
         conn.close()

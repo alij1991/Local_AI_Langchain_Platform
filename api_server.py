@@ -216,13 +216,15 @@ def _build_trace(agent: str, conversation_id: str | None) -> tuple[str, TraceRec
         model_id=model_id,
     )
     callbacks: list[Any] = [LocalTraceCallbackHandler(recorder)] if config.trace_enabled else []
+    if config.trace_enabled:
+        trace_store.upsert(recorder.to_dict(success=None, error=None))
     return run_id, recorder, callbacks
 
 
 def _finalize_trace(recorder: TraceRecorder, success: bool, error: str | None = None) -> None:
     if not config.trace_enabled:
         return
-    trace_store.save(recorder.finalize(success=success, error=error))
+    trace_store.upsert(recorder.finalize(success=success, error=error))
 
 
 def _redacted_env(data: dict[str, Any]) -> dict[str, Any]:
@@ -1215,6 +1217,29 @@ def purge_trace(run_id: str) -> dict[str, Any]:
     return {"deleted": trace_store.purge(run_id)}
 
 
+@app.get("/traces/status")
+def traces_status() -> dict[str, Any]:
+    return {
+        "enabled": bool(config.trace_enabled),
+        "verbose": bool(config.trace_verbose),
+        "store_dir": config.trace_store_dir,
+    }
+
+
+@app.get("/runs")
+def list_runs(limit: int = 50, offset: int = 0, conversation_id: str | None = None, agent: str | None = None) -> dict[str, Any]:
+    rows = trace_store.list(conversation_id=conversation_id, limit=max(limit + offset, 1))
+    if agent:
+        rows = [r for r in rows if (r.get("agent_name") or "") == agent]
+    rows = rows[offset: offset + limit]
+    return {"items": rows, "limit": limit, "offset": offset}
+
+
+@app.get("/runs/{run_id}")
+def get_run(run_id: str) -> dict[str, Any]:
+    return get_trace(run_id)
+
+
 def _tool_python_snippet(tool: dict[str, Any]) -> str:
     ttype = str(tool.get("type") or "custom")
     cfg = tool.get("config_json") or {}
@@ -1345,7 +1370,7 @@ async def _chat_impl(request: Request) -> tuple[dict[str, Any], str]:
         _finalize_trace(recorder, success=False, error=str(exc))
         raise
 
-    assistant_message = add_message(conversation_id, role="assistant", content=reply, agent=agent, model=model_name)
+    assistant_message = add_message(conversation_id, role="assistant", content=reply, agent=agent, model=model_name, run_id=run_id)
     return {
         "conversation_id": conversation_id,
         "assistant_message": assistant_message,
@@ -1391,7 +1416,7 @@ def chat_stream(payload: ChatStreamRequest):
                 final = partial
                 if delta:
                     yield f"event: token\ndata: {json.dumps({'text': delta})}\n\n"
-            assistant_message = add_message(conversation_id, role="assistant", content=final, agent=agent, model=model_name)
+            assistant_message = add_message(conversation_id, role="assistant", content=final, agent=agent, model=model_name, run_id=run_id)
             end = json.dumps({"conversation_id": conversation_id, "assistant_reply": final, "assistant_message": assistant_message, "run_id": run_id})
             _finalize_trace(recorder, success=True)
             yield f"event: end\ndata: {end}\n\n"

@@ -372,3 +372,24 @@ def test_agent_and_tool_definition_endpoints():
     payload = agent_resp.json()
     assert 'agent_json' in payload
     assert 'python_snippet' in payload
+
+
+def test_runs_endpoints_and_message_run_id(monkeypatch):
+    monkeypatch.setattr(api_server.orchestrator, 'chat_with_agent', lambda *args, **kwargs: 'run detail reply')
+    response = client.post('/chat', json={'agent': 'assistant', 'message': 'run endpoint check'})
+    assert response.status_code == 200
+    body = response.json()
+    run_id = body['run_id']
+
+    runs = client.get('/runs?limit=10')
+    assert runs.status_code == 200
+    assert any((r.get('run_id') == run_id) for r in runs.json().get('items', []))
+
+    run = client.get(f'/runs/{run_id}')
+    assert run.status_code == 200
+    assert run.json().get('run_id') == run_id
+
+    messages = client.get(f"/conversations/{body['conversation_id']}/messages").json()
+    assistant = [m for m in messages if m.get('role') == 'assistant']
+    assert assistant
+    assert assistant[-1].get('run_id') == run_id

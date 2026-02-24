@@ -79,14 +79,15 @@ def add_message(
     agent: str | None = None,
     model: str | None = None,
     attachments: list[dict] | None = None,
+    run_id: str | None = None,
 ) -> dict:
     mid = str(uuid.uuid4())
     now = _now()
     conn = get_conn()
     try:
         conn.execute(
-            "INSERT INTO messages (id, conversation_id, role, agent, model, content, created_at, attachments_json) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
-            (mid, conversation_id, role, agent, model, content, now, json.dumps(attachments or [])),
+            "INSERT INTO messages (id, conversation_id, role, agent, model, content, created_at, attachments_json, run_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            (mid, conversation_id, role, agent, model, content, now, json.dumps(attachments or []), run_id),
         )
         conn.execute(
             "UPDATE conversations SET updated_at = ?, last_agent = COALESCE(?, last_agent), last_model = COALESCE(?, last_model) WHERE id = ?",

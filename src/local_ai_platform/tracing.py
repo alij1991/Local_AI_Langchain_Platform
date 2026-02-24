@@ -95,10 +95,8 @@ class TraceRecorder:
         if self._llm_stream_count % 10 == 0:
             self._event("llm_stream", name, outputs={"chunk_count": self._llm_stream_count, "partial": self._llm_stream_buffer[-500:]})
 
-    def finalize(self, success: bool = True, error: str | None = None) -> dict[str, Any]:
+    def to_dict(self, success: bool | None = None, error: str | None = None) -> dict[str, Any]:
         ended_at = datetime.now(timezone.utc)
-        if self._llm_stream_buffer:
-            self._event("llm_stream", "stream", outputs={"chunk_count": self._llm_stream_count, "partial": self._llm_stream_buffer[-500:]})
         return {
             "run_id": self.run_id,
             "conversation_id": self.conversation_id,
@@ -106,12 +104,18 @@ class TraceRecorder:
             "model_provider": self.model_provider,
             "model_id": self.model_id,
             "start_timestamp": self.started_at.isoformat(),
-            "end_timestamp": ended_at.isoformat(),
+            "end_timestamp": ended_at.isoformat() if success is not None else None,
             "duration_ms": int((ended_at - self.started_at).total_seconds() * 1000),
             "success": success,
             "error": error,
             "events": self.events,
         }
+
+    def finalize(self, success: bool = True, error: str | None = None) -> dict[str, Any]:
+        ended_at = datetime.now(timezone.utc)
+        if self._llm_stream_buffer:
+            self._event("llm_stream", "stream", outputs={"chunk_count": self._llm_stream_count, "partial": self._llm_stream_buffer[-500:]})
+        return self.to_dict(success=success, error=error)
 
 
 class LocalTraceCallbackHandler(BaseCallbackHandler):
@@ -161,6 +165,12 @@ class TraceStore:
         self.base = Path(cfg.store_dir)
         self.base.mkdir(parents=True, exist_ok=True)
 
+    def upsert(self, trace: dict[str, Any]) -> None:
+        if not self.cfg.enabled:
+            return
+        path = self.base / f"{trace['run_id']}.json"
+        path.write_text(json.dumps(trace, ensure_ascii=False, indent=2), encoding="utf-8")
+
     def save(self, trace: dict[str, Any]) -> None:
         if not self.cfg.enabled:
             return
@@ -182,7 +192,8 @@ class TraceStore:
                 continue
             if conversation_id and data.get("conversation_id") != conversation_id:
                 continue
-            items.append({k: data.get(k) for k in ["run_id", "conversation_id", "agent_name", "model_provider", "model_id", "start_timestamp", "end_timestamp", "duration_ms", "success", "error"]})
+            tool_calls = len([e for e in data.get("events", []) if e.get("event_type") in {"tool_start", "tool_end", "tool_error"}])
+            items.append({k: data.get(k) for k in ["run_id", "conversation_id", "agent_name", "model_provider", "model_id", "start_timestamp", "end_timestamp", "duration_ms", "success", "error"]} | {"tool_calls_count": tool_calls, "status": "running" if data.get("success") is None else ("ok" if data.get("success") else "error")})
             if len(items) >= limit:
                 break
         return items

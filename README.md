@@ -277,6 +277,16 @@ When `TRACE_VERBOSE=false`, long prompts/tool payloads are truncated and secret-
 
 Chat responses include `run_id` and `X-Run-Id` response header for correlation.
 
+
+Additional tracing/run endpoints:
+- `GET /traces/status`
+- `GET /runs?limit=50&offset=0&conversation_id=<id>&agent=<name>`
+- `GET /runs/{run_id}`
+
+Run traces are stored as JSON files under `TRACE_STORE_DIR` (default `./data/traces`).
+- Standard mode (`TRACE_VERBOSE=false`): stores structured events, tool usage, timings, and redacted/truncated payloads.
+- Debug mode (`TRACE_VERBOSE=true`): stores fuller prompt/tool payload detail (still with secret-key redaction).
+
 ### Optional LangSmith export
 
 If LangSmith is configured, LangChain tracing can also be exported:
