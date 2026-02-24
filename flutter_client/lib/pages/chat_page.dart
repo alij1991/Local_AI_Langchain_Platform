@@ -3,7 +3,34 @@ import 'dart:convert';
 
 import 'package:file_picker/file_picker.dart';
 import 'package:flutter/material.dart';
+import 'package:flutter_markdown/flutter_markdown.dart';
 import 'package:local_ai_flutter_client/services/api_client.dart';
+
+enum ChatMessageStatus { draft, sending, sent, failed, streaming, complete }
+
+class ChatUiMessage {
+  ChatUiMessage({
+    required this.localId,
+    required this.role,
+    required this.content,
+    this.attachments = const [],
+    this.status = ChatMessageStatus.complete,
+    this.createdAt,
+    this.retryMessage,
+    this.retryAttachments = const [],
+  });
+
+  final String localId;
+  final String role;
+  String content;
+  List<Map<String, dynamic>> attachments;
+  ChatMessageStatus status;
+  final DateTime? createdAt;
+  final String? retryMessage;
+  final List<PlatformFile> retryAttachments;
+
+  bool get isUser => role == 'user';
+}
 
 class ChatPage extends StatefulWidget {
   const ChatPage({super.key, required this.api});
@@ -16,17 +43,22 @@ class ChatPage extends StatefulWidget {
 
 class _ChatPageState extends State<ChatPage> {
   List<Map<String, dynamic>> _conversations = [];
-  List<Map<String, dynamic>> _messages = [];
+  List<ChatUiMessage> _messages = [];
   List<String> _agents = [];
   String _selectedAgent = 'assistant';
   String? _conversationId;
 
   final _messageController = TextEditingController();
+  final ScrollController _scrollController = ScrollController();
+
   bool _loading = false;
   bool _isSending = false;
   bool _isStreaming = false;
-  String _error = '';
   bool _supportsStreaming = false;
+  bool _autoScroll = true;
+  bool _showJumpToLatest = false;
+
+  String _error = '';
   final List<PlatformFile> _pendingAttachments = [];
   StreamSubscription<Map<String, dynamic>>? _streamSub;
 
@@ -39,6 +71,7 @@ class _ChatPageState extends State<ChatPage> {
   @override
   void dispose() {
     _streamSub?.cancel();
+    _scrollController.dispose();
     super.dispose();
   }
 
@@ -54,10 +87,10 @@ class _ChatPageState extends State<ChatPage> {
         selected = convs.first['id']?.toString();
       }
 
-      List<Map<String, dynamic>> messages = [];
+      List<ChatUiMessage> messages = [];
       if (selected != null) {
         final body = await widget.api.get('/conversations/$selected/messages') as List<dynamic>;
-        messages = body.cast<Map<String, dynamic>>();
+        messages = body.cast<Map<String, dynamic>>().map(_fromServerMessage).toList();
       }
 
       if (!mounted) return;
@@ -71,11 +104,22 @@ class _ChatPageState extends State<ChatPage> {
         _messages = messages;
       });
       await _refreshCapabilities();
+      _scheduleAutoScroll(force: true);
     } finally {
       if (mounted) {
         setState(() => _loading = false);
       }
     }
+  }
+
+  ChatUiMessage _fromServerMessage(Map<String, dynamic> m) {
+    return ChatUiMessage(
+      localId: (m['id'] ?? DateTime.now().microsecondsSinceEpoch.toString()).toString(),
+      role: (m['role'] ?? 'assistant').toString(),
+      content: (m['content'] ?? '').toString(),
+      attachments: _attachmentsForMessage(m),
+      status: ChatMessageStatus.complete,
+    );
   }
 
   Future<void> _refreshCapabilities() async {
@@ -109,65 +153,108 @@ class _ChatPageState extends State<ChatPage> {
     await _load();
   }
 
-  Future<void> _sendMessage() async {
-    final text = _messageController.text.trim();
-    if (text.isEmpty && _pendingAttachments.isEmpty) return;
+  Future<void> _sendMessage({String? overrideText, List<PlatformFile>? overrideAttachments, String? retryLocalId}) async {
+    final text = (overrideText ?? _messageController.text).trim();
+    final attachments = overrideAttachments ?? List<PlatformFile>.from(_pendingAttachments);
+    if (text.isEmpty && attachments.isEmpty) return;
     if (_isSending || _isStreaming) return;
+
+    final userMessage = ChatUiMessage(
+      localId: DateTime.now().microsecondsSinceEpoch.toString(),
+      role: 'user',
+      content: text,
+      attachments: attachments.map((f) => {'filename': f.name, 'size': f.size}).toList(),
+      status: ChatMessageStatus.sending,
+      createdAt: DateTime.now(),
+      retryMessage: text,
+      retryAttachments: attachments,
+    );
+
+    final assistantPlaceholder = ChatUiMessage(
+      localId: '${userMessage.localId}-assistant',
+      role: 'assistant',
+      content: '',
+      status: ChatMessageStatus.streaming,
+      createdAt: DateTime.now(),
+    );
+
+    if (retryLocalId != null) {
+      _messages.removeWhere((m) => m.localId == retryLocalId);
+    }
 
     setState(() {
       _error = '';
       _isSending = true;
+      _messages = [..._messages, userMessage, assistantPlaceholder];
+      if (overrideText == null) {
+        _messageController.clear();
+        _pendingAttachments.clear();
+      }
     });
+    _scheduleAutoScroll(force: true);
 
     try {
-      if (_pendingAttachments.isEmpty && _supportsStreaming) {
-        await _sendStreaming(text);
-      } else if (_pendingAttachments.isEmpty) {
-        await widget.api.post('/chat', {
-          'agent': _selectedAgent,
-          'message': text,
-          'conversation_id': _conversationId,
-        });
+      if (attachments.isEmpty && _supportsStreaming) {
+        await _sendStreaming(text, userMessage.localId, assistantPlaceholder.localId);
       } else {
-        await widget.api.postMultipart(
-          '/chat_with_attachments',
-          fields: {
-            'agent': _selectedAgent,
-            'message': text,
-            if (_conversationId != null) 'conversation_id': _conversationId!,
-          },
-          files: _pendingAttachments
-              .map(
-                (f) => MultipartAttachment(
-                  fieldName: 'files',
-                  fileName: f.name,
-                  path: f.path,
-                  bytes: f.bytes,
-                ),
-              )
-              .toList(),
-        );
+        final response = attachments.isEmpty
+            ? await widget.api.post('/chat', {
+                'agent': _selectedAgent,
+                'message': text,
+                'conversation_id': _conversationId,
+              })
+            : await widget.api.postMultipart(
+                '/chat_with_attachments',
+                fields: {
+                  'agent': _selectedAgent,
+                  'message': text,
+                  if (_conversationId != null) 'conversation_id': _conversationId!,
+                },
+                files: attachments
+                    .map(
+                      (f) => MultipartAttachment(
+                        fieldName: 'files',
+                        fileName: f.name,
+                        path: f.path,
+                        bytes: f.bytes,
+                      ),
+                    )
+                    .toList(),
+              );
+
+        final body = response as Map<String, dynamic>;
+        final assistantReply = (body['assistant_reply'] ?? '').toString();
+        final conversationId = body['conversation_id']?.toString();
+
+        if (!mounted) return;
+        setState(() {
+          _conversationId = conversationId ?? _conversationId;
+          final user = _messages.firstWhere((m) => m.localId == userMessage.localId);
+          user.status = ChatMessageStatus.sent;
+
+          final assistant = _messages.firstWhere((m) => m.localId == assistantPlaceholder.localId);
+          assistant.content = assistantReply;
+          assistant.status = ChatMessageStatus.complete;
+        });
+        _scheduleAutoScroll();
       }
 
-      _messageController.clear();
-      if (mounted) setState(() => _pendingAttachments.clear());
       await _load();
     } catch (e) {
       if (!mounted) return;
-      setState(() => _error = '$e');
+      setState(() {
+        _error = '$e';
+        final user = _messages.firstWhere((m) => m.localId == userMessage.localId, orElse: () => userMessage);
+        user.status = ChatMessageStatus.failed;
+        _messages.removeWhere((m) => m.localId == assistantPlaceholder.localId);
+      });
     } finally {
       if (mounted) setState(() => _isSending = false);
     }
   }
 
-  Future<void> _sendStreaming(String text) async {
-    setState(() {
-      _isStreaming = true;
-      _messages = [
-        ..._messages,
-        {'role': 'assistant', 'content': '', 'attachments_json': '[]', '_streaming': true}
-      ];
-    });
+  Future<void> _sendStreaming(String text, String userLocalId, String assistantLocalId) async {
+    setState(() => _isStreaming = true);
 
     final stream = widget.api.postSse('/chat/stream', {
       'agent': _selectedAgent,
@@ -179,20 +266,31 @@ class _ChatPageState extends State<ChatPage> {
       if (!mounted) return;
       final type = event['event']?.toString() ?? '';
       if (type == 'start') {
-        setState(() => _conversationId = event['conversation_id']?.toString() ?? _conversationId);
+        setState(() {
+          _conversationId = event['conversation_id']?.toString() ?? _conversationId;
+          final user = _messages.firstWhere((m) => m.localId == userLocalId);
+          user.status = ChatMessageStatus.sent;
+        });
       } else if (type == 'token') {
         final token = event['text']?.toString() ?? '';
         setState(() {
-          final last = Map<String, dynamic>.from(_messages.last);
-          last['content'] = '${last['content'] ?? ''}$token';
-          _messages[_messages.length - 1] = last;
+          final assistant = _messages.firstWhere((m) => m.localId == assistantLocalId);
+          assistant.content = '${assistant.content}$token';
+          assistant.status = ChatMessageStatus.streaming;
         });
+        _scheduleAutoScroll();
       } else if (type == 'end') {
-        setState(() => _isStreaming = false);
+        setState(() {
+          final assistant = _messages.firstWhere((m) => m.localId == assistantLocalId);
+          assistant.status = ChatMessageStatus.complete;
+          _isStreaming = false;
+        });
       } else if (type == 'error') {
         setState(() {
           _error = event['error']?.toString() ?? 'stream error';
           _isStreaming = false;
+          final assistant = _messages.firstWhere((m) => m.localId == assistantLocalId);
+          assistant.status = ChatMessageStatus.failed;
         });
       }
     }, onError: (e) async {
@@ -215,7 +313,35 @@ class _ChatPageState extends State<ChatPage> {
 
   void _stopStreaming() {
     _streamSub?.cancel();
-    setState(() => _isStreaming = false);
+    if (mounted) setState(() => _isStreaming = false);
+  }
+
+  void _scheduleAutoScroll({bool force = false}) {
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (!_scrollController.hasClients) return;
+      if (!_autoScroll && !force) {
+        if (!_showJumpToLatest) {
+          setState(() => _showJumpToLatest = true);
+        }
+        return;
+      }
+      _scrollController.animateTo(
+        _scrollController.position.maxScrollExtent + 80,
+        duration: const Duration(milliseconds: 220),
+        curve: Curves.easeOut,
+      );
+      if (_showJumpToLatest) {
+        setState(() => _showJumpToLatest = false);
+      }
+    });
+  }
+
+  void _jumpToLatest() {
+    setState(() {
+      _autoScroll = true;
+      _showJumpToLatest = false;
+    });
+    _scheduleAutoScroll(force: true);
   }
 
   List<Map<String, dynamic>> _attachmentsForMessage(Map<String, dynamic> m) {
@@ -227,6 +353,98 @@ class _ChatPageState extends State<ChatPage> {
       if (parsed is List) return parsed.cast<Map<String, dynamic>>();
     }
     return const [];
+  }
+
+  Widget _statusIcon(ChatUiMessage m) {
+    switch (m.status) {
+      case ChatMessageStatus.sending:
+        return const SizedBox(width: 12, height: 12, child: CircularProgressIndicator(strokeWidth: 1.5));
+      case ChatMessageStatus.sent:
+      case ChatMessageStatus.complete:
+        return const Icon(Icons.check, size: 14, color: Colors.green);
+      case ChatMessageStatus.failed:
+        return const Icon(Icons.error_outline, size: 14, color: Colors.red);
+      case ChatMessageStatus.streaming:
+        return const Text('▍', style: TextStyle(color: Colors.blueGrey));
+      default:
+        return const SizedBox.shrink();
+    }
+  }
+
+  Widget _typingIndicator() {
+    return Row(
+      mainAxisSize: MainAxisSize.min,
+      children: const [
+        Text('●', style: TextStyle(color: Colors.grey)),
+        SizedBox(width: 4),
+        Text('●', style: TextStyle(color: Colors.grey)),
+        SizedBox(width: 4),
+        Text('●', style: TextStyle(color: Colors.grey)),
+      ],
+    );
+  }
+
+  Widget _chatBubble(ChatUiMessage m) {
+    final isUser = m.isUser;
+    final bubbleColor = isUser ? Colors.blue.shade50 : Colors.grey.shade100;
+    final align = isUser ? CrossAxisAlignment.end : CrossAxisAlignment.start;
+
+    return Align(
+      alignment: isUser ? Alignment.centerRight : Alignment.centerLeft,
+      child: ConstrainedBox(
+        constraints: const BoxConstraints(maxWidth: 680),
+        child: Column(
+          crossAxisAlignment: align,
+          children: [
+            Container(
+              margin: const EdgeInsets.symmetric(vertical: 6),
+              padding: const EdgeInsets.all(12),
+              decoration: BoxDecoration(
+                color: bubbleColor,
+                borderRadius: BorderRadius.circular(14),
+              ),
+              child: Column(
+                crossAxisAlignment: align,
+                children: [
+                  if (!isUser)
+                    (m.content.isEmpty && m.status == ChatMessageStatus.streaming)
+                        ? _typingIndicator()
+                        : SelectionArea(
+                            child: MarkdownBody(
+                              data: m.content,
+                              selectable: true,
+                            ),
+                          )
+                  else
+                    SelectionArea(child: Text(m.content)),
+                  if (m.attachments.isNotEmpty) ...[
+                    const SizedBox(height: 6),
+                    Wrap(
+                      spacing: 6,
+                      runSpacing: 4,
+                      children: m.attachments
+                          .map((a) => Chip(avatar: const Icon(Icons.attach_file, size: 16), label: Text(a['filename']?.toString() ?? 'attachment')))
+                          .toList(),
+                    ),
+                  ],
+                ],
+              ),
+            ),
+            Row(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                _statusIcon(m),
+                if (m.status == ChatMessageStatus.failed && m.retryMessage != null)
+                  TextButton(
+                    onPressed: () => _sendMessage(overrideText: m.retryMessage, overrideAttachments: m.retryAttachments, retryLocalId: m.localId),
+                    child: const Text('Retry'),
+                  ),
+              ],
+            ),
+          ],
+        ),
+      ),
+    );
   }
 
   @override
@@ -257,7 +475,8 @@ class _ChatPageState extends State<ChatPage> {
                   if (v != null) {
                     final messages = await widget.api.get('/conversations/$v/messages') as List<dynamic>;
                     if (!mounted) return;
-                    setState(() => _messages = messages.cast<Map<String, dynamic>>());
+                    setState(() => _messages = messages.cast<Map<String, dynamic>>().map(_fromServerMessage).toList());
+                    _scheduleAutoScroll(force: true);
                   }
                 },
               ),
@@ -277,54 +496,56 @@ class _ChatPageState extends State<ChatPage> {
                 },
               ),
             ),
+            const SizedBox(width: 8),
+            Chip(
+              label: Text(_supportsStreaming ? 'Streaming available' : 'Standard mode'),
+              backgroundColor: _supportsStreaming ? Colors.green.shade50 : Colors.grey.shade100,
+            ),
           ],
         ),
-        if (_isSending || _isStreaming || _loading)
-          const Padding(
-            padding: EdgeInsets.only(top: 8),
-            child: Row(children: [SizedBox(width: 16, height: 16, child: CircularProgressIndicator(strokeWidth: 2)), SizedBox(width: 8), Text('Assistant is thinking...')]),
-          ),
         if (_error.isNotEmpty) ...[
           const SizedBox(height: 6),
           Text(_error, style: const TextStyle(color: Colors.red)),
         ],
         const SizedBox(height: 12),
         Expanded(
-          child: Card(
-            child: _loading
-                ? const Center(child: CircularProgressIndicator())
-                : ListView(
-                    padding: const EdgeInsets.all(12),
-                    children: _messages.map((m) {
-                      final attachments = _attachmentsForMessage(m);
-                      return Padding(
-                        padding: const EdgeInsets.symmetric(vertical: 6),
-                        child: Column(
-                          crossAxisAlignment: CrossAxisAlignment.start,
-                          children: [
-                            Text((m['role'] ?? 'unknown').toString(), style: const TextStyle(fontWeight: FontWeight.bold)),
-                            const SizedBox(height: 2),
-                            SelectableText((m['content'] ?? '').toString()),
-                            if (attachments.isNotEmpty) ...[
-                              const SizedBox(height: 6),
-                              Wrap(
-                                spacing: 6,
-                                runSpacing: 4,
-                                children: attachments
-                                    .map(
-                                      (a) => Chip(
-                                        avatar: const Icon(Icons.attach_file, size: 16),
-                                        label: Text(a['filename']?.toString() ?? 'attachment'),
-                                      ),
-                                    )
-                                    .toList(),
-                              ),
-                            ]
-                          ],
+          child: Stack(
+            children: [
+              Card(
+                child: NotificationListener<ScrollNotification>(
+                  onNotification: (notification) {
+                    if (!_scrollController.hasClients) return false;
+                    final atBottom = _scrollController.position.pixels >= _scrollController.position.maxScrollExtent - 36;
+                    if (notification is UserScrollNotification) {
+                      if (notification.direction == ScrollDirection.forward || notification.direction == ScrollDirection.reverse) {
+                        _autoScroll = atBottom;
+                        if (!atBottom && !_showJumpToLatest) {
+                          setState(() => _showJumpToLatest = true);
+                        }
+                      }
+                    }
+                    return false;
+                  },
+                  child: _loading
+                      ? const Center(child: CircularProgressIndicator())
+                      : ListView.builder(
+                          controller: _scrollController,
+                          padding: const EdgeInsets.all(12),
+                          itemCount: _messages.length,
+                          itemBuilder: (_, i) => _chatBubble(_messages[i]),
                         ),
-                      );
-                    }).toList(),
+                ),
+              ),
+              if (_showJumpToLatest)
+                Positioned(
+                  right: 16,
+                  bottom: 16,
+                  child: FloatingActionButton.small(
+                    onPressed: _jumpToLatest,
+                    child: const Icon(Icons.arrow_downward),
                   ),
+                ),
+            ],
           ),
         ),
         if (_pendingAttachments.isNotEmpty) ...[
@@ -356,7 +577,7 @@ class _ChatPageState extends State<ChatPage> {
             Expanded(
               child: TextField(
                 controller: _messageController,
-                decoration: InputDecoration(labelText: _supportsStreaming ? 'Message (streaming available)' : 'Message'),
+                decoration: const InputDecoration(labelText: 'Message'),
                 minLines: 1,
                 maxLines: 4,
               ),
@@ -365,7 +586,7 @@ class _ChatPageState extends State<ChatPage> {
             if (_isStreaming)
               FilledButton.tonal(onPressed: _stopStreaming, child: const Text('Stop'))
             else
-              FilledButton(onPressed: _isSending ? null : _sendMessage, child: const Text('Send')),
+              FilledButton(onPressed: _isSending ? null : _sendMessage, child: _isSending ? const SizedBox(width: 14, height: 14, child: CircularProgressIndicator(strokeWidth: 2)) : const Text('Send')),
           ],
         ),
       ],
