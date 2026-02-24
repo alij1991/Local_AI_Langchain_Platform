@@ -1,0 +1,1548 @@
+{
+  "run_id": "51f156d7-fbc1-4ad1-856f-76091cd63719",
+  "conversation_id": "e9a42226-952a-4659-acb7-29280169ce5c",
+  "agent_name": "wedding-plannar",
+  "model_provider": "ollama",
+  "model_id": "lfm2.5-thinking:latest",
+  "start_timestamp": "2026-02-24T22:18:45.523201+00:00",
+  "end_timestamp": "2026-02-24T22:19:29.100137+00:00",
+  "duration_ms": 43576,
+  "success": true,
+  "error": null,
+  "events": [
+    {
+      "event_type": "llm_start",
+      "name": "ChatOllama",
+      "inputs": {
+        "prompts": [
+          "System: You are a helpful AI assistant planning the whole wedding base on the date and location and finding the flight and venue options using the tools you have. if user provide their current location donot ask additional questions and get the result they want using the tools you have \nHuman: Hey I want to organize my wedding for 20th of June in Paris. and we want option to fly from Madrid to the wedding. can you plan it for us"
+        ]
+      },
+      "outputs": null,
+      "token_usage": null,
+      "duration_ms": null,
+      "timestamp": "2026-02-24T22:18:46.971335+00:00"
+    },
+    {
+      "event_type": "llm_stream",
+      "name": "llm",
+      "inputs": null,
+      "outputs": {
+        "chunk_count": 10,
+        "partial": ""
+      },
+      "token_usage": null,
+      "duration_ms": null,
+      "timestamp": "2026-02-24T22:18:52.063884+00:00"
+    },
+    {
+      "event_type": "llm_stream",
+      "name": "llm",
+      "inputs": null,
+      "outputs": {
+        "chunk_count": 20,
+        "partial": ""
+      },
+      "token_usage": null,
+      "duration_ms": null,
+      "timestamp": "2026-02-24T22:18:52.379461+00:00"
+    },
+    {
+      "event_type": "llm_stream",
+      "name": "llm",
+      "inputs": null,
+      "outputs": {
+        "chunk_count": 30,
+        "partial": ""
+      },
+      "token_usage": null,
+      "duration_ms": null,
+      "timestamp": "2026-02-24T22:18:52.666485+00:00"
+    },
+    {
+      "event_type": "llm_stream",
+      "name": "llm",
+      "inputs": null,
+      "outputs": {
+        "chunk_count": 40,
+        "partial": ""
+      },
+      "token_usage": null,
+      "duration_ms": null,
+      "timestamp": "2026-02-24T22:18:52.954673+00:00"
+    },
+    {
+      "event_type": "llm_stream",
+      "name": "llm",
+      "inputs": null,
+      "outputs": {
+        "chunk_count": 50,
+        "partial": ""
+      },
+      "token_usage": null,
+      "duration_ms": null,
+      "timestamp": "2026-02-24T22:18:53.241316+00:00"
+    },
+    {
+      "event_type": "llm_stream",
+      "name": "llm",
+      "inputs": null,
+      "outputs": {
+        "chunk_count": 60,
+        "partial": ""
+      },
+      "token_usage": null,
+      "duration_ms": null,
+      "timestamp": "2026-02-24T22:18:53.528513+00:00"
+    },
+    {
+      "event_type": "llm_stream",
+      "name": "llm",
+      "inputs": null,
+      "outputs": {
+        "chunk_count": 70,
+        "partial": ""
+      },
+      "token_usage": null,
+      "duration_ms": null,
+      "timestamp": "2026-02-24T22:18:53.847728+00:00"
+    },
+    {
+      "event_type": "llm_stream",
+      "name": "llm",
+      "inputs": null,
+      "outputs": {
+        "chunk_count": 80,
+        "partial": ""
+      },
+      "token_usage": null,
+      "duration_ms": null,
+      "timestamp": "2026-02-24T22:18:54.138544+00:00"
+    },
+    {
+      "event_type": "llm_stream",
+      "name": "llm",
+      "inputs": null,
+      "outputs": {
+        "chunk_count": 90,
+        "partial": ""
+      },
+      "token_usage": null,
+      "duration_ms": null,
+      "timestamp": "2026-02-24T22:18:54.427816+00:00"
+    },
+    {
+      "event_type": "llm_stream",
+      "name": "llm",
+      "inputs": null,
+      "outputs": {
+        "chunk_count": 100,
+        "partial": ""
+      },
+      "token_usage": null,
+      "duration_ms": null,
+      "timestamp": "2026-02-24T22:18:54.714961+00:00"
+    },
+    {
+      "event_type": "llm_stream",
+      "name": "llm",
+      "inputs": null,
+      "outputs": {
+        "chunk_count": 110,
+        "partial": ""
+      },
+      "token_usage": null,
+      "duration_ms": null,
+      "timestamp": "2026-02-24T22:18:55.000769+00:00"
+    },
+    {
+      "event_type": "llm_stream",
+      "name": "llm",
+      "inputs": null,
+      "outputs": {
+        "chunk_count": 120,
+        "partial": ""
+      },
+      "token_usage": null,
+      "duration_ms": null,
+      "timestamp": "2026-02-24T22:18:55.286944+00:00"
+    },
+    {
+      "event_type": "llm_stream",
+      "name": "llm",
+      "inputs": null,
+      "outputs": {
+        "chunk_count": 130,
+        "partial": ""
+      },
+      "token_usage": null,
+      "duration_ms": null,
+      "timestamp": "2026-02-24T22:18:55.572959+00:00"
+    },
+    {
+      "event_type": "llm_stream",
+      "name": "llm",
+      "inputs": null,
+      "outputs": {
+        "chunk_count": 140,
+        "partial": ""
+      },
+      "token_usage": null,
+      "duration_ms": null,
+      "timestamp": "2026-02-24T22:18:55.862944+00:00"
+    },
+    {
+      "event_type": "llm_stream",
+      "name": "llm",
+      "inputs": null,
+      "outputs": {
+        "chunk_count": 150,
+        "partial": ""
+      },
+      "token_usage": null,
+      "duration_ms": null,
+      "timestamp": "2026-02-24T22:18:56.149601+00:00"
+    },
+    {
+      "event_type": "llm_stream",
+      "name": "llm",
+      "inputs": null,
+      "outputs": {
+        "chunk_count": 160,
+        "partial": ""
+      },
+      "token_usage": null,
+      "duration_ms": null,
+      "timestamp": "2026-02-24T22:18:56.440313+00:00"
+    },
+    {
+      "event_type": "llm_stream",
+      "name": "llm",
+      "inputs": null,
+      "outputs": {
+        "chunk_count": 170,
+        "partial": ""
+      },
+      "token_usage": null,
+      "duration_ms": null,
+      "timestamp": "2026-02-24T22:18:56.734459+00:00"
+    },
+    {
+      "event_type": "llm_stream",
+      "name": "llm",
+      "inputs": null,
+      "outputs": {
+        "chunk_count": 180,
+        "partial": ""
+      },
+      "token_usage": null,
+      "duration_ms": null,
+      "timestamp": "2026-02-24T22:18:57.051576+00:00"
+    },
+    {
+      "event_type": "llm_stream",
+      "name": "llm",
+      "inputs": null,
+      "outputs": {
+        "chunk_count": 190,
+        "partial": ""
+      },
+      "token_usage": null,
+      "duration_ms": null,
+      "timestamp": "2026-02-24T22:18:57.342286+00:00"
+    },
+    {
+      "event_type": "llm_stream",
+      "name": "llm",
+      "inputs": null,
+      "outputs": {
+        "chunk_count": 200,
+        "partial": ""
+      },
+      "token_usage": null,
+      "duration_ms": null,
+      "timestamp": "2026-02-24T22:18:57.631681+00:00"
+    },
+    {
+      "event_type": "llm_stream",
+      "name": "llm",
+      "inputs": null,
+      "outputs": {
+        "chunk_count": 210,
+        "partial": ""
+      },
+      "token_usage": null,
+      "duration_ms": null,
+      "timestamp": "2026-02-24T22:18:57.918246+00:00"
+    },
+    {
+      "event_type": "llm_stream",
+      "name": "llm",
+      "inputs": null,
+      "outputs": {
+        "chunk_count": 220,
+        "partial": ""
+      },
+      "token_usage": null,
+      "duration_ms": null,
+      "timestamp": "2026-02-24T22:18:58.209294+00:00"
+    },
+    {
+      "event_type": "llm_stream",
+      "name": "llm",
+      "inputs": null,
+      "outputs": {
+        "chunk_count": 230,
+        "partial": ""
+      },
+      "token_usage": null,
+      "duration_ms": null,
+      "timestamp": "2026-02-24T22:18:58.527133+00:00"
+    },
+    {
+      "event_type": "llm_stream",
+      "name": "llm",
+      "inputs": null,
+      "outputs": {
+        "chunk_count": 240,
+        "partial": ""
+      },
+      "token_usage": null,
+      "duration_ms": null,
+      "timestamp": "2026-02-24T22:18:58.816869+00:00"
+    },
+    {
+      "event_type": "llm_stream",
+      "name": "llm",
+      "inputs": null,
+      "outputs": {
+        "chunk_count": 250,
+        "partial": ""
+      },
+      "token_usage": null,
+      "duration_ms": null,
+      "timestamp": "2026-02-24T22:18:59.106729+00:00"
+    },
+    {
+      "event_type": "llm_stream",
+      "name": "llm",
+      "inputs": null,
+      "outputs": {
+        "chunk_count": 260,
+        "partial": ""
+      },
+      "token_usage": null,
+      "duration_ms": null,
+      "timestamp": "2026-02-24T22:18:59.396077+00:00"
+    },
+    {
+      "event_type": "llm_stream",
+      "name": "llm",
+      "inputs": null,
+      "outputs": {
+        "chunk_count": 270,
+        "partial": ""
+      },
+      "token_usage": null,
+      "duration_ms": null,
+      "timestamp": "2026-02-24T22:18:59.685577+00:00"
+    },
+    {
+      "event_type": "llm_stream",
+      "name": "llm",
+      "inputs": null,
+      "outputs": {
+        "chunk_count": 280,
+        "partial": ""
+      },
+      "token_usage": null,
+      "duration_ms": null,
+      "timestamp": "2026-02-24T22:18:59.976220+00:00"
+    },
+    {
+      "event_type": "llm_stream",
+      "name": "llm",
+      "inputs": null,
+      "outputs": {
+        "chunk_count": 290,
+        "partial": ""
+      },
+      "token_usage": null,
+      "duration_ms": null,
+      "timestamp": "2026-02-24T22:19:00.264841+00:00"
+    },
+    {
+      "event_type": "llm_stream",
+      "name": "llm",
+      "inputs": null,
+      "outputs": {
+        "chunk_count": 300,
+        "partial": ""
+      },
+      "token_usage": null,
+      "duration_ms": null,
+      "timestamp": "2026-02-24T22:19:00.555585+00:00"
+    },
+    {
+      "event_type": "llm_stream",
+      "name": "llm",
+      "inputs": null,
+      "outputs": {
+        "chunk_count": 310,
+        "partial": ""
+      },
+      "token_usage": null,
+      "duration_ms": null,
+      "timestamp": "2026-02-24T22:19:00.844261+00:00"
+    },
+    {
+      "event_type": "llm_stream",
+      "name": "llm",
+      "inputs": null,
+      "outputs": {
+        "chunk_count": 320,
+        "partial": ""
+      },
+      "token_usage": null,
+      "duration_ms": null,
+      "timestamp": "2026-02-24T22:19:01.137055+00:00"
+    },
+    {
+      "event_type": "llm_stream",
+      "name": "llm",
+      "inputs": null,
+      "outputs": {
+        "chunk_count": 330,
+        "partial": ""
+      },
+      "token_usage": null,
+      "duration_ms": null,
+      "timestamp": "2026-02-24T22:19:01.427822+00:00"
+    },
+    {
+      "event_type": "llm_stream",
+      "name": "llm",
+      "inputs": null,
+      "outputs": {
+        "chunk_count": 340,
+        "partial": ""
+      },
+      "token_usage": null,
+      "duration_ms": null,
+      "timestamp": "2026-02-24T22:19:01.718314+00:00"
+    },
+    {
+      "event_type": "llm_stream",
+      "name": "llm",
+      "inputs": null,
+      "outputs": {
+        "chunk_count": 350,
+        "partial": ""
+      },
+      "token_usage": null,
+      "duration_ms": null,
+      "timestamp": "2026-02-24T22:19:02.009555+00:00"
+    },
+    {
+      "event_type": "llm_stream",
+      "name": "llm",
+      "inputs": null,
+      "outputs": {
+        "chunk_count": 360,
+        "partial": ""
+      },
+      "token_usage": null,
+      "duration_ms": null,
+      "timestamp": "2026-02-24T22:19:02.300005+00:00"
+    },
+    {
+      "event_type": "llm_stream",
+      "name": "llm",
+      "inputs": null,
+      "outputs": {
+        "chunk_count": 370,
+        "partial": ""
+      },
+      "token_usage": null,
+      "duration_ms": null,
+      "timestamp": "2026-02-24T22:19:02.590509+00:00"
+    },
+    {
+      "event_type": "llm_stream",
+      "name": "llm",
+      "inputs": null,
+      "outputs": {
+        "chunk_count": 380,
+        "partial": ""
+      },
+      "token_usage": null,
+      "duration_ms": null,
+      "timestamp": "2026-02-24T22:19:02.880565+00:00"
+    },
+    {
+      "event_type": "llm_stream",
+      "name": "llm",
+      "inputs": null,
+      "outputs": {
+        "chunk_count": 390,
+        "partial": ""
+      },
+      "token_usage": null,
+      "duration_ms": null,
+      "timestamp": "2026-02-24T22:19:03.171656+00:00"
+    },
+    {
+      "event_type": "llm_stream",
+      "name": "llm",
+      "inputs": null,
+      "outputs": {
+        "chunk_count": 400,
+        "partial": ""
+      },
+      "token_usage": null,
+      "duration_ms": null,
+      "timestamp": "2026-02-24T22:19:03.464167+00:00"
+    },
+    {
+      "event_type": "llm_stream",
+      "name": "llm",
+      "inputs": null,
+      "outputs": {
+        "chunk_count": 410,
+        "partial": ""
+      },
+      "token_usage": null,
+      "duration_ms": null,
+      "timestamp": "2026-02-24T22:19:03.755542+00:00"
+    },
+    {
+      "event_type": "llm_stream",
+      "name": "llm",
+      "inputs": null,
+      "outputs": {
+        "chunk_count": 420,
+        "partial": ""
+      },
+      "token_usage": null,
+      "duration_ms": null,
+      "timestamp": "2026-02-24T22:19:04.049452+00:00"
+    },
+    {
+      "event_type": "llm_stream",
+      "name": "llm",
+      "inputs": null,
+      "outputs": {
+        "chunk_count": 430,
+        "partial": ""
+      },
+      "token_usage": null,
+      "duration_ms": null,
+      "timestamp": "2026-02-24T22:19:04.340171+00:00"
+    },
+    {
+      "event_type": "llm_stream",
+      "name": "llm",
+      "inputs": null,
+      "outputs": {
+        "chunk_count": 440,
+        "partial": ""
+      },
+      "token_usage": null,
+      "duration_ms": null,
+      "timestamp": "2026-02-24T22:19:04.631721+00:00"
+    },
+    {
+      "event_type": "llm_stream",
+      "name": "llm",
+      "inputs": null,
+      "outputs": {
+        "chunk_count": 450,
+        "partial": ""
+      },
+      "token_usage": null,
+      "duration_ms": null,
+      "timestamp": "2026-02-24T22:19:04.924405+00:00"
+    },
+    {
+      "event_type": "llm_stream",
+      "name": "llm",
+      "inputs": null,
+      "outputs": {
+        "chunk_count": 460,
+        "partial": ""
+      },
+      "token_usage": null,
+      "duration_ms": null,
+      "timestamp": "2026-02-24T22:19:05.215798+00:00"
+    },
+    {
+      "event_type": "llm_stream",
+      "name": "llm",
+      "inputs": null,
+      "outputs": {
+        "chunk_count": 470,
+        "partial": ""
+      },
+      "token_usage": null,
+      "duration_ms": null,
+      "timestamp": "2026-02-24T22:19:05.505277+00:00"
+    },
+    {
+      "event_type": "llm_stream",
+      "name": "llm",
+      "inputs": null,
+      "outputs": {
+        "chunk_count": 480,
+        "partial": ""
+      },
+      "token_usage": null,
+      "duration_ms": null,
+      "timestamp": "2026-02-24T22:19:05.798093+00:00"
+    },
+    {
+      "event_type": "llm_stream",
+      "name": "llm",
+      "inputs": null,
+      "outputs": {
+        "chunk_count": 490,
+        "partial": ""
+      },
+      "token_usage": null,
+      "duration_ms": null,
+      "timestamp": "2026-02-24T22:19:06.088857+00:00"
+    },
+    {
+      "event_type": "llm_stream",
+      "name": "llm",
+      "inputs": null,
+      "outputs": {
+        "chunk_count": 500,
+        "partial": ""
+      },
+      "token_usage": null,
+      "duration_ms": null,
+      "timestamp": "2026-02-24T22:19:06.387699+00:00"
+    },
+    {
+      "event_type": "llm_stream",
+      "name": "llm",
+      "inputs": null,
+      "outputs": {
+        "chunk_count": 510,
+        "partial": ""
+      },
+      "token_usage": null,
+      "duration_ms": null,
+      "timestamp": "2026-02-24T22:19:06.680332+00:00"
+    },
+    {
+      "event_type": "llm_stream",
+      "name": "llm",
+      "inputs": null,
+      "outputs": {
+        "chunk_count": 520,
+        "partial": ""
+      },
+      "token_usage": null,
+      "duration_ms": null,
+      "timestamp": "2026-02-24T22:19:06.972441+00:00"
+    },
+    {
+      "event_type": "llm_stream",
+      "name": "llm",
+      "inputs": null,
+      "outputs": {
+        "chunk_count": 530,
+        "partial": ""
+      },
+      "token_usage": null,
+      "duration_ms": null,
+      "timestamp": "2026-02-24T22:19:07.268674+00:00"
+    },
+    {
+      "event_type": "llm_stream",
+      "name": "llm",
+      "inputs": null,
+      "outputs": {
+        "chunk_count": 540,
+        "partial": ""
+      },
+      "token_usage": null,
+      "duration_ms": null,
+      "timestamp": "2026-02-24T22:19:07.564304+00:00"
+    },
+    {
+      "event_type": "llm_stream",
+      "name": "llm",
+      "inputs": null,
+      "outputs": {
+        "chunk_count": 550,
+        "partial": ""
+      },
+      "token_usage": null,
+      "duration_ms": null,
+      "timestamp": "2026-02-24T22:19:07.858088+00:00"
+    },
+    {
+      "event_type": "llm_stream",
+      "name": "llm",
+      "inputs": null,
+      "outputs": {
+        "chunk_count": 560,
+        "partial": ""
+      },
+      "token_usage": null,
+      "duration_ms": null,
+      "timestamp": "2026-02-24T22:19:08.153688+00:00"
+    },
+    {
+      "event_type": "llm_stream",
+      "name": "llm",
+      "inputs": null,
+      "outputs": {
+        "chunk_count": 570,
+        "partial": ""
+      },
+      "token_usage": null,
+      "duration_ms": null,
+      "timestamp": "2026-02-24T22:19:08.444729+00:00"
+    },
+    {
+      "event_type": "llm_stream",
+      "name": "llm",
+      "inputs": null,
+      "outputs": {
+        "chunk_count": 580,
+        "partial": ""
+      },
+      "token_usage": null,
+      "duration_ms": null,
+      "timestamp": "2026-02-24T22:19:08.735539+00:00"
+    },
+    {
+      "event_type": "llm_stream",
+      "name": "llm",
+      "inputs": null,
+      "outputs": {
+        "chunk_count": 590,
+        "partial": ""
+      },
+      "token_usage": null,
+      "duration_ms": null,
+      "timestamp": "2026-02-24T22:19:09.027975+00:00"
+    },
+    {
+      "event_type": "llm_stream",
+      "name": "llm",
+      "inputs": null,
+      "outputs": {
+        "chunk_count": 600,
+        "partial": ""
+      },
+      "token_usage": null,
+      "duration_ms": null,
+      "timestamp": "2026-02-24T22:19:09.327200+00:00"
+    },
+    {
+      "event_type": "llm_stream",
+      "name": "llm",
+      "inputs": null,
+      "outputs": {
+        "chunk_count": 610,
+        "partial": ""
+      },
+      "token_usage": null,
+      "duration_ms": null,
+      "timestamp": "2026-02-24T22:19:09.647064+00:00"
+    },
+    {
+      "event_type": "llm_stream",
+      "name": "llm",
+      "inputs": null,
+      "outputs": {
+        "chunk_count": 620,
+        "partial": ""
+      },
+      "token_usage": null,
+      "duration_ms": null,
+      "timestamp": "2026-02-24T22:19:09.943966+00:00"
+    },
+    {
+      "event_type": "llm_stream",
+      "name": "llm",
+      "inputs": null,
+      "outputs": {
+        "chunk_count": 630,
+        "partial": ""
+      },
+      "token_usage": null,
+      "duration_ms": null,
+      "timestamp": "2026-02-24T22:19:10.251830+00:00"
+    },
+    {
+      "event_type": "llm_stream",
+      "name": "llm",
+      "inputs": null,
+      "outputs": {
+        "chunk_count": 640,
+        "partial": ""
+      },
+      "token_usage": null,
+      "duration_ms": null,
+      "timestamp": "2026-02-24T22:19:10.559177+00:00"
+    },
+    {
+      "event_type": "llm_stream",
+      "name": "llm",
+      "inputs": null,
+      "outputs": {
+        "chunk_count": 650,
+        "partial": ""
+      },
+      "token_usage": null,
+      "duration_ms": null,
+      "timestamp": "2026-02-24T22:19:10.860736+00:00"
+    },
+    {
+      "event_type": "llm_stream",
+      "name": "llm",
+      "inputs": null,
+      "outputs": {
+        "chunk_count": 660,
+        "partial": ""
+      },
+      "token_usage": null,
+      "duration_ms": null,
+      "timestamp": "2026-02-24T22:19:11.163630+00:00"
+    },
+    {
+      "event_type": "llm_stream",
+      "name": "llm",
+      "inputs": null,
+      "outputs": {
+        "chunk_count": 670,
+        "partial": ""
+      },
+      "token_usage": null,
+      "duration_ms": null,
+      "timestamp": "2026-02-24T22:19:11.475890+00:00"
+    },
+    {
+      "event_type": "llm_stream",
+      "name": "llm",
+      "inputs": null,
+      "outputs": {
+        "chunk_count": 680,
+        "partial": ""
+      },
+      "token_usage": null,
+      "duration_ms": null,
+      "timestamp": "2026-02-24T22:19:11.774519+00:00"
+    },
+    {
+      "event_type": "llm_stream",
+      "name": "llm",
+      "inputs": null,
+      "outputs": {
+        "chunk_count": 690,
+        "partial": ""
+      },
+      "token_usage": null,
+      "duration_ms": null,
+      "timestamp": "2026-02-24T22:19:12.067463+00:00"
+    },
+    {
+      "event_type": "llm_stream",
+      "name": "llm",
+      "inputs": null,
+      "outputs": {
+        "chunk_count": 700,
+        "partial": ""
+      },
+      "token_usage": null,
+      "duration_ms": null,
+      "timestamp": "2026-02-24T22:19:12.359059+00:00"
+    },
+    {
+      "event_type": "llm_stream",
+      "name": "llm",
+      "inputs": null,
+      "outputs": {
+        "chunk_count": 710,
+        "partial": ""
+      },
+      "token_usage": null,
+      "duration_ms": null,
+      "timestamp": "2026-02-24T22:19:12.651981+00:00"
+    },
+    {
+      "event_type": "llm_stream",
+      "name": "llm",
+      "inputs": null,
+      "outputs": {
+        "chunk_count": 720,
+        "partial": ""
+      },
+      "token_usage": null,
+      "duration_ms": null,
+      "timestamp": "2026-02-24T22:19:12.947320+00:00"
+    },
+    {
+      "event_type": "llm_stream",
+      "name": "llm",
+      "inputs": null,
+      "outputs": {
+        "chunk_count": 730,
+        "partial": ""
+      },
+      "token_usage": null,
+      "duration_ms": null,
+      "timestamp": "2026-02-24T22:19:13.241945+00:00"
+    },
+    {
+      "event_type": "llm_stream",
+      "name": "llm",
+      "inputs": null,
+      "outputs": {
+        "chunk_count": 740,
+        "partial": ""
+      },
+      "token_usage": null,
+      "duration_ms": null,
+      "timestamp": "2026-02-24T22:19:13.534955+00:00"
+    },
+    {
+      "event_type": "llm_stream",
+      "name": "llm",
+      "inputs": null,
+      "outputs": {
+        "chunk_count": 750,
+        "partial": ""
+      },
+      "token_usage": null,
+      "duration_ms": null,
+      "timestamp": "2026-02-24T22:19:13.827274+00:00"
+    },
+    {
+      "event_type": "llm_stream",
+      "name": "llm",
+      "inputs": null,
+      "outputs": {
+        "chunk_count": 760,
+        "partial": ""
+      },
+      "token_usage": null,
+      "duration_ms": null,
+      "timestamp": "2026-02-24T22:19:14.119977+00:00"
+    },
+    {
+      "event_type": "llm_stream",
+      "name": "llm",
+      "inputs": null,
+      "outputs": {
+        "chunk_count": 770,
+        "partial": ""
+      },
+      "token_usage": null,
+      "duration_ms": null,
+      "timestamp": "2026-02-24T22:19:14.412372+00:00"
+    },
+    {
+      "event_type": "llm_stream",
+      "name": "llm",
+      "inputs": null,
+      "outputs": {
+        "chunk_count": 780,
+        "partial": ""
+      },
+      "token_usage": null,
+      "duration_ms": null,
+      "timestamp": "2026-02-24T22:19:14.704679+00:00"
+    },
+    {
+      "event_type": "llm_stream",
+      "name": "llm",
+      "inputs": null,
+      "outputs": {
+        "chunk_count": 790,
+        "partial": ""
+      },
+      "token_usage": null,
+      "duration_ms": null,
+      "timestamp": "2026-02-24T22:19:14.996499+00:00"
+    },
+    {
+      "event_type": "llm_stream",
+      "name": "llm",
+      "inputs": null,
+      "outputs": {
+        "chunk_count": 800,
+        "partial": ""
+      },
+      "token_usage": null,
+      "duration_ms": null,
+      "timestamp": "2026-02-24T22:19:15.294726+00:00"
+    },
+    {
+      "event_type": "llm_stream",
+      "name": "llm",
+      "inputs": null,
+      "outputs": {
+        "chunk_count": 810,
+        "partial": ""
+      },
+      "token_usage": null,
+      "duration_ms": null,
+      "timestamp": "2026-02-24T22:19:15.588062+00:00"
+    },
+    {
+      "event_type": "llm_stream",
+      "name": "llm",
+      "inputs": null,
+      "outputs": {
+        "chunk_count": 820,
+        "partial": ""
+      },
+      "token_usage": null,
+      "duration_ms": null,
+      "timestamp": "2026-02-24T22:19:15.883620+00:00"
+    },
+    {
+      "event_type": "llm_stream",
+      "name": "llm",
+      "inputs": null,
+      "outputs": {
+        "chunk_count": 830,
+        "partial": ""
+      },
+      "token_usage": null,
+      "duration_ms": null,
+      "timestamp": "2026-02-24T22:19:16.180529+00:00"
+    },
+    {
+      "event_type": "llm_stream",
+      "name": "llm",
+      "inputs": null,
+      "outputs": {
+        "chunk_count": 840,
+        "partial": ""
+      },
+      "token_usage": null,
+      "duration_ms": null,
+      "timestamp": "2026-02-24T22:19:16.475279+00:00"
+    },
+    {
+      "event_type": "llm_stream",
+      "name": "llm",
+      "inputs": null,
+      "outputs": {
+        "chunk_count": 850,
+        "partial": ""
+      },
+      "token_usage": null,
+      "duration_ms": null,
+      "timestamp": "2026-02-24T22:19:16.773070+00:00"
+    },
+    {
+      "event_type": "llm_stream",
+      "name": "llm",
+      "inputs": null,
+      "outputs": {
+        "chunk_count": 860,
+        "partial": ""
+      },
+      "token_usage": null,
+      "duration_ms": null,
+      "timestamp": "2026-02-24T22:19:17.067156+00:00"
+    },
+    {
+      "event_type": "llm_stream",
+      "name": "llm",
+      "inputs": null,
+      "outputs": {
+        "chunk_count": 870,
+        "partial": ""
+      },
+      "token_usage": null,
+      "duration_ms": null,
+      "timestamp": "2026-02-24T22:19:17.361793+00:00"
+    },
+    {
+      "event_type": "llm_stream",
+      "name": "llm",
+      "inputs": null,
+      "outputs": {
+        "chunk_count": 880,
+        "partial": ""
+      },
+      "token_usage": null,
+      "duration_ms": null,
+      "timestamp": "2026-02-24T22:19:17.659429+00:00"
+    },
+    {
+      "event_type": "llm_stream",
+      "name": "llm",
+      "inputs": null,
+      "outputs": {
+        "chunk_count": 890,
+        "partial": ""
+      },
+      "token_usage": null,
+      "duration_ms": null,
+      "timestamp": "2026-02-24T22:19:17.952548+00:00"
+    },
+    {
+      "event_type": "llm_stream",
+      "name": "llm",
+      "inputs": null,
+      "outputs": {
+        "chunk_count": 900,
+        "partial": ""
+      },
+      "token_usage": null,
+      "duration_ms": null,
+      "timestamp": "2026-02-24T22:19:18.245441+00:00"
+    },
+    {
+      "event_type": "llm_stream",
+      "name": "llm",
+      "inputs": null,
+      "outputs": {
+        "chunk_count": 910,
+        "partial": ""
+      },
+      "token_usage": null,
+      "duration_ms": null,
+      "timestamp": "2026-02-24T22:19:18.537055+00:00"
+    },
+    {
+      "event_type": "llm_stream",
+      "name": "llm",
+      "inputs": null,
+      "outputs": {
+        "chunk_count": 920,
+        "partial": ""
+      },
+      "token_usage": null,
+      "duration_ms": null,
+      "timestamp": "2026-02-24T22:19:18.830771+00:00"
+    },
+    {
+      "event_type": "llm_stream",
+      "name": "llm",
+      "inputs": null,
+      "outputs": {
+        "chunk_count": 930,
+        "partial": ""
+      },
+      "token_usage": null,
+      "duration_ms": null,
+      "timestamp": "2026-02-24T22:19:19.155948+00:00"
+    },
+    {
+      "event_type": "llm_stream",
+      "name": "llm",
+      "inputs": null,
+      "outputs": {
+        "chunk_count": 940,
+        "partial": ""
+      },
+      "token_usage": null,
+      "duration_ms": null,
+      "timestamp": "2026-02-24T22:19:19.449738+00:00"
+    },
+    {
+      "event_type": "llm_stream",
+      "name": "llm",
+      "inputs": null,
+      "outputs": {
+        "chunk_count": 950,
+        "partial": ""
+      },
+      "token_usage": null,
+      "duration_ms": null,
+      "timestamp": "2026-02-24T22:19:19.745428+00:00"
+    },
+    {
+      "event_type": "llm_stream",
+      "name": "llm",
+      "inputs": null,
+      "outputs": {
+        "chunk_count": 960,
+        "partial": ""
+      },
+      "token_usage": null,
+      "duration_ms": null,
+      "timestamp": "2026-02-24T22:19:20.045493+00:00"
+    },
+    {
+      "event_type": "llm_stream",
+      "name": "llm",
+      "inputs": null,
+      "outputs": {
+        "chunk_count": 970,
+        "partial": ""
+      },
+      "token_usage": null,
+      "duration_ms": null,
+      "timestamp": "2026-02-24T22:19:20.343212+00:00"
+    },
+    {
+      "event_type": "llm_stream",
+      "name": "llm",
+      "inputs": null,
+      "outputs": {
+        "chunk_count": 980,
+        "partial": ""
+      },
+      "token_usage": null,
+      "duration_ms": null,
+      "timestamp": "2026-02-24T22:19:20.637928+00:00"
+    },
+    {
+      "event_type": "llm_stream",
+      "name": "llm",
+      "inputs": null,
+      "outputs": {
+        "chunk_count": 990,
+        "partial": ""
+      },
+      "token_usage": null,
+      "duration_ms": null,
+      "timestamp": "2026-02-24T22:19:20.933017+00:00"
+    },
+    {
+      "event_type": "llm_stream",
+      "name": "llm",
+      "inputs": null,
+      "outputs": {
+        "chunk_count": 1000,
+        "partial": ""
+      },
+      "token_usage": null,
+      "duration_ms": null,
+      "timestamp": "2026-02-24T22:19:21.228437+00:00"
+    },
+    {
+      "event_type": "llm_stream",
+      "name": "llm",
+      "inputs": null,
+      "outputs": {
+        "chunk_count": 1010,
+        "partial": ""
+      },
+      "token_usage": null,
+      "duration_ms": null,
+      "timestamp": "2026-02-24T22:19:21.522499+00:00"
+    },
+    {
+      "event_type": "llm_stream",
+      "name": "llm",
+      "inputs": null,
+      "outputs": {
+        "chunk_count": 1020,
+        "partial": ""
+      },
+      "token_usage": null,
+      "duration_ms": null,
+      "timestamp": "2026-02-24T22:19:21.829438+00:00"
+    },
+    {
+      "event_type": "llm_stream",
+      "name": "llm",
+      "inputs": null,
+      "outputs": {
+        "chunk_count": 1030,
+        "partial": ""
+      },
+      "token_usage": null,
+      "duration_ms": null,
+      "timestamp": "2026-02-24T22:19:22.113419+00:00"
+    },
+    {
+      "event_type": "llm_stream",
+      "name": "llm",
+      "inputs": null,
+      "outputs": {
+        "chunk_count": 1040,
+        "partial": ""
+      },
+      "token_usage": null,
+      "duration_ms": null,
+      "timestamp": "2026-02-24T22:19:22.411981+00:00"
+    },
+    {
+      "event_type": "llm_stream",
+      "name": "llm",
+      "inputs": null,
+      "outputs": {
+        "chunk_count": 1050,
+        "partial": ""
+      },
+      "token_usage": null,
+      "duration_ms": null,
+      "timestamp": "2026-02-24T22:19:22.711222+00:00"
+    },
+    {
+      "event_type": "llm_stream",
+      "name": "llm",
+      "inputs": null,
+      "outputs": {
+        "chunk_count": 1060,
+        "partial": ""
+      },
+      "token_usage": null,
+      "duration_ms": null,
+      "timestamp": "2026-02-24T22:19:23.008085+00:00"
+    },
+    {
+      "event_type": "llm_stream",
+      "name": "llm",
+      "inputs": null,
+      "outputs": {
+        "chunk_count": 1070,
+        "partial": ""
+      },
+      "token_usage": null,
+      "duration_ms": null,
+      "timestamp": "2026-02-24T22:19:23.304605+00:00"
+    },
+    {
+      "event_type": "llm_stream",
+      "name": "llm",
+      "inputs": null,
+      "outputs": {
+        "chunk_count": 1080,
+        "partial": "Your wedding on June 20"
+      },
+      "token_usage": null,
+      "duration_ms": null,
+      "timestamp": "2026-02-24T22:19:23.660059+00:00"
+    },
+    {
+      "event_type": "llm_stream",
+      "name": "llm",
+      "inputs": null,
+      "outputs": {
+        "chunk_count": 1090,
+        "partial": "Your wedding on June 20th in Paris offers a romantic setting! Here’s"
+      },
+      "token_usage": null,
+      "duration_ms": null,
+      "timestamp": "2026-02-24T22:19:23.956041+00:00"
+    },
+    {
+      "event_type": "llm_stream",
+      "name": "llm",
+      "inputs": null,
+      "outputs": {
+        "chunk_count": 1100,
+        "partial": "Your wedding on June 20th in Paris offers a romantic setting! Here’s a structured plan based on available options:  \n\n"
+      },
+      "token_usage": null,
+      "duration_ms": null,
+      "timestamp": "2026-02-24T22:19:24.250418+00:00"
+    },
+    {
+      "event_type": "llm_stream",
+      "name": "llm",
+      "inputs": null,
+      "outputs": {
+        "chunk_count": 1110,
+        "partial": "Your wedding on June 20th in Paris offers a romantic setting! Here’s a structured plan based on available options:  \n\n1. **Venue**: Consider iconic venues"
+      },
+      "token_usage": null,
+      "duration_ms": null,
+      "timestamp": "2026-02-24T22:19:24.575677+00:00"
+    },
+    {
+      "event_type": "llm_stream",
+      "name": "llm",
+      "inputs": null,
+      "outputs": {
+        "chunk_count": 1120,
+        "partial": "Your wedding on June 20th in Paris offers a romantic setting! Here’s a structured plan based on available options:  \n\n1. **Venue**: Consider iconic venues like *Le Meurice* (luxury"
+      },
+      "token_usage": null,
+      "duration_ms": null,
+      "timestamp": "2026-02-24T22:19:24.881335+00:00"
+    },
+    {
+      "event_type": "llm_stream",
+      "name": "llm",
+      "inputs": null,
+      "outputs": {
+        "chunk_count": 1130,
+        "partial": "Your wedding on June 20th in Paris offers a romantic setting! Here’s a structured plan based on available options:  \n\n1. **Venue**: Consider iconic venues like *Le Meurice* (luxury) or *La Maison Rose* (chic"
+      },
+      "token_usage": null,
+      "duration_ms": null,
+      "timestamp": "2026-02-24T22:19:25.178659+00:00"
+    },
+    {
+      "event_type": "llm_stream",
+      "name": "llm",
+      "inputs": null,
+      "outputs": {
+        "chunk_count": 1140,
+        "partial": "Your wedding on June 20th in Paris offers a romantic setting! Here’s a structured plan based on available options:  \n\n1. **Venue**: Consider iconic venues like *Le Meurice* (luxury) or *La Maison Rose* (chic), or intimate spaces like *Le Jardin des"
+      },
+      "token_usage": null,
+      "duration_ms": null,
+      "timestamp": "2026-02-24T22:19:25.476654+00:00"
+    },
+    {
+      "event_type": "llm_stream",
+      "name": "llm",
+      "inputs": null,
+      "outputs": {
+        "chunk_count": 1150,
+        "partial": "Your wedding on June 20th in Paris offers a romantic setting! Here’s a structured plan based on available options:  \n\n1. **Venue**: Consider iconic venues like *Le Meurice* (luxury) or *La Maison Rose* (chic), or intimate spaces like *Le Jardin des Plantes*.  \n2. **Flights**"
+      },
+      "token_usage": null,
+      "duration_ms": null,
+      "timestamp": "2026-02-24T22:19:25.776132+00:00"
+    },
+    {
+      "event_type": "llm_stream",
+      "name": "llm",
+      "inputs": null,
+      "outputs": {
+        "chunk_count": 1160,
+        "partial": "Your wedding on June 20th in Paris offers a romantic setting! Here’s a structured plan based on available options:  \n\n1. **Venue**: Consider iconic venues like *Le Meurice* (luxury) or *La Maison Rose* (chic), or intimate spaces like *Le Jardin des Plantes*.  \n2. **Flights**: Fly from Madrid (MAD) to Paris"
+      },
+      "token_usage": null,
+      "duration_ms": null,
+      "timestamp": "2026-02-24T22:19:26.073954+00:00"
+    },
+    {
+      "event_type": "llm_stream",
+      "name": "llm",
+      "inputs": null,
+      "outputs": {
+        "chunk_count": 1170,
+        "partial": "Your wedding on June 20th in Paris offers a romantic setting! Here’s a structured plan based on available options:  \n\n1. **Venue**: Consider iconic venues like *Le Meurice* (luxury) or *La Maison Rose* (chic), or intimate spaces like *Le Jardin des Plantes*.  \n2. **Flights**: Fly from Madrid (MAD) to Paris (CDG) on June 20th."
+      },
+      "token_usage": null,
+      "duration_ms": null,
+      "timestamp": "2026-02-24T22:19:26.373673+00:00"
+    },
+    {
+      "event_type": "llm_stream",
+      "name": "llm",
+      "inputs": null,
+      "outputs": {
+        "chunk_count": 1180,
+        "partial": "Your wedding on June 20th in Paris offers a romantic setting! Here’s a structured plan based on available options:  \n\n1. **Venue**: Consider iconic venues like *Le Meurice* (luxury) or *La Maison Rose* (chic), or intimate spaces like *Le Jardin des Plantes*.  \n2. **Flights**: Fly from Madrid (MAD) to Paris (CDG) on June 20th. Options include Air France, Ryanair, or T"
+      },
+      "token_usage": null,
+      "duration_ms": null,
+      "timestamp": "2026-02-24T22:19:26.673008+00:00"
+    },
+    {
+      "event_type": "llm_stream",
+      "name": "llm",
+      "inputs": null,
+      "outputs": {
+        "chunk_count": 1190,
+        "partial": "Your wedding on June 20th in Paris offers a romantic setting! Here’s a structured plan based on available options:  \n\n1. **Venue**: Consider iconic venues like *Le Meurice* (luxury) or *La Maison Rose* (chic), or intimate spaces like *Le Jardin des Plantes*.  \n2. **Flights**: Fly from Madrid (MAD) to Paris (CDG) on June 20th. Options include Air France, Ryanair, or TAP Air Portugal (check availability for June 20"
+      },
+      "token_usage": null,
+      "duration_ms": null,
+      "timestamp": "2026-02-24T22:19:26.971944+00:00"
+    },
+    {
+      "event_type": "llm_stream",
+      "name": "llm",
+      "inputs": null,
+      "outputs": {
+        "chunk_count": 1200,
+        "partial": "Your wedding on June 20th in Paris offers a romantic setting! Here’s a structured plan based on available options:  \n\n1. **Venue**: Consider iconic venues like *Le Meurice* (luxury) or *La Maison Rose* (chic), or intimate spaces like *Le Jardin des Plantes*.  \n2. **Flights**: Fly from Madrid (MAD) to Paris (CDG) on June 20th. Options include Air France, Ryanair, or TAP Air Portugal (check availability for June 20th).  \n3. **Accommodation"
+      },
+      "token_usage": null,
+      "duration_ms": null,
+      "timestamp": "2026-02-24T22:19:27.275497+00:00"
+    },
+    {
+      "event_type": "llm_stream",
+      "name": "llm",
+      "inputs": null,
+      "outputs": {
+        "chunk_count": 1210,
+        "partial": "Your wedding on June 20th in Paris offers a romantic setting! Here’s a structured plan based on available options:  \n\n1. **Venue**: Consider iconic venues like *Le Meurice* (luxury) or *La Maison Rose* (chic), or intimate spaces like *Le Jardin des Plantes*.  \n2. **Flights**: Fly from Madrid (MAD) to Paris (CDG) on June 20th. Options include Air France, Ryanair, or TAP Air Portugal (check availability for June 20th).  \n3. **Accommodation**: Book hotels near central Paris (e.g"
+      },
+      "token_usage": null,
+      "duration_ms": null,
+      "timestamp": "2026-02-24T22:19:27.578086+00:00"
+    },
+    {
+      "event_type": "llm_stream",
+      "name": "llm",
+      "inputs": null,
+      "outputs": {
+        "chunk_count": 1220,
+        "partial": "0th in Paris offers a romantic setting! Here’s a structured plan based on available options:  \n\n1. **Venue**: Consider iconic venues like *Le Meurice* (luxury) or *La Maison Rose* (chic), or intimate spaces like *Le Jardin des Plantes*.  \n2. **Flights**: Fly from Madrid (MAD) to Paris (CDG) on June 20th. Options include Air France, Ryanair, or TAP Air Portugal (check availability for June 20th).  \n3. **Accommodation**: Book hotels near central Paris (e.g., 1st arrondissement) for convenience.  \n"
+      },
+      "token_usage": null,
+      "duration_ms": null,
+      "timestamp": "2026-02-24T22:19:27.878036+00:00"
+    },
+    {
+      "event_type": "llm_stream",
+      "name": "llm",
+      "inputs": null,
+      "outputs": {
+        "chunk_count": 1230,
+        "partial": "mantic setting! Here’s a structured plan based on available options:  \n\n1. **Venue**: Consider iconic venues like *Le Meurice* (luxury) or *La Maison Rose* (chic), or intimate spaces like *Le Jardin des Plantes*.  \n2. **Flights**: Fly from Madrid (MAD) to Paris (CDG) on June 20th. Options include Air France, Ryanair, or TAP Air Portugal (check availability for June 20th).  \n3. **Accommodation**: Book hotels near central Paris (e.g., 1st arrondissement) for convenience.  \n4. **Ceremony**: Arrange"
+      },
+      "token_usage": null,
+      "duration_ms": null,
+      "timestamp": "2026-02-24T22:19:28.175905+00:00"
+    },
+    {
+      "event_type": "llm_stream",
+      "name": "llm",
+      "inputs": null,
+      "outputs": {
+        "chunk_count": 1240,
+        "partial": " available options:  \n\n1. **Venue**: Consider iconic venues like *Le Meurice* (luxury) or *La Maison Rose* (chic), or intimate spaces like *Le Jardin des Plantes*.  \n2. **Flights**: Fly from Madrid (MAD) to Paris (CDG) on June 20th. Options include Air France, Ryanair, or TAP Air Portugal (check availability for June 20th).  \n3. **Accommodation**: Book hotels near central Paris (e.g., 1st arrondissement) for convenience.  \n4. **Ceremony**: Arrange a ceremony at a historic site like Notre-Dame or"
+      },
+      "token_usage": null,
+      "duration_ms": null,
+      "timestamp": "2026-02-24T22:19:28.476896+00:00"
+    },
+    {
+      "event_type": "llm_stream",
+      "name": "llm",
+      "inputs": null,
+      "outputs": {
+        "chunk_count": 1250,
+        "partial": " Consider iconic venues like *Le Meurice* (luxury) or *La Maison Rose* (chic), or intimate spaces like *Le Jardin des Plantes*.  \n2. **Flights**: Fly from Madrid (MAD) to Paris (CDG) on June 20th. Options include Air France, Ryanair, or TAP Air Portugal (check availability for June 20th).  \n3. **Accommodation**: Book hotels near central Paris (e.g., 1st arrondissement) for convenience.  \n4. **Ceremony**: Arrange a ceremony at a historic site like Notre-Dame or a private chapel.  \n\nLet me know if"
+      },
+      "token_usage": null,
+      "duration_ms": null,
+      "timestamp": "2026-02-24T22:19:28.774809+00:00"
+    },
+    {
+      "event_type": "llm_end",
+      "name": "llm",
+      "inputs": null,
+      "outputs": "generations=[[ChatGenerationChunk(text='Your wedding on June 20th in Paris offers a romantic setting! Here’s a structured plan based on available options:  \\n\\n1. **Venue**: Consider iconic venues like *Le Meurice* (luxury) or *La Maison Rose* (chic), or intimate spaces like *Le Jardin des Plantes*.  \\n2. **Flights**: Fly from Madrid (MAD) to Paris (CDG) on June 20th. Options include Air France, Ryanair, or TAP Air Portugal (check availability for June 20th).  \\n3. **Accommodation**: Book hotels…",
+      "token_usage": null,
+      "duration_ms": 42118,
+      "timestamp": "2026-02-24T22:19:29.082912+00:00"
+    },
+    {
+      "event_type": "llm_stream",
+      "name": "stream",
+      "inputs": null,
+      "outputs": {
+        "chunk_count": 1259,
+        "partial": "Le Meurice* (luxury) or *La Maison Rose* (chic), or intimate spaces like *Le Jardin des Plantes*.  \n2. **Flights**: Fly from Madrid (MAD) to Paris (CDG) on June 20th. Options include Air France, Ryanair, or TAP Air Portugal (check availability for June 20th).  \n3. **Accommodation**: Book hotels near central Paris (e.g., 1st arrondissement) for convenience.  \n4. **Ceremony**: Arrange a ceremony at a historic site like Notre-Dame or a private chapel.  \n\nLet me know if you’d like further details! 🌹"
+      },
+      "token_usage": null,
+      "duration_ms": null,
+      "timestamp": "2026-02-24T22:19:29.100137+00:00"
+    }
+  ]
+}
