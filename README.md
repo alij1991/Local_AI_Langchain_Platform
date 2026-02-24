@@ -165,6 +165,7 @@ The stream emits `start`, `token`, `end`, and `error` events.
 - Click **Add Tool** to create Tavily, MCP-imported, or Agent Tool entries.
 
 ### Tavily setup
+- Place `.env` next to `api_server.py` (project root) and run `python api_server.py` from that directory.
 - Add in backend `.env` (project root):
 
 ```env
@@ -227,4 +228,10 @@ Create a tool that calls another agent:
 curl -X POST http://127.0.0.1:8000/tools \
   -H 'Content-Type: application/json' \
   -d '{"name":"call_assistant","type":"agent_tool","description":"Call assistant","config_json":{"target_agent":"assistant","raw_passthrough":true,"template":"{input}","output_mode":"text","timeout_s":60},"is_enabled":true}'
+```
+
+
+Windows PowerShell quick debug:
+```powershell
+python -c "import os; print('TAVILY_API_KEY' in os.environ)"
 ```

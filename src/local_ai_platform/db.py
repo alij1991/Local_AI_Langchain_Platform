@@ -90,6 +90,16 @@ def init_db() -> None:
                 created_at TEXT NOT NULL,
                 updated_at TEXT NOT NULL
             );
+
+            CREATE TABLE IF NOT EXISTS mcp_discovered_tools (
+                server_id TEXT NOT NULL,
+                tool_name TEXT NOT NULL,
+                description TEXT,
+                schema_json TEXT,
+                updated_at TEXT NOT NULL,
+                PRIMARY KEY(server_id, tool_name),
+                FOREIGN KEY(server_id) REFERENCES mcp_servers(id) ON DELETE CASCADE
+            );
             """
         )
         conn.commit()

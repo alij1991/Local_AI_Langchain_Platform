@@ -128,3 +128,54 @@ def delete_mcp_server(server_id: str) -> None:
         conn.commit()
     finally:
         conn.close()
+
+
+def upsert_mcp_discovered_tools(server_id: str, items: list[dict]) -> list[dict]:
+    conn = get_conn()
+    now = _now()
+    try:
+        for item in items:
+            conn.execute(
+                """
+                INSERT INTO mcp_discovered_tools (server_id, tool_name, description, schema_json, updated_at)
+                VALUES (?, ?, ?, ?, ?)
+                ON CONFLICT(server_id, tool_name) DO UPDATE SET
+                    description=excluded.description,
+                    schema_json=excluded.schema_json,
+                    updated_at=excluded.updated_at
+                """,
+                (server_id, str(item.get('tool_name') or item.get('name') or ''), str(item.get('description') or ''), json.dumps(item.get('input_schema') or item.get('schema') or {}), now),
+            )
+        conn.commit()
+        rows = conn.execute("SELECT * FROM mcp_discovered_tools WHERE server_id = ? ORDER BY tool_name ASC", (server_id,)).fetchall()
+        out = []
+        for r in rows:
+            d = dict(r)
+            d['schema_json'] = json.loads(d.get('schema_json') or '{}')
+            out.append(d)
+        return out
+    finally:
+        conn.close()
+
+
+def list_mcp_discovered_tools(server_id: str) -> list[dict]:
+    conn = get_conn()
+    try:
+        rows = conn.execute("SELECT * FROM mcp_discovered_tools WHERE server_id = ? ORDER BY tool_name ASC", (server_id,)).fetchall()
+        out = []
+        for r in rows:
+            d = dict(r)
+            d['schema_json'] = json.loads(d.get('schema_json') or '{}')
+            out.append(d)
+        return out
+    finally:
+        conn.close()
+
+
+def delete_mcp_discovered_tools(server_id: str) -> None:
+    conn = get_conn()
+    try:
+        conn.execute("DELETE FROM mcp_discovered_tools WHERE server_id = ?", (server_id,))
+        conn.commit()
+    finally:
+        conn.close()

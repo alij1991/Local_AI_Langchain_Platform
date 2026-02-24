@@ -140,7 +140,7 @@ def test_tools_list_includes_builtin_tools_even_without_db_rows():
     assert response.status_code == 200
     items = response.json()['items']
     assert any(item['name'] == 'tavily_web_search' for item in items)
-    assert any(item['name'] == 'mcp_query' for item in items)
+    assert not any(item['tool_id'] == 'mcp_query' for item in items)
 
 
 def test_model_catalog_exposes_capability_flags():
@@ -313,3 +313,37 @@ def test_mcp_tools_select_persists_tools(monkeypatch):
     })
     assert response.status_code == 200
     assert response.json()['items']
+
+
+def test_tavily_status_endpoint(monkeypatch):
+    monkeypatch.delenv('TAVILY_API_KEY', raising=False)
+    response = client.get('/tools/tavily/status')
+    assert response.status_code == 200
+    assert response.json()['present'] is False
+
+    monkeypatch.setenv('TAVILY_API_KEY', 'abcd1234')
+    response2 = client.get('/tools/tavily/status')
+    assert response2.status_code == 200
+    assert response2.json()['present'] is True
+    assert response2.json()['masked_key'].endswith('1234')
+
+
+def test_mcp_discover_does_not_create_top_level_mcp_tool(monkeypatch):
+    create = client.post('/mcp/servers', json={'name': 'srv-hide', 'transport': 'http', 'endpoint': 'http://127.0.0.1:9191', 'enabled': True})
+    sid = create.json()['id']
+    monkeypatch.setattr(api_server, '_discover_mcp_tools', lambda _server: ([{
+        'tool_id': 'mcp:srv-hide:search',
+        'name': 'srv-hide:search',
+        'description': 'search',
+        'type': 'mcp_tool',
+        'config_json': {'tool_name': 'search'},
+        'is_enabled': True,
+    }], None))
+    resp = client.post(f'/mcp/servers/{sid}/discover', json={})
+    assert resp.status_code == 200
+
+    tools = client.get('/tools').json()['items']
+    assert not any(t.get('tool_id') == 'mcp:srv-hide:search' for t in tools)
+    server_item = next((t for t in tools if t.get('type') == 'mcp_server' and t.get('config_json', {}).get('server_id') == sid), None)
+    assert server_item is not None
+    assert server_item['config_json']['discovered_tools']
