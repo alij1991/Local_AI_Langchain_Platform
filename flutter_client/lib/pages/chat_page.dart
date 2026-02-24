@@ -259,6 +259,12 @@ class _ChatPageState extends State<ChatPage> {
     }
   }
 
+  String? _extractRunId(Map<String, dynamic> event) {
+    final v = event['run_id'] ?? event['runId'] ?? event['id'];
+    final text = v?.toString().trim();
+    return (text == null || text.isEmpty) ? null : text;
+  }
+
   Future<void> _sendStreaming(String text, String userLocalId, String assistantLocalId) async {
     setState(() => _isStreaming = true);
 
@@ -268,38 +274,58 @@ class _ChatPageState extends State<ChatPage> {
       'conversation_id': _conversationId,
     });
 
+    String? currentRunId;
     _streamSub = stream.listen((event) {
       if (!mounted) return;
       final type = event['event']?.toString() ?? '';
+      final eventRunId = _extractRunId(event);
+      if (eventRunId != null) {
+        currentRunId = eventRunId;
+      }
+
+      final assistantIndex = _messages.indexWhere((m) => m.localId == assistantLocalId);
+      final userIndex = _messages.indexWhere((m) => m.localId == userLocalId);
+
       if (type == 'start') {
         setState(() {
           _conversationId = event['conversation_id']?.toString() ?? _conversationId;
-          final assistant = _messages.firstWhere((m) => m.localId == assistantLocalId);
-          assistant.runId = event['run_id']?.toString() ?? assistant.runId;
-          final user = _messages.firstWhere((m) => m.localId == userLocalId);
-          user.status = ChatMessageStatus.sent;
+          if (assistantIndex >= 0) {
+            final assistant = _messages[assistantIndex];
+            assistant.runId = currentRunId ?? assistant.runId;
+          }
+          if (userIndex >= 0) {
+            _messages[userIndex].status = ChatMessageStatus.sent;
+          }
         });
       } else if (type == 'token') {
         final token = event['text']?.toString() ?? '';
         setState(() {
-          final assistant = _messages.firstWhere((m) => m.localId == assistantLocalId);
-          assistant.content = '${assistant.content}$token';
-          assistant.status = ChatMessageStatus.streaming;
+          if (assistantIndex >= 0) {
+            final assistant = _messages[assistantIndex];
+            assistant.content = '${assistant.content}$token';
+            assistant.status = ChatMessageStatus.streaming;
+            assistant.runId = currentRunId ?? assistant.runId;
+          }
         });
         _scheduleAutoScroll();
       } else if (type == 'end') {
         setState(() {
-          final assistant = _messages.firstWhere((m) => m.localId == assistantLocalId);
-          assistant.status = ChatMessageStatus.complete;
-          assistant.runId = runId;
+          if (assistantIndex >= 0) {
+            final assistant = _messages[assistantIndex];
+            assistant.status = ChatMessageStatus.complete;
+            assistant.runId = currentRunId ?? assistant.runId;
+          }
           _isStreaming = false;
         });
       } else if (type == 'error') {
         setState(() {
           _error = event['error']?.toString() ?? 'stream error';
           _isStreaming = false;
-          final assistant = _messages.firstWhere((m) => m.localId == assistantLocalId);
-          assistant.status = ChatMessageStatus.failed;
+          if (assistantIndex >= 0) {
+            final assistant = _messages[assistantIndex];
+            assistant.status = ChatMessageStatus.failed;
+            assistant.runId = currentRunId ?? assistant.runId;
+          }
         });
       }
     }, onError: (e) async {
@@ -365,37 +391,41 @@ class _ChatPageState extends State<ChatPage> {
   }
 
   Widget _statusIcon(ChatUiMessage m) {
+    final colors = Theme.of(context).colorScheme;
     switch (m.status) {
       case ChatMessageStatus.sending:
-        return const SizedBox(width: 12, height: 12, child: CircularProgressIndicator(strokeWidth: 1.5));
+        return SizedBox(width: 12, height: 12, child: CircularProgressIndicator(strokeWidth: 1.5, color: colors.primary));
       case ChatMessageStatus.sent:
       case ChatMessageStatus.complete:
-        return const Icon(Icons.check, size: 14, color: Colors.green);
+        return Icon(Icons.check, size: 14, color: colors.primary);
       case ChatMessageStatus.failed:
-        return const Icon(Icons.error_outline, size: 14, color: Colors.red);
+        return Icon(Icons.error_outline, size: 14, color: colors.error);
       case ChatMessageStatus.streaming:
-        return const Text('▍', style: TextStyle(color: Colors.blueGrey));
+        return Text('▍', style: TextStyle(color: colors.primary));
       default:
         return const SizedBox.shrink();
     }
   }
 
   Widget _typingIndicator() {
+    final colors = Theme.of(context).colorScheme;
     return Row(
       mainAxisSize: MainAxisSize.min,
-      children: const [
-        Text('●', style: TextStyle(color: Colors.grey)),
-        SizedBox(width: 4),
-        Text('●', style: TextStyle(color: Colors.grey)),
-        SizedBox(width: 4),
-        Text('●', style: TextStyle(color: Colors.grey)),
+      children: [
+        Text('●', style: TextStyle(color: colors.onSurfaceVariant)),
+        const SizedBox(width: 4),
+        Text('●', style: TextStyle(color: colors.onSurfaceVariant)),
+        const SizedBox(width: 4),
+        Text('●', style: TextStyle(color: colors.onSurfaceVariant)),
       ],
     );
   }
 
   Widget _chatBubble(ChatUiMessage m) {
+    final colors = Theme.of(context).colorScheme;
     final isUser = m.isUser;
-    final bubbleColor = isUser ? Colors.blue.shade50 : Colors.grey.shade100;
+    final bubbleColor = isUser ? colors.surfaceContainerHighest : colors.surfaceContainerLow;
+    final textColor = isUser ? colors.onSurface : colors.onSurfaceVariant;
     final align = isUser ? CrossAxisAlignment.end : CrossAxisAlignment.start;
 
     return Align(
@@ -422,10 +452,19 @@ class _ChatPageState extends State<ChatPage> {
                             child: MarkdownBody(
                               data: m.content,
                               selectable: true,
+                              styleSheet: MarkdownStyleSheet.fromTheme(Theme.of(context)).copyWith(
+                                p: TextStyle(color: textColor),
+                                code: TextStyle(color: colors.onSurface, backgroundColor: colors.surfaceVariant),
+                                codeblockDecoration: BoxDecoration(
+                                  color: colors.surfaceVariant,
+                                  borderRadius: BorderRadius.circular(8),
+                                ),
+                                blockquote: TextStyle(color: colors.onSurfaceVariant),
+                              ),
                             ),
                           )
                   else
-                    SelectionArea(child: Text(m.content)),
+                    SelectionArea(child: Text(m.content, style: TextStyle(color: textColor))),
                   if (m.attachments.isNotEmpty) ...[
                     const SizedBox(height: 6),
                     Wrap(
@@ -580,6 +619,7 @@ class _ChatPageState extends State<ChatPage> {
           child: Stack(
             children: [
               Card(
+                color: Theme.of(context).colorScheme.surface,
                 child: NotificationListener<ScrollNotification>(
                   onNotification: (notification) {
                     if (!_scrollController.hasClients) return false;

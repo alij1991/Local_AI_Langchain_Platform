@@ -26,6 +26,25 @@ rm -rf data
 - `TAVILY_API_KEY` (optional; if missing Tavily tool appears disabled in status)
 - `API_SERVER_PORT` (default `8000`)
 
+## Dependencies (LangChain ecosystem)
+
+Install with:
+
+```bash
+pip install -e .[dev]
+```
+
+Pinned minimums used by this repo:
+- `langchain>=0.3.0`
+- `langchain-core>=0.3.0`
+- `langchain-community>=0.3.0`
+- `langchain-ollama>=0.2.0`
+- `langchain-text-splitters>=0.3.0`
+- `langgraph>=0.2.0`
+- `langchain-huggingface>=0.1.0`
+- `langchain-tavily>=0.1.0`
+- `langchain-mcp-adapters>=0.1.0`
+
 ## Run backend
 
 ```bash

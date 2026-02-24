@@ -11,6 +11,10 @@ from langchain_core.prompts import ChatPromptTemplate
 from langchain_core.tools import StructuredTool
 from langchain_ollama import ChatOllama
 from langgraph.graph import END, START, StateGraph
+try:
+    from langchain.agents import create_agent as create_langchain_agent
+except Exception:  # noqa: BLE001
+    create_langchain_agent = None
 from langgraph.prebuilt import create_react_agent
 
 from .config import AppConfig
@@ -120,12 +124,14 @@ class AgentOrchestrator:
         result = llm.invoke(prompt.format_messages(description=description))
         return str(getattr(result, "content", ""))
 
-    def _build_agent_graph(self, definition: AgentDefinition, allow_tools: bool = True, callbacks: list[Any] | None = None):
+    def _build_agent_graph(self, definition: AgentDefinition, allow_tools: bool = True):
         llm = ChatOllama(model=definition.model_name, base_url=self.config.ollama_base_url, temperature=0.2)
         tools = self._tools_for_agent(definition.name)
         if not allow_tools or definition.model_name in self._models_without_tool_support:
             tools = []
-        return create_react_agent(model=llm, tools=tools, prompt=definition.system_prompt), callbacks
+        if create_langchain_agent is not None:
+            return create_langchain_agent(model=llm, tools=tools, system_prompt=definition.system_prompt)
+        return create_react_agent(model=llm, tools=tools, prompt=definition.system_prompt)
 
     @staticmethod
     def _is_tool_support_error(exc: Exception) -> bool:
@@ -174,19 +180,25 @@ class AgentOrchestrator:
             result = llm.invoke([SystemMessage(content=definition.system_prompt), HumanMessage(content=content)], config=cfg)
             return self._stringify_content(getattr(result, "content", "No response returned."))
 
-        graph, _ = self._build_agent_graph(definition, callbacks=callbacks)
+        graph = self._build_agent_graph(definition)
         payload = {"messages": [*history, HumanMessage(content=user_input)]}
         cfg = {"callbacks": callbacks}
         if run_id:
             cfg["run_id"] = run_id
         try:
-            result = graph.invoke(payload, config=cfg)
+            try:
+                result = graph.invoke(payload, config=cfg)
+            except TypeError:
+                result = graph.invoke(payload)
         except Exception as exc:  # noqa: BLE001
             if not self._is_tool_support_error(exc):
                 raise
             self._models_without_tool_support.add(definition.model_name)
-            graph_no_tools, _ = self._build_agent_graph(definition, allow_tools=False, callbacks=callbacks)
-            result = graph_no_tools.invoke(payload, config=cfg)
+            graph_no_tools = self._build_agent_graph(definition, allow_tools=False)
+            try:
+                result = graph_no_tools.invoke(payload, config=cfg)
+            except TypeError:
+                result = graph_no_tools.invoke(payload)
 
         messages = result.get("messages", [])
         final_message = next((msg for msg in reversed(messages) if isinstance(msg, AIMessage)), None)
