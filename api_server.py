@@ -35,6 +35,12 @@ from local_ai_platform.repositories.conversations import (
     rename_conversation,
 )
 from local_ai_platform.repositories.models import list_model_entries, upsert_model_entry
+from local_ai_platform.repositories.prompt_drafts import (
+    create_prompt_draft,
+    delete_prompt_draft,
+    get_prompt_draft,
+    list_prompt_drafts,
+)
 from local_ai_platform.repositories.systems import delete_system, get_system, list_systems, upsert_system
 from local_ai_platform.repositories.tools_repo import (
     delete_mcp_server,
@@ -96,6 +102,15 @@ class PromptDraftRequest(BaseModel):
     target_stack: str | None = None
     output_format: str | None = None
     model_name: str | None = None
+
+
+class PromptDraftCreateRequest(BaseModel):
+    title: str | None = None
+    inputs_json: dict[str, Any] = Field(default_factory=dict)
+    output_prompt_text: str
+    used_fallback: bool = False
+    model_provider: str | None = None
+    model_id: str | None = None
 
 
 class WorkflowRunRequest(BaseModel):
@@ -295,6 +310,14 @@ def _serialize_model(provider: str, model_id: str, display_name: str, installed:
             "last_seen": kwargs.get("last_seen"),
         },
         "provider_unavailable": kwargs.get("provider_unavailable", False),
+        "metadata": {
+            "size_bytes": kwargs.get("size_bytes"),
+            "parameters": kwargs.get("parameters"),
+            "quantization": kwargs.get("quantization"),
+            "context_length": kwargs.get("context_length"),
+            "license": kwargs.get("license"),
+            "tags": kwargs.get("tags", []),
+        },
     }
 
 
@@ -522,6 +545,31 @@ def model_catalog(provider: str | None = None, search: str = "", installed_only:
     return {"items": [e for e in entries if _match(e)]}
 
 
+
+
+@app.get("/models/catalog")
+def models_catalog(provider: str | None = None, search: str = "", installed_only: bool = False, supports_tools: bool = False, supports_vision: bool = False, supports_embeddings: bool = False, supports_streaming: bool = False) -> dict[str, Any]:
+    body = model_catalog(provider=provider, search=search, installed_only=installed_only, supports_tools=supports_tools, supports_vision=supports_vision, supports_embeddings=supports_embeddings)
+    items: list[dict[str, Any]] = []
+    for it in body.get("items", []):
+        supports = it.get("supports") or {}
+        if supports_streaming and not supports.get("streaming"):
+            continue
+        items.append({
+            "id": f"{it.get('provider')}:{it.get('model_id')}",
+            "name": it.get("display_name") or it.get("model_id"),
+            "model_id": it.get("model_id"),
+            "provider": it.get("provider"),
+            "supports_tools": bool(it.get("supports_tools")),
+            "supports_streaming": bool(supports.get("streaming")),
+            "supports_vision": bool(it.get("supports_vision")),
+            "supports_embeddings": bool(it.get("supports_embeddings")),
+            "installed": bool((it.get("local_status") or {}).get("installed")),
+            "metadata": it.get("metadata") or {},
+            "supports": supports,
+            "raw": it,
+        })
+    return {"items": items, "count": len(items)}
 @app.get("/model-catalog/{provider}/{model_id:path}/details")
 def model_catalog_details(provider: str, model_id: str) -> dict[str, Any]:
     if provider == "ollama":
@@ -892,6 +940,8 @@ def agent_capabilities(name: str) -> dict[str, Any]:
 @app.post("/agents/prompt-draft")
 def draft_prompt(payload: PromptDraftRequest) -> dict[str, Any]:
     fallback = _build_prompt_fallback(payload)
+    model_provider = "ollama"
+    model_id = config.prompt_builder_model
     try:
         llm_text = orchestrator.generate_system_prompt(
             f"Goal: {payload.goal}\nContext: {payload.context}\nRequirements: {payload.requirements}\n"
@@ -902,10 +952,59 @@ def draft_prompt(payload: PromptDraftRequest) -> dict[str, Any]:
             fallback["used_fallback"] = False
     except Exception as exc:  # noqa: BLE001
         logger.warning("Prompt refine fallback due to: %s", exc)
-    return fallback
+        model_provider = "fallback"
+        model_id = None
+
+    draft = create_prompt_draft(
+        title=(payload.goal or "Prompt draft")[:80],
+        inputs={
+            "goal": payload.goal,
+            "context": payload.context,
+            "requirements": payload.requirements,
+            "constraints": payload.constraints,
+            "target_stack": payload.target_stack,
+            "output_format": payload.output_format,
+            "model_name": payload.model_name,
+        },
+        output_prompt_text=str(fallback.get("prompt_text") or ""),
+        used_fallback=bool(fallback.get("used_fallback")),
+        model_provider=model_provider,
+        model_id=model_id,
+    )
+    return {**fallback, "draft_id": draft["id"]}
 
 
 # Tools endpoints
+@app.post("/prompt_drafts")
+def prompt_drafts_create(payload: PromptDraftCreateRequest) -> dict[str, Any]:
+    return create_prompt_draft(
+        title=payload.title,
+        inputs=payload.inputs_json,
+        output_prompt_text=payload.output_prompt_text,
+        used_fallback=payload.used_fallback,
+        model_provider=payload.model_provider,
+        model_id=payload.model_id,
+    )
+
+
+@app.get("/prompt_drafts")
+def prompt_drafts_list(limit: int = 50, offset: int = 0) -> dict[str, Any]:
+    return {"items": list_prompt_drafts(limit=limit, offset=offset), "limit": limit, "offset": offset}
+
+
+@app.get("/prompt_drafts/{draft_id}")
+def prompt_drafts_get(draft_id: str) -> dict[str, Any]:
+    row = get_prompt_draft(draft_id)
+    if not row:
+        raise error_response("not_found", "Prompt draft not found", status=404)
+    return row
+
+
+@app.delete("/prompt_drafts/{draft_id}")
+def prompt_drafts_delete(draft_id: str) -> dict[str, Any]:
+    return {"deleted": delete_prompt_draft(draft_id)}
+
+
 @app.get("/tools")
 def list_tools_endpoint() -> dict[str, Any]:
     items = _normalized_tools()

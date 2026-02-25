@@ -393,3 +393,31 @@ def test_runs_endpoints_and_message_run_id(monkeypatch):
     assistant = [m for m in messages if m.get('role') == 'assistant']
     assert assistant
     assert assistant[-1].get('run_id') == run_id
+
+
+def test_prompt_draft_auto_saves_and_history_endpoints():
+    response = client.post('/agents/prompt-draft', json={'goal': 'Build summarizer'})
+    assert response.status_code == 200
+    body = response.json()
+    assert body.get('draft_id')
+
+    listing = client.get('/prompt_drafts?limit=20')
+    assert listing.status_code == 200
+    items = listing.json()['items']
+    assert any(i.get('id') == body['draft_id'] for i in items)
+
+    item = client.get(f"/prompt_drafts/{body['draft_id']}")
+    assert item.status_code == 200
+    assert item.json()['id'] == body['draft_id']
+
+
+def test_models_catalog_endpoint():
+    response = client.get('/models/catalog?supports_streaming=true')
+    assert response.status_code == 200
+    payload = response.json()
+    assert 'items' in payload
+    if payload['items']:
+        sample = payload['items'][0]
+        assert 'id' in sample
+        assert 'provider' in sample
+        assert 'supports_streaming' in sample
