@@ -282,6 +282,7 @@ Additional tracing/run endpoints:
 - `GET /traces/status`
 - `GET /runs?limit=50&offset=0&conversation_id=<id>&agent=<name>`
 - `GET /runs/{run_id}`
+- `GET /runs/{run_id}/view` (aggregated timeline for UI)
 
 Run traces are stored as JSON files under `TRACE_STORE_DIR` (default `./data/traces`).
 - Standard mode (`TRACE_VERBOSE=false`): stores structured events, tool usage, timings, and redacted/truncated payloads.
@@ -334,3 +335,6 @@ curl "http://127.0.0.1:8000/models/catalog?provider=ollama&supports_tools=true"
 ```
 
 Returned fields include: `id`, `name`, `model_id`, `provider`, capability flags, install status, metadata, and raw provider payload.
+
+
+Systems run now returns `run_id` in `POST /systems/{name}/run` so executions appear in Runs/Traces.
