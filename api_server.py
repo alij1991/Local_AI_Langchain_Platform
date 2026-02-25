@@ -1285,7 +1285,15 @@ def systems_run(name: str, payload: SystemRunRequest) -> dict[str, Any]:
         raise error_response("not_found", "Unknown system", status=404)
     definition = json.loads(item["definition_json"])
     sequence = _validate_system_graph(definition)
-    return {"outputs": orchestrator.run_agent_workflow(payload.prompt, sequence), "sequence": sequence}
+
+    run_id, recorder, callbacks = _build_trace(f"system:{name}", None)
+    try:
+        outputs = orchestrator.run_agent_workflow(payload.prompt, sequence, callbacks=callbacks)
+        _finalize_trace(recorder, success=True)
+    except Exception as exc:  # noqa: BLE001
+        _finalize_trace(recorder, success=False, error=str(exc))
+        raise
+    return {"outputs": outputs, "sequence": sequence, "run_id": run_id}
 
 
 
@@ -1325,6 +1333,68 @@ def traces_status() -> dict[str, Any]:
     }
 
 
+
+
+def _build_run_view(trace: dict[str, Any]) -> dict[str, Any]:
+    events = (trace.get("events") or [])
+    tool_calls: list[dict[str, Any]] = []
+    model_calls: list[dict[str, Any]] = []
+    streams = {"chunks": 0, "final_chars": 0}
+
+    current_tool: dict[str, Any] | None = None
+    current_llm: dict[str, Any] | None = None
+
+    for e in events:
+        et = str(e.get("event_type") or "")
+        if et == "tool_start":
+            current_tool = {"name": e.get("name"), "status": "running", "inputs": e.get("inputs"), "outputs": None, "duration_ms": None}
+        elif et in {"tool_end", "tool_error"}:
+            if current_tool is None:
+                current_tool = {"name": e.get("name"), "inputs": None}
+            current_tool["outputs"] = e.get("outputs")
+            current_tool["duration_ms"] = e.get("duration_ms")
+            current_tool["status"] = "ok" if et == "tool_end" else "error"
+            tool_calls.append(current_tool)
+            current_tool = None
+        elif et == "llm_start":
+            current_llm = {"name": e.get("name"), "status": "running", "inputs": e.get("inputs"), "outputs": None, "duration_ms": None, "token_usage": None}
+        elif et == "llm_end":
+            if current_llm is None:
+                current_llm = {"name": e.get("name")}
+            current_llm["outputs"] = e.get("outputs")
+            current_llm["duration_ms"] = e.get("duration_ms")
+            current_llm["token_usage"] = e.get("token_usage")
+            current_llm["status"] = "ok"
+            model_calls.append(current_llm)
+            current_llm = None
+        elif et == "llm_stream":
+            out = e.get("outputs") or {}
+            streams["chunks"] = max(streams["chunks"], int(out.get("chunk_count") or 0))
+            partial = str(out.get("partial") or "")
+            streams["final_chars"] = max(streams["final_chars"], len(partial))
+
+    timeline: list[dict[str, Any]] = []
+    for i, m in enumerate(model_calls, start=1):
+        timeline.append({"type": "model_call", "index": i, **m})
+    for i, t in enumerate(tool_calls, start=1):
+        timeline.append({"type": "tool_call", "index": i, **t})
+
+    summary = {
+        "run_id": trace.get("run_id"),
+        "agent": trace.get("agent_name"),
+        "model": f"{trace.get('model_provider')}:{trace.get('model_id')}",
+        "status": "running" if trace.get("success") is None else ("ok" if trace.get("success") else "error"),
+        "duration_ms": trace.get("duration_ms"),
+        "error": trace.get("error"),
+        "tool_calls_count": len(tool_calls),
+        "model_calls_count": len(model_calls),
+        "stream_summary": streams,
+        "token_usage": next((m.get("token_usage") for m in reversed(model_calls) if m.get("token_usage") is not None), None),
+        "started_at": trace.get("start_timestamp"),
+    }
+    return {"summary": summary, "timeline": timeline, "raw": trace}
+
+
 @app.get("/runs")
 def list_runs(limit: int = 50, offset: int = 0, conversation_id: str | None = None, agent: str | None = None) -> dict[str, Any]:
     rows = trace_store.list(conversation_id=conversation_id, limit=max(limit + offset, 1))
@@ -1337,6 +1407,12 @@ def list_runs(limit: int = 50, offset: int = 0, conversation_id: str | None = No
 @app.get("/runs/{run_id}")
 def get_run(run_id: str) -> dict[str, Any]:
     return get_trace(run_id)
+
+
+@app.get("/runs/{run_id}/view")
+def get_run_view(run_id: str) -> dict[str, Any]:
+    trace = get_trace(run_id)
+    return _build_run_view(trace)
 
 
 def _tool_python_snippet(tool: dict[str, Any]) -> str:

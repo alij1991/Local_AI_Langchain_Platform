@@ -421,3 +421,31 @@ def test_models_catalog_endpoint():
         assert 'id' in sample
         assert 'provider' in sample
         assert 'supports_streaming' in sample
+
+
+def test_runs_view_endpoint_and_stream_summary(monkeypatch):
+    monkeypatch.setattr(api_server.orchestrator, 'chat_with_agent', lambda *args, **kwargs: 'trace reply')
+    response = client.post('/chat', json={'agent': 'assistant', 'message': 'aggregate me'})
+    run_id = response.json()['run_id']
+
+    view = client.get(f'/runs/{run_id}/view')
+    assert view.status_code == 200
+    body = view.json()
+    assert 'summary' in body
+    assert 'timeline' in body
+    assert body['summary']['run_id'] == run_id
+
+
+def test_systems_run_returns_run_id_and_creates_trace(monkeypatch):
+    monkeypatch.setattr(api_server.orchestrator, 'run_agent_workflow', lambda *args, **kwargs: {'assistant': 'ok'})
+    create = client.post('/systems', json={'name': 'sys-run', 'definition': {'nodes': [{'id': 'n1', 'type': 'agent', 'agent': 'assistant'}], 'edges': []}})
+    assert create.status_code == 200
+
+    run = client.post('/systems/sys-run/run', json={'prompt': 'hello'})
+    assert run.status_code == 200
+    run_id = run.json().get('run_id')
+    assert run_id
+
+    trace = client.get(f'/runs/{run_id}')
+    assert trace.status_code == 200
+    assert trace.json()['run_id'] == run_id
