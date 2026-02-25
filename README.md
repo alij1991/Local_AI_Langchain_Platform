@@ -305,3 +305,32 @@ This keeps local trace files while enabling hosted run inspection.
   - `resolved_model`
   - `python_snippet` showing LangChain wiring
 - `GET /tools/{tool_id}/definition` returns structured tool definition + snippet.
+
+
+## Prompt Drafts history
+
+Prompt generation now persists drafts automatically when calling `POST /agents/prompt-draft`.
+
+Stored fields include:
+- generated prompt text
+- all generation inputs/options
+- fallback/model metadata
+- timestamp/title
+
+Endpoints:
+- `POST /prompt_drafts`
+- `GET /prompt_drafts?limit=50&offset=0`
+- `GET /prompt_drafts/{id}`
+- `DELETE /prompt_drafts/{id}`
+
+
+## Unified model catalog endpoint
+
+Use `GET /models/catalog` for a normalized UI-friendly schema across providers.
+
+Example:
+```bash
+curl "http://127.0.0.1:8000/models/catalog?provider=ollama&supports_tools=true"
+```
+
+Returned fields include: `id`, `name`, `model_id`, `provider`, capability flags, install status, metadata, and raw provider payload.

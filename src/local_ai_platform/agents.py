@@ -11,11 +11,7 @@ from langchain_core.prompts import ChatPromptTemplate
 from langchain_core.tools import StructuredTool
 from langchain_ollama import ChatOllama
 from langgraph.graph import END, START, StateGraph
-try:
-    from langchain.agents import create_agent as create_langchain_agent
-except Exception:  # noqa: BLE001
-    create_langchain_agent = None
-from langgraph.prebuilt import create_react_agent
+from langchain.agents import create_agent
 
 from .config import AppConfig
 from .huggingface import HuggingFaceController
@@ -129,9 +125,7 @@ class AgentOrchestrator:
         tools = self._tools_for_agent(definition.name)
         if not allow_tools or definition.model_name in self._models_without_tool_support:
             tools = []
-        if create_langchain_agent is not None:
-            return create_langchain_agent(model=llm, tools=tools, system_prompt=definition.system_prompt)
-        return create_react_agent(model=llm, tools=tools, prompt=definition.system_prompt)
+        return create_agent(model=llm, tools=tools, system_prompt=definition.system_prompt)
 
     @staticmethod
     def _is_tool_support_error(exc: Exception) -> bool:

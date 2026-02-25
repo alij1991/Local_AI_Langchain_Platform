@@ -92,6 +92,17 @@ def init_db() -> None:
                 updated_at TEXT NOT NULL
             );
 
+            CREATE TABLE IF NOT EXISTS prompt_drafts (
+                id TEXT PRIMARY KEY,
+                created_at TEXT NOT NULL,
+                title TEXT,
+                inputs_json TEXT NOT NULL,
+                output_prompt_text TEXT NOT NULL,
+                used_fallback INTEGER NOT NULL DEFAULT 0,
+                model_provider TEXT,
+                model_id TEXT
+            );
+
             CREATE TABLE IF NOT EXISTS mcp_discovered_tools (
                 server_id TEXT NOT NULL,
                 tool_name TEXT NOT NULL,
