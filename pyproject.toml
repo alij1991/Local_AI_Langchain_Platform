@@ -1,0 +1,50 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "local-ai-langchain-platform"
+version = "0.1.0"
+description = "Starter UI + backend for LangChain agents powered by Ollama."
+readme = "README.md"
+requires-python = ">=3.10"
+authors = [{ name = "Local AI Team" }]
+dependencies = [
+  "gradio>=5.0.0",
+  "langchain>=0.3.27",
+  "langchain-core>=0.3.66",
+  "langchain-ollama>=0.2.3",
+  "langchain-community>=0.3.27",
+  "langchain-text-splitters>=0.3.8",
+  "langgraph>=0.2.74",
+  "pydantic>=2.7.0",
+  "ollama>=0.4.0",
+  "langchain-huggingface>=0.1.2",
+  "transformers>=4.45.0",
+  "accelerate>=0.34.0",
+  "tavily-python>=0.5.0",
+  "langchain-tavily>=0.1.5",
+  "langchain-mcp-adapters>=0.1.9",
+  "fastapi>=0.115.12",
+  "uvicorn>=0.30.6",
+  "pypdf>=5.0.0",
+]
+
+[project.optional-dependencies]
+dev = [
+  "pytest",
+  "ruff",
+]
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+pythonpath = [".", "src"]
+addopts = "-q"
+
+[tool.ruff]
+line-length = 100
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "B"]
