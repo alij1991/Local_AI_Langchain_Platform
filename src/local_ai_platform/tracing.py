@@ -4,7 +4,8 @@ import json
 import os
 import time
 import uuid
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass, is_dataclass
+from enum import Enum
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -22,6 +23,50 @@ REDACT_KEYS = {
     "tavily_api_key",
     "langsmith_api_key",
 }
+
+
+def safe_json(value: Any) -> Any:
+    if value is None or isinstance(value, (str, int, float, bool)):
+        return value
+    if isinstance(value, dict):
+        return {str(k): safe_json(v) for k, v in value.items()}
+    if isinstance(value, (list, tuple, set)):
+        return [safe_json(v) for v in value]
+    if isinstance(value, Path):
+        return str(value)
+    if isinstance(value, bytes):
+        return f"<bytes {len(value)}>"
+    if isinstance(value, Exception):
+        return str(value)
+    if isinstance(value, Enum):
+        return safe_json(value.value)
+    if is_dataclass(value):
+        return safe_json(asdict(value))
+
+    cls_name = value.__class__.__name__
+    if cls_name == "Command":
+        out: dict[str, Any] = {}
+        for attr in ("goto", "update", "resume", "graph", "metadata"):
+            if hasattr(value, attr):
+                out[attr] = safe_json(getattr(value, attr))
+        return out or repr(value)
+
+    for method in ("model_dump", "dict"):
+        fn = getattr(value, method, None)
+        if callable(fn):
+            try:
+                return safe_json(fn())
+            except Exception:  # noqa: BLE001
+                pass
+
+    if hasattr(value, "__dict__"):
+        try:
+            return safe_json(vars(value))
+        except Exception:  # noqa: BLE001
+            pass
+    return repr(value)
+
+
 
 
 @dataclass
@@ -46,6 +91,7 @@ class TraceRecorder:
         self._llm_stream_count = 0
 
     def _redact(self, value: Any) -> Any:
+        value = safe_json(value)
         if isinstance(value, dict):
             out: dict[str, Any] = {}
             for k, v in value.items():
@@ -69,7 +115,7 @@ class TraceRecorder:
                 "name": name,
                 "inputs": self._redact(inputs),
                 "outputs": self._redact(outputs),
-                "token_usage": token_usage,
+                "token_usage": self._redact(token_usage),
                 "duration_ms": duration_ms,
                 "timestamp": datetime.now(timezone.utc).isoformat(),
             }
@@ -123,17 +169,20 @@ class LocalTraceCallbackHandler(BaseCallbackHandler):
         super().__init__()
         self.recorder = recorder
 
-    def on_chain_start(self, serialized: dict[str, Any], inputs: dict[str, Any], *, run_id: uuid.UUID, parent_run_id: uuid.UUID | None = None, **kwargs: Any) -> None:
+    def on_chain_start(self, serialized: dict[str, Any] | None, inputs: dict[str, Any] | None, *, run_id: uuid.UUID, parent_run_id: uuid.UUID | None = None, **kwargs: Any) -> None:
+        serialized = serialized or {}
+        inputs = inputs or {}
         self.recorder.start(run_id, "chain_start", serialized.get("name") or "chain", inputs=inputs)
 
-    def on_chain_end(self, outputs: dict[str, Any], *, run_id: uuid.UUID, parent_run_id: uuid.UUID | None = None, **kwargs: Any) -> None:
-        self.recorder.end(run_id, "chain_end", "chain", outputs=outputs)
+    def on_chain_end(self, outputs: dict[str, Any] | None, *, run_id: uuid.UUID, parent_run_id: uuid.UUID | None = None, **kwargs: Any) -> None:
+        self.recorder.end(run_id, "chain_end", "chain", outputs=outputs or {})
 
     def on_chain_error(self, error: Exception, *, run_id: uuid.UUID, parent_run_id: uuid.UUID | None = None, **kwargs: Any) -> None:
         self.recorder.error(run_id, "chain", error)
 
-    def on_tool_start(self, serialized: dict[str, Any], input_str: str, *, run_id: uuid.UUID, parent_run_id: uuid.UUID | None = None, **kwargs: Any) -> None:
-        self.recorder.start(run_id, "tool_start", serialized.get("name") or "tool", inputs=input_str)
+    def on_tool_start(self, serialized: dict[str, Any] | None, input_str: str | None, *, run_id: uuid.UUID, parent_run_id: uuid.UUID | None = None, **kwargs: Any) -> None:
+        serialized = serialized or {}
+        self.recorder.start(run_id, "tool_start", serialized.get("name") or "tool", inputs=input_str or "")
 
     def on_tool_end(self, output: Any, *, run_id: uuid.UUID, parent_run_id: uuid.UUID | None = None, **kwargs: Any) -> None:
         self.recorder.end(run_id, "tool_end", "tool", outputs=output)
@@ -141,8 +190,9 @@ class LocalTraceCallbackHandler(BaseCallbackHandler):
     def on_tool_error(self, error: Exception, *, run_id: uuid.UUID, parent_run_id: uuid.UUID | None = None, **kwargs: Any) -> None:
         self.recorder.end(run_id, "tool_error", "tool", outputs={"error": str(error)})
 
-    def on_llm_start(self, serialized: dict[str, Any], prompts: list[str], *, run_id: uuid.UUID, parent_run_id: uuid.UUID | None = None, **kwargs: Any) -> None:
-        self.recorder.start(run_id, "llm_start", serialized.get("name") or "llm", inputs={"prompts": prompts})
+    def on_llm_start(self, serialized: dict[str, Any] | None, prompts: list[str] | None, *, run_id: uuid.UUID, parent_run_id: uuid.UUID | None = None, **kwargs: Any) -> None:
+        serialized = serialized or {}
+        self.recorder.start(run_id, "llm_start", serialized.get("name") or "llm", inputs={"prompts": prompts or []})
 
     def on_llm_new_token(self, token: str, *, run_id: uuid.UUID, parent_run_id: uuid.UUID | None = None, **kwargs: Any) -> None:
         self.recorder.stream_chunk("llm", token)
@@ -168,14 +218,12 @@ class TraceStore:
     def upsert(self, trace: dict[str, Any]) -> None:
         if not self.cfg.enabled:
             return
-        path = self.base / f"{trace['run_id']}.json"
-        path.write_text(json.dumps(trace, ensure_ascii=False, indent=2), encoding="utf-8")
+        payload = safe_json(trace)
+        path = self.base / f"{payload.get('run_id', 'unknown')}.json"
+        path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
 
     def save(self, trace: dict[str, Any]) -> None:
-        if not self.cfg.enabled:
-            return
-        path = self.base / f"{trace['run_id']}.json"
-        path.write_text(json.dumps(trace, ensure_ascii=False, indent=2), encoding="utf-8")
+        self.upsert(trace)
 
     def get(self, run_id: str) -> dict[str, Any] | None:
         path = self.base / f"{run_id}.json"
