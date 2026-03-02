@@ -302,7 +302,7 @@ class _AgentsPageState extends State<AgentsPage> {
               }).toList(),
             ),
             const SizedBox(height: 8),
-            Row(children: [Expanded(child: TextField(controller: _temperature, decoration: const InputDecoration(labelText: 'Temperature'))), const SizedBox(width: 8), Expanded(child: TextField(controller: _maxTokens, decoration: const InputDecoration(labelText: 'Max tokens'))), const SizedBox(width: 8), Checkbox(value: _streaming, onChanged: (v) => setState(() => _streaming = v ?? true)), const Text('Streaming')]),
+            Row(children: [Expanded(child: TextField(controller: _temperature, decoration: const InputDecoration(labelText: 'Temperature'))), const SizedBox(width: 8), Expanded(child: TextField(controller: _maxTokens, decoration: const InputDecoration(labelText: 'Max tokens'))), const SizedBox(width: 8), Checkbox(value: _provider == 'huggingface' ? false : _streaming, onChanged: _provider == 'huggingface' ? null : (v) => setState(() => _streaming = v ?? true)), Text(_provider == 'huggingface' ? 'Streaming (not supported for HF runtime)' : 'Streaming')]),
             const SizedBox(height: 8),
             Row(children: [FilledButton(onPressed: _isSaving ? null : _save, child: _isSaving ? const SizedBox(width: 16, height: 16, child: CircularProgressIndicator(strokeWidth: 2)) : const Text('Save')), const SizedBox(width: 8), FilledButton.tonal(onPressed: _isSaving ? null : _remove, child: const Text('Delete'))]),
             ],

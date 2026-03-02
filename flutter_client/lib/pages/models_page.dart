@@ -55,6 +55,15 @@ class _ModelsPageState extends State<ModelsPage> {
     }
   }
 
+
+  Future<void> _refreshMetadata() async {
+    if (_selected == null) return;
+    final provider = (_selected!['provider'] ?? '').toString();
+    final modelId = Uri.encodeComponent((_selected!['model_id'] ?? '').toString());
+    await widget.api.get('/model-catalog/$provider/$modelId/details?refresh=true');
+    await _load();
+  }
+
   Widget _capabilityChip(String label, bool enabled) {
     final c = Theme.of(context).colorScheme;
     return Chip(
@@ -167,7 +176,38 @@ class _ModelsPageState extends State<ModelsPage> {
                         ),
                       ]),
                       const SizedBox(height: 8),
-                      SelectableText((_selected!['raw'] ?? _selected).toString()),
+                      Text('Overview', style: Theme.of(context).textTheme.titleMedium),
+                      const SizedBox(height: 6),
+                      Text('Provider: ${_selected!['provider']}'),
+                      Text('Model ID: ${_selected!['model_id']}'),
+                      Text('Runtime: ${_selected!['runtime'] ?? ((_selected!['metadata'] as Map<String, dynamic>?)?['runtime'] ?? 'unknown')}'),
+                      Text('Metadata source: ${_selected!['metadata_source'] ?? ((_selected!['metadata'] as Map<String, dynamic>?)?['metadata_source'] ?? 'unknown')}'),
+                      const SizedBox(height: 10),
+                      Wrap(spacing: 6, runSpacing: 6, children: [
+                        _capabilityChip('Chat', true),
+                        _capabilityChip('Tools', _selected!['supports_tools'] == true),
+                        _capabilityChip('Vision', _selected!['supports_vision'] == true),
+                        _capabilityChip('Embeddings', _selected!['supports_embeddings'] == true),
+                        _capabilityChip('Streaming', _selected!['supports_streaming'] == true),
+                      ]),
+                      const SizedBox(height: 10),
+                      Text('Size: ${((_selected!['metadata'] as Map<String, dynamic>?)?['size_bytes'] ?? 'unknown')}'),
+                      Text('Parameters: ${((_selected!['metadata'] as Map<String, dynamic>?)?['parameters'] ?? 'unknown')}'),
+                      Text('Context length: ${((_selected!['metadata'] as Map<String, dynamic>?)?['context_length'] ?? 'unknown')}'),
+                      Text('Quantization: ${((_selected!['metadata'] as Map<String, dynamic>?)?['quantization'] ?? 'unknown')}'),
+                      const SizedBox(height: 12),
+                      Row(children: [
+                        FilledButton.tonalIcon(
+                          onPressed: _refreshMetadata,
+                          icon: const Icon(Icons.refresh),
+                          label: const Text('Refresh metadata'),
+                        ),
+                      ]),
+                      const SizedBox(height: 12),
+                      ExpansionTile(
+                        title: const Text('Raw JSON'),
+                        children: [Padding(padding: const EdgeInsets.all(8), child: SelectableText((_selected!['raw'] ?? _selected).toString()))],
+                      ),
                     ]),
                   ),
                 ),
