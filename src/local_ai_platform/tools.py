@@ -23,6 +23,19 @@ class MCPQueryInput(BaseModel):
     prompt: str = Field(..., description="Task/query to send to MCP server")
 
 
+class GenerateImageInput(BaseModel):
+    session_id: str = Field(..., description="Image session id")
+    model_id: str = Field(..., description="Hugging Face image model id")
+    prompt: str = Field(..., description="Prompt to generate image")
+
+
+class EditImageInput(BaseModel):
+    session_id: str = Field(..., description="Image session id")
+    base_image_id: str = Field(..., description="Existing image id")
+    model_id: str = Field(..., description="Hugging Face image model id")
+    instruction: str = Field(..., description="Natural-language image edit instruction")
+
+
 def multiply_numbers(a: float, b: float) -> str:
     return f"{a} * {b} = {a * b}"
 
@@ -44,6 +57,39 @@ def tavily_web_search(query: str, max_results: int = 5) -> str:
         return str(result)
     except Exception as exc:  # noqa: BLE001
         return f"Tavily search unavailable: {exc}"
+
+
+
+
+def _post_json(url: str, payload: dict) -> str:
+    body = json.dumps(payload).encode("utf-8")
+    req = request.Request(url, data=body, headers={"Content-Type": "application/json"}, method="POST")
+    with request.urlopen(req, timeout=60) as resp:  # noqa: S310
+        return resp.read().decode("utf-8")
+
+
+def generate_image(session_id: str, model_id: str, prompt: str) -> str:
+    api_base = os.getenv("LOCAL_AI_API_URL", "http://127.0.0.1:8000").rstrip("/")
+    try:
+        return _post_json(f"{api_base}/images/generate", {"session_id": session_id, "model_id": model_id, "prompt": prompt})
+    except Exception as exc:  # noqa: BLE001
+        return f"Image generation failed: {exc}"
+
+
+def edit_image(session_id: str, base_image_id: str, model_id: str, instruction: str) -> str:
+    api_base = os.getenv("LOCAL_AI_API_URL", "http://127.0.0.1:8000").rstrip("/")
+    try:
+        return _post_json(
+            f"{api_base}/images/edit",
+            {
+                "session_id": session_id,
+                "base_image_id": base_image_id,
+                "model_id": model_id,
+                "instruction": instruction,
+            },
+        )
+    except Exception as exc:  # noqa: BLE001
+        return f"Image edit failed: {exc}"
 
 
 def mcp_query(prompt: str) -> str:
@@ -91,5 +137,17 @@ def build_default_tools() -> list[StructuredTool]:
             name="mcp_query",
             description="Call a configured MCP server tool endpoint.",
             args_schema=MCPQueryInput,
+        ),
+        StructuredTool.from_function(
+            func=generate_image,
+            name="generate_image",
+            description="Generate an image in an image session using configured image model.",
+            args_schema=GenerateImageInput,
+        ),
+        StructuredTool.from_function(
+            func=edit_image,
+            name="edit_image",
+            description="Edit an existing image version in an image session.",
+            args_schema=EditImageInput,
         ),
     ]
