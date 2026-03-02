@@ -449,3 +449,17 @@ def test_systems_run_returns_run_id_and_creates_trace(monkeypatch):
     trace = client.get(f'/runs/{run_id}')
     assert trace.status_code == 200
     assert trace.json()['run_id'] == run_id
+
+
+def test_systems_chat_returns_conversation_and_node_outputs(monkeypatch):
+    monkeypatch.setattr(api_server.orchestrator, 'run_agent_workflow', lambda *args, **kwargs: {'assistant': 'hello from system'})
+    create = client.post('/systems', json={'name': 'sys-chat', 'definition': {'nodes': [{'id': 'n1', 'type': 'agent', 'agent': 'assistant'}], 'edges': []}})
+    assert create.status_code == 200
+
+    res = client.post('/systems/sys-chat/chat', json={'message': 'hi'})
+    assert res.status_code == 200
+    body = res.json()
+    assert body['conversation_id']
+    assert body['run_id']
+    assert body['final_text'] == 'hello from system'
+    assert body['node_outputs'][0]['node'] == 'assistant'
