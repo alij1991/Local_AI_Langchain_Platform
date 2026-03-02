@@ -127,6 +127,12 @@ class SystemRunRequest(BaseModel):
     prompt: str
 
 
+class SystemChatRequest(BaseModel):
+    message: str = Field(..., min_length=1)
+    conversation_id: str | None = None
+    agent_overrides: dict[str, str] = Field(default_factory=dict)
+
+
 class ToolCreateRequest(BaseModel):
     tool_id: str | None = None
     name: str
@@ -420,6 +426,21 @@ def _validate_system_graph(definition: dict[str, Any]) -> list[str]:
     if not sequence:
         raise error_response("invalid_system", "No agent nodes found")
     return sequence
+
+
+def _render_system_conversation_context(conversation_id: str, max_turns: int = 10) -> str:
+    rows = list_messages(conversation_id, limit=max_turns * 2)
+    if not rows:
+        return ""
+    lines: list[str] = []
+    for row in rows:
+        role = str(row.get("role") or "assistant")
+        content = str(row.get("content") or "")
+        if not content.strip():
+            continue
+        label = "User" if role == "user" else "System"
+        lines.append(f"{label}: {content}")
+    return "\n".join(lines)
 
 
 @app.get("/health")
@@ -1294,6 +1315,53 @@ def systems_run(name: str, payload: SystemRunRequest) -> dict[str, Any]:
         _finalize_trace(recorder, success=False, error=str(exc))
         raise
     return {"outputs": outputs, "sequence": sequence, "run_id": run_id}
+
+
+@app.post("/systems/{name}/chat")
+def systems_chat(name: str, payload: SystemChatRequest) -> dict[str, Any]:
+    item = get_system(name)
+    if not item:
+        raise error_response("not_found", "Unknown system", status=404)
+
+    definition = json.loads(item["definition_json"])
+    sequence = _validate_system_graph(definition)
+
+    conversation_id = payload.conversation_id
+    if not conversation_id:
+        title = f"System: {name}"
+        conversation = create_conversation(title=title)
+        conversation_id = str(conversation["id"])
+
+    if not get_conversation(conversation_id):
+        raise error_response("not_found", "Conversation not found", status=404)
+
+    add_message(conversation_id, "user", payload.message)
+    context_text = _render_system_conversation_context(conversation_id)
+    effective_prompt = payload.message if not context_text else f"Conversation so far:\n{context_text}\n\nLatest user message: {payload.message}"
+
+    run_id, recorder, callbacks = _build_trace(f"system:{name}", conversation_id)
+    node_outputs: list[dict[str, str]] = []
+    final_text = ""
+    try:
+        outputs = orchestrator.run_agent_workflow(effective_prompt, sequence, callbacks=callbacks)
+        for agent_name in sequence:
+            if agent_name in outputs:
+                value = str(outputs[agent_name])
+                node_outputs.append({"node": agent_name, "text": value})
+                final_text = value
+        _finalize_trace(recorder, success=True)
+    except Exception as exc:  # noqa: BLE001
+        _finalize_trace(recorder, success=False, error=str(exc))
+        raise
+
+    add_message(conversation_id, "assistant", final_text or "No response returned.", run_id=run_id)
+    return {
+        "conversation_id": conversation_id,
+        "run_id": run_id,
+        "final_text": final_text,
+        "node_outputs": node_outputs,
+        "sequence": sequence,
+    }
 
 
 
