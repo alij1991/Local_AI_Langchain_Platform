@@ -115,6 +115,27 @@ curl -X POST http://127.0.0.1:8000/chat_with_attachments \
 
 Attachments are stored in `./data/uploads/{conversation_id}/` and message rows persist metadata in `messages.attachments_json`.
 
+
+### Systems chat with attachments
+```bash
+curl -X POST http://127.0.0.1:8000/systems/my-system/chat   -F message='Use attached notes for planning'   -F files=@./brief.md   -F files=@./diagram.png
+```
+
+System chat accepts both JSON and multipart payloads. Uploaded files are stored under `./data/uploads/{conversation_id}/` and user message rows persist attachment metadata in `messages.attachments_json`.
+
+## Hugging Face metadata and runtime notes
+
+- Runtime path is `transformers_local` via `langchain_huggingface` + `transformers` pipeline.
+- "Installed" for HF models means model files are present under local HF cache (`$HF_HOME/hub/models--...` or `~/.cache/huggingface/hub/models--...`).
+- Metadata enrichment sources:
+  - local snapshot `config.json` (context length, quantization hints, architecture)
+  - local cache size (directory byte size)
+  - optional Hugging Face Hub metadata when online (pipeline tags/capability hints)
+- Refresh metadata on demand via:
+  - `GET /model-catalog/{provider}/{model_id}/details?refresh=true`
+
+To pre-cache/download a model for offline use, run a local `transformers` load once (or use `huggingface-cli download`) so files exist in HF cache before starting the app.
+
 ### Prompt draft
 ```bash
 curl -X POST http://127.0.0.1:8000/agents/prompt-draft \

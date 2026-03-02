@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import base64
 import mimetypes
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Generator, TypedDict
 
@@ -24,6 +24,7 @@ class AgentDefinition:
     model_name: str
     system_prompt: str
     provider: str = "ollama"
+    settings: dict[str, Any] = field(default_factory=dict)
 
 
 class WorkflowState(TypedDict):
@@ -43,12 +44,13 @@ class AgentOrchestrator:
         self._agent_tool_ids: dict[str, list[str]] = {}
         self.hf = HuggingFaceController(config)
 
-    def add_agent(self, name: str, model_name: str, system_prompt: str, provider: str = "ollama") -> None:
+    def add_agent(self, name: str, model_name: str, system_prompt: str, provider: str = "ollama", settings: dict[str, Any] | None = None) -> None:
         self.definitions[name] = AgentDefinition(
             name=name,
             model_name=model_name,
             system_prompt=system_prompt,
             provider=provider,
+            settings=settings or {},
         )
         self.chat_histories[name] = []
 
@@ -222,7 +224,7 @@ class AgentOrchestrator:
             elif isinstance(msg, AIMessage):
                 compact.append((user_turn, str(msg.content)))
                 user_turn = ""
-        return self.hf.chat(definition.model_name, definition.system_prompt, compact, user_input)
+        return self.hf.chat(definition.model_name, definition.system_prompt, compact, user_input, settings=definition.settings)
 
     def chat_with_agent(
         self,

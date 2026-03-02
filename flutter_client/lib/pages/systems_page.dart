@@ -1,7 +1,9 @@
 import 'dart:convert';
 
 import 'package:flutter/material.dart';
+import 'package:file_picker/file_picker.dart';
 import 'package:local_ai_flutter_client/services/api_client.dart';
+import 'package:local_ai_flutter_client/widgets/attachment_widgets.dart';
 
 class _SystemNode {
   _SystemNode({
@@ -29,13 +31,14 @@ class _SystemEdge {
 }
 
 class _RunChatMessage {
-  _RunChatMessage({required this.role, required this.content, this.isTyping = false, this.isActivity = false, this.runId});
+  _RunChatMessage({required this.role, required this.content, this.isTyping = false, this.isActivity = false, this.runId, this.attachments = const []});
 
   final String role;
   final String content;
   final bool isTyping;
   final bool isActivity;
   final String? runId;
+  final List<Map<String, dynamic>> attachments;
 }
 
 enum _SystemsTab { designer, run }
@@ -75,6 +78,7 @@ class _SystemsPageState extends State<SystemsPage> {
   List<_RunChatMessage> _runMessages = [];
 
   final ScrollController _runScroll = ScrollController();
+  final AttachmentController _attachments = AttachmentController();
 
   @override
   void initState() {
@@ -87,6 +91,7 @@ class _SystemsPageState extends State<SystemsPage> {
     _nameController.dispose();
     _chatInputController.dispose();
     _runScroll.dispose();
+    _attachments.dispose();
     super.dispose();
   }
 
@@ -215,7 +220,8 @@ class _SystemsPageState extends State<SystemsPage> {
   Future<void> _sendSystemMessage() async {
     final name = _nameController.text.trim().isNotEmpty ? _nameController.text.trim() : _selectedName;
     final text = _chatInputController.text.trim();
-    if (_runInFlight || text.isEmpty || name == null || name.isEmpty) return;
+    final pendingAttachments = List<PlatformFile>.from(_attachments.files.value);
+    if (_runInFlight || (text.isEmpty && pendingAttachments.isEmpty) || name == null || name.isEmpty) return;
 
     if (_selectedName != name || !_systems.any((s) => (s['name'] ?? '').toString() == name)) {
       await _saveSystem();
@@ -226,17 +232,30 @@ class _SystemsPageState extends State<SystemsPage> {
       _runInFlight = true;
       _runStatus = 'Running system… preparing graph';
       _lastDurationMs = null;
-      _runMessages.add(_RunChatMessage(role: 'user', content: text));
+      _runMessages.add(_RunChatMessage(role: 'user', content: text.isEmpty ? '(attachment)' : text, attachments: pendingAttachments.map((f) => {'filename': f.name, 'size': f.size}).toList()));
       _runMessages.add(_RunChatMessage(role: 'system', content: 'Running system…', isTyping: true));
       _chatInputController.clear();
+      _attachments.clear();
     });
     _scheduleRunScroll();
 
     try {
-      final body = await widget.api.post('/systems/$name/chat', {
-        'conversation_id': _activeConversationId,
-        'message': text,
-      }) as Map<String, dynamic>;
+      final dynamic response = pendingAttachments.isEmpty
+          ? await widget.api.post('/systems/$name/chat', {
+              'conversation_id': _activeConversationId,
+              'message': text,
+            })
+          : await widget.api.postMultipart(
+              '/systems/$name/chat',
+              fields: {
+                if (_activeConversationId != null) 'conversation_id': _activeConversationId!,
+                'message': text,
+              },
+              files: pendingAttachments
+                  .map((f) => MultipartAttachment(fieldName: 'files', fileName: f.name, path: f.path, bytes: f.bytes))
+                  .toList(),
+            );
+      final body = response as Map<String, dynamic>;
 
       final outputs = ((body['node_outputs'] as List<dynamic>?) ?? const []).cast<Map<String, dynamic>>();
       final messages = <_RunChatMessage>[];
@@ -331,9 +350,23 @@ class _SystemsPageState extends State<SystemsPage> {
               const Icon(Icons.alt_route, size: 16),
             if (m.isTyping || m.isActivity) const SizedBox(width: 8),
             Flexible(
-              child: Text(
-                m.isTyping ? 'Thinking… ▍' : m.content,
-                style: TextStyle(fontWeight: isAssistant ? FontWeight.w500 : FontWeight.w400),
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  SelectableText(
+                    m.isTyping ? 'Thinking… ▍' : m.content,
+                    style: TextStyle(fontWeight: isAssistant ? FontWeight.w500 : FontWeight.w400),
+                  ),
+                  if (m.attachments.isNotEmpty)
+                    Padding(
+                      padding: const EdgeInsets.only(top: 6),
+                      child: Wrap(
+                        spacing: 6,
+                        runSpacing: 6,
+                        children: m.attachments.map((a) => Chip(label: Text((a['filename'] ?? 'attachment').toString()))).toList(),
+                      ),
+                    ),
+                ],
               ),
             ),
           ],
@@ -705,9 +738,15 @@ class _SystemsPageState extends State<SystemsPage> {
                         ),
                         const Divider(height: 1),
                         Padding(
+                          padding: const EdgeInsets.fromLTRB(12, 8, 12, 0),
+                          child: AttachmentChips(controller: _attachments, enabled: !_runInFlight),
+                        ),
+                        Padding(
                           padding: const EdgeInsets.all(12),
                           child: Row(
                             children: [
+                              AttachmentPickerButton(controller: _attachments, enabled: !_runInFlight),
+                              const SizedBox(width: 8),
                               Expanded(
                                 child: TextField(
                                   controller: _chatInputController,

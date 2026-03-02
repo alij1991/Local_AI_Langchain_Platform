@@ -463,3 +463,24 @@ def test_systems_chat_returns_conversation_and_node_outputs(monkeypatch):
     assert body['run_id']
     assert body['final_text'] == 'hello from system'
     assert body['node_outputs'][0]['node'] == 'assistant'
+
+
+def test_systems_chat_multipart_with_attachment(monkeypatch):
+    monkeypatch.setattr(api_server.orchestrator, 'run_agent_workflow', lambda *args, **kwargs: {'assistant': 'system ok'})
+    create = client.post('/systems', json={'name': 'sys-chat-file', 'definition': {'nodes': [{'id': 'n1', 'type': 'agent', 'agent': 'assistant'}], 'edges': []}})
+    assert create.status_code == 200
+
+    response = client.post(
+        '/systems/sys-chat-file/chat',
+        data={'message': 'use file'},
+        files=[('files', ('note.txt', b'hello from file', 'text/plain'))],
+    )
+    assert response.status_code == 200
+    body = response.json()
+    assert body['conversation_id']
+    assert body['attachments']
+
+    msgs = client.get(f"/conversations/{body['conversation_id']}/messages").json()
+    user_msgs = [m for m in msgs if m.get('role') == 'user']
+    assert user_msgs
+    assert 'note.txt' in user_msgs[-1]['attachments_json']

@@ -1,11 +1,12 @@
 import 'dart:async';
 import 'dart:convert';
 
-import 'package:file_picker/file_picker.dart';
 import 'package:flutter/material.dart';
+import 'package:file_picker/file_picker.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_markdown/flutter_markdown.dart';
 import 'package:local_ai_flutter_client/services/api_client.dart';
+import 'package:local_ai_flutter_client/widgets/attachment_widgets.dart';
 
 enum ChatMessageStatus { draft, sending, sent, failed, streaming, complete }
 
@@ -63,7 +64,7 @@ class _ChatPageState extends State<ChatPage> {
   bool _tracingEnabled = false;
 
   String _error = '';
-  final List<PlatformFile> _pendingAttachments = [];
+  final AttachmentController _attachments = AttachmentController();
   StreamSubscription<Map<String, dynamic>>? _streamSub;
 
   @override
@@ -76,6 +77,7 @@ class _ChatPageState extends State<ChatPage> {
   void dispose() {
     _streamSub?.cancel();
     _scrollController.dispose();
+    _attachments.dispose();
     super.dispose();
   }
 
@@ -139,19 +141,7 @@ class _ChatPageState extends State<ChatPage> {
     }
   }
 
-  Future<void> _pickAttachments() async {
-    final result = await FilePicker.platform.pickFiles(
-      allowMultiple: true,
-      withData: true,
-      type: FileType.custom,
-      allowedExtensions: ['png', 'jpg', 'jpeg', 'webp', 'txt', 'md', 'pdf', 'json', 'csv'],
-    );
-    if (result == null || result.files.isEmpty) return;
-    if (!mounted) return;
-    setState(() {
-      _pendingAttachments.addAll(result.files);
-    });
-  }
+
 
   Future<void> _createConversation() async {
     final body = await widget.api.post('/conversations', {'title': 'New chat'}) as Map<String, dynamic>;
@@ -161,7 +151,7 @@ class _ChatPageState extends State<ChatPage> {
 
   Future<void> _sendMessage({String? overrideText, List<PlatformFile>? overrideAttachments, String? retryLocalId}) async {
     final text = (overrideText ?? _messageController.text).trim();
-    final attachments = overrideAttachments ?? List<PlatformFile>.from(_pendingAttachments);
+    final attachments = overrideAttachments ?? List<PlatformFile>.from(_attachments.files.value);
     if (text.isEmpty && attachments.isEmpty) return;
     if (_isSending || _isStreaming) return;
 
@@ -194,7 +184,7 @@ class _ChatPageState extends State<ChatPage> {
       _messages = [..._messages, userMessage, assistantPlaceholder];
       if (overrideText == null) {
         _messageController.clear();
-        _pendingAttachments.clear();
+        _attachments.clear();
       }
     });
     _scheduleAutoScroll(force: true);
@@ -682,31 +672,12 @@ class _ChatPageState extends State<ChatPage> {
             ],
           ),
         ),
-        if (_pendingAttachments.isNotEmpty) ...[
-          const SizedBox(height: 8),
-          Wrap(
-            spacing: 8,
-            runSpacing: 6,
-            children: _pendingAttachments.asMap().entries.map((entry) {
-              final i = entry.key;
-              final file = entry.value;
-              final kb = ((file.size) / 1024).toStringAsFixed(1);
-              return InputChip(
-                avatar: const Icon(Icons.insert_drive_file, size: 16),
-                label: Text('${file.name} (${kb} KB)'),
-                onDeleted: () => setState(() => _pendingAttachments.removeAt(i)),
-              );
-            }).toList(),
-          ),
-        ],
+        const SizedBox(height: 8),
+        AttachmentChips(controller: _attachments, enabled: !_isSending && !_isStreaming),
         const SizedBox(height: 8),
         Row(
           children: [
-            IconButton.filledTonal(
-              onPressed: _isSending || _isStreaming ? null : _pickAttachments,
-              icon: const Icon(Icons.add),
-              tooltip: 'Attach files',
-            ),
+            AttachmentPickerButton(controller: _attachments, enabled: !_isSending && !_isStreaming),
             const SizedBox(width: 8),
             Expanded(
               child: TextField(

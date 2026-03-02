@@ -128,7 +128,7 @@ class SystemRunRequest(BaseModel):
 
 
 class SystemChatRequest(BaseModel):
-    message: str = Field(..., min_length=1)
+    message: str = Field(default="", min_length=0)
     conversation_id: str | None = None
     agent_overrides: dict[str, str] = Field(default_factory=dict)
 
@@ -202,7 +202,7 @@ orchestrator.add_agent("assistant", startup_model, "You are a practical AI assis
 
 for item in list_agents_db():
     d = item["json_definition"]
-    orchestrator.add_agent(d["name"], d["model_id"], d.get("system_prompt", ""), provider=d.get("provider", "ollama"))
+    orchestrator.add_agent(d["name"], d["model_id"], d.get("system_prompt", ""), provider=d.get("provider", "ollama"), settings=d.get("settings", {}))
     orchestrator.set_agent_tools(d["name"], [str(t) for t in d.get("tool_ids", [])])
 
 app = FastAPI(title="Local AI Platform API", version="0.5.0")
@@ -323,6 +323,9 @@ def _serialize_model(provider: str, model_id: str, display_name: str, installed:
             "context_length": kwargs.get("context_length"),
             "license": kwargs.get("license"),
             "tags": kwargs.get("tags", []),
+            "runtime": kwargs.get("runtime"),
+            "runtimes": kwargs.get("runtimes"),
+            "metadata_source": kwargs.get("metadata_source"),
         },
     }
 
@@ -532,15 +535,24 @@ def model_catalog(provider: str | None = None, search: str = "", installed_only:
         pinned = {(r["provider"], r["model_id"]): r for r in list_model_entries("huggingface")}
         for model_id in configured:
             row = pinned.get(("huggingface", model_id), {})
+            meta = orchestrator.hf.model_metadata(model_id)
             entries.append(
                 _serialize_model(
                     "huggingface",
                     model_id,
                     model_id,
-                    True,
-                    supports={"chat": True, "tools": False, "vision": False, "json_mode": False, "embeddings": "embed" in model_id.lower(), "streaming": False},
-                    tags=["configured"],
+                    bool(meta.get("installed")),
+                    supports=meta.get("supports", {}),
+                    tags=meta.get("tags", ["configured"]),
                     last_seen=row.get("updated_at"),
+                    size_bytes=meta.get("size_bytes"),
+                    parameters=meta.get("parameters"),
+                    quantization=meta.get("quantization"),
+                    context_length=meta.get("context_length"),
+                    location=meta.get("location"),
+                    runtime=meta.get("runtime"),
+                    runtimes=meta.get("runtimes", ["transformers_local"]),
+                    metadata_source=meta.get("metadata_source"),
                 )
             )
 
@@ -588,11 +600,13 @@ def models_catalog(provider: str | None = None, search: str = "", installed_only
             "installed": bool((it.get("local_status") or {}).get("installed")),
             "metadata": it.get("metadata") or {},
             "supports": supports,
+            "runtime": (it.get("metadata") or {}).get("runtime"),
+            "metadata_source": (it.get("metadata") or {}).get("metadata_source"),
             "raw": it,
         })
     return {"items": items, "count": len(items)}
 @app.get("/model-catalog/{provider}/{model_id:path}/details")
-def model_catalog_details(provider: str, model_id: str) -> dict[str, Any]:
+def model_catalog_details(provider: str, model_id: str, refresh: bool = False) -> dict[str, Any]:
     if provider == "ollama":
         ok_local, infos, error = controller.list_local_models_detailed()
         if not ok_local:
@@ -603,7 +617,23 @@ def model_catalog_details(provider: str, model_id: str) -> dict[str, Any]:
         return _model_from_ollama(found)
 
     if provider == "huggingface":
-        return _serialize_model("huggingface", model_id, model_id, True, supports={"chat": True, "tools": False, "vision": False, "json_mode": False, "embeddings": "embed" in model_id.lower(), "streaming": False}, tags=["configured"],)
+        meta = orchestrator.hf.model_metadata(model_id, refresh=refresh)
+        return _serialize_model(
+            "huggingface",
+            model_id,
+            model_id,
+            bool(meta.get("installed")),
+            supports=meta.get("supports", {}),
+            tags=meta.get("tags", ["configured"]),
+            size_bytes=meta.get("size_bytes"),
+            parameters=meta.get("parameters"),
+            quantization=meta.get("quantization"),
+            context_length=meta.get("context_length"),
+            location=meta.get("location"),
+            runtime=meta.get("runtime"),
+            runtimes=meta.get("runtimes", ["transformers_local"]),
+            metadata_source=meta.get("metadata_source"),
+        )
 
     raise error_response("invalid_provider", f"Unknown provider: {provider}")
 
@@ -890,8 +920,9 @@ def create_agent(payload: AgentCreateRequest) -> dict[str, Any]:
     if name in orchestrator.definitions:
         orchestrator.set_agent_model(name, payload.model_id, provider=payload.provider)
         orchestrator.definitions[name].system_prompt = payload.system_prompt
+        orchestrator.definitions[name].settings = payload.settings
     else:
-        orchestrator.add_agent(name, payload.model_id, payload.system_prompt, provider=payload.provider)
+        orchestrator.add_agent(name, payload.model_id, payload.system_prompt, provider=payload.provider, settings=payload.settings)
     orchestrator.set_agent_tools(name, definition["tool_ids"])
     return definition
 
@@ -1318,7 +1349,7 @@ def systems_run(name: str, payload: SystemRunRequest) -> dict[str, Any]:
 
 
 @app.post("/systems/{name}/chat")
-def systems_chat(name: str, payload: SystemChatRequest) -> dict[str, Any]:
+async def systems_chat(name: str, request: Request, response: Response) -> dict[str, Any]:
     item = get_system(name)
     if not item:
         raise error_response("not_found", "Unknown system", status=404)
@@ -1326,7 +1357,21 @@ def systems_chat(name: str, payload: SystemChatRequest) -> dict[str, Any]:
     definition = json.loads(item["definition_json"])
     sequence = _validate_system_graph(definition)
 
-    conversation_id = payload.conversation_id
+    content_type = request.headers.get("content-type", "")
+    attachments_meta: list[dict[str, Any]] = []
+    stored_paths: list[Path] = []
+
+    if "multipart/form-data" in content_type:
+        form = await request.form()
+        message = str(form.get("message", "")).strip()
+        conversation_id = str(form.get("conversation_id")) if form.get("conversation_id") else None
+        raw_files = form.getlist("files")
+    else:
+        payload = SystemChatRequest(**(await request.json()))
+        message = payload.message.strip()
+        conversation_id = payload.conversation_id
+        raw_files = []
+
     if not conversation_id:
         title = f"System: {name}"
         conversation = create_conversation(title=title)
@@ -1335,9 +1380,29 @@ def systems_chat(name: str, payload: SystemChatRequest) -> dict[str, Any]:
     if not get_conversation(conversation_id):
         raise error_response("not_found", "Conversation not found", status=404)
 
-    add_message(conversation_id, "user", payload.message)
+    conv_dir = UPLOAD_ROOT / conversation_id
+    conv_dir.mkdir(parents=True, exist_ok=True)
+    for upload in raw_files:
+        filename = _safe_name(getattr(upload, "filename", "upload.bin"))
+        target = conv_dir / f"{uuid.uuid4().hex}_{filename}"
+        with target.open("wb") as f:
+            shutil.copyfileobj(upload.file, f)
+        stored_paths.append(target)
+        attachments_meta.append({"filename": filename, "path": str(target), "size": target.stat().st_size, "mime": getattr(upload, "content_type", None)})
+
+    attachment_text, image_paths = _attachment_context(stored_paths)
+    user_visible_message = message or "(attachment)"
+    add_message(conversation_id, "user", user_visible_message, attachments=attachments_meta)
+
     context_text = _render_system_conversation_context(conversation_id)
-    effective_prompt = payload.message if not context_text else f"Conversation so far:\n{context_text}\n\nLatest user message: {payload.message}"
+    effective_prompt = message
+    if attachment_text:
+        effective_prompt = f"{effective_prompt}\n\nAttachment context:\n{attachment_text}" if effective_prompt else attachment_text
+    if image_paths:
+        image_note = f"Attached image files: {', '.join([Path(p).name for p in image_paths])}"
+        effective_prompt = f"{effective_prompt}\n\n{image_note}" if effective_prompt else image_note
+    if context_text:
+        effective_prompt = f"Conversation so far:\n{context_text}\n\nLatest user message: {effective_prompt or user_visible_message}"
 
     run_id, recorder, callbacks = _build_trace(f"system:{name}", conversation_id)
     node_outputs: list[dict[str, str]] = []
@@ -1355,12 +1420,14 @@ def systems_chat(name: str, payload: SystemChatRequest) -> dict[str, Any]:
         raise
 
     add_message(conversation_id, "assistant", final_text or "No response returned.", run_id=run_id)
+    response.headers["X-Run-Id"] = run_id
     return {
         "conversation_id": conversation_id,
         "run_id": run_id,
         "final_text": final_text,
         "node_outputs": node_outputs,
         "sequence": sequence,
+        "attachments": attachments_meta,
     }
 
 
