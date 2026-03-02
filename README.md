@@ -359,3 +359,35 @@ Returned fields include: `id`, `name`, `model_id`, `provider`, capability flags,
 
 
 Systems run now returns `run_id` in `POST /systems/{name}/run` so executions appear in Runs/Traces.
+
+
+## Images generation (Hugging Face)
+
+New endpoints:
+- `GET /images/models`
+- `POST /images/sessions`
+- `GET /images/sessions`
+- `GET /images/sessions/{session_id}`
+- `POST /images/generate`
+- `POST /images/edit`
+
+Storage:
+- image files: `./data/images/{session_id}/{image_id}.png`
+- metadata: SQLite tables `image_sessions` and `images`
+
+Key env vars:
+- `HF_IMAGE_MODEL_CATALOG` (comma-separated HF image model ids)
+- `HF_IMAGE_DEFAULT_MODEL`
+- `HF_IMAGE_RUNTIME` (`diffusers_local` or `hf_inference_api`)
+- `HF_IMAGE_REQUIRE_GPU` (default true)
+- `HF_IMAGE_ALLOW_AUTO_DOWNLOAD` (default false)
+- `HF_IMAGE_ALLOW_PLACEHOLDER` (default false, dev fallback)
+- `HF_API_TOKEN` (required for `hf_inference_api` runtime)
+
+For local runtime install:
+```bash
+pip install diffusers transformers accelerate safetensors huggingface_hub pillow
+```
+
+The service does not silently download large models unless `HF_IMAGE_ALLOW_AUTO_DOWNLOAD=true`.
+

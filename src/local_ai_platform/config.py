@@ -24,6 +24,13 @@ class AppConfig:
     trace_enabled: bool = True
     trace_verbose: bool = False
     trace_store_dir: str = "./data/traces"
+    hf_image_model_catalog: str = ""
+    hf_image_default_model: str = ""
+    hf_image_runtime: str = "diffusers_local"
+    hf_image_require_gpu: bool = True
+    hf_image_allow_auto_download: bool = False
+    hf_image_allow_placeholder: bool = False
+    hf_api_token: str = ""
 
 
 def load_config() -> AppConfig:
@@ -43,4 +50,11 @@ def load_config() -> AppConfig:
         trace_enabled=_as_bool(os.getenv("TRACE_ENABLED"), default=True),
         trace_verbose=_as_bool(os.getenv("TRACE_VERBOSE"), default=False),
         trace_store_dir=os.getenv("TRACE_STORE_DIR", "./data/traces"),
+        hf_image_model_catalog=os.getenv("HF_IMAGE_MODEL_CATALOG", "Tongyi-MAI/Z-Image-Turbo,shallowdream204/BitDance-14B-64x"),
+        hf_image_default_model=os.getenv("HF_IMAGE_DEFAULT_MODEL", "Tongyi-MAI/Z-Image-Turbo"),
+        hf_image_runtime=os.getenv("HF_IMAGE_RUNTIME", "diffusers_local"),
+        hf_image_require_gpu=_as_bool(os.getenv("HF_IMAGE_REQUIRE_GPU"), default=True),
+        hf_image_allow_auto_download=_as_bool(os.getenv("HF_IMAGE_ALLOW_AUTO_DOWNLOAD"), default=False),
+        hf_image_allow_placeholder=_as_bool(os.getenv("HF_IMAGE_ALLOW_PLACEHOLDER"), default=False),
+        hf_api_token=os.getenv("HF_API_TOKEN", ""),
     )

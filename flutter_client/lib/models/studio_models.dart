@@ -1,1 +1,1 @@
-enum AppSection { chat, models, agents, promptBuilder, tools, systems, runs }
+enum AppSection { chat, models, agents, promptBuilder, tools, systems, images, runs }

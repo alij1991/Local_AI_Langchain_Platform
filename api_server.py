@@ -12,7 +12,7 @@ from typing import Any
 
 from fastapi import FastAPI, HTTPException, Request, Response
 from dotenv import load_dotenv
-from fastapi.responses import StreamingResponse
+from fastapi.responses import FileResponse, StreamingResponse
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
 
@@ -22,6 +22,7 @@ from local_ai_platform import load_config
 from local_ai_platform.agents import AgentOrchestrator
 from local_ai_platform.db import init_db
 from local_ai_platform.memory import db_messages_to_langchain
+from local_ai_platform.images.service import ImageGenerationService
 from local_ai_platform.ollama import ModelInfo, OllamaController
 from local_ai_platform.tracing import LocalTraceCallbackHandler, TraceRecorder, TraceStore
 from local_ai_platform.repositories.agents_repo import delete_agent_db, get_agent_db, list_agents_db, save_agent
@@ -35,6 +36,14 @@ from local_ai_platform.repositories.conversations import (
     rename_conversation,
 )
 from local_ai_platform.repositories.models import list_model_entries, upsert_model_entry
+from local_ai_platform.repositories.images_repo import (
+    add_image,
+    create_image_session,
+    get_image,
+    get_image_session,
+    image_output_path,
+    list_image_sessions,
+)
 from local_ai_platform.repositories.prompt_drafts import (
     create_prompt_draft,
     delete_prompt_draft,
@@ -175,6 +184,40 @@ class HFAddRequest(BaseModel):
     notes: str = ""
 
 
+class ImageSessionCreateRequest(BaseModel):
+    title: str | None = None
+
+
+class ImageGenerateRequest(BaseModel):
+    session_id: str
+    model_id: str
+    prompt: str
+    negative_prompt: str | None = None
+    seed: int | None = None
+    steps: int = 20
+    guidance_scale: float = 7.0
+    width: int = 1024
+    height: int = 1024
+    init_image_id: str | None = None
+    strength: float = 0.65
+    params_json: dict[str, Any] = Field(default_factory=dict)
+
+
+class ImageEditRequest(BaseModel):
+    session_id: str
+    base_image_id: str
+    model_id: str
+    instruction: str
+    prompt_override: str | None = None
+    mask_image_id: str | None = None
+    negative_prompt: str | None = None
+    seed: int | None = None
+    steps: int = 20
+    guidance_scale: float = 7.0
+    strength: float = 0.65
+    params_json: dict[str, Any] = Field(default_factory=dict)
+
+
 def error_response(code: str, message: str, details: Any = None, status: int = 400) -> HTTPException:
     return HTTPException(status_code=status, detail={"error": {"code": code, "message": message, "details": details}})
 
@@ -185,6 +228,7 @@ init_db()
 orchestrator = AgentOrchestrator(config)
 controller = OllamaController(config)
 trace_store = TraceStore(cfg=type("Cfg", (), {"enabled": config.trace_enabled, "verbose": config.trace_verbose, "store_dir": config.trace_store_dir})())
+image_service = ImageGenerationService(config)
 if os.getenv("LANGSMITH_TRACING", "").strip().lower() in {"1", "true", "yes", "on"}:
     os.environ.setdefault("LANGCHAIN_TRACING_V2", "true")
     if os.getenv("LANGSMITH_API_KEY"):
@@ -554,6 +598,36 @@ def model_catalog(provider: str | None = None, search: str = "", installed_only:
                     runtimes=meta.get("runtimes", ["transformers_local"]),
                     metadata_source=meta.get("metadata_source"),
                 )
+            )
+
+        # image-capable Hugging Face models
+        for img in image_service.list_models():
+            supports = {
+                "chat": False,
+                "tools": False,
+                "vision": bool((img.get("supported_features") or {}).get("img2img")),
+                "json_mode": False,
+                "embeddings": False,
+                "streaming": False,
+            }
+            entries.append(
+                _serialize_model(
+                    "huggingface",
+                    str(img.get("model_id") or ""),
+                    str(img.get("display_name") or img.get("model_id") or ""),
+                    bool((img.get("local_status") or {}).get("downloaded")),
+                    supports=supports,
+                    tags=["image", "text-to-image"],
+                    location=(img.get("local_status") or {}).get("location"),
+                    runtime=img.get("runtime"),
+                    runtimes=[img.get("runtime")],
+                    metadata_source="image_service",
+                )
+                | {
+                    "task": "text-to-image",
+                    "supported_features": img.get("supported_features") or {},
+                    "requirements": img.get("requirements") or {},
+                }
             )
 
     if "lmstudio" in providers:
@@ -1611,6 +1685,181 @@ def agent_definition(name: str) -> dict[str, Any]:
         "resolved_tools": resolved_tools,
         "resolved_model": resolved_model,
         "python_snippet": snippet,
+    }
+
+
+# images
+@app.get("/images/models")
+def images_models() -> dict[str, Any]:
+    return {
+        "items": image_service.list_models(),
+        "runtime": config.hf_image_runtime,
+        "require_gpu": bool(config.hf_image_require_gpu),
+    }
+
+
+@app.post("/images/sessions")
+def images_create_session(payload: ImageSessionCreateRequest) -> dict[str, Any]:
+    item = create_image_session(payload.title or "Untitled image session")
+    return {"session_id": item["id"], "session": item}
+
+
+@app.get("/images/sessions")
+def images_list_sessions(limit: int = 100) -> dict[str, Any]:
+    return {"items": list_image_sessions(limit=limit)}
+
+
+@app.get("/images/sessions/{session_id}")
+def images_get_session(session_id: str) -> dict[str, Any]:
+    item = get_image_session(session_id)
+    if not item:
+        raise error_response("not_found", "Image session not found", status=404)
+    return item
+
+
+@app.get("/images/files/{session_id}/{image_id}.png")
+def images_file(session_id: str, image_id: str):
+    image = get_image(image_id)
+    if not image or image.get("session_id") != session_id:
+        raise error_response("not_found", "Image not found", status=404)
+    path = Path(str(image.get("file_path") or ""))
+    if not path.exists():
+        raise error_response("not_found", "Image file not found", status=404)
+    return FileResponse(str(path), media_type="image/png")
+
+
+@app.post("/images/generate")
+def images_generate(payload: ImageGenerateRequest, response: Response) -> dict[str, Any]:
+    session = get_image_session(payload.session_id)
+    if not session:
+        raise error_response("not_found", "Image session not found", status=404)
+
+    init_path = None
+    parent_id = None
+    if payload.init_image_id:
+        parent = get_image(payload.init_image_id)
+        if not parent:
+            raise error_response("not_found", "Base image not found", status=404)
+        init_path = str(parent.get("file_path"))
+        parent_id = payload.init_image_id
+
+    run_id, recorder, _ = _build_trace(f"image:{payload.model_id}", payload.session_id)
+    result = image_service.generate(
+        model_id=payload.model_id,
+        prompt=payload.prompt,
+        negative_prompt=payload.negative_prompt,
+        seed=payload.seed,
+        steps=payload.steps,
+        guidance_scale=payload.guidance_scale,
+        width=payload.width,
+        height=payload.height,
+        init_image_path=init_path,
+        strength=payload.strength,
+        params_json=payload.params_json,
+    )
+    if not result.ok or not result.image_bytes:
+        _finalize_trace(recorder, success=False, error=result.error_message or result.error_code or "generation failed")
+        raise error_response(result.error_code or "generation_failed", result.error_message or "Image generation failed", status=400)
+
+    image_id = str(uuid.uuid4())
+    file_path = image_output_path(payload.session_id, image_id)
+    file_path.write_bytes(result.image_bytes)
+    row = add_image(
+        payload.session_id,
+        payload.model_id,
+        payload.prompt,
+        str(file_path),
+        parent_image_id=parent_id,
+        negative_prompt=payload.negative_prompt,
+        params={
+            "seed": payload.seed,
+            "steps": payload.steps,
+            "guidance_scale": payload.guidance_scale,
+            "width": payload.width,
+            "height": payload.height,
+            "strength": payload.strength,
+            "params_json": payload.params_json,
+            "runtime": (result.metadata or {}).get("runtime"),
+            "runtime_metadata": result.metadata or {},
+        },
+        run_id=run_id,
+        operation="img2img" if parent_id else "text2img",
+    )
+    _finalize_trace(recorder, success=True)
+    response.headers["X-Run-Id"] = run_id
+    return {
+        "image_id": row["id"],
+        "image_url": f"/images/files/{payload.session_id}/{row['id']}.png",
+        "run_id": run_id,
+        "session_id": payload.session_id,
+        "metadata": result.metadata or {},
+    }
+
+
+@app.post("/images/edit")
+def images_edit(payload: ImageEditRequest, response: Response) -> dict[str, Any]:
+    base = get_image(payload.base_image_id)
+    if not base:
+        raise error_response("not_found", "Base image not found", status=404)
+    if base.get("session_id") != payload.session_id:
+        raise error_response("invalid_session", "Base image does not belong to session")
+
+    prompt = payload.prompt_override or payload.instruction
+    run_id, recorder, _ = _build_trace(f"image-edit:{payload.model_id}", payload.session_id)
+
+    result = image_service.generate(
+        model_id=payload.model_id,
+        prompt=prompt,
+        negative_prompt=payload.negative_prompt,
+        seed=payload.seed,
+        steps=payload.steps,
+        guidance_scale=payload.guidance_scale,
+        init_image_path=str(base.get("file_path")),
+        strength=payload.strength,
+        params_json=payload.params_json,
+    )
+
+    if (not result.ok or not result.image_bytes) and payload.instruction:
+        # fallback to deterministic local edit
+        try:
+            edited = image_service.apply_basic_edit(str(base.get("file_path")), payload.instruction)
+            result.ok = True
+            result.image_bytes = edited
+            result.metadata = {"runtime": "basic_edit", "fallback": True, "source_error": result.error_message}
+        except Exception as exc:  # noqa: BLE001
+            _finalize_trace(recorder, success=False, error=str(exc))
+            raise error_response(result.error_code or "edit_failed", result.error_message or str(exc), status=400)
+
+    image_id = str(uuid.uuid4())
+    file_path = image_output_path(payload.session_id, image_id)
+    file_path.write_bytes(result.image_bytes or b"")
+    row = add_image(
+        payload.session_id,
+        payload.model_id,
+        prompt,
+        str(file_path),
+        parent_image_id=payload.base_image_id,
+        negative_prompt=payload.negative_prompt,
+        params={
+            "instruction": payload.instruction,
+            "prompt_override": payload.prompt_override,
+            "strength": payload.strength,
+            "steps": payload.steps,
+            "guidance_scale": payload.guidance_scale,
+            "runtime": (result.metadata or {}).get("runtime"),
+            "runtime_metadata": result.metadata or {},
+        },
+        run_id=run_id,
+        operation="edit",
+    )
+    _finalize_trace(recorder, success=True)
+    response.headers["X-Run-Id"] = run_id
+    return {
+        "image_id": row["id"],
+        "image_url": f"/images/files/{payload.session_id}/{row['id']}.png",
+        "run_id": run_id,
+        "session_id": payload.session_id,
+        "metadata": result.metadata or {},
     }
 
 

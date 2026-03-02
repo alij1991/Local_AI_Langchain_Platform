@@ -484,3 +484,38 @@ def test_systems_chat_multipart_with_attachment(monkeypatch):
     user_msgs = [m for m in msgs if m.get('role') == 'user']
     assert user_msgs
     assert 'note.txt' in user_msgs[-1]['attachments_json']
+
+
+def test_images_session_and_generate_with_placeholder(monkeypatch):
+    class _FakeResult:
+        ok = True
+        image_bytes = b"fake-png-bytes"
+        metadata = {"runtime": "placeholder"}
+
+    monkeypatch.setattr(api_server.image_service, 'generate', lambda **kwargs: _FakeResult())
+
+    sess = client.post('/images/sessions', json={'title': 'img test'})
+    assert sess.status_code == 200
+    session_id = sess.json()['session_id']
+
+    gen = client.post('/images/generate', json={
+        'session_id': session_id,
+        'model_id': 'Tongyi-MAI/Z-Image-Turbo',
+        'prompt': 'a cat with hat',
+    })
+    assert gen.status_code == 200
+    body = gen.json()
+    assert body['image_id']
+    assert body['image_url']
+    assert body['run_id']
+
+    detail = client.get(f"/images/sessions/{session_id}")
+    assert detail.status_code == 200
+    assert len(detail.json().get('images', [])) >= 1
+
+
+def test_images_models_endpoint():
+    res = client.get('/images/models')
+    assert res.status_code == 200
+    body = res.json()
+    assert 'items' in body

@@ -103,6 +103,30 @@ def init_db() -> None:
                 model_id TEXT
             );
 
+
+            CREATE TABLE IF NOT EXISTS image_sessions (
+                id TEXT PRIMARY KEY,
+                title TEXT,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+            );
+
+            CREATE TABLE IF NOT EXISTS images (
+                id TEXT PRIMARY KEY,
+                session_id TEXT NOT NULL,
+                parent_image_id TEXT,
+                model_id TEXT NOT NULL,
+                operation TEXT NOT NULL,
+                prompt TEXT NOT NULL,
+                negative_prompt TEXT,
+                params_json TEXT,
+                file_path TEXT NOT NULL,
+                run_id TEXT,
+                created_at TEXT NOT NULL,
+                FOREIGN KEY(session_id) REFERENCES image_sessions(id) ON DELETE CASCADE,
+                FOREIGN KEY(parent_image_id) REFERENCES images(id) ON DELETE SET NULL
+            );
+
             CREATE TABLE IF NOT EXISTS mcp_discovered_tools (
                 server_id TEXT NOT NULL,
                 tool_name TEXT NOT NULL,
