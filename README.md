@@ -391,3 +391,18 @@ pip install diffusers transformers accelerate safetensors huggingface_hub pillow
 
 The service does not silently download large models unless `HF_IMAGE_ALLOW_AUTO_DOWNLOAD=true`.
 
+
+
+## Local models folder (git-ignored)
+
+- Place local HF/Diffusers models under `./models` (default `LOCAL_MODELS_DIR`).
+- **Do not commit model weights**. The repository ignores `/models/`.
+- If large model files were committed in the past, remove them from git tracking (`git rm --cached <path>`) and consider history cleanup separately if needed.
+
+Model discovery supports:
+- Diffusers folder: `./models/<name>/model_index.json`
+- Transformers folder: `./models/<name>/config.json`
+
+Refresh endpoints:
+- `POST /images/models/refresh`
+- `POST /models/refresh`
