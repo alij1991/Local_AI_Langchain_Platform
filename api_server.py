@@ -1722,6 +1722,11 @@ def images_models(refresh: bool = False) -> dict[str, Any]:
     }
 
 
+@app.get("/images/runtime")
+def images_runtime() -> dict[str, Any]:
+    return image_service.get_device_status()
+
+
 @app.post("/images/models/refresh")
 def images_models_refresh() -> dict[str, Any]:
     body = image_service.refresh_models()
@@ -1790,7 +1795,7 @@ def images_generate(payload: ImageGenerateRequest, response: Response) -> dict[s
     )
     if not result.ok or not result.image_bytes:
         _finalize_trace(recorder, success=False, error=result.error_message or result.error_code or "generation failed")
-        raise error_response(result.error_code or "generation_failed", result.error_message or "Image generation failed", status=400)
+        raise error_response(result.error_code or "provider_unavailable", result.error_message or "Image generation failed", details=result.metadata or {}, status=400)
 
     image_id = str(uuid.uuid4())
     file_path = image_output_path(payload.session_id, image_id)
@@ -1811,6 +1816,9 @@ def images_generate(payload: ImageGenerateRequest, response: Response) -> dict[s
             "strength": payload.strength,
             "params_json": payload.params_json,
             "runtime": (result.metadata or {}).get("runtime"),
+            "device_used": (result.metadata or {}).get("device_used"),
+            "fallback_used": bool((result.metadata or {}).get("fallback_used")),
+            "fallback_reason": (result.metadata or {}).get("fallback_reason"),
             "runtime_metadata": result.metadata or {},
         },
         run_id=run_id,
@@ -1824,6 +1832,9 @@ def images_generate(payload: ImageGenerateRequest, response: Response) -> dict[s
         "run_id": run_id,
         "session_id": payload.session_id,
         "metadata": result.metadata or {},
+        "device_used": (result.metadata or {}).get("device_used"),
+        "fallback_used": bool((result.metadata or {}).get("fallback_used")),
+        "fallback_reason": (result.metadata or {}).get("fallback_reason"),
     }
 
 
@@ -1860,7 +1871,7 @@ def images_edit(payload: ImageEditRequest, response: Response) -> dict[str, Any]
             result.metadata = {"runtime": "basic_edit", "fallback": True, "source_error": result.error_message}
         except Exception as exc:  # noqa: BLE001
             _finalize_trace(recorder, success=False, error=str(exc))
-            raise error_response(result.error_code or "edit_failed", result.error_message or str(exc), status=400)
+            raise error_response(result.error_code or "provider_unavailable", result.error_message or str(exc), details=result.metadata or {}, status=400)
 
     image_id = str(uuid.uuid4())
     file_path = image_output_path(payload.session_id, image_id)
@@ -1879,6 +1890,9 @@ def images_edit(payload: ImageEditRequest, response: Response) -> dict[str, Any]
             "steps": payload.steps,
             "guidance_scale": payload.guidance_scale,
             "runtime": (result.metadata or {}).get("runtime"),
+            "device_used": (result.metadata or {}).get("device_used"),
+            "fallback_used": bool((result.metadata or {}).get("fallback_used")),
+            "fallback_reason": (result.metadata or {}).get("fallback_reason"),
             "runtime_metadata": result.metadata or {},
         },
         run_id=run_id,
@@ -1892,6 +1906,9 @@ def images_edit(payload: ImageEditRequest, response: Response) -> dict[str, Any]
         "run_id": run_id,
         "session_id": payload.session_id,
         "metadata": result.metadata or {},
+        "device_used": (result.metadata or {}).get("device_used"),
+        "fallback_used": bool((result.metadata or {}).get("fallback_used")),
+        "fallback_reason": (result.metadata or {}).get("fallback_reason"),
     }
 
 

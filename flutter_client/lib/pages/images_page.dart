@@ -1,7 +1,6 @@
 import 'dart:convert';
 
 import 'package:flutter/material.dart';
-import 'package:flutter/services.dart';
 import 'package:local_ai_flutter_client/services/api_client.dart';
 
 class ImagesPage extends StatefulWidget {
@@ -24,6 +23,7 @@ class _ImagesPageState extends State<ImagesPage> {
 
   bool _busy = false;
   String _status = '';
+  Map<String, dynamic> _runtime = {};
   String _errorMessage = '';
   String _errorDetails = '';
   bool _showHelp = true;
@@ -37,12 +37,14 @@ class _ImagesPageState extends State<ImagesPage> {
   Future<void> _load({bool refreshModels = false}) async {
     final sessions = await widget.api.get('/images/sessions') as Map<String, dynamic>;
     final models = await widget.api.get('/images/models${refreshModels ? '?refresh=true' : ''}') as Map<String, dynamic>;
+    final runtime = await widget.api.get('/images/runtime') as Map<String, dynamic>;
     setState(() {
       _sessions = ((sessions['items'] as List<dynamic>?) ?? []).cast<Map<String, dynamic>>();
       _models = ((models['items'] as List<dynamic>?) ?? []).cast<Map<String, dynamic>>();
       if (_selectedModel == null || !_models.any((m) => m['model_id'].toString() == _selectedModel)) {
         _selectedModel = _models.isNotEmpty ? _models.first['model_id']?.toString() : null;
       }
+      _runtime = runtime;
       if (_models.isEmpty) {
         _status = 'No image models detected. Put a diffusers model folder in ./models and click Refresh models.';
       }
@@ -99,7 +101,6 @@ class _ImagesPageState extends State<ImagesPage> {
       _errorMessage = message;
       _errorDetails = details;
     });
-    ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(message)));
   }
 
   Future<void> _generate() async {
@@ -153,6 +154,28 @@ class _ImagesPageState extends State<ImagesPage> {
     }
   }
 
+
+  Map<String, dynamic> _paramsFor(Map<String, dynamic> imageRow) {
+    final raw = imageRow['params_json'];
+    if (raw is Map<String, dynamic>) return raw;
+    if (raw is String && raw.isNotEmpty) {
+      try {
+        final parsed = jsonDecode(raw);
+        if (parsed is Map<String, dynamic>) return parsed;
+      } catch (_) {}
+    }
+    return const {};
+  }
+
+  String _runtimeChipText() {
+    final cuda = _runtime['cuda_available'] == true;
+    final gpuName = _runtime['gpu_name']?.toString();
+    if (cuda) {
+      return gpuName == null || gpuName.isEmpty ? 'GPU available' : 'GPU: $gpuName';
+    }
+    return 'CPU mode';
+  }
+
   @override
   Widget build(BuildContext context) {
     final images = ((_activeSession?['images'] as List<dynamic>?) ?? []).cast<Map<String, dynamic>>();
@@ -167,6 +190,16 @@ class _ImagesPageState extends State<ImagesPage> {
             padding: const EdgeInsets.symmetric(vertical: 6),
             child: Align(alignment: Alignment.centerLeft, child: Text(_status)),
           ),
+        Row(children: [
+          Chip(
+            label: Text(_runtimeChipText()),
+            backgroundColor: _runtime['cuda_available'] == true ? Colors.green.shade50 : null,
+          ),
+          const SizedBox(width: 8),
+          IconButton(onPressed: _load, icon: const Icon(Icons.refresh), tooltip: 'Refresh runtime status'),
+          const SizedBox(width: 8),
+          Text('Preference: ${(_runtime['device_preference'] ?? 'auto').toString()} • Effective: ${(_runtime['effective_device'] ?? 'cpu').toString()}'),
+        ]),
         Expanded(
           child: Row(
             children: [
@@ -316,12 +349,18 @@ class _ImagesPageState extends State<ImagesPage> {
                           Text('ID: ${selected['id']}'),
                           Text('Operation: ${selected['operation']}'),
                           Text('Prompt: ${(selected['prompt'] ?? '').toString()}'),
+                          Builder(builder: (_) {
+                            final params = _paramsFor(selected);
+                            final deviceUsed = (params['device_used'] ?? '').toString();
+                            final fallback = params['fallback_used'] == true;
+                            final fallbackReason = (params['fallback_reason'] ?? '').toString();
+                            return Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+                              if (deviceUsed.isNotEmpty) Text('Generated on: $deviceUsed'),
+                              if (fallback) Text('Fallback to CPU: $fallbackReason', style: const TextStyle(color: Colors.orange)),
+                            ]);
+                          }),
                           const SizedBox(height: 8),
-                          FilledButton.tonalIcon(
-                            onPressed: () => Clipboard.setData(ClipboardData(text: selectedUrl ?? '')),
-                            icon: const Icon(Icons.copy),
-                            label: const Text('Copy image URL'),
-                          ),
+                          SelectableText('Image URL: ${selectedUrl ?? ''}'),
                         ],
                       ],
                     ),
