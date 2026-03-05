@@ -566,7 +566,7 @@ def list_available_models() -> dict[str, list[str]]:
 def model_catalog(provider: str | None = None, search: str = "", installed_only: bool = False, supports_tools: bool = False, supports_vision: bool = False, supports_embeddings: bool = False, supports_json: bool = False) -> dict[str, Any]:
     entries: list[dict[str, Any]] = []
 
-    providers = [provider] if provider else ["ollama", "huggingface", "lmstudio"]
+    providers = [provider] if provider else ["ollama", "huggingface", "local", "lmstudio"]
     if "ollama" in providers:
         ok_local, infos, error = controller.list_local_models_detailed()
         if ok_local:
@@ -630,6 +630,23 @@ def model_catalog(provider: str | None = None, search: str = "", installed_only:
                 }
             )
 
+    if "local" in providers or provider is None:
+        for local_model in image_service.list_local_text_models():
+            entries.append(
+                _serialize_model(
+                    "local",
+                    str(local_model.get("model_id") or ""),
+                    str(local_model.get("display_name") or local_model.get("model_id") or ""),
+                    True,
+                    supports={"chat": True, "tools": False, "vision": False, "json_mode": False, "embeddings": False, "streaming": False},
+                    size_bytes=local_model.get("size_bytes"),
+                    context_length=local_model.get("context_length"),
+                    location=local_model.get("path"),
+                    tags=["local_models_dir"],
+                    metadata_source="local_models_dir",
+                )
+            )
+
     if "lmstudio" in providers:
         entries.append(_serialize_model("lmstudio", "", "LM Studio integration not configured", False, provider_unavailable=True))
 
@@ -652,6 +669,12 @@ def model_catalog(provider: str | None = None, search: str = "", installed_only:
     return {"items": [e for e in entries if _match(e)]}
 
 
+
+
+@app.post("/models/refresh")
+def models_refresh() -> dict[str, Any]:
+    body = image_service.refresh_models()
+    return {"refreshed": True, "image_models": len(body.get("items", [])), "local_text_models": len(body.get("local_text_models", []))}
 
 
 @app.get("/models/catalog")
@@ -1690,12 +1713,19 @@ def agent_definition(name: str) -> dict[str, Any]:
 
 # images
 @app.get("/images/models")
-def images_models() -> dict[str, Any]:
+def images_models(refresh: bool = False) -> dict[str, Any]:
     return {
-        "items": image_service.list_models(),
+        "items": image_service.list_models(refresh=refresh),
         "runtime": config.hf_image_runtime,
         "require_gpu": bool(config.hf_image_require_gpu),
+        "local_models_dir": str(Path(config.local_models_dir).resolve()),
     }
+
+
+@app.post("/images/models/refresh")
+def images_models_refresh() -> dict[str, Any]:
+    body = image_service.refresh_models()
+    return {"items": body.get("items", []), "refreshed": True}
 
 
 @app.post("/images/sessions")
@@ -1730,6 +1760,7 @@ def images_file(session_id: str, image_id: str):
 
 @app.post("/images/generate")
 def images_generate(payload: ImageGenerateRequest, response: Response) -> dict[str, Any]:
+    logger.info("images_generate model=%s session=%s", payload.model_id, payload.session_id)
     session = get_image_session(payload.session_id)
     if not session:
         raise error_response("not_found", "Image session not found", status=404)
@@ -1798,6 +1829,7 @@ def images_generate(payload: ImageGenerateRequest, response: Response) -> dict[s
 
 @app.post("/images/edit")
 def images_edit(payload: ImageEditRequest, response: Response) -> dict[str, Any]:
+    logger.info("images_edit model=%s session=%s base=%s", payload.model_id, payload.session_id, payload.base_image_id)
     base = get_image(payload.base_image_id)
     if not base:
         raise error_response("not_found", "Base image not found", status=404)

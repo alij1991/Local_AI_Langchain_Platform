@@ -15,3 +15,8 @@ flutter_client/windows/flutter/generated_config.cmake
 flutter_client/windows/flutter/generated_plugins.cmake
 flutter_client/windows/flutter/generated_plugin_registrant.cc
 flutter_client/windows/flutter/generated_plugin_registrant.h
+
+# Local model/data artifacts (never commit weights)
+/models/
+/data/images/
+/data/uploads/

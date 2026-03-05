@@ -519,3 +519,18 @@ def test_images_models_endpoint():
     assert res.status_code == 200
     body = res.json()
     assert 'items' in body
+
+
+def test_images_models_refresh_endpoint(monkeypatch):
+    monkeypatch.setattr(api_server.image_service, 'refresh_models', lambda: {'items': [{'model_id': 'local:test'}], 'local_text_models': []})
+    res = client.post('/images/models/refresh', json={})
+    assert res.status_code == 200
+    assert res.json()['refreshed'] is True
+
+
+def test_models_refresh_endpoint(monkeypatch):
+    monkeypatch.setattr(api_server.image_service, 'refresh_models', lambda: {'items': [], 'local_text_models': [{'model_id': 'local:text'}]})
+    res = client.post('/models/refresh', json={})
+    assert res.status_code == 200
+    assert res.json()['refreshed'] is True
+    assert res.json()['local_text_models'] == 1

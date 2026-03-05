@@ -5,12 +5,9 @@ import json
 import os
 import random
 import time
-import uuid
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
-
-from PIL import Image, ImageOps
 
 from local_ai_platform.config import AppConfig
 
@@ -24,10 +21,26 @@ class ImageRuntimeResult:
     metadata: dict[str, Any] | None = None
 
 
+
+
+def _require_pillow():
+    try:
+        from PIL import Image, ImageOps  # type: ignore
+
+        return Image, ImageOps
+    except Exception as exc:  # noqa: BLE001
+        raise RuntimeError("missing_dependency:pillow") from exc
+
+
 class ImageGenerationService:
     def __init__(self, config: AppConfig) -> None:
         self.config = config
         self._pipelines: dict[tuple[str, str], Any] = {}
+        self._models_cache: dict[str, Any] = {"ts": 0.0, "items": []}
+
+    @property
+    def local_models_dir(self) -> Path:
+        return Path(self.config.local_models_dir).resolve()
 
     def configured_models(self) -> list[str]:
         raw = self.config.hf_image_model_catalog or ""
@@ -41,11 +54,75 @@ class ImageGenerationService:
         candidate = root / "hub" / f"models--{model_id.replace('/', '--')}"
         return candidate if candidate.exists() else None
 
-    def list_models(self) -> list[dict[str, Any]]:
-        out: list[dict[str, Any]] = []
+    @staticmethod
+    def _dir_size(path: Path) -> int:
+        return sum(p.stat().st_size for p in path.rglob("*") if p.is_file())
+
+    def _scan_local_models(self) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+        image_models: list[dict[str, Any]] = []
+        text_models: list[dict[str, Any]] = []
+        root = self.local_models_dir
+        if not root.exists():
+            return image_models, text_models
+
+        for entry in root.iterdir():
+            if not entry.is_dir():
+                continue
+            model_name = entry.name
+            size = self._dir_size(entry)
+            model_index = entry / "model_index.json"
+            config_json = entry / "config.json"
+
+            if model_index.exists():
+                image_models.append(
+                    {
+                        "provider": "huggingface",
+                        "task": ["text-to-image", "image-to-image"],
+                        "model_id": f"local:{model_name}",
+                        "display_name": f"{model_name} (local)",
+                        "local_status": {
+                            "downloaded": True,
+                            "cached": True,
+                            "location": str(entry),
+                        },
+                        "requirements": {
+                            "gpu_recommended": True,
+                            "memory_estimate": "Depends on model",
+                        },
+                        "supported_features": {"text2img": True, "img2img": True, "inpaint": False},
+                        "runtime": "diffusers_local",
+                        "size_bytes": size,
+                    }
+                )
+                continue
+
+            if config_json.exists():
+                context = None
+                architecture = None
+                try:
+                    cfg = json.loads(config_json.read_text(encoding="utf-8"))
+                    context = cfg.get("max_position_embeddings") or cfg.get("n_positions")
+                    architecture = cfg.get("model_type")
+                except Exception:
+                    pass
+                text_models.append(
+                    {
+                        "provider": "local",
+                        "model_id": f"local:{model_name}",
+                        "display_name": f"{model_name} (local)",
+                        "size_bytes": size,
+                        "context_length": context,
+                        "architecture": architecture,
+                        "path": str(entry),
+                    }
+                )
+        return image_models, text_models
+
+    def refresh_models(self) -> dict[str, Any]:
+        configured_items: list[dict[str, Any]] = []
         for model_id in self.configured_models():
             cache = self._cache_dir(model_id)
-            out.append(
+            configured_items.append(
                 {
                     "provider": "huggingface",
                     "task": ["text-to-image", "image-to-image"],
@@ -60,19 +137,33 @@ class ImageGenerationService:
                         "gpu_recommended": True,
                         "memory_estimate": "8GB+ VRAM recommended",
                     },
-                    "supported_features": {
-                        "text2img": True,
-                        "img2img": True,
-                        "inpaint": False,
-                    },
+                    "supported_features": {"text2img": True, "img2img": True, "inpaint": False},
                     "runtime": self.config.hf_image_runtime,
                 }
             )
-        return out
+
+        local_image_models, local_text_models = self._scan_local_models()
+        all_items = configured_items + local_image_models
+        self._models_cache = {
+            "ts": time.time(),
+            "items": all_items,
+            "local_text_models": local_text_models,
+        }
+        return {"items": all_items, "local_text_models": local_text_models}
+
+    def list_models(self, refresh: bool = False) -> list[dict[str, Any]]:
+        if refresh or not self._models_cache.get("items"):
+            return self.refresh_models()["items"]
+        return list(self._models_cache["items"])
+
+    def list_local_text_models(self, refresh: bool = False) -> list[dict[str, Any]]:
+        if refresh or "local_text_models" not in self._models_cache:
+            self.refresh_models()
+        return list(self._models_cache.get("local_text_models", []))
 
     def _generate_placeholder(self, prompt: str, width: int, height: int) -> bytes:
+        Image, _ = _require_pillow()
         img = Image.new("RGB", (width, height), color=(32, 35, 40))
-        # simple deterministic visual marker from prompt
         val = sum(ord(c) for c in prompt) % 255
         overlay = Image.new("RGB", (width // 2, height // 2), color=(val, 120, 255 - val))
         img.paste(overlay, (width // 4, height // 4))
@@ -80,16 +171,27 @@ class ImageGenerationService:
         img.save(buf, format="PNG")
         return buf.getvalue()
 
-    def _load_pipeline(self, model_id: str, mode: str) -> Any:
-        key = (model_id, mode)
+    def _resolve_model_source(self, model_id: str) -> tuple[str, str]:
+        if model_id.startswith("local:"):
+            local_name = model_id.split(":", 1)[1]
+            path = self.local_models_dir / local_name
+            if not path.exists():
+                raise FileNotFoundError(f"Local model not found: {path}")
+            if not (path / "model_index.json").exists():
+                raise ValueError("invalid_model_format")
+            return "local", str(path)
+        return "remote", model_id
+
+    def _load_pipeline(self, model_id_or_path: str, mode: str, local_files_only: bool) -> Any:
+        key = (model_id_or_path, mode)
         if key in self._pipelines:
             return self._pipelines[key]
         from diffusers import AutoPipelineForImage2Image, AutoPipelineForText2Image
 
         if mode == "img2img":
-            pipe = AutoPipelineForImage2Image.from_pretrained(model_id)
+            pipe = AutoPipelineForImage2Image.from_pretrained(model_id_or_path, local_files_only=local_files_only)
         else:
-            pipe = AutoPipelineForText2Image.from_pretrained(model_id)
+            pipe = AutoPipelineForText2Image.from_pretrained(model_id_or_path, local_files_only=local_files_only)
         pipe.set_progress_bar_config(disable=True)
         self._pipelines[key] = pipe
         return pipe
@@ -110,16 +212,26 @@ class ImageGenerationService:
         params_json: dict[str, Any] | None = None,
     ) -> ImageRuntimeResult:
         if self.config.hf_image_runtime not in {"diffusers_local", "hf_inference_api"}:
-            return ImageRuntimeResult(ok=False, error_code="runtime_unavailable", error_message=f"Unsupported runtime: {self.config.hf_image_runtime}")
+            return ImageRuntimeResult(ok=False, error_code="provider_unavailable", error_message=f"Unsupported runtime: {self.config.hf_image_runtime}")
+
+        model_source = "remote"
+        resolved_model = model_id
+        try:
+            model_source, resolved_model = self._resolve_model_source(model_id)
+        except FileNotFoundError as exc:
+            return ImageRuntimeResult(ok=False, error_code="model_not_found", error_message=str(exc))
+        except ValueError:
+            return ImageRuntimeResult(ok=False, error_code="invalid_model_format", error_message="Local model folder is missing model_index.json")
 
         if self.config.hf_image_runtime == "hf_inference_api":
             token = (self.config.hf_api_token or "").strip()
             if not token:
-                return ImageRuntimeResult(ok=False, error_code="missing_hf_token", error_message="HF API token is required for hf_inference_api runtime")
+                return ImageRuntimeResult(ok=False, error_code="missing_dependency", error_message="HF_API_TOKEN is required for hf_inference_api runtime")
             try:
                 from huggingface_hub import InferenceClient
+                Image, _ = _require_pillow()
 
-                client = InferenceClient(model=model_id, token=token)
+                client = InferenceClient(model=resolved_model, token=token)
                 if init_image_path:
                     image = Image.open(init_image_path).convert("RGB")
                     out = client.image_to_image(prompt=prompt, image=image)
@@ -127,32 +239,32 @@ class ImageGenerationService:
                     out = client.text_to_image(prompt=prompt, negative_prompt=negative_prompt)
                 buf = io.BytesIO()
                 out.save(buf, format="PNG")
-                return ImageRuntimeResult(ok=True, image_bytes=buf.getvalue(), metadata={"runtime": "hf_inference_api"})
+                return ImageRuntimeResult(ok=True, image_bytes=buf.getvalue(), metadata={"runtime": "hf_inference_api", "model_source": model_source})
             except Exception as exc:  # noqa: BLE001
-                return ImageRuntimeResult(ok=False, error_code="inference_failed", error_message=str(exc))
+                return ImageRuntimeResult(ok=False, error_code="provider_unavailable", error_message=str(exc))
 
-        # local runtime
         try:
             import torch
         except Exception:
-            return ImageRuntimeResult(ok=False, error_code="missing_dependency", error_message="torch is required for local diffusers runtime")
+            return ImageRuntimeResult(ok=False, error_code="missing_dependency", error_message="Install torch/diffusers/transformers/accelerate/safetensors")
 
         if not torch.cuda.is_available() and self.config.hf_image_require_gpu:
-            return ImageRuntimeResult(ok=False, error_code="gpu_required", error_message="CUDA GPU is required by current configuration")
+            return ImageRuntimeResult(ok=False, error_code="gpu_required", error_message="No CUDA GPU available. Set HF_IMAGE_REQUIRE_GPU=false to allow CPU mode.")
 
-        # no silent downloads unless explicitly allowed
-        if not self._cache_dir(model_id) and not self.config.hf_image_allow_auto_download:
-            return ImageRuntimeResult(ok=False, error_code="model_not_cached", error_message="Model is not cached locally. Enable HF_IMAGE_ALLOW_AUTO_DOWNLOAD=true or download model first.")
+        if model_source == "remote" and not self._cache_dir(resolved_model) and not self.config.hf_image_allow_auto_download:
+            return ImageRuntimeResult(ok=False, error_code="model_not_found", error_message="Remote model is not cached locally. Put model under ./models or set HF_IMAGE_ALLOW_AUTO_DOWNLOAD=true.")
 
         try:
             generator = torch.Generator(device="cuda" if torch.cuda.is_available() else "cpu")
             generator.manual_seed(seed if seed is not None else random.randint(1, 2**31 - 1))
             mode = "img2img" if init_image_path else "text2img"
-            pipe = self._load_pipeline(model_id, "img2img" if init_image_path else "text2img")
+            local_only = model_source == "local" or not self.config.hf_image_allow_auto_download
+            pipe = self._load_pipeline(resolved_model, mode, local_files_only=local_only)
             if torch.cuda.is_available():
                 pipe = pipe.to("cuda")
 
             if init_image_path:
+                Image, _ = _require_pillow()
                 init_img = Image.open(init_image_path).convert("RGB")
                 result = pipe(
                     prompt=prompt,
@@ -176,14 +288,19 @@ class ImageGenerationService:
             image = result.images[0]
             buf = io.BytesIO()
             image.save(buf, format="PNG")
-            return ImageRuntimeResult(ok=True, image_bytes=buf.getvalue(), metadata={"runtime": "diffusers_local", "mode": mode})
+            return ImageRuntimeResult(ok=True, image_bytes=buf.getvalue(), metadata={"runtime": "diffusers_local", "mode": mode, "model_source": model_source})
+        except RuntimeError as exc:
+            text = str(exc).lower()
+            if "out of memory" in text:
+                return ImageRuntimeResult(ok=False, error_code="out_of_memory", error_message=str(exc))
+            return ImageRuntimeResult(ok=False, error_code="provider_unavailable", error_message=str(exc))
         except Exception as exc:  # noqa: BLE001
-            # fallback placeholder to keep workflow available in constrained env if enabled
             if self.config.hf_image_allow_placeholder:
                 return ImageRuntimeResult(ok=True, image_bytes=self._generate_placeholder(prompt, width, height), metadata={"runtime": "placeholder", "warning": str(exc)})
-            return ImageRuntimeResult(ok=False, error_code="generation_failed", error_message=str(exc))
+            return ImageRuntimeResult(ok=False, error_code="provider_unavailable", error_message=str(exc))
 
     def apply_basic_edit(self, image_path: str, instruction: str) -> bytes:
+        Image, ImageOps = _require_pillow()
         img = Image.open(image_path).convert("RGB")
         lower = instruction.lower()
         if "rotate" in lower:

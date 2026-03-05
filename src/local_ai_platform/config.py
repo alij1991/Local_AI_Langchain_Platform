@@ -31,6 +31,7 @@ class AppConfig:
     hf_image_allow_auto_download: bool = False
     hf_image_allow_placeholder: bool = False
     hf_api_token: str = ""
+    local_models_dir: str = "./models"
 
 
 def load_config() -> AppConfig:
@@ -57,4 +58,5 @@ def load_config() -> AppConfig:
         hf_image_allow_auto_download=_as_bool(os.getenv("HF_IMAGE_ALLOW_AUTO_DOWNLOAD"), default=False),
         hf_image_allow_placeholder=_as_bool(os.getenv("HF_IMAGE_ALLOW_PLACEHOLDER"), default=False),
         hf_api_token=os.getenv("HF_API_TOKEN", ""),
+        local_models_dir=os.getenv("LOCAL_MODELS_DIR", "./models"),
     )
