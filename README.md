@@ -365,6 +365,7 @@ Systems run now returns `run_id` in `POST /systems/{name}/run` so executions app
 
 New endpoints:
 - `GET /images/models`
+- `GET /images/runtime`
 - `POST /images/sessions`
 - `GET /images/sessions`
 - `GET /images/sessions/{session_id}`
@@ -382,6 +383,8 @@ Key env vars:
 - `HF_IMAGE_REQUIRE_GPU` (default true)
 - `HF_IMAGE_ALLOW_AUTO_DOWNLOAD` (default false)
 - `HF_IMAGE_ALLOW_PLACEHOLDER` (default false, dev fallback)
+- `HF_IMAGE_DEVICE` (`auto` | `cuda` | `cpu`)
+- `HF_IMAGE_ALLOW_CPU_FALLBACK` (default true; retry on CPU after CUDA failure)
 - `HF_API_TOKEN` (required for `hf_inference_api` runtime)
 
 For local runtime install:

@@ -534,3 +534,10 @@ def test_models_refresh_endpoint(monkeypatch):
     assert res.status_code == 200
     assert res.json()['refreshed'] is True
     assert res.json()['local_text_models'] == 1
+
+
+def test_images_runtime_endpoint(monkeypatch):
+    monkeypatch.setattr(api_server.image_service, 'get_device_status', lambda: {'cuda_available': False, 'effective_device': 'cpu', 'device_preference': 'auto'})
+    res = client.get('/images/runtime')
+    assert res.status_code == 200
+    assert res.json()['effective_device'] == 'cpu'
