@@ -607,7 +607,7 @@ class _ChatPageState extends State<ChatPage> {
             ),
             const SizedBox(width: 8),
             SizedBox(
-              width: 220,
+              width: 250,
               child: DropdownButtonFormField<String>(
                 value: _agents.contains(_selectedAgent) ? _selectedAgent : null,
                 decoration: const InputDecoration(labelText: 'Agent'),
