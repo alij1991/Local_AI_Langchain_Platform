@@ -6,22 +6,22 @@ Author: Local AI Team
 Requires-Python: >=3.10
 Description-Content-Type: text/markdown
 Requires-Dist: gradio>=5.0.0
-Requires-Dist: langchain>=0.3.0
-Requires-Dist: langchain-core>=0.3.0
-Requires-Dist: langchain-ollama>=0.2.0
-Requires-Dist: langchain-community>=0.3.0
-Requires-Dist: langchain-text-splitters>=0.3.0
-Requires-Dist: langgraph>=0.2.0
+Requires-Dist: langchain>=0.3.27
+Requires-Dist: langchain-core>=0.3.66
+Requires-Dist: langchain-ollama>=0.2.3
+Requires-Dist: langchain-community>=0.3.27
+Requires-Dist: langchain-text-splitters>=0.3.8
+Requires-Dist: langgraph>=0.2.74
 Requires-Dist: pydantic>=2.7.0
 Requires-Dist: ollama>=0.4.0
-Requires-Dist: langchain-huggingface>=0.1.0
+Requires-Dist: langchain-huggingface>=0.1.2
 Requires-Dist: transformers>=4.45.0
 Requires-Dist: accelerate>=0.34.0
 Requires-Dist: tavily-python>=0.5.0
-Requires-Dist: langchain-tavily>=0.1.0
-Requires-Dist: langchain-mcp-adapters>=0.1.0
-Requires-Dist: fastapi>=0.115.0
-Requires-Dist: uvicorn>=0.30.0
+Requires-Dist: langchain-tavily>=0.1.5
+Requires-Dist: langchain-mcp-adapters>=0.1.9
+Requires-Dist: fastapi>=0.115.12
+Requires-Dist: uvicorn>=0.30.6
 Requires-Dist: pypdf>=5.0.0
 Provides-Extra: dev
 Requires-Dist: pytest; extra == "dev"
@@ -143,6 +143,27 @@ curl -X POST http://127.0.0.1:8000/chat_with_attachments \
 ```
 
 Attachments are stored in `./data/uploads/{conversation_id}/` and message rows persist metadata in `messages.attachments_json`.
+
+
+### Systems chat with attachments
+```bash
+curl -X POST http://127.0.0.1:8000/systems/my-system/chat   -F message='Use attached notes for planning'   -F files=@./brief.md   -F files=@./diagram.png
+```
+
+System chat accepts both JSON and multipart payloads. Uploaded files are stored under `./data/uploads/{conversation_id}/` and user message rows persist attachment metadata in `messages.attachments_json`.
+
+## Hugging Face metadata and runtime notes
+
+- Runtime path is `transformers_local` via `langchain_huggingface` + `transformers` pipeline.
+- "Installed" for HF models means model files are present under local HF cache (`$HF_HOME/hub/models--...` or `~/.cache/huggingface/hub/models--...`).
+- Metadata enrichment sources:
+  - local snapshot `config.json` (context length, quantization hints, architecture)
+  - local cache size (directory byte size)
+  - optional Hugging Face Hub metadata when online (pipeline tags/capability hints)
+- Refresh metadata on demand via:
+  - `GET /model-catalog/{provider}/{model_id}/details?refresh=true`
+
+To pre-cache/download a model for offline use, run a local `transformers` load once (or use `huggingface-cli download`) so files exist in HF cache before starting the app.
 
 ### Prompt draft
 ```bash
@@ -306,6 +327,17 @@ When `TRACE_VERBOSE=false`, long prompts/tool payloads are truncated and secret-
 
 Chat responses include `run_id` and `X-Run-Id` response header for correlation.
 
+
+Additional tracing/run endpoints:
+- `GET /traces/status`
+- `GET /runs?limit=50&offset=0&conversation_id=<id>&agent=<name>`
+- `GET /runs/{run_id}`
+- `GET /runs/{run_id}/view` (aggregated timeline for UI)
+
+Run traces are stored as JSON files under `TRACE_STORE_DIR` (default `./data/traces`).
+- Standard mode (`TRACE_VERBOSE=false`): stores structured events, tool usage, timings, and redacted/truncated payloads.
+- Debug mode (`TRACE_VERBOSE=true`): stores fuller prompt/tool payload detail (still with secret-key redaction).
+
 ### Optional LangSmith export
 
 If LangSmith is configured, LangChain tracing can also be exported:
@@ -324,3 +356,85 @@ This keeps local trace files while enabling hosted run inspection.
   - `resolved_model`
   - `python_snippet` showing LangChain wiring
 - `GET /tools/{tool_id}/definition` returns structured tool definition + snippet.
+
+
+## Prompt Drafts history
+
+Prompt generation now persists drafts automatically when calling `POST /agents/prompt-draft`.
+
+Stored fields include:
+- generated prompt text
+- all generation inputs/options
+- fallback/model metadata
+- timestamp/title
+
+Endpoints:
+- `POST /prompt_drafts`
+- `GET /prompt_drafts?limit=50&offset=0`
+- `GET /prompt_drafts/{id}`
+- `DELETE /prompt_drafts/{id}`
+
+
+## Unified model catalog endpoint
+
+Use `GET /models/catalog` for a normalized UI-friendly schema across providers.
+
+Example:
+```bash
+curl "http://127.0.0.1:8000/models/catalog?provider=ollama&supports_tools=true"
+```
+
+Returned fields include: `id`, `name`, `model_id`, `provider`, capability flags, install status, metadata, and raw provider payload.
+
+
+Systems run now returns `run_id` in `POST /systems/{name}/run` so executions appear in Runs/Traces.
+
+
+## Images generation (Hugging Face)
+
+New endpoints:
+- `GET /images/models`
+- `GET /images/runtime`
+- `POST /images/sessions`
+- `GET /images/sessions`
+- `GET /images/sessions/{session_id}`
+- `POST /images/generate`
+- `POST /images/edit`
+
+Storage:
+- image files: `./data/images/{session_id}/{image_id}.png`
+- metadata: SQLite tables `image_sessions` and `images`
+
+Key env vars:
+- `HF_IMAGE_MODEL_CATALOG` (comma-separated HF image model ids)
+- `HF_IMAGE_DEFAULT_MODEL`
+- `HF_IMAGE_RUNTIME` (`diffusers_local` or `hf_inference_api`)
+- `HF_IMAGE_REQUIRE_GPU` (default true)
+- `HF_IMAGE_ALLOW_AUTO_DOWNLOAD` (default false)
+- `HF_IMAGE_ALLOW_PLACEHOLDER` (default false, dev fallback)
+- `HF_IMAGE_DEVICE` (`auto` | `cuda` | `cpu`)
+- `HF_IMAGE_ALLOW_CPU_FALLBACK` (default true; retry on CPU after CUDA failure)
+- `HF_API_TOKEN` (required for `hf_inference_api` runtime)
+
+For local runtime install:
+```bash
+pip install diffusers transformers accelerate safetensors huggingface_hub pillow
+```
+
+The service does not silently download large models unless `HF_IMAGE_ALLOW_AUTO_DOWNLOAD=true`.
+
+
+
+## Local models folder (git-ignored)
+
+- Place local HF/Diffusers models under `./models` (default `LOCAL_MODELS_DIR`).
+- **Do not commit model weights**. The repository ignores `/models/`.
+- If large model files were committed in the past, remove them from git tracking (`git rm --cached <path>`) and consider history cleanup separately if needed.
+
+Model discovery supports:
+- Diffusers folder: `./models/<name>/model_index.json`
+- Transformers folder: `./models/<name>/config.json`
+
+Refresh endpoints:
+- `POST /images/models/refresh`
+- `POST /models/refresh`
