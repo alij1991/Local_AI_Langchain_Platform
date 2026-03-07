@@ -3,6 +3,7 @@ import 'dart:convert';
 
 import 'package:flutter/material.dart';
 import 'package:file_picker/file_picker.dart';
+import 'package:flutter/rendering.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_markdown/flutter_markdown.dart';
 import 'package:local_ai_flutter_client/services/api_client.dart';
@@ -110,7 +111,7 @@ class _ChatPageState extends State<ChatPage> {
         _messages = messages;
       });
       await _refreshCapabilities();
-      await _refreshTraceStatus();
+      // await _refreshTraceStatus();
       _scheduleAutoScroll(force: true);
     } finally {
       if (mounted) {
