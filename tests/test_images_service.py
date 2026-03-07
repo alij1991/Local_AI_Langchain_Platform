@@ -33,3 +33,14 @@ def test_local_model_scan_detects_diffusers_and_transformers(tmp_path):
 
     assert any(m['model_id'] == 'local:img-model' for m in body['items'])
     assert any(m['model_id'] == 'local:text-model' for m in body['local_text_models'])
+
+
+def test_doctor_reports_local_models_missing(tmp_path):
+    cfg = _cfg(tmp_path)
+    svc = ImageGenerationService(cfg)
+
+    report = svc.doctor()
+
+    assert 'checks' in report
+    local_check = next(c for c in report['checks'] if c['name'] == 'local_models')
+    assert local_check['ok'] is False

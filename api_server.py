@@ -1727,6 +1727,11 @@ def images_runtime() -> dict[str, Any]:
     return image_service.get_device_status()
 
 
+@app.get("/images/doctor")
+def images_doctor() -> dict[str, Any]:
+    return image_service.doctor()
+
+
 @app.post("/images/models/refresh")
 def images_models_refresh() -> dict[str, Any]:
     body = image_service.refresh_models()

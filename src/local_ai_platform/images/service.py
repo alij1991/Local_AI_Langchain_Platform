@@ -115,6 +115,68 @@ class ImageGenerationService:
             status["effective_device"] = "cpu"
         return status
 
+    def doctor(self) -> dict[str, Any]:
+        status = self.get_device_status()
+        checks: list[dict[str, Any]] = []
+
+        try:
+            import diffusers  # noqa: F401
+
+            checks.append({"name": "diffusers", "ok": True})
+        except Exception:
+            checks.append(
+                {
+                    "name": "diffusers",
+                    "ok": False,
+                    "message": "Install diffusers to enable local image generation.",
+                }
+            )
+
+        try:
+            import transformers  # noqa: F401
+
+            checks.append({"name": "transformers", "ok": True})
+        except Exception:
+            checks.append(
+                {
+                    "name": "transformers",
+                    "ok": False,
+                    "message": "Install transformers for local Hugging Face pipelines.",
+                }
+            )
+
+        try:
+            _require_pillow()
+            checks.append({"name": "pillow", "ok": True})
+        except Exception:
+            checks.append({"name": "pillow", "ok": False, "message": "Install pillow for image read/write operations."})
+
+        if status.get("torch_installed") and not status.get("cuda_available") and status.get("cuda_version") is None:
+            checks.append(
+                {
+                    "name": "torch_cuda",
+                    "ok": False,
+                    "message": "PyTorch is installed but this build has no CUDA support (torch.version.cuda is None).",
+                    "suggestion": "Install a CUDA-enabled PyTorch build if you want GPU acceleration.",
+                }
+            )
+
+        local_models = self.list_models()
+        if not local_models:
+            checks.append(
+                {
+                    "name": "local_models",
+                    "ok": False,
+                    "message": f"No image models found in {self.local_models_dir}.",
+                    "suggestion": "Add a diffusers model folder containing model_index.json or configure HF cache.",
+                }
+            )
+        else:
+            checks.append({"name": "local_models", "ok": True, "count": len(local_models)})
+
+        ok = all(bool(c.get("ok")) for c in checks)
+        return {"ok": ok, "runtime": status, "checks": checks}
+
     def _scan_local_models(self) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
         image_models: list[dict[str, Any]] = []
         text_models: list[dict[str, Any]] = []

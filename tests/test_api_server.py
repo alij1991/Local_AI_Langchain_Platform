@@ -541,3 +541,10 @@ def test_images_runtime_endpoint(monkeypatch):
     res = client.get('/images/runtime')
     assert res.status_code == 200
     assert res.json()['effective_device'] == 'cpu'
+
+
+def test_images_doctor_endpoint(monkeypatch):
+    monkeypatch.setattr(api_server.image_service, 'doctor', lambda: {'ok': True, 'checks': [{'name': 'torch', 'ok': True}]})
+    res = client.get('/images/doctor')
+    assert res.status_code == 200
+    assert res.json()['ok'] is True
