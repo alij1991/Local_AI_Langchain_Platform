@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import io
 import json
+import logging
 import os
 import random
 import time
@@ -13,6 +14,9 @@ from typing import Any
 
 from local_ai_platform.config import AppConfig
 from local_ai_platform.formatting import format_bytes_human
+
+
+logger = logging.getLogger("local_ai_platform.images")
 
 
 @dataclass
@@ -114,6 +118,7 @@ def _quality_profile_defaults(profile: str) -> dict[str, Any]:
 
 def _diffusers_worker(payload: dict[str, Any], out_q: Any) -> None:
     started = time.time()
+    stage = "bootstrap"
     try:
         import torch
         from diffusers import AutoPipelineForImage2Image, AutoPipelineForText2Image
@@ -134,6 +139,7 @@ def _diffusers_worker(payload: dict[str, Any], out_q: Any) -> None:
         if payload.get("use_safetensors") is not None:
             load_kwargs["use_safetensors"] = bool(payload.get("use_safetensors"))
 
+        stage = "pipeline_load"
         if mode == "img2img":
             pipe = AutoPipelineForImage2Image.from_pretrained(model_id_or_path, **load_kwargs)
         else:
@@ -172,6 +178,7 @@ def _diffusers_worker(payload: dict[str, Any], out_q: Any) -> None:
         seed = payload.get("seed")
         generator.manual_seed(int(seed) if seed is not None else random.randint(1, 2**31 - 1))
 
+        stage = "inference"
         if init_image_path:
             Image, _ = _require_pillow()
             init_img = Image.open(str(init_image_path)).convert("RGB")
@@ -207,6 +214,7 @@ def _diffusers_worker(payload: dict[str, Any], out_q: Any) -> None:
                 "device_used": device,
                 "runtime_strategy": payload.get("runtime_strategy") or ("cuda_fp16" if device == "cuda" else "cpu_only"),
                 "execution_plan": payload.get("execution_plan") or {},
+                "stage": "completed",
                 "worker_elapsed_sec": round(time.time() - started, 3),
             },
         })
@@ -217,7 +225,7 @@ def _diffusers_worker(payload: dict[str, Any], out_q: Any) -> None:
             "ok": False,
             "error_code": mem_code if mem_err else ("out_of_memory" if "out of memory" in txt else "generation_failed"),
             "error_message": str(exc),
-            "metadata": {"worker_traceback": traceback.format_exc()},
+            "metadata": {"worker_traceback": traceback.format_exc(), "stage": stage},
         })
     except Exception as exc:  # noqa: BLE001
         mem_err, mem_code = _is_memory_error(exc)
@@ -225,7 +233,7 @@ def _diffusers_worker(payload: dict[str, Any], out_q: Any) -> None:
             "ok": False,
             "error_code": mem_code if mem_err else "model_load_failed",
             "error_message": str(exc),
-            "metadata": {"worker_traceback": traceback.format_exc()},
+            "metadata": {"worker_traceback": traceback.format_exc(), "stage": stage},
         })
 
 class ImageGenerationService:
@@ -360,6 +368,8 @@ class ImageGenerationService:
             "recommended_steps": int(requested.get("steps") or 20),
             "reason": "CPU fallback plan selected.",
             "warnings": [],
+            "expected_timeout_sec": 420,
+            "practical_on_cpu": True,
         }
 
         if status.get("torch_installed") and status.get("cuda_version") is None:
@@ -378,6 +388,7 @@ class ImageGenerationService:
                     "use_attention_slicing": True,
                     "use_vae_tiling": True,
                     "reason": "CUDA available but VRAM is tight relative to model footprint; enabling CPU offload.",
+                    "expected_timeout_sec": 300,
                 })
             else:
                 plan.update({
@@ -388,6 +399,7 @@ class ImageGenerationService:
                     "use_attention_slicing": low_memory_mode,
                     "use_vae_tiling": low_memory_mode,
                     "reason": "CUDA available and VRAM appears sufficient.",
+                    "expected_timeout_sec": 220,
                 })
         else:
             if avail_ram and est_ram and avail_ram < int(est_ram * 0.7):
@@ -401,6 +413,10 @@ class ImageGenerationService:
             if plan["device_plan"] == "cuda":
                 plan["use_attention_slicing"] = True
                 plan["use_vae_tiling"] = True
+            if plan["device_plan"] == "cpu_low_memory":
+                plan["practical_on_cpu"] = False
+                plan["warnings"].append("Model fit is poor for CPU mode; generation may timeout or fail.")
+                plan["expected_timeout_sec"] = max(int(plan.get("expected_timeout_sec") or 420), 480)
         elif fit == "maybe":
             plan["recommended_width"] = min(plan["recommended_width"], 768)
             plan["recommended_height"] = min(plan["recommended_height"], 768)
@@ -411,6 +427,10 @@ class ImageGenerationService:
         plan["estimated_vram_required_bytes"] = est_vram or None
         plan["gpu_total_vram_bytes"] = gpu_vram or None
         plan["available_ram_bytes"] = avail_ram or None
+        if plan["device_plan"] == "cpu_low_memory" and est_ram and avail_ram and avail_ram < int(est_ram * 0.5):
+            plan["practical_on_cpu"] = False
+            plan["warnings"].append("Available RAM is significantly below estimate for this model.")
+            plan["expected_timeout_sec"] = max(int(plan.get("expected_timeout_sec") or 420), 540)
         return plan
 
     def _apply_postprocess(self, image_bytes: bytes, *, upscale: bool, postprocess: bool) -> bytes:
@@ -493,6 +513,11 @@ class ImageGenerationService:
         except Exception:
             xformers_available = False
         memory = _system_memory_snapshot()
+        runtime_note = None
+        if status.get("torch_installed") and status.get("cuda_version") and not status.get("cuda_available"):
+            runtime_note = "CUDA-enabled torch build detected, but no CUDA runtime device is available in this environment."
+        if status.get("torch_installed") and status.get("cuda_version") is None:
+            runtime_note = "Torch build is CPU-only; CUDA toolkit presence alone is not enough for GPU execution."
         return {
             "ok": ok,
             "runtime": status,
@@ -506,6 +531,7 @@ class ImageGenerationService:
             "cpu_offload_enabled": bool(getattr(self.config, "hf_enable_cpu_offload", True)),
             "memory_efficient_attention_enabled": bool(getattr(self.config, "hf_enable_memory_efficient_attention", False)),
             "xformers_available": xformers_available,
+            "runtime_note": runtime_note,
         }
 
     def validate_model(self, model_id: str) -> dict[str, Any]:
@@ -779,6 +805,7 @@ class ImageGenerationService:
         strength: float,
         device: str,
         execution_plan: dict[str, Any] | None = None,
+        timeout_s: int | None = None,
     ) -> ImageRuntimeResult:
         if model_source == "remote" and not self._cache_dir(model_id_or_path) and not self.config.hf_image_allow_auto_download:
             return ImageRuntimeResult(ok=False, error_code="model_not_found", error_message="Remote model is not cached locally. Put model under ./models or set HF_IMAGE_ALLOW_AUTO_DOWNLOAD=true.")
@@ -806,7 +833,7 @@ class ImageGenerationService:
                 },
             )
 
-        timeout_s = int(getattr(self.config, "hf_image_job_timeout_sec", 180) or 180)
+        timeout_s = int(timeout_s or getattr(self.config, "hf_image_job_timeout_sec", 180) or 180)
         ctx = mp.get_context("spawn")
         q = ctx.Queue(maxsize=1)
         mode = "img2img" if init_image_path else "text2img"
@@ -845,7 +872,17 @@ class ImageGenerationService:
         if proc.is_alive():
             proc.terminate()
             proc.join(timeout=3)
-            return ImageRuntimeResult(ok=False, error_code="runtime_timeout", error_message=f"Image generation timed out after {timeout_s}s")
+            return ImageRuntimeResult(
+                ok=False,
+                error_code="runtime_timeout",
+                error_message=f"Image generation timed out after {timeout_s}s",
+                metadata={
+                    "timeout_sec": timeout_s,
+                    "device_requested": device,
+                    "execution_plan": execution_plan or {},
+                    "suggestion": "Use recommended settings or smaller resolution/steps for CPU mode.",
+                },
+            )
 
         if proc.exitcode is None:
             return ImageRuntimeResult(ok=False, error_code="runtime_crash", error_message="Image worker ended with unknown state")
@@ -856,6 +893,14 @@ class ImageGenerationService:
             return ImageRuntimeResult(ok=False, error_code="generation_failed", error_message="Image worker returned no result")
 
         data = q.get()
+        if not bool(data.get("ok")):
+            logger.warning(
+                "image.worker.failed code=%s message=%s device=%s strategy=%s",
+                data.get("error_code"),
+                data.get("error_message"),
+                device,
+                (execution_plan or {}).get("device_plan"),
+            )
         return ImageRuntimeResult(
             ok=bool(data.get("ok")),
             image_bytes=data.get("image_bytes"),
@@ -973,6 +1018,18 @@ class ImageGenerationService:
         enable_refine = bool(params.get("enable_refine", qd["refine"]))
         enable_upscale = bool(params.get("enable_upscale", qd["upscale"]))
         enable_postprocess = bool(params.get("enable_postprocess", qd["postprocess"]))
+        timeout_s = int(params.get("timeout_sec") or execution_plan.get("expected_timeout_sec") or getattr(self.config, "hf_image_job_timeout_sec", 180) or 180)
+
+        logger.info(
+            "image.generate.plan model=%s source=%s plan=%s timeout_s=%s width=%s height=%s steps=%s",
+            model_id,
+            model_source,
+            execution_plan.get("device_plan"),
+            timeout_s,
+            width,
+            height,
+            steps,
+        )
 
         if self.config.hf_image_runtime == "hf_inference_api":
             token = (self.config.hf_api_token or "").strip()
@@ -1022,6 +1079,19 @@ class ImageGenerationService:
                 }
                 return ImageRuntimeResult(ok=False, error_code="gpu_required", error_message=f"GPU required but unavailable. {details}")
 
+        fail_if_cpu_impractical = bool(params.get("fail_if_cpu_impractical", False))
+        if preferred == "cpu" and execution_plan.get("practical_on_cpu") is False and fail_if_cpu_impractical and not bool(self.config.hf_image_allow_placeholder):
+            return ImageRuntimeResult(
+                ok=False,
+                error_code="cpu_impractical_for_model",
+                error_message="Model is likely impractical on CPU for current memory constraints.",
+                metadata={
+                    "execution_plan": execution_plan,
+                    "timeout_sec": timeout_s,
+                    "suggestion": "Use GPU (CUDA-enabled torch) or smaller model/recommended settings.",
+                },
+            )
+
         stages_run: list[str] = ["base_generation"]
         result = self._run_diffusers_isolated(
             model_id_or_path=resolved_model,
@@ -1037,6 +1107,7 @@ class ImageGenerationService:
             strength=strength,
             device=preferred,
             execution_plan=execution_plan,
+            timeout_s=timeout_s,
         )
 
         if not result.ok and preferred == "cuda" and bool(self.config.hf_image_allow_cpu_fallback) and result.error_code in {"out_of_memory", "provider_unavailable"}:
@@ -1055,6 +1126,7 @@ class ImageGenerationService:
                 strength=strength,
                 device="cpu",
                 execution_plan={**execution_plan, "device_plan": "cpu_low_memory", "torch_dtype": "float32"},
+                timeout_s=max(timeout_s, 420),
             )
             if retry.ok:
                 result = retry

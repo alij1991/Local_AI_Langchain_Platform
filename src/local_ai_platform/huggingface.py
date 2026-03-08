@@ -82,6 +82,10 @@ class HuggingFaceController:
     def _hf_root() -> Path:
         return Path(os.getenv("HF_HOME") or (Path.home() / ".cache" / "huggingface"))
 
+    @staticmethod
+    def _hf_hub_cache() -> Path:
+        return Path(os.getenv("HF_HUB_CACHE") or (HuggingFaceController._hf_root() / "hub"))
+
     def _model_cache_dir(self, model_id: str) -> Path | None:
         models_dir = self._hf_root() / "hub"
         if not models_dir.exists():
@@ -105,7 +109,7 @@ class HuggingFaceController:
         try:
             from huggingface_hub import scan_cache_dir
 
-            cache_info = scan_cache_dir(cache_dir=self._hf_root())
+            cache_info = scan_cache_dir(cache_dir=self._hf_hub_cache())
             repos = getattr(cache_info, "repos", None) or []
             target = next((r for r in repos if getattr(r, "repo_type", "model") == "model" and getattr(r, "repo_id", None) == model_id), None)
             if target is not None:
@@ -127,9 +131,11 @@ class HuggingFaceController:
                 if last_accessed:
                     out["last_seen"] = max(last_accessed)
                 out["metadata_source"] = "hf_cache_scan"
+                if out["resolved_snapshot_path"] is None:
+                    out["snapshot_reason"] = "snapshot_ref_missing"
                 return out
         except Exception:
-            pass
+            out["cache_scan_reason"] = "cache_metadata_unavailable"
 
         cache_dir = self._model_cache_dir(model_id)
         if not cache_dir:
@@ -159,6 +165,8 @@ class HuggingFaceController:
                         pass
                 if not out["resolved_snapshot_path"]:
                     out["resolved_snapshot_path"] = str(all_snaps[0])
+        if not out.get("resolved_snapshot_path") and out.get("installed"):
+            out["snapshot_reason"] = "snapshot_ref_missing"
         out["metadata_source"] = "local_cache"
         return out
 
@@ -200,6 +208,8 @@ class HuggingFaceController:
             "resolved_snapshot_path": None,
             "cached_files_count": None,
             "last_seen": None,
+            "snapshot_reason": None,
+            "cache_scan_reason": None,
             "pipeline_tag": None,
             "downloads": None,
             "likes": None,
@@ -231,6 +241,8 @@ class HuggingFaceController:
             "size_bytes": cache.get("size_bytes"),
             "cached_files_count": cache.get("cached_files_count"),
             "last_seen": cache.get("last_seen"),
+            "snapshot_reason": cache.get("snapshot_reason"),
+            "cache_scan_reason": cache.get("cache_scan_reason"),
             "metadata_source": cache.get("metadata_source") or info["metadata_source"],
         })
 

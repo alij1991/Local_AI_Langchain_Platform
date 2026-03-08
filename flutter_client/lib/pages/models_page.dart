@@ -391,6 +391,8 @@ class _ModelsPageState extends State<ModelsPage> {
                       Text('Runtime: ${_selected!['runtime'] ?? ((_selected!['metadata'] as Map<String, dynamic>?)?['runtime'] ?? 'Not available yet')}'),
                       Text('Local path: ${_selected!['local_path'] ?? ((_selected!['metadata'] as Map<String, dynamic>?)?['local_path'] ?? 'Not yet computed')}'),
                       Text('Snapshot path: ${_selected!['resolved_snapshot_path'] ?? ((_selected!['metadata'] as Map<String, dynamic>?)?['resolved_snapshot_path'] ?? 'Unavailable')}'),
+                      if (((_selected!['snapshot_reason'] ?? ((_selected!['metadata'] as Map<String, dynamic>?)?['snapshot_reason'])) ?? '').toString().isNotEmpty)
+                        Text('Snapshot status: ${(_selected!['snapshot_reason'] ?? ((_selected!['metadata'] as Map<String, dynamic>?)?['snapshot_reason'])).toString()}'),
                       const SizedBox(height: 10),
                       Wrap(spacing: 6, runSpacing: 6, children: [
                         _capabilityChip('Chat', (_selected!['capabilities']?['supports_chat'] ?? _selected!['supports']?['chat']) == true),
@@ -410,6 +412,8 @@ class _ModelsPageState extends State<ModelsPage> {
                       Text('Updated: ${_selected!['last_modified'] ?? ((_selected!['metadata'] as Map<String, dynamic>?)?['last_modified'] ?? 'unknown')}'),
                       Text('Cached files: ${_selected!['cached_files_count'] ?? ((_selected!['metadata'] as Map<String, dynamic>?)?['cached_files_count'] ?? 'Unavailable')}'),
                       Text('Last seen in cache: ${_selected!['last_seen'] ?? ((_selected!['metadata'] as Map<String, dynamic>?)?['last_seen'] ?? 'Unavailable')}'),
+                      if (((_selected!['cache_scan_reason'] ?? ((_selected!['metadata'] as Map<String, dynamic>?)?['cache_scan_reason'])) ?? '').toString().isNotEmpty)
+                        Text('Cache scan status: ${(_selected!['cache_scan_reason'] ?? ((_selected!['metadata'] as Map<String, dynamic>?)?['cache_scan_reason'])).toString()}'),
                       const SizedBox(height: 12),
                       Wrap(spacing: 8, children: [
                         FilledButton.tonalIcon(
