@@ -357,6 +357,24 @@ curl "http://127.0.0.1:8000/models/catalog?provider=ollama&supports_tools=true"
 
 Returned fields include: `id`, `name`, `model_id`, `provider`, capability flags, install status, metadata, and raw provider payload.
 
+Hugging Face local-only mode (default in Flutter Models HF tab):
+```bash
+curl "http://127.0.0.1:8000/models/catalog?provider=huggingface&scope=local"
+```
+This returns only verified local models found in `LOCAL_MODELS_DIR` and local Hugging Face cache locations.
+
+Hugging Face discover mode:
+```bash
+curl "http://127.0.0.1:8000/models/hf/discover?q=phi&task=text-generation&sort=downloads&limit=20"
+```
+
+Download endpoint (explicit action only):
+```bash
+curl -X POST "http://127.0.0.1:8000/models/hf/download" \
+  -H "Content-Type: application/json" \
+  -d '{"model_id":"sentence-transformers/all-MiniLM-L6-v2"}'
+```
+Downloads are stored under `./models/<model_id with / replaced by -->`.
 
 Systems run now returns `run_id` in `POST /systems/{name}/run` so executions appear in Runs/Traces.
 
