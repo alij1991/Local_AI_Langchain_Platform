@@ -392,6 +392,18 @@ Metadata quality notes:
 Systems run now returns `run_id` in `POST /systems/{name}/run` so executions appear in Runs/Traces.
 
 
+Discover metadata sources:
+- Hugging Face Hub listing fields (`pipeline_tag`, downloads, likes, tags, library/license).
+- Best-effort size from Hub file metadata (`siblings` size sum) when available.
+- Local on-disk cache/folder inspection fallback for installed models.
+- If size still cannot be resolved, it remains unavailable and is shown as "Size not available yet" in UI.
+
+Download polling behavior:
+- Flutter Models page polls `/models/hf/downloads` only when there are active download jobs.
+- Polling automatically stops when all jobs complete/fail.
+- Idle Models page does not run heartbeat download polling.
+
+
 ## Images generation (Hugging Face)
 
 New endpoints:

@@ -243,6 +243,7 @@ trace_store = TraceStore(cfg=type("Cfg", (), {"enabled": config.trace_enabled, "
 image_service = ImageGenerationService(config)
 _download_jobs: dict[str, dict[str, Any]] = {}
 _download_lock = threading.Lock()
+_hf_discover_meta_cache: dict[str, dict[str, Any]] = {}
 if os.getenv("LANGSMITH_TRACING", "").strip().lower() in {"1", "true", "yes", "on"}:
     os.environ.setdefault("LANGCHAIN_TRACING_V2", "true")
     if os.getenv("LANGSMITH_API_KEY"):
@@ -860,9 +861,13 @@ def models_catalog(provider: str | None = None, search: str = "", installed_only
             "local_path": it.get("local_path") or ((it.get("local_status") or {}).get("location")),
             "capabilities": it.get("capabilities") or _normalize_capabilities(supports),
             "source_url": (it.get("metadata") or {}).get("source_url") or (f"https://huggingface.co/{it.get('model_id')}" if it.get("provider") == "huggingface" else None),
-            "downloads": (it.get("metadata") or {}).get("downloads"),
-            "likes": (it.get("metadata") or {}).get("likes"),
-            "last_modified": (it.get("metadata") or {}).get("last_modified"),
+            "size_bytes": it.get("size_bytes") or (it.get("metadata") or {}).get("size_bytes"),
+            "parameters": it.get("parameters") or (it.get("metadata") or {}).get("parameters"),
+            "context_length": it.get("context_length") or (it.get("metadata") or {}).get("context_length"),
+            "quantization": it.get("quantization") or (it.get("metadata") or {}).get("quantization"),
+            "downloads": it.get("downloads") or (it.get("metadata") or {}).get("downloads"),
+            "likes": it.get("likes") or (it.get("metadata") or {}).get("likes"),
+            "last_modified": it.get("last_modified") or (it.get("metadata") or {}).get("last_modified"),
             "metadata_completeness": (it.get("metadata") or {}).get("metadata_completeness"),
             "estimated_fields": (it.get("metadata") or {}).get("estimated_fields", []),
             "raw": it,
@@ -916,6 +921,53 @@ def add_hf_model(payload: HFAddRequest) -> dict[str, Any]:
     return row
 
 
+
+
+def _hf_discover_meta(model_id: str, ttl_s: int = 600) -> dict[str, Any]:
+    now = time.time()
+    cached = _hf_discover_meta_cache.get(model_id)
+    if cached and (now - float(cached.get("ts", 0))) < ttl_s:
+        return dict(cached.get("data") or {})
+
+    meta: dict[str, Any] = {
+        "size_bytes": None,
+        "size_estimate": "unknown",
+        "parameters": None,
+        "context_length": None,
+        "quantization": None,
+    }
+    # local first
+    local_meta = orchestrator.hf.model_metadata(model_id)
+    if local_meta.get("size_bytes") is not None:
+        meta["size_bytes"] = local_meta.get("size_bytes")
+        meta["size_estimate"] = "local_folder"
+    if local_meta.get("parameters"):
+        meta["parameters"] = local_meta.get("parameters")
+    if local_meta.get("context_length"):
+        meta["context_length"] = local_meta.get("context_length")
+    if local_meta.get("quantization"):
+        meta["quantization"] = local_meta.get("quantization")
+
+    # remote file metadata best-effort
+    try:
+        from huggingface_hub import model_info
+
+        info = model_info(model_id, files_metadata=True)
+        siblings = getattr(info, "siblings", None) or []
+        total = 0
+        for sbl in siblings:
+            size = getattr(sbl, "size", None)
+            if isinstance(size, int):
+                total += size
+        if total > 0:
+            meta["size_bytes"] = total
+            meta["size_estimate"] = "hub_siblings_sum"
+    except Exception:
+        pass
+
+    _hf_discover_meta_cache[model_id] = {"ts": now, "data": dict(meta)}
+    return meta
+
 @app.get("/models/hf/discover")
 def models_hf_discover(q: str = "", task: str = "", sort: str = "downloads", limit: int = 30, cursor: str = "") -> dict[str, Any]:
     try:
@@ -951,6 +1003,8 @@ def models_hf_discover(q: str = "", task: str = "", sort: str = "downloads", lim
     for m in page:
         model_id = str(getattr(m, "id", "") or "")
         pipeline = getattr(m, "pipeline_tag", None)
+        extra = _hf_discover_meta(model_id)
+        local_meta = orchestrator.hf.model_metadata(model_id)
         items.append({
             "provider": "huggingface",
             "model_id": model_id,
@@ -963,11 +1017,15 @@ def models_hf_discover(q: str = "", task: str = "", sort: str = "downloads", lim
             "last_modified": str(getattr(m, "last_modified", "") or "") or None,
             "library_name": getattr(m, "library_name", None),
             "license": getattr(m, "license", None),
-            "size_bytes": None,
-            "size_estimate": "unknown",
+            "size_bytes": extra.get("size_bytes"),
+            "size_estimate": extra.get("size_estimate"),
+            "parameters": extra.get("parameters"),
+            "context_length": extra.get("context_length"),
+            "quantization": extra.get("quantization"),
             "source_url": f"https://huggingface.co/{model_id}",
             "capabilities": _caps(m),
-            "local_status": {"installed": bool(orchestrator.hf.model_metadata(model_id).get("installed"))},
+            "local_status": {"installed": bool(local_meta.get("installed")), "location": local_meta.get("location")},
+            "metadata_completeness": local_meta.get("metadata_completeness"),
             "remote": True,
         })
 
