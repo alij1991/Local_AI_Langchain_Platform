@@ -40,3 +40,6 @@ def test_model_metadata_from_local_config(monkeypatch, tmp_path):
     assert meta["installed"] is True
     assert meta["context_length"] == 8192
     assert str(meta["parameters"]).startswith("~")
+    assert meta["size_bytes"] is not None
+    assert meta["cached_files_count"] is not None
+    assert meta["resolved_snapshot_path"] is not None

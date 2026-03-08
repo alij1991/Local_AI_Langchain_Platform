@@ -78,9 +78,12 @@ class HuggingFaceController:
         self._llm_cache[cache_key] = llm
         return llm
 
+    @staticmethod
+    def _hf_root() -> Path:
+        return Path(os.getenv("HF_HOME") or (Path.home() / ".cache" / "huggingface"))
+
     def _model_cache_dir(self, model_id: str) -> Path | None:
-        root = Path(os.getenv("HF_HOME") or (Path.home() / ".cache" / "huggingface"))
-        models_dir = root / "hub"
+        models_dir = self._hf_root() / "hub"
         if not models_dir.exists():
             return None
         safe = f"models--{model_id.replace('/', '--')}"
@@ -88,6 +91,76 @@ class HuggingFaceController:
         if candidate.exists():
             return candidate
         return None
+
+    def _scan_cache_repo(self, model_id: str) -> dict[str, Any]:
+        out: dict[str, Any] = {
+            "installed": False,
+            "location": None,
+            "resolved_snapshot_path": None,
+            "size_bytes": None,
+            "cached_files_count": None,
+            "last_seen": None,
+            "metadata_source": "config",
+        }
+        try:
+            from huggingface_hub import scan_cache_dir
+
+            cache_info = scan_cache_dir(cache_dir=self._hf_root())
+            repos = getattr(cache_info, "repos", None) or []
+            target = next((r for r in repos if getattr(r, "repo_type", "model") == "model" and getattr(r, "repo_id", None) == model_id), None)
+            if target is not None:
+                out["installed"] = True
+                out["location"] = str(getattr(target, "repo_path", None) or "") or None
+                out["size_bytes"] = int(getattr(target, "size_on_disk", 0) or 0) or None
+                out["cached_files_count"] = len(getattr(target, "cached_files", None) or [])
+                refs = getattr(target, "refs", None) or set()
+                snapshots = {str(getattr(r, "commit_hash", "")): str(getattr(r, "snapshot_path", "")) for r in (getattr(target, "revisions", None) or []) if getattr(r, "commit_hash", None)}
+                chosen = None
+                for ref in refs:
+                    if getattr(ref, "ref_name", "") == "main" and getattr(ref, "commit_hash", None):
+                        chosen = snapshots.get(str(getattr(ref, "commit_hash")))
+                        break
+                if not chosen and snapshots:
+                    chosen = next(iter(snapshots.values()))
+                out["resolved_snapshot_path"] = chosen
+                last_accessed = [getattr(r, "last_accessed", None) for r in (getattr(target, "revisions", None) or []) if getattr(r, "last_accessed", None)]
+                if last_accessed:
+                    out["last_seen"] = max(last_accessed)
+                out["metadata_source"] = "hf_cache_scan"
+                return out
+        except Exception:
+            pass
+
+        cache_dir = self._model_cache_dir(model_id)
+        if not cache_dir:
+            return out
+        out["installed"] = True
+        out["location"] = str(cache_dir)
+        try:
+            files = [p for p in cache_dir.rglob("*") if p.is_file()]
+            out["size_bytes"] = sum(p.stat().st_size for p in files)
+            out["cached_files_count"] = len(files)
+            out["last_seen"] = int(max((p.stat().st_mtime for p in files), default=time.time())) if files else None
+        except Exception:
+            pass
+
+        snapshots = cache_dir / "snapshots"
+        if snapshots.exists():
+            all_snaps = [p for p in snapshots.iterdir() if p.is_dir()]
+            if all_snaps:
+                main_ref = cache_dir / "refs" / "main"
+                if main_ref.exists():
+                    try:
+                        rev = main_ref.read_text(encoding="utf-8").strip()
+                        resolved = snapshots / rev
+                        if resolved.exists():
+                            out["resolved_snapshot_path"] = str(resolved)
+                    except Exception:
+                        pass
+                if not out["resolved_snapshot_path"]:
+                    out["resolved_snapshot_path"] = str(all_snaps[0])
+        out["metadata_source"] = "local_cache"
+        return out
 
     @staticmethod
     def _estimate_params(cfg: dict[str, Any]) -> str | None:
@@ -123,6 +196,10 @@ class HuggingFaceController:
             "size_bytes": None,
             "installed": False,
             "location": None,
+            "local_path": None,
+            "resolved_snapshot_path": None,
+            "cached_files_count": None,
+            "last_seen": None,
             "pipeline_tag": None,
             "downloads": None,
             "likes": None,
@@ -145,41 +222,48 @@ class HuggingFaceController:
             "updated_at": int(time.time()),
         }
 
-        cache_dir = self._model_cache_dir(key)
-        if cache_dir:
-            info["installed"] = True
-            info["location"] = str(cache_dir)
-            try:
-                info["size_bytes"] = sum(p.stat().st_size for p in cache_dir.rglob("*") if p.is_file())
-            except Exception:
-                pass
+        cache = self._scan_cache_repo(key)
+        info.update({
+            "installed": bool(cache.get("installed")),
+            "location": cache.get("location"),
+            "local_path": cache.get("location"),
+            "resolved_snapshot_path": cache.get("resolved_snapshot_path"),
+            "size_bytes": cache.get("size_bytes"),
+            "cached_files_count": cache.get("cached_files_count"),
+            "last_seen": cache.get("last_seen"),
+            "metadata_source": cache.get("metadata_source") or info["metadata_source"],
+        })
 
-            cfg_path = cache_dir / "snapshots"
-            chosen_cfg = None
+        chosen_cfg = None
+        snapshot = info.get("resolved_snapshot_path")
+        if snapshot:
+            candidate = Path(str(snapshot)) / "config.json"
+            if candidate.exists():
+                chosen_cfg = candidate
+        if chosen_cfg is None and info.get("location"):
+            cfg_path = Path(str(info["location"])) / "snapshots"
             if cfg_path.exists():
                 for snap in cfg_path.iterdir():
                     candidate = snap / "config.json"
                     if candidate.exists():
                         chosen_cfg = candidate
                         break
-            if chosen_cfg and chosen_cfg.exists():
-                try:
-                    cfg = json.loads(chosen_cfg.read_text(encoding="utf-8"))
-                    info["context_length"] = cfg.get("max_position_embeddings") or cfg.get("n_positions") or cfg.get("seq_length")
-                    info["parameters"] = self._estimate_params(cfg)
-                    if isinstance(info["parameters"], str) and info["parameters"].startswith("~"):
-                        info["estimated_fields"].append("parameters")
-                    q = cfg.get("quantization_config")
-                    if q:
-                        info["quantization"] = q.get("quant_method") or str(q)
-                    model_type = str(cfg.get("model_type", "")).lower()
-                    if "vision" in model_type or "llava" in model_type:
-                        info["supports"]["vision"] = True
-                    info["metadata_source"] = "local_config"
-                except Exception:
-                    pass
+        if chosen_cfg and chosen_cfg.exists():
+            try:
+                cfg = json.loads(chosen_cfg.read_text(encoding="utf-8"))
+                info["context_length"] = cfg.get("max_position_embeddings") or cfg.get("n_positions") or cfg.get("seq_length")
+                info["parameters"] = self._estimate_params(cfg)
+                if isinstance(info["parameters"], str) and info["parameters"].startswith("~"):
+                    info["estimated_fields"].append("parameters")
+                q = cfg.get("quantization_config")
+                if q:
+                    info["quantization"] = q.get("quant_method") or str(q)
+                model_type = str(cfg.get("model_type", "")).lower()
+                if "vision" in model_type or "llava" in model_type:
+                    info["supports"]["vision"] = True
+            except Exception:
+                pass
 
-        # best-effort hub metadata enrichment
         try:
             from huggingface_hub import model_info
 
@@ -199,12 +283,23 @@ class HuggingFaceController:
             if remote_tags:
                 info["tags"] = sorted(set(info["tags"] + list(remote_tags)))
             info["tags"] = sorted(set(info["tags"] + ["hub"]))
-            info["metadata_source"] = "hub+local" if info["installed"] else "hub"
+            if info["installed"]:
+                info["metadata_source"] = "hub+cache"
+            else:
+                info["metadata_source"] = "hub"
         except Exception:
             pass
 
-        known = [info.get("size_bytes"), info.get("parameters"), info.get("context_length"), info.get("pipeline_tag"), info.get("downloads")]
-        if sum(1 for x in known if x not in {None, ""}) >= 3:
+        known = [
+            info.get("size_bytes"),
+            info.get("parameters"),
+            info.get("context_length"),
+            info.get("pipeline_tag"),
+            info.get("downloads"),
+            info.get("cached_files_count"),
+            info.get("resolved_snapshot_path"),
+        ]
+        if sum(1 for x in known if x not in {None, ""}) >= 4:
             info["metadata_completeness"] = "good"
 
         self._metadata_cache[key] = info

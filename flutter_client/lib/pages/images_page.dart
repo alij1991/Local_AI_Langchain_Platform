@@ -30,6 +30,14 @@ class _ImagesPageState extends State<ImagesPage> {
   bool _showHelp = true;
   bool _lowMemoryMode = false;
   Map<String, dynamic> _modelFit = {};
+  String _qualityProfile = 'balanced';
+  bool _enableRefine = false;
+  bool _enableUpscale = false;
+  bool _enablePostprocess = false;
+  int _width = 1024;
+  int _height = 1024;
+  int _steps = 20;
+  double _guidance = 7.0;
 
   @override
   void initState() {
@@ -40,7 +48,7 @@ class _ImagesPageState extends State<ImagesPage> {
   Future<void> _load({bool refreshModels = false}) async {
     final sessions = await widget.api.get('/images/sessions') as Map<String, dynamic>;
     final models = await widget.api.get('/images/models${refreshModels ? '?refresh=true' : ''}') as Map<String, dynamic>;
-    final runtime = await widget.api.get('/images/runtime') as Map<String, dynamic>;
+    final runtime = await widget.api.get('/images/runtime${_selectedModel != null ? '?model_id=${Uri.encodeComponent(_selectedModel!)}' : ''}') as Map<String, dynamic>;
     setState(() {
       _sessions = ((sessions['items'] as List<dynamic>?) ?? []).cast<Map<String, dynamic>>();
       _models = ((models['items'] as List<dynamic>?) ?? []).cast<Map<String, dynamic>>();
@@ -153,6 +161,9 @@ class _ImagesPageState extends State<ImagesPage> {
       final rec = await widget.api.get('/images/recommendations?model_id=${Uri.encodeComponent(_selectedModel!)}') as Map<String, dynamic>;
       if (!mounted) return;
       setState(() {
+        _width = (rec['recommended_width'] as num?)?.toInt() ?? _width;
+        _height = (rec['recommended_height'] as num?)?.toInt() ?? _height;
+        _steps = (rec['recommended_steps'] as num?)?.toInt() ?? _steps;
         _status = 'Applied recommended settings: ${rec['recommended_width']}x${rec['recommended_height']} steps ${rec['recommended_steps']}';
       });
     } catch (e) {
@@ -170,16 +181,30 @@ class _ImagesPageState extends State<ImagesPage> {
       _errorDetails = '';
     });
     try {
-      setState(() => _status = 'Generating…');
+      setState(() => _status = 'Generating base image…');
       final payload = {
         'session_id': _activeSession!['id'],
         'model_id': _selectedModel,
         'prompt': _prompt.text.trim(),
-        if (_lowMemoryMode) 'width': 512,
-        if (_lowMemoryMode) 'height': 512,
-        if (_lowMemoryMode) 'steps': 16,
+        'width': _lowMemoryMode ? 512 : _width,
+        'height': _lowMemoryMode ? 512 : _height,
+        'steps': _lowMemoryMode ? 16 : _steps,
+        'guidance_scale': _guidance,
+        'params_json': {
+          'quality_profile': _qualityProfile,
+          'enable_refine': _enableRefine,
+          'enable_upscale': _enableUpscale,
+          'enable_postprocess': _enablePostprocess,
+          'width': _lowMemoryMode ? 512 : _width,
+          'height': _lowMemoryMode ? 512 : _height,
+          'steps': _lowMemoryMode ? 16 : _steps,
+          'guidance_scale': _guidance,
+        },
       };
       await widget.api.post('/images/generate', payload);
+      if (_enableRefine) setState(() => _status = 'Refining image…');
+      if (_enableUpscale) setState(() => _status = 'Upscaling image…');
+      if (_enablePostprocess) setState(() => _status = 'Postprocessing image…');
       setState(() => _status = 'Saving image…');
       await _openSession(_activeSession!['id'].toString());
       _prompt.clear();
@@ -231,6 +256,10 @@ class _ImagesPageState extends State<ImagesPage> {
   }
 
   String _runtimeChipText() {
+    final plan = (_runtime['runtime_strategy'] ?? '').toString();
+    if (plan == 'cuda') return 'GPU mode';
+    if (plan == 'cuda_with_cpu_offload') return 'GPU + CPU offload';
+    if (plan == 'cpu_low_memory') return 'CPU low-memory mode';
     final cuda = _runtime['cuda_available'] == true;
     final gpuName = _runtime['gpu_name']?.toString();
     if (cuda) {
@@ -263,7 +292,7 @@ class _ImagesPageState extends State<ImagesPage> {
           const SizedBox(width: 8),
           IconButton(onPressed: _load, icon: const Icon(Icons.refresh), tooltip: 'Refresh runtime status'),
           const SizedBox(width: 8),
-          Text('Preference: ${(_runtime['device_preference'] ?? 'auto').toString()} • Effective: ${(_runtime['effective_device'] ?? 'cpu').toString()}'),
+          Expanded(child: Text('Preference: ${(_runtime['device_preference'] ?? 'auto').toString()} • Effective: ${(_runtime['effective_device'] ?? 'cpu').toString()} • ${(_runtime['reason'] ?? '').toString()}')),
         ]),
         Expanded(
           child: Row(
@@ -419,6 +448,51 @@ class _ImagesPageState extends State<ImagesPage> {
                           ],
                         ),
                         const SizedBox(height: 8),
+                        ExpansionTile(
+                          title: const Text('Runtime details'),
+                          children: [
+                            ListTile(dense: true, title: Text('Torch: ${(_runtime['torch_version'] ?? 'n/a').toString()} • CUDA build: ${(_runtime['cuda_version'] ?? 'none').toString()}')),
+                            ListTile(dense: true, title: Text('CUDA available: ${(_runtime['cuda_available'] == true)} • Effective: ${(_runtime['effective_device'] ?? 'cpu')}')),
+                            ListTile(dense: true, title: Text('Execution plan: ${((_runtime['execution_plan'] as Map<String, dynamic>?)?['device_plan'] ?? _runtime['runtime_strategy'] ?? 'unknown')}')),
+                            if (((_runtime['warnings'] as List<dynamic>?) ?? const []).isNotEmpty)
+                              Padding(
+                                padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 4),
+                                child: Text('Warnings: ${(_runtime['warnings'] as List<dynamic>).join(', ')}'),
+                              ),
+                          ],
+                        ),
+                        DropdownButtonFormField<String>(
+                          value: _qualityProfile,
+                          decoration: const InputDecoration(labelText: 'Quality profile'),
+                          items: const [
+                            DropdownMenuItem(value: 'fast', child: Text('Fast')),
+                            DropdownMenuItem(value: 'balanced', child: Text('Balanced')),
+                            DropdownMenuItem(value: 'quality', child: Text('Quality')),
+                            DropdownMenuItem(value: 'low_memory', child: Text('Low Memory')),
+                          ],
+                          onChanged: _busy ? null : (v) => setState(() => _qualityProfile = v ?? 'balanced'),
+                        ),
+                        const SizedBox(height: 8),
+                        ExpansionTile(
+                          title: const Text('Advanced'),
+                          children: [
+                            Wrap(
+                              spacing: 8,
+                              runSpacing: 8,
+                              children: [
+                                SizedBox(width: 110, child: TextFormField(initialValue: _width.toString(), decoration: const InputDecoration(labelText: 'Width'), keyboardType: TextInputType.number, onChanged: (v) => _width = int.tryParse(v) ?? _width)),
+                                SizedBox(width: 110, child: TextFormField(initialValue: _height.toString(), decoration: const InputDecoration(labelText: 'Height'), keyboardType: TextInputType.number, onChanged: (v) => _height = int.tryParse(v) ?? _height)),
+                                SizedBox(width: 110, child: TextFormField(initialValue: _steps.toString(), decoration: const InputDecoration(labelText: 'Steps'), keyboardType: TextInputType.number, onChanged: (v) => _steps = int.tryParse(v) ?? _steps)),
+                              ],
+                            ),
+                            const SizedBox(height: 6),
+                            Slider(value: _guidance, min: 1.0, max: 12.0, divisions: 22, label: _guidance.toStringAsFixed(1), onChanged: _busy ? null : (v) => setState(() => _guidance = v)),
+                            Text('Guidance: ${_guidance.toStringAsFixed(1)}'),
+                            SwitchListTile.adaptive(value: _enableRefine, onChanged: _busy ? null : (v) => setState(() => _enableRefine = v), title: const Text('Enable refinement pass')),
+                            SwitchListTile.adaptive(value: _enableUpscale, onChanged: _busy ? null : (v) => setState(() => _enableUpscale = v), title: const Text('Enable upscale')),
+                            SwitchListTile.adaptive(value: _enablePostprocess, onChanged: _busy ? null : (v) => setState(() => _enablePostprocess = v), title: const Text('Enable postprocess cleanup')),
+                          ],
+                        ),
                         SwitchListTile.adaptive(
                           value: _lowMemoryMode,
                           onChanged: _busy ? null : (v) => setState(() => _lowMemoryMode = v),
@@ -470,9 +544,13 @@ class _ImagesPageState extends State<ImagesPage> {
                             final fallback = params['fallback_used'] == true;
                             final fallbackReason = (params['fallback_reason'] ?? '').toString();
                             final strategy = (params['runtime_strategy'] ?? '').toString();
+                            final profile = (params['quality_profile'] ?? '').toString();
+                            final stages = ((params['stages_run'] as List<dynamic>?) ?? const []).join(', ');
                             return Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
                               if (deviceUsed.isNotEmpty) Text('Generated on: $deviceUsed'),
                               if (strategy.isNotEmpty) Text('Strategy: $strategy'),
+                              if (profile.isNotEmpty) Text('Profile: $profile'),
+                              if (stages.isNotEmpty) Text('Stages: $stages'),
                               if (fallback) Text('Fallback to CPU: $fallbackReason', style: const TextStyle(color: Colors.orange)),
                             ]);
                           }),

@@ -101,6 +101,17 @@ def _estimate_memory_requirements(folder_size_bytes: int, device: str) -> dict[s
         "estimated_vram_required_bytes": max(est_vram, 0),
     }
 
+
+def _quality_profile_defaults(profile: str) -> dict[str, Any]:
+    p = (profile or "balanced").strip().lower()
+    if p == "fast":
+        return {"width": 640, "height": 640, "steps": 16, "guidance_scale": 6.5, "refine": False, "upscale": False, "postprocess": False}
+    if p == "quality":
+        return {"width": 1024, "height": 1024, "steps": 28, "guidance_scale": 7.5, "refine": True, "upscale": True, "postprocess": True}
+    if p == "low_memory":
+        return {"width": 512, "height": 512, "steps": 14, "guidance_scale": 6.0, "refine": False, "upscale": False, "postprocess": False}
+    return {"width": 768, "height": 768, "steps": 20, "guidance_scale": 7.0, "refine": False, "upscale": False, "postprocess": False}
+
 def _diffusers_worker(payload: dict[str, Any], out_q: Any) -> None:
     started = time.time()
     try:
@@ -133,20 +144,25 @@ def _diffusers_worker(payload: dict[str, Any], out_q: Any) -> None:
                 pipe.enable_xformers_memory_efficient_attention()
             except Exception:
                 pass
-        if bool(payload.get("low_memory_mode", True)):
+        if bool(payload.get("use_attention_slicing", payload.get("low_memory_mode", True))):
             try:
                 pipe.enable_attention_slicing()
             except Exception:
                 pass
+        if bool(payload.get("use_vae_tiling", payload.get("low_memory_mode", True))):
             try:
                 pipe.enable_vae_slicing()
             except Exception:
                 pass
         if device == "cuda":
-            if bool(payload.get("enable_cpu_offload", False)):
+            if bool(payload.get("use_sequential_cpu_offload", False)):
+                try:
+                    pipe.enable_sequential_cpu_offload()
+                except Exception:
+                    pass
+            elif bool(payload.get("use_model_cpu_offload", payload.get("enable_cpu_offload", False))):
                 try:
                     pipe.enable_model_cpu_offload()
-                    payload["runtime_strategy"] = "hybrid_offload"
                 except Exception:
                     pipe = pipe.to("cuda")
             else:
@@ -190,6 +206,7 @@ def _diffusers_worker(payload: dict[str, Any], out_q: Any) -> None:
                 "model_source": payload.get("model_source"),
                 "device_used": device,
                 "runtime_strategy": payload.get("runtime_strategy") or ("cuda_fp16" if device == "cuda" else "cpu_only"),
+                "execution_plan": payload.get("execution_plan") or {},
                 "worker_elapsed_sec": round(time.time() - started, 3),
             },
         })
@@ -313,6 +330,101 @@ class ImageGenerationService:
                 status["reason"] = "cuda not available"
             status["effective_device"] = "cpu"
         return status
+
+    def build_image_execution_plan(
+        self,
+        model_id: str,
+        *,
+        requested: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        requested = requested or {}
+        status = self.get_device_status()
+        validation = self.validate_model(model_id)
+        folder_size = int(validation.get("folder_size_bytes") or 0)
+        est_ram = int(validation.get("estimated_ram_required_bytes") or 0)
+        est_vram = int(validation.get("estimated_vram_required_bytes") or 0)
+        mem = validation.get("memory") or _system_memory_snapshot()
+        avail_ram = int(mem.get("available_ram_bytes") or 0)
+        gpu_vram = int(status.get("gpu_total_vram_bytes") or 0)
+
+        plan: dict[str, Any] = {
+            "device_plan": "cpu_low_memory",
+            "torch_dtype": "float32",
+            "use_low_cpu_mem_usage": True,
+            "use_attention_slicing": True,
+            "use_vae_tiling": True,
+            "use_model_cpu_offload": False,
+            "use_sequential_cpu_offload": False,
+            "recommended_width": int(requested.get("width") or 768),
+            "recommended_height": int(requested.get("height") or 768),
+            "recommended_steps": int(requested.get("steps") or 20),
+            "reason": "CPU fallback plan selected.",
+            "warnings": [],
+        }
+
+        if status.get("torch_installed") and status.get("cuda_version") is None:
+            plan["warnings"].append("Torch build is CPU-only; CUDA toolkit presence alone is not enough.")
+
+        cuda_available = bool(status.get("cuda_available"))
+        low_memory_mode = bool(getattr(self.config, "hf_image_low_memory_mode", True))
+
+        if cuda_available:
+            if gpu_vram and est_vram and gpu_vram < int(est_vram * 0.7):
+                plan.update({
+                    "device_plan": "cuda_with_cpu_offload",
+                    "torch_dtype": "float16",
+                    "use_model_cpu_offload": True,
+                    "use_sequential_cpu_offload": True,
+                    "use_attention_slicing": True,
+                    "use_vae_tiling": True,
+                    "reason": "CUDA available but VRAM is tight relative to model footprint; enabling CPU offload.",
+                })
+            else:
+                plan.update({
+                    "device_plan": "cuda",
+                    "torch_dtype": "float16",
+                    "use_model_cpu_offload": False,
+                    "use_sequential_cpu_offload": False,
+                    "use_attention_slicing": low_memory_mode,
+                    "use_vae_tiling": low_memory_mode,
+                    "reason": "CUDA available and VRAM appears sufficient.",
+                })
+        else:
+            if avail_ram and est_ram and avail_ram < int(est_ram * 0.7):
+                plan["warnings"].append("Available RAM looks tight for this model; using conservative CPU settings.")
+
+        fit = str(validation.get("fit") or "maybe")
+        if fit == "poor" or low_memory_mode:
+            plan["recommended_width"] = min(plan["recommended_width"], 512)
+            plan["recommended_height"] = min(plan["recommended_height"], 512)
+            plan["recommended_steps"] = min(plan["recommended_steps"], 16)
+            if plan["device_plan"] == "cuda":
+                plan["use_attention_slicing"] = True
+                plan["use_vae_tiling"] = True
+        elif fit == "maybe":
+            plan["recommended_width"] = min(plan["recommended_width"], 768)
+            plan["recommended_height"] = min(plan["recommended_height"], 768)
+            plan["recommended_steps"] = min(plan["recommended_steps"], 20)
+
+        plan["model_size_bytes"] = folder_size or None
+        plan["estimated_ram_required_bytes"] = est_ram or None
+        plan["estimated_vram_required_bytes"] = est_vram or None
+        plan["gpu_total_vram_bytes"] = gpu_vram or None
+        plan["available_ram_bytes"] = avail_ram or None
+        return plan
+
+    def _apply_postprocess(self, image_bytes: bytes, *, upscale: bool, postprocess: bool) -> bytes:
+        if not upscale and not postprocess:
+            return image_bytes
+        Image, ImageOps = _require_pillow()
+        img = Image.open(io.BytesIO(image_bytes)).convert("RGB")
+        if upscale:
+            img = img.resize((img.width * 2, img.height * 2), Image.Resampling.LANCZOS)
+        if postprocess:
+            img = ImageOps.autocontrast(img)
+        out = io.BytesIO()
+        img.save(out, format="PNG")
+        return out.getvalue()
 
     def doctor(self) -> dict[str, Any]:
         status = self.get_device_status()
@@ -478,14 +590,17 @@ class ImageGenerationService:
         return result
 
     def recommended_settings(self, model_id: str) -> dict[str, Any]:
-        validation = self.validate_model(model_id)
-        fit = validation.get("fit")
-        low_mode = bool(getattr(self.config, "hf_image_low_memory_mode", True))
-        if fit == "poor" or low_mode:
-            return {"recommended_width": 512, "recommended_height": 512, "recommended_steps": 16, "reason": "Low-memory mode suggested for this hardware.", "recommended_runtime_strategy": "hybrid_offload", "recommended_precision": "fp16_or_fp32"}
-        if fit == "maybe":
-            return {"recommended_width": 768, "recommended_height": 768, "recommended_steps": 20, "reason": "Moderate memory pressure detected.", "recommended_runtime_strategy": "cuda_fp16_or_cpu_offload", "recommended_precision": "fp16"}
-        return {"recommended_width": 1024, "recommended_height": 1024, "recommended_steps": 24, "reason": "Hardware fit appears good.", "recommended_runtime_strategy": "cuda_fp16", "recommended_precision": "fp16"}
+        plan = self.build_image_execution_plan(model_id)
+        precision = "fp16" if str(plan.get("torch_dtype")) in {"float16", "bfloat16"} else "fp32"
+        return {
+            "recommended_width": int(plan.get("recommended_width") or 768),
+            "recommended_height": int(plan.get("recommended_height") or 768),
+            "recommended_steps": int(plan.get("recommended_steps") or 20),
+            "reason": plan.get("reason") or "Hardware-aware defaults selected.",
+            "recommended_runtime_strategy": plan.get("device_plan"),
+            "recommended_precision": precision,
+            "execution_plan": plan,
+        }
 
     def _scan_local_models(self) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
         image_models: list[dict[str, Any]] = []
@@ -622,20 +737,25 @@ class ImageGenerationService:
                 pipe.enable_xformers_memory_efficient_attention()
             except Exception:
                 pass
-        if bool(payload.get("low_memory_mode", True)):
+        if bool(payload.get("use_attention_slicing", payload.get("low_memory_mode", True))):
             try:
                 pipe.enable_attention_slicing()
             except Exception:
                 pass
+        if bool(payload.get("use_vae_tiling", payload.get("low_memory_mode", True))):
             try:
                 pipe.enable_vae_slicing()
             except Exception:
                 pass
         if device == "cuda":
-            if bool(payload.get("enable_cpu_offload", False)):
+            if bool(payload.get("use_sequential_cpu_offload", False)):
+                try:
+                    pipe.enable_sequential_cpu_offload()
+                except Exception:
+                    pass
+            elif bool(payload.get("use_model_cpu_offload", payload.get("enable_cpu_offload", False))):
                 try:
                     pipe.enable_model_cpu_offload()
-                    payload["runtime_strategy"] = "hybrid_offload"
                 except Exception:
                     pipe = pipe.to("cuda")
             else:
@@ -658,6 +778,7 @@ class ImageGenerationService:
         init_image_path: str | None,
         strength: float,
         device: str,
+        execution_plan: dict[str, Any] | None = None,
     ) -> ImageRuntimeResult:
         if model_source == "remote" and not self._cache_dir(model_id_or_path) and not self.config.hf_image_allow_auto_download:
             return ImageRuntimeResult(ok=False, error_code="model_not_found", error_message="Remote model is not cached locally. Put model under ./models or set HF_IMAGE_ALLOW_AUTO_DOWNLOAD=true.")
@@ -689,6 +810,7 @@ class ImageGenerationService:
         ctx = mp.get_context("spawn")
         q = ctx.Queue(maxsize=1)
         mode = "img2img" if init_image_path else "text2img"
+        execution_plan = execution_plan or {}
         payload = {
             "model_id_or_path": model_id_or_path,
             "model_source": model_source,
@@ -705,11 +827,16 @@ class ImageGenerationService:
             "mode": mode,
             "local_files_only": model_source == "local" or not self.config.hf_image_allow_auto_download,
             "low_memory_mode": bool(getattr(self.config, "hf_image_low_memory_mode", True)),
-            "torch_dtype": ("float16" if device == "cuda" else "float32"),
+            "torch_dtype": execution_plan.get("torch_dtype") or ("float16" if device == "cuda" else "float32"),
             "use_safetensors": True,
             "enable_cpu_offload": bool(getattr(self.config, "hf_enable_cpu_offload", True)),
             "enable_memory_efficient_attention": bool(getattr(self.config, "hf_enable_memory_efficient_attention", False)),
-            "runtime_strategy": "cuda_fp16" if device == "cuda" else "cpu_only",
+            "use_attention_slicing": bool(execution_plan.get("use_attention_slicing", True)),
+            "use_vae_tiling": bool(execution_plan.get("use_vae_tiling", True)),
+            "use_model_cpu_offload": bool(execution_plan.get("use_model_cpu_offload", False)),
+            "use_sequential_cpu_offload": bool(execution_plan.get("use_sequential_cpu_offload", False)),
+            "runtime_strategy": execution_plan.get("device_plan") or ("cuda_fp16" if device == "cuda" else "cpu_only"),
+            "execution_plan": execution_plan,
         }
         proc = ctx.Process(target=_diffusers_worker, args=(payload, q), daemon=True)
         proc.start()
@@ -752,6 +879,7 @@ class ImageGenerationService:
         init_image_path: str | None,
         strength: float,
         device: str,
+        execution_plan: dict[str, Any] | None = None,
     ) -> ImageRuntimeResult:
         try:
             import torch
@@ -820,6 +948,10 @@ class ImageGenerationService:
         if self.config.hf_image_runtime not in {"diffusers_local", "hf_inference_api"}:
             return ImageRuntimeResult(ok=False, error_code="provider_unavailable", error_message=f"Unsupported runtime: {self.config.hf_image_runtime}")
 
+        params = dict(params_json or {})
+        profile = str(params.get("quality_profile") or "balanced").strip().lower()
+        qd = _quality_profile_defaults(profile)
+
         try:
             model_source, resolved_model = self._resolve_model_source(model_id)
         except FileNotFoundError as exc:
@@ -827,7 +959,21 @@ class ImageGenerationService:
         except ValueError:
             return ImageRuntimeResult(ok=False, error_code="invalid_model_format", error_message="Local model folder is missing model_index.json")
 
-        device_status = self.get_device_status()
+        requested = {
+            "width": int(params.get("width") or width or qd["width"]),
+            "height": int(params.get("height") or height or qd["height"]),
+            "steps": int(params.get("steps") or steps or qd["steps"]),
+        }
+        execution_plan = self.build_image_execution_plan(model_id, requested=requested)
+        width = int(params.get("width") or execution_plan.get("recommended_width") or qd["width"])
+        height = int(params.get("height") or execution_plan.get("recommended_height") or qd["height"])
+        steps = int(params.get("steps") or execution_plan.get("recommended_steps") or qd["steps"])
+        guidance_scale = float(params.get("guidance_scale") or guidance_scale or qd["guidance_scale"])
+
+        enable_refine = bool(params.get("enable_refine", qd["refine"]))
+        enable_upscale = bool(params.get("enable_upscale", qd["upscale"]))
+        enable_postprocess = bool(params.get("enable_postprocess", qd["postprocess"]))
+
         if self.config.hf_image_runtime == "hf_inference_api":
             token = (self.config.hf_api_token or "").strip()
             if not token:
@@ -844,15 +990,28 @@ class ImageGenerationService:
                     out = client.text_to_image(prompt=prompt, negative_prompt=negative_prompt)
                 buf = io.BytesIO()
                 out.save(buf, format="PNG")
-                return ImageRuntimeResult(ok=True, image_bytes=buf.getvalue(), metadata={"runtime": "hf_inference_api", "model_source": model_source, "device_used": "remote"})
+                meta = {
+                    "runtime": "hf_inference_api",
+                    "model_source": model_source,
+                    "device_used": "remote",
+                    "execution_plan": execution_plan,
+                    "quality_profile": profile,
+                    "stages_run": ["base_generation"],
+                    "enhancement_summary": {"refine": False, "upscale": False, "postprocess": False},
+                }
+                return ImageRuntimeResult(ok=True, image_bytes=buf.getvalue(), metadata=meta)
             except Exception as exc:  # noqa: BLE001
                 return ImageRuntimeResult(ok=False, error_code="provider_unavailable", error_message=str(exc))
 
-        preferred = str(device_status.get("effective_device") or "cpu")
+        device_status = self.get_device_status()
+        plan_device = str(execution_plan.get("device_plan") or "cpu_low_memory")
+        preferred = "cuda" if plan_device in {"cuda", "cuda_with_cpu_offload"} else "cpu"
+
         cpu_override_warning: str | None = None
         if self.config.hf_image_require_gpu and not device_status.get("cuda_available"):
             if self.config.hf_image_allow_cpu_fallback:
                 preferred = "cpu"
+                execution_plan["device_plan"] = "cpu_low_memory"
                 cpu_override_warning = "HF_IMAGE_REQUIRE_GPU=true but CUDA is unavailable; using CPU fallback because HF_IMAGE_ALLOW_CPU_FALLBACK=true."
             else:
                 details = {
@@ -863,6 +1022,7 @@ class ImageGenerationService:
                 }
                 return ImageRuntimeResult(ok=False, error_code="gpu_required", error_message=f"GPU required but unavailable. {details}")
 
+        stages_run: list[str] = ["base_generation"]
         result = self._run_diffusers_isolated(
             model_id_or_path=resolved_model,
             model_source=model_source,
@@ -876,46 +1036,91 @@ class ImageGenerationService:
             init_image_path=init_image_path,
             strength=strength,
             device=preferred,
+            execution_plan=execution_plan,
         )
 
-        if result.ok:
-            if cpu_override_warning:
-                result.metadata = {**(result.metadata or {}), "warning": cpu_override_warning}
-            return result
-
-        allow_cpu_fallback = bool(self.config.hf_image_allow_cpu_fallback)
-        if preferred == "cuda" and allow_cpu_fallback and result.error_code in {"out_of_memory", "provider_unavailable"}:
+        if not result.ok and preferred == "cuda" and bool(self.config.hf_image_allow_cpu_fallback) and result.error_code in {"out_of_memory", "provider_unavailable"}:
+            execution_plan["warnings"] = list(execution_plan.get("warnings") or []) + ["Base generation on CUDA failed; fell back to CPU."]
             retry = self._run_diffusers_isolated(
                 model_id_or_path=resolved_model,
                 model_source=model_source,
                 prompt=prompt,
                 negative_prompt=negative_prompt,
                 seed=seed,
-                steps=steps,
+                steps=max(12, min(steps, 20)),
                 guidance_scale=guidance_scale,
-                width=width,
-                height=height,
+                width=min(width, 768),
+                height=min(height, 768),
                 init_image_path=init_image_path,
                 strength=strength,
                 device="cpu",
+                execution_plan={**execution_plan, "device_plan": "cpu_low_memory", "torch_dtype": "float32"},
             )
             if retry.ok:
-                retry.metadata = {
-                    **(retry.metadata or {}),
+                result = retry
+                result.metadata = {
+                    **(result.metadata or {}),
                     "fallback_used": True,
                     "fallback_reason": result.error_message,
                     "device_used": "cpu",
-                    **({"warning": cpu_override_warning} if cpu_override_warning else {}),
                 }
-                return retry
 
-        if not result.ok and self.config.hf_image_allow_placeholder:
-            return ImageRuntimeResult(
-                ok=True,
-                image_bytes=self._generate_placeholder(prompt, width, height),
-                metadata={"runtime": "placeholder", "warning": result.error_message, "device_used": "cpu"},
+        if not result.ok:
+            if self.config.hf_image_allow_placeholder:
+                return ImageRuntimeResult(
+                    ok=True,
+                    image_bytes=self._generate_placeholder(prompt, width, height),
+                    metadata={"runtime": "placeholder", "warning": result.error_message, "device_used": "cpu", "quality_profile": profile, "execution_plan": execution_plan, "stages_run": stages_run},
+                )
+            return result
+
+        image_bytes = result.image_bytes or b""
+
+        if enable_refine:
+            stages_run.append("refinement")
+            refine = self._run_diffusers_isolated(
+                model_id_or_path=resolved_model,
+                model_source=model_source,
+                prompt=prompt,
+                negative_prompt=negative_prompt,
+                seed=seed,
+                steps=max(8, min(steps, 18)),
+                guidance_scale=max(4.0, guidance_scale - 0.7),
+                width=width,
+                height=height,
+                init_image_path=init_image_path,
+                strength=0.35,
+                device=preferred,
+                execution_plan=execution_plan,
             )
-        return result
+            if refine.ok and refine.image_bytes:
+                image_bytes = refine.image_bytes
+            else:
+                execution_plan["warnings"] = list(execution_plan.get("warnings") or []) + ["Refinement stage skipped due to runtime error."]
+
+        if enable_upscale or enable_postprocess:
+            stages_run.append("upscale" if enable_upscale else "postprocess")
+            try:
+                image_bytes = self._apply_postprocess(image_bytes, upscale=enable_upscale, postprocess=enable_postprocess)
+            except Exception as exc:
+                execution_plan["warnings"] = list(execution_plan.get("warnings") or []) + [f"Postprocess stage failed: {exc}"]
+
+        metadata = {
+            **(result.metadata or {}),
+            "device_used": (result.metadata or {}).get("device_used") or preferred,
+            "runtime_strategy": execution_plan.get("device_plan"),
+            "execution_plan": execution_plan,
+            "quality_profile": profile,
+            "stages_run": stages_run,
+            "enhancement_summary": {
+                "refine": enable_refine,
+                "upscale": enable_upscale,
+                "postprocess": enable_postprocess,
+            },
+        }
+        if cpu_override_warning:
+            metadata["warning"] = cpu_override_warning
+        return ImageRuntimeResult(ok=True, image_bytes=image_bytes, metadata=metadata)
 
     def apply_basic_edit(self, image_path: str, instruction: str) -> bytes:
         Image, ImageOps = _require_pillow()
