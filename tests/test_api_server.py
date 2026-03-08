@@ -548,3 +548,49 @@ def test_images_doctor_endpoint(monkeypatch):
     res = client.get('/images/doctor')
     assert res.status_code == 200
     assert res.json()['ok'] is True
+
+
+def test_models_catalog_hf_local_scope(monkeypatch):
+    monkeypatch.setattr(api_server, '_hf_local_entries', lambda search='': [{
+        'provider': 'huggingface',
+        'model_id': 'local:model-a',
+        'display_name': 'model-a',
+        'local_status': {'installed': True, 'location': '/tmp/models/model-a'},
+        'supports': {'chat': True, 'tools': False, 'vision': False, 'embeddings': False, 'streaming': False},
+        'metadata': {},
+        'capabilities': {'supports_chat': True, 'supports_tools': False, 'supports_vision': False, 'supports_embeddings': False, 'supports_streaming': False},
+        'local_path': '/tmp/models/model-a',
+    }])
+    res = client.get('/models/catalog?provider=huggingface&scope=local')
+    assert res.status_code == 200
+    body = res.json()
+    assert body['count'] == 1
+    assert body['items'][0]['installed'] is True
+    assert body['items'][0]['local_path']
+
+
+def test_models_hf_discover_endpoint(monkeypatch):
+    class _Model:
+        id = 'sentence-transformers/all-MiniLM-L6-v2'
+        pipeline_tag = 'feature-extraction'
+        tags = ['sentence-transformers']
+        downloads = 123
+        likes = 45
+        last_modified = '2024-01-01T00:00:00'
+
+    class _Api:
+        def __init__(self, token=None):
+            pass
+
+        def list_models(self, **kwargs):
+            return [_Model()]
+
+    import huggingface_hub
+    monkeypatch.setattr(huggingface_hub, 'HfApi', _Api)
+
+    res = client.get('/models/hf/discover?q=minilm&sort=downloads&limit=10')
+    assert res.status_code == 200
+    body = res.json()
+    assert body['count'] == 1
+    assert body['items'][0]['provider'] == 'huggingface'
+    assert body['items'][0]['capabilities']['supports_embeddings'] is True

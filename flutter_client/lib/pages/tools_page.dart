@@ -244,7 +244,7 @@ class _ToolsPageState extends State<ToolsPage> {
             title: const Text('Tavily Web Search (built-in)'),
             subtitle: Text(_tavily!['status'] == 'enabled' ? 'Ready' : 'Missing API key. Set TAVILY_API_KEY in backend .env and restart.'),
             trailing: Wrap(spacing: 8, children: [
-              // FilledButton.tonal(onPressed: _showTavilyHelp, child: const Text('Show setup instructions')),
+              FilledButton.tonal(onPressed: _showTavilyHelp, child: const Text('Show setup instructions')),
               FilledButton.tonal(onPressed: _recheckTavily, child: const Text('Recheck')),
               FilledButton.tonal(onPressed: () => _showToolTest(_tavily!), child: const Text('Test tool')),
             ]),

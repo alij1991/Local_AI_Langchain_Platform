@@ -184,6 +184,12 @@ class HFAddRequest(BaseModel):
     notes: str = ""
 
 
+class HFDownloadRequest(BaseModel):
+    model_id: str
+    revision: str | None = None
+    allow_patterns: list[str] | None = None
+
+
 class ImageSessionCreateRequest(BaseModel):
     title: str | None = None
 
@@ -561,9 +567,107 @@ def list_available_models() -> dict[str, list[str]]:
     }
 
 
+def _normalize_capabilities(supports: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "supports_chat": bool(supports.get("chat")),
+        "supports_embeddings": bool(supports.get("embeddings")),
+        "supports_vision": bool(supports.get("vision")),
+        "supports_streaming": bool(supports.get("streaming")),
+        "supports_tools": bool(supports.get("tools")),
+    }
+
+
+def _hf_local_entries(search: str = "") -> list[dict[str, Any]]:
+    entries: list[dict[str, Any]] = []
+    seen: set[tuple[str, str]] = set()
+
+    for model_id in orchestrator.hf.configured_models():
+        meta = orchestrator.hf.model_metadata(model_id)
+        if not bool(meta.get("installed")):
+            continue
+        supports = meta.get("supports", {})
+        key = ("huggingface", model_id)
+        if key in seen:
+            continue
+        seen.add(key)
+        entries.append(
+            _serialize_model(
+                "huggingface",
+                model_id,
+                model_id,
+                True,
+                supports=supports,
+                tags=meta.get("tags", ["configured"]),
+                size_bytes=meta.get("size_bytes"),
+                parameters=meta.get("parameters"),
+                quantization=meta.get("quantization"),
+                context_length=meta.get("context_length"),
+                location=meta.get("location"),
+                runtime=meta.get("runtime"),
+                runtimes=meta.get("runtimes", ["transformers_local"]),
+                metadata_source=meta.get("metadata_source", "local_cache"),
+            )
+            | {
+                "task": "text-generation",
+                "local_path": meta.get("location"),
+                "capabilities": _normalize_capabilities(supports),
+                "available_locally": True,
+            }
+        )
+
+    for img in image_service.list_models(refresh=True):
+        if img.get("provider") != "huggingface":
+            continue
+        local_status = img.get("local_status") or {}
+        location = local_status.get("location")
+        if not location:
+            continue
+        mid = str(img.get("model_id") or "")
+        supports = {
+            "chat": False,
+            "tools": False,
+            "vision": bool((img.get("supported_features") or {}).get("img2img")),
+            "json_mode": False,
+            "embeddings": False,
+            "streaming": False,
+        }
+        key = ("huggingface", mid)
+        if key in seen:
+            continue
+        seen.add(key)
+        entries.append(
+            _serialize_model(
+                "huggingface",
+                mid,
+                str(img.get("display_name") or mid),
+                True,
+                supports=supports,
+                tags=["image", "text-to-image", "local"],
+                size_bytes=img.get("size_bytes"),
+                location=location,
+                runtime=img.get("runtime"),
+                runtimes=[img.get("runtime")],
+                metadata_source="image_service",
+            )
+            | {
+                "task": "text-to-image",
+                "local_path": location,
+                "capabilities": _normalize_capabilities(supports),
+                "available_locally": True,
+                "supported_features": img.get("supported_features") or {},
+            }
+        )
+
+    if search:
+        q = search.lower()
+        entries = [e for e in entries if q in f"{e.get('display_name','')} {e.get('model_id','')}".lower()]
+
+    return entries
+
+
 # New unified model catalog
 @app.get("/model-catalog")
-def model_catalog(provider: str | None = None, search: str = "", installed_only: bool = False, supports_tools: bool = False, supports_vision: bool = False, supports_embeddings: bool = False, supports_json: bool = False) -> dict[str, Any]:
+def model_catalog(provider: str | None = None, search: str = "", installed_only: bool = False, supports_tools: bool = False, supports_vision: bool = False, supports_embeddings: bool = False, supports_json: bool = False, scope: str = "all") -> dict[str, Any]:
     entries: list[dict[str, Any]] = []
 
     providers = [provider] if provider else ["ollama", "huggingface", "local", "lmstudio"]
@@ -575,60 +679,66 @@ def model_catalog(provider: str | None = None, search: str = "", installed_only:
             entries.append(_serialize_model("ollama", "", "Ollama provider unavailable", False, provider_unavailable=True, tags=[error]))
 
     if "huggingface" in providers:
-        configured = orchestrator.hf.configured_models()
-        pinned = {(r["provider"], r["model_id"]): r for r in list_model_entries("huggingface")}
-        for model_id in configured:
-            row = pinned.get(("huggingface", model_id), {})
-            meta = orchestrator.hf.model_metadata(model_id)
-            entries.append(
-                _serialize_model(
-                    "huggingface",
-                    model_id,
-                    model_id,
-                    bool(meta.get("installed")),
-                    supports=meta.get("supports", {}),
-                    tags=meta.get("tags", ["configured"]),
-                    last_seen=row.get("updated_at"),
-                    size_bytes=meta.get("size_bytes"),
-                    parameters=meta.get("parameters"),
-                    quantization=meta.get("quantization"),
-                    context_length=meta.get("context_length"),
-                    location=meta.get("location"),
-                    runtime=meta.get("runtime"),
-                    runtimes=meta.get("runtimes", ["transformers_local"]),
-                    metadata_source=meta.get("metadata_source"),
+        if scope == "local":
+            entries.extend(_hf_local_entries(search=search))
+        else:
+            configured = orchestrator.hf.configured_models()
+            pinned = {(r["provider"], r["model_id"]): r for r in list_model_entries("huggingface")}
+            for model_id in configured:
+                row = pinned.get(("huggingface", model_id), {})
+                meta = orchestrator.hf.model_metadata(model_id)
+                supports = meta.get("supports", {})
+                entries.append(
+                    _serialize_model(
+                        "huggingface",
+                        model_id,
+                        model_id,
+                        bool(meta.get("installed")),
+                        supports=supports,
+                        tags=meta.get("tags", ["configured"]),
+                        last_seen=row.get("updated_at"),
+                        size_bytes=meta.get("size_bytes"),
+                        parameters=meta.get("parameters"),
+                        quantization=meta.get("quantization"),
+                        context_length=meta.get("context_length"),
+                        location=meta.get("location"),
+                        runtime=meta.get("runtime"),
+                        runtimes=meta.get("runtimes", ["transformers_local"]),
+                        metadata_source=meta.get("metadata_source"),
+                    )
+                    | {"capabilities": _normalize_capabilities(supports), "local_path": meta.get("location")}
                 )
-            )
 
-        # image-capable Hugging Face models
-        for img in image_service.list_models():
-            supports = {
-                "chat": False,
-                "tools": False,
-                "vision": bool((img.get("supported_features") or {}).get("img2img")),
-                "json_mode": False,
-                "embeddings": False,
-                "streaming": False,
-            }
-            entries.append(
-                _serialize_model(
-                    "huggingface",
-                    str(img.get("model_id") or ""),
-                    str(img.get("display_name") or img.get("model_id") or ""),
-                    bool((img.get("local_status") or {}).get("downloaded")),
-                    supports=supports,
-                    tags=["image", "text-to-image"],
-                    location=(img.get("local_status") or {}).get("location"),
-                    runtime=img.get("runtime"),
-                    runtimes=[img.get("runtime")],
-                    metadata_source="image_service",
-                )
-                | {
-                    "task": "text-to-image",
-                    "supported_features": img.get("supported_features") or {},
-                    "requirements": img.get("requirements") or {},
+            for img in image_service.list_models():
+                supports = {
+                    "chat": False,
+                    "tools": False,
+                    "vision": bool((img.get("supported_features") or {}).get("img2img")),
+                    "json_mode": False,
+                    "embeddings": False,
+                    "streaming": False,
                 }
-            )
+                entries.append(
+                    _serialize_model(
+                        "huggingface",
+                        str(img.get("model_id") or ""),
+                        str(img.get("display_name") or img.get("model_id") or ""),
+                        bool((img.get("local_status") or {}).get("downloaded")),
+                        supports=supports,
+                        tags=["image", "text-to-image"],
+                        location=(img.get("local_status") or {}).get("location"),
+                        runtime=img.get("runtime"),
+                        runtimes=[img.get("runtime")],
+                        metadata_source="image_service",
+                    )
+                    | {
+                        "task": "text-to-image",
+                        "supported_features": img.get("supported_features") or {},
+                        "requirements": img.get("requirements") or {},
+                        "capabilities": _normalize_capabilities(supports),
+                        "local_path": (img.get("local_status") or {}).get("location"),
+                    }
+                )
 
     if "local" in providers or provider is None:
         for local_model in image_service.list_local_text_models():
@@ -672,14 +782,16 @@ def model_catalog(provider: str | None = None, search: str = "", installed_only:
 
 
 @app.post("/models/refresh")
-def models_refresh() -> dict[str, Any]:
+def models_refresh(provider: str | None = None) -> dict[str, Any]:
     body = image_service.refresh_models()
+    if provider == "huggingface":
+        return {"refreshed": True, "provider": "huggingface", "local_hf_models": len(_hf_local_entries())}
     return {"refreshed": True, "image_models": len(body.get("items", [])), "local_text_models": len(body.get("local_text_models", []))}
 
 
 @app.get("/models/catalog")
-def models_catalog(provider: str | None = None, search: str = "", installed_only: bool = False, supports_tools: bool = False, supports_vision: bool = False, supports_embeddings: bool = False, supports_streaming: bool = False) -> dict[str, Any]:
-    body = model_catalog(provider=provider, search=search, installed_only=installed_only, supports_tools=supports_tools, supports_vision=supports_vision, supports_embeddings=supports_embeddings)
+def models_catalog(provider: str | None = None, search: str = "", installed_only: bool = False, supports_tools: bool = False, supports_vision: bool = False, supports_embeddings: bool = False, supports_streaming: bool = False, scope: str = "all") -> dict[str, Any]:
+    body = model_catalog(provider=provider, search=search, installed_only=installed_only, supports_tools=supports_tools, supports_vision=supports_vision, supports_embeddings=supports_embeddings, scope=scope)
     items: list[dict[str, Any]] = []
     for it in body.get("items", []):
         supports = it.get("supports") or {}
@@ -699,6 +811,9 @@ def models_catalog(provider: str | None = None, search: str = "", installed_only
             "supports": supports,
             "runtime": (it.get("metadata") or {}).get("runtime"),
             "metadata_source": (it.get("metadata") or {}).get("metadata_source"),
+            "task": it.get("task"),
+            "local_path": it.get("local_path") or ((it.get("local_status") or {}).get("location")),
+            "capabilities": it.get("capabilities") or _normalize_capabilities(supports),
             "raw": it,
         })
     return {"items": items, "count": len(items)}
@@ -739,6 +854,86 @@ def model_catalog_details(provider: str, model_id: str, refresh: bool = False) -
 def add_hf_model(payload: HFAddRequest) -> dict[str, Any]:
     row = upsert_model_entry("huggingface", payload.model_id.strip(), notes=payload.notes, task_hint=payload.task_hint, revision=payload.revision)
     return row
+
+
+@app.get("/models/hf/discover")
+def models_hf_discover(q: str = "", task: str = "", sort: str = "downloads", limit: int = 30, cursor: str = "") -> dict[str, Any]:
+    try:
+        from huggingface_hub import HfApi
+    except Exception:
+        raise error_response("missing_dependency", "huggingface_hub is required for discover mode", status=500)
+
+    api = HfApi(token=(config.hf_api_token or None))
+    direction = -1 if sort in {"downloads", "likes", "updated"} else 1
+    safe_limit = max(1, min(limit, 100))
+    offset = int(cursor) if cursor.isdigit() else 0
+    if task.strip():
+        tag_filters = [task.strip()]
+    else:
+        tag_filters = None
+
+    models = list(api.list_models(search=q or None, filter=tag_filters, sort=("lastModified" if sort == "updated" else sort), direction=direction, limit=safe_limit + offset))
+    page = models[offset : offset + safe_limit]
+
+    def _caps(m: Any) -> dict[str, bool]:
+        tags = set(getattr(m, "tags", []) or [])
+        pipeline = str(getattr(m, "pipeline_tag", "") or "")
+        text_gen = pipeline in {"text-generation", "text2text-generation"}
+        return {
+            "supports_chat": text_gen,
+            "supports_embeddings": pipeline in {"feature-extraction", "sentence-similarity"} or "sentence-transformers" in tags,
+            "supports_vision": pipeline in {"image-text-to-text", "image-to-text", "text-to-image", "image-classification"} or "vision" in tags,
+            "supports_streaming": text_gen,
+            "supports_tools": False,
+        }
+
+    items = []
+    for m in page:
+        model_id = str(getattr(m, "id", "") or "")
+        pipeline = getattr(m, "pipeline_tag", None)
+        items.append({
+            "provider": "huggingface",
+            "model_id": model_id,
+            "display_name": model_id,
+            "task": pipeline,
+            "pipeline_tag": pipeline,
+            "tags": list(getattr(m, "tags", []) or []),
+            "downloads": getattr(m, "downloads", None),
+            "likes": getattr(m, "likes", None),
+            "last_modified": str(getattr(m, "last_modified", "") or "") or None,
+            "size_bytes": None,
+            "size_estimate": "unknown",
+            "capabilities": _caps(m),
+            "local_status": {"installed": bool(orchestrator.hf.model_metadata(model_id).get("installed"))},
+            "remote": True,
+        })
+
+    next_cursor = str(offset + safe_limit) if len(models) > offset + safe_limit else None
+    return {"items": items, "cursor": next_cursor, "count": len(items)}
+
+
+@app.post("/models/hf/download")
+def models_hf_download(payload: HFDownloadRequest) -> dict[str, Any]:
+    model_id = payload.model_id.strip()
+    if not model_id:
+        raise error_response("invalid_model", "model_id is required", status=400)
+    target = Path(config.local_models_dir).resolve() / model_id.replace("/", "--")
+    target.mkdir(parents=True, exist_ok=True)
+    try:
+        from huggingface_hub import snapshot_download
+
+        out = snapshot_download(
+            repo_id=model_id,
+            local_dir=str(target),
+            local_dir_use_symlinks=False,
+            revision=payload.revision,
+            allow_patterns=payload.allow_patterns,
+        )
+    except Exception as exc:
+        raise error_response("provider_unavailable", f"Download failed: {exc}", status=502)
+
+    image_service.refresh_models()
+    return {"downloaded": True, "model_id": model_id, "local_path": out}
 
 
 def _default_assistant_definition() -> dict[str, Any]:

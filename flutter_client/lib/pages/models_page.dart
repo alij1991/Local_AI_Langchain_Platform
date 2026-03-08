@@ -12,6 +12,7 @@ class ModelsPage extends StatefulWidget {
 
 class _ModelsPageState extends State<ModelsPage> {
   List<Map<String, dynamic>> _models = [];
+  List<Map<String, dynamic>> _discover = [];
   Map<String, dynamic>? _selected;
   String _provider = 'all';
   String _search = '';
@@ -20,6 +21,9 @@ class _ModelsPageState extends State<ModelsPage> {
   bool _visionOnly = false;
   bool _streamingOnly = false;
   String _error = '';
+  String _hfMode = 'local'; // local | discover
+  String _discoverTask = '';
+  String _discoverSort = 'downloads';
 
   @override
   void initState() {
@@ -28,25 +32,42 @@ class _ModelsPageState extends State<ModelsPage> {
   }
 
   Future<void> _load() async {
-    final query = [
+    final params = [
       if (_provider != 'all') 'provider=$_provider',
       if (_search.isNotEmpty) 'search=${Uri.encodeComponent(_search)}',
       'installed_only=$_installedOnly',
       'supports_tools=$_toolsOnly',
       'supports_vision=$_visionOnly',
       'supports_streaming=$_streamingOnly',
-    ].join('&');
+      if (_provider == 'huggingface' && _hfMode == 'local') 'scope=local',
+    ];
 
     try {
-      final body = await widget.api.get('/models/catalog${query.isEmpty ? '' : '?$query'}') as Map<String, dynamic>;
-      if (!mounted) return;
+      final body = await widget.api.get('/models/catalog${params.isEmpty ? '' : '?${params.join('&')}'}') as Map<String, dynamic>;
+      List<Map<String, dynamic>> items = ((body['items'] as List<dynamic>?) ?? []).cast<Map<String, dynamic>>();
+      if (_provider == 'huggingface' && _hfMode == 'discover') {
+        final discoverParams = [
+          if (_search.isNotEmpty) 'q=${Uri.encodeComponent(_search)}',
+          if (_discoverTask.isNotEmpty) 'task=${Uri.encodeComponent(_discoverTask)}',
+          'sort=${Uri.encodeComponent(_discoverSort)}',
+          'limit=40',
+        ].join('&');
+        final discoverBody = await widget.api.get('/models/hf/discover?$discoverParams') as Map<String, dynamic>;
+        final discoverItems = ((discoverBody['items'] as List<dynamic>?) ?? []).cast<Map<String, dynamic>>();
+        setState(() {
+          _discover = discoverItems;
+          _models = items;
+          _selected = discoverItems.isEmpty ? null : discoverItems.first;
+          _error = '';
+        });
+        return;
+      }
+
       setState(() {
-        _models = ((body['items'] as List<dynamic>?) ?? []).cast<Map<String, dynamic>>();
+        _models = items;
         _selected = _models.isEmpty
             ? null
-            : (_selected != null
-                ? _models.firstWhere((m) => m['id'] == _selected!['id'], orElse: () => _models.first)
-                : _models.first);
+            : (_selected != null ? _models.firstWhere((m) => m['id'] == _selected!['id'], orElse: () => _models.first) : _models.first);
         _error = '';
       });
     } catch (e) {
@@ -55,9 +76,28 @@ class _ModelsPageState extends State<ModelsPage> {
     }
   }
 
+  Future<void> _refreshModels() async {
+    if (_provider == 'huggingface') {
+      await widget.api.post('/models/refresh?provider=huggingface', {});
+    } else {
+      await widget.api.post('/models/refresh', {});
+    }
+    await _load();
+  }
+
+  Future<void> _downloadModel(String modelId) async {
+    await widget.api.post('/models/hf/download', {'model_id': modelId});
+    if (!mounted) return;
+    ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('Downloaded $modelId')));
+    setState(() {
+      _hfMode = 'local';
+      _provider = 'huggingface';
+    });
+    await _load();
+  }
 
   Future<void> _refreshMetadata() async {
-    if (_selected == null) return;
+    if (_selected == null || _hfMode == 'discover') return;
     final provider = (_selected!['provider'] ?? '').toString();
     final modelId = Uri.encodeComponent((_selected!['model_id'] ?? '').toString());
     await widget.api.get('/model-catalog/$provider/$modelId/details?refresh=true');
@@ -76,10 +116,13 @@ class _ModelsPageState extends State<ModelsPage> {
 
   @override
   Widget build(BuildContext context) {
+    final list = (_provider == 'huggingface' && _hfMode == 'discover') ? _discover : _models;
+    final hfLocalEmpty = _provider == 'huggingface' && _hfMode == 'local' && list.isEmpty;
+
     return Row(
       children: [
         SizedBox(
-          width: 520,
+          width: 560,
           child: Column(
             children: [
               Row(children: [
@@ -103,54 +146,113 @@ class _ModelsPageState extends State<ModelsPage> {
                     _load();
                   },
                 ),
+                const SizedBox(width: 8),
+                IconButton(onPressed: _refreshModels, icon: const Icon(Icons.refresh), tooltip: 'Refresh models'),
               ]),
+              if (_provider == 'huggingface') ...[
+                const SizedBox(height: 8),
+                Row(
+                  children: [
+                    SegmentedButton<String>(
+                      segments: const [
+                        ButtonSegment(value: 'local', label: Text('Local')),
+                        ButtonSegment(value: 'discover', label: Text('Discover')),
+                      ],
+                      selected: {_hfMode},
+                      onSelectionChanged: (s) {
+                        setState(() => _hfMode = s.first);
+                        _load();
+                      },
+                    ),
+                    const SizedBox(width: 10),
+                    if (_hfMode == 'discover')
+                      DropdownButton<String>(
+                        value: _discoverSort,
+                        items: const [
+                          DropdownMenuItem(value: 'downloads', child: Text('Sort: Downloads')),
+                          DropdownMenuItem(value: 'likes', child: Text('Sort: Likes')),
+                          DropdownMenuItem(value: 'updated', child: Text('Sort: Updated')),
+                        ],
+                        onChanged: (v) {
+                          if (v == null) return;
+                          setState(() => _discoverSort = v);
+                          _load();
+                        },
+                      ),
+                    const SizedBox(width: 10),
+                    if (_hfMode == 'discover')
+                      DropdownButton<String>(
+                        value: _discoverTask,
+                        items: const [
+                          DropdownMenuItem(value: '', child: Text('Task: Any')),
+                          DropdownMenuItem(value: 'text-generation', child: Text('Text generation')),
+                          DropdownMenuItem(value: 'feature-extraction', child: Text('Embeddings')),
+                          DropdownMenuItem(value: 'text-to-image', child: Text('Text-to-image')),
+                        ],
+                        onChanged: (v) {
+                          if (v == null) return;
+                          setState(() => _discoverTask = v);
+                          _load();
+                        },
+                      ),
+                  ],
+                ),
+              ],
               const SizedBox(height: 8),
               Wrap(
                 spacing: 6,
                 children: [
-                  FilterChip(label: const Text('Installed'), selected: _installedOnly, onSelected: (v) => setState(() { _installedOnly = v; _load(); })),
-                  FilterChip(label: const Text('Tools'), selected: _toolsOnly, onSelected: (v) => setState(() { _toolsOnly = v; _load(); })),
-                  FilterChip(label: const Text('Vision'), selected: _visionOnly, onSelected: (v) => setState(() { _visionOnly = v; _load(); })),
-                  FilterChip(label: const Text('Streaming'), selected: _streamingOnly, onSelected: (v) => setState(() { _streamingOnly = v; _load(); })),
+                  FilterChip(label: const Text('Installed'), selected: _installedOnly, onSelected: (v) => setState(() {
+                        _installedOnly = v;
+                        _load();
+                      })),
+                  FilterChip(label: const Text('Tools'), selected: _toolsOnly, onSelected: (v) => setState(() {
+                        _toolsOnly = v;
+                        _load();
+                      })),
+                  FilterChip(label: const Text('Vision'), selected: _visionOnly, onSelected: (v) => setState(() {
+                        _visionOnly = v;
+                        _load();
+                      })),
+                  FilterChip(label: const Text('Streaming'), selected: _streamingOnly, onSelected: (v) => setState(() {
+                        _streamingOnly = v;
+                        _load();
+                      })),
                 ],
               ),
               if (_error.isNotEmpty) Padding(padding: const EdgeInsets.only(top: 8), child: Text(_error, style: const TextStyle(color: Colors.red))),
+              if (hfLocalEmpty)
+                const Padding(
+                  padding: EdgeInsets.symmetric(vertical: 24),
+                  child: Card(
+                    child: ListTile(
+                      leading: Icon(Icons.info_outline),
+                      title: Text('No local Hugging Face models found.'),
+                      subtitle: Text('Place models in ./models or download them from Discover.'),
+                    ),
+                  ),
+                ),
               const SizedBox(height: 8),
               Expanded(
-                child: GridView.builder(
-                  gridDelegate: const SliverGridDelegateWithFixedCrossAxisCount(crossAxisCount: 1, childAspectRatio: 2.1, mainAxisSpacing: 8),
-                  itemCount: _models.length,
+                child: ListView.separated(
+                  itemCount: list.length,
+                  separatorBuilder: (_, __) => const SizedBox(height: 8),
                   itemBuilder: (_, i) {
-                    final m = _models[i];
-                    final meta = (m['metadata'] as Map<String, dynamic>?) ?? const {};
-                    final supports = (m['supports'] as Map<String, dynamic>?) ?? const {};
+                    final m = list[i];
                     return Card(
-                      child: InkWell(
+                      child: ListTile(
                         onTap: () => setState(() => _selected = m),
-                        child: Padding(
-                          padding: const EdgeInsets.all(12),
-                          child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
-                            Row(children: [
-                              Expanded(child: Text((m['name'] ?? '').toString(), style: Theme.of(context).textTheme.titleMedium)),
-                              Chip(label: Text((m['provider'] ?? '').toString())),
-                            ]),
-                            const SizedBox(height: 4),
-                            Text((m['model_id'] ?? '').toString(), style: Theme.of(context).textTheme.bodySmall),
-                            const SizedBox(height: 6),
-                            Wrap(
-                              spacing: 6,
-                              children: [
-                                _capabilityChip('Tools', m['supports_tools'] == true),
-                                _capabilityChip('Streaming', m['supports_streaming'] == true),
-                                _capabilityChip('Vision', m['supports_vision'] == true),
-                                _capabilityChip('Embeddings', m['supports_embeddings'] == true),
-                              ],
-                            ),
-                            const Spacer(),
-                            Text('Size: ${(meta['size_bytes'] ?? 'unknown')} • Params: ${(meta['parameters'] ?? 'unknown')} • Ctx: ${(meta['context_length'] ?? 'unknown')}'),
-                            if ((supports['json_mode'] == true)) const Text('JSON mode capable'),
-                          ]),
-                        ),
+                        title: Text((m['name'] ?? m['display_name'] ?? '').toString()),
+                        subtitle: Text((m['model_id'] ?? '').toString()),
+                        trailing: _hfMode == 'discover'
+                            ? FilledButton.tonal(
+                                onPressed: () => _downloadModel((m['model_id'] ?? '').toString()),
+                                child: const Text('Download'),
+                              )
+                            : Chip(label: Text((m['provider'] ?? '').toString())),
+                        isThreeLine: true,
+                        dense: false,
+                        contentPadding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
                       ),
                     );
                   },
@@ -168,7 +270,7 @@ class _ModelsPageState extends State<ModelsPage> {
                     padding: const EdgeInsets.all(16),
                     child: ListView(children: [
                       Row(children: [
-                        Expanded(child: Text((_selected!['name'] ?? '').toString(), style: Theme.of(context).textTheme.headlineSmall)),
+                        Expanded(child: Text((_selected!['name'] ?? _selected!['display_name'] ?? '').toString(), style: Theme.of(context).textTheme.headlineSmall)),
                         FilledButton.tonalIcon(
                           onPressed: () => Clipboard.setData(ClipboardData(text: (_selected!['model_id'] ?? '').toString())),
                           icon: const Icon(Icons.copy),
@@ -180,34 +282,30 @@ class _ModelsPageState extends State<ModelsPage> {
                       const SizedBox(height: 6),
                       Text('Provider: ${_selected!['provider']}'),
                       Text('Model ID: ${_selected!['model_id']}'),
+                      Text('Task: ${_selected!['task'] ?? 'unknown'}'),
                       Text('Runtime: ${_selected!['runtime'] ?? ((_selected!['metadata'] as Map<String, dynamic>?)?['runtime'] ?? 'unknown')}'),
-                      Text('Metadata source: ${_selected!['metadata_source'] ?? ((_selected!['metadata'] as Map<String, dynamic>?)?['metadata_source'] ?? 'unknown')}'),
+                      Text('Local path: ${_selected!['local_path'] ?? ((_selected!['raw'] as Map<String, dynamic>?)?['local_path'] ?? 'unknown')}'),
                       const SizedBox(height: 10),
                       Wrap(spacing: 6, runSpacing: 6, children: [
-                        _capabilityChip('Chat', true),
-                        _capabilityChip('Tools', _selected!['supports_tools'] == true),
-                        _capabilityChip('Vision', _selected!['supports_vision'] == true),
-                        _capabilityChip('Embeddings', _selected!['supports_embeddings'] == true),
-                        _capabilityChip('Streaming', _selected!['supports_streaming'] == true),
+                        _capabilityChip('Chat', (_selected!['capabilities']?['supports_chat'] ?? _selected!['supports']?['chat']) == true),
+                        _capabilityChip('Tools', (_selected!['capabilities']?['supports_tools'] ?? _selected!['supports_tools']) == true),
+                        _capabilityChip('Vision', (_selected!['capabilities']?['supports_vision'] ?? _selected!['supports_vision']) == true),
+                        _capabilityChip('Embeddings', (_selected!['capabilities']?['supports_embeddings'] ?? _selected!['supports_embeddings']) == true),
+                        _capabilityChip('Streaming', (_selected!['capabilities']?['supports_streaming'] ?? _selected!['supports_streaming']) == true),
                       ]),
                       const SizedBox(height: 10),
-                      Text('Size: ${((_selected!['metadata'] as Map<String, dynamic>?)?['size_bytes'] ?? 'unknown')}'),
+                      Text('Size: ${((_selected!['metadata'] as Map<String, dynamic>?)?['size_bytes'] ?? _selected!['size_bytes'] ?? 'unknown')}'),
                       Text('Parameters: ${((_selected!['metadata'] as Map<String, dynamic>?)?['parameters'] ?? 'unknown')}'),
                       Text('Context length: ${((_selected!['metadata'] as Map<String, dynamic>?)?['context_length'] ?? 'unknown')}'),
                       Text('Quantization: ${((_selected!['metadata'] as Map<String, dynamic>?)?['quantization'] ?? 'unknown')}'),
-                      const SizedBox(height: 12),
-                      Row(children: [
+                      if (_hfMode != 'discover') ...[
+                        const SizedBox(height: 12),
                         FilledButton.tonalIcon(
                           onPressed: _refreshMetadata,
                           icon: const Icon(Icons.refresh),
                           label: const Text('Refresh metadata'),
                         ),
-                      ]),
-                      const SizedBox(height: 12),
-                      ExpansionTile(
-                        title: const Text('Raw JSON'),
-                        children: [Padding(padding: const EdgeInsets.all(8), child: SelectableText((_selected!['raw'] ?? _selected).toString()))],
-                      ),
+                      ],
                     ]),
                   ),
                 ),
