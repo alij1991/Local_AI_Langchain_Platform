@@ -1,7 +1,7 @@
 from pathlib import Path
 
 from local_ai_platform.config import AppConfig
-from local_ai_platform.images.service import ImageGenerationService
+from local_ai_platform.images.service import ImageGenerationService, ImageRuntimeResult
 
 
 def _cfg(tmp_path: Path) -> AppConfig:
@@ -44,3 +44,34 @@ def test_doctor_reports_local_models_missing(tmp_path):
     assert 'checks' in report
     local_check = next(c for c in report['checks'] if c['name'] == 'local_models')
     assert local_check['ok'] is False
+
+
+def test_generate_uses_cpu_fallback_when_gpu_required_but_unavailable(tmp_path, monkeypatch):
+    cfg = _cfg(tmp_path)
+    cfg.hf_image_runtime = 'diffusers_local'
+    cfg.hf_image_require_gpu = True
+    cfg.hf_image_allow_cpu_fallback = True
+    svc = ImageGenerationService(cfg)
+
+    monkeypatch.setattr(svc, '_resolve_model_source', lambda model_id: ('remote', model_id))
+    monkeypatch.setattr(svc, 'get_device_status', lambda: {
+        'torch_installed': True,
+        'cuda_available': False,
+        'cuda_version': None,
+        'effective_device': 'cpu',
+        'torch_version': '2.10.0+cpu',
+    })
+
+    def _fake_run_diffusers(**kwargs):
+        assert kwargs['device'] == 'cpu'
+        return ImageRuntimeResult(
+            ok=True,
+            image_bytes=b'x',
+            metadata={'runtime': 'diffusers_local', 'device_used': 'cpu'},
+        )
+
+    monkeypatch.setattr(svc, '_run_diffusers', _fake_run_diffusers)
+
+    result = svc.generate(model_id='google/flan-t5-base', prompt='test')
+    assert result.ok is True
+    assert result.metadata and 'warning' in result.metadata

@@ -592,16 +592,22 @@ def _normalize_capabilities(supports: dict[str, Any]) -> dict[str, Any]:
 def _hf_local_entries(search: str = "") -> list[dict[str, Any]]:
     entries: list[dict[str, Any]] = []
     seen: set[tuple[str, str]] = set()
+    seen_paths: set[str] = set()
 
     for model_id in orchestrator.hf.configured_models():
         meta = orchestrator.hf.model_metadata(model_id)
         if not bool(meta.get("installed")):
             continue
         supports = meta.get("supports", {})
+        location = str(meta.get("location") or "")
         key = ("huggingface", model_id)
         if key in seen:
             continue
+        if location and location in seen_paths:
+            continue
         seen.add(key)
+        if location:
+            seen_paths.add(location)
         entries.append(
             _serialize_model(
                 "huggingface",
@@ -614,7 +620,7 @@ def _hf_local_entries(search: str = "") -> list[dict[str, Any]]:
                 parameters=meta.get("parameters"),
                 quantization=meta.get("quantization"),
                 context_length=meta.get("context_length"),
-                location=meta.get("location"),
+                location=location or None,
                 runtime=meta.get("runtime"),
                 runtimes=meta.get("runtimes", ["transformers_local"]),
                 metadata_source=meta.get("metadata_source", "local_cache"),
@@ -630,7 +636,7 @@ def _hf_local_entries(search: str = "") -> list[dict[str, Any]]:
             )
             | {
                 "task": meta.get("pipeline_tag") or "text-generation",
-                "local_path": meta.get("location"),
+                "local_path": location or None,
                 "capabilities": _normalize_capabilities(supports),
                 "available_locally": True,
             }
@@ -653,9 +659,14 @@ def _hf_local_entries(search: str = "") -> list[dict[str, Any]]:
             "streaming": False,
         }
         key = ("huggingface", mid)
+        norm_location = str(location)
         if key in seen:
             continue
+        if norm_location and norm_location in seen_paths:
+            continue
         seen.add(key)
+        if norm_location:
+            seen_paths.add(norm_location)
         entries.append(
             _serialize_model(
                 "huggingface",
@@ -672,7 +683,7 @@ def _hf_local_entries(search: str = "") -> list[dict[str, Any]]:
             )
             | {
                 "task": "text-to-image",
-                "local_path": location,
+                "local_path": norm_location or location,
                 "capabilities": _normalize_capabilities(supports),
                 "available_locally": True,
                 "supported_features": img.get("supported_features") or {},
