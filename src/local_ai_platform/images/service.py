@@ -410,16 +410,21 @@ class ImageGenerationService:
             except Exception as exc:  # noqa: BLE001
                 return ImageRuntimeResult(ok=False, error_code="provider_unavailable", error_message=str(exc))
 
-        if self.config.hf_image_require_gpu and not device_status.get("cuda_available"):
-            details = {
-                "torch_version": device_status.get("torch_version"),
-                "torch_cuda_version": device_status.get("cuda_version"),
-                "cuda_available": device_status.get("cuda_available"),
-                "suggestion": "Install CUDA-enabled torch or set HF_IMAGE_REQUIRE_GPU=false.",
-            }
-            return ImageRuntimeResult(ok=False, error_code="gpu_required", error_message=f"GPU required but unavailable. {details}")
-
         preferred = str(device_status.get("effective_device") or "cpu")
+        cpu_override_warning: str | None = None
+        if self.config.hf_image_require_gpu and not device_status.get("cuda_available"):
+            if self.config.hf_image_allow_cpu_fallback:
+                preferred = "cpu"
+                cpu_override_warning = "HF_IMAGE_REQUIRE_GPU=true but CUDA is unavailable; using CPU fallback because HF_IMAGE_ALLOW_CPU_FALLBACK=true."
+            else:
+                details = {
+                    "torch_version": device_status.get("torch_version"),
+                    "torch_cuda_version": device_status.get("cuda_version"),
+                    "cuda_available": device_status.get("cuda_available"),
+                    "suggestion": "Install CUDA-enabled torch or set HF_IMAGE_REQUIRE_GPU=false.",
+                }
+                return ImageRuntimeResult(ok=False, error_code="gpu_required", error_message=f"GPU required but unavailable. {details}")
+
         result = self._run_diffusers(
             model_id_or_path=resolved_model,
             model_source=model_source,
@@ -436,6 +441,8 @@ class ImageGenerationService:
         )
 
         if result.ok:
+            if cpu_override_warning:
+                result.metadata = {**(result.metadata or {}), "warning": cpu_override_warning}
             return result
 
         allow_cpu_fallback = bool(self.config.hf_image_allow_cpu_fallback)
@@ -460,6 +467,7 @@ class ImageGenerationService:
                     "fallback_used": True,
                     "fallback_reason": result.error_message,
                     "device_used": "cpu",
+                    **({"warning": cpu_override_warning} if cpu_override_warning else {}),
                 }
                 return retry
 

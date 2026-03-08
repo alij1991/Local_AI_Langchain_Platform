@@ -636,3 +636,24 @@ def test_models_catalog_hf_includes_source_url(monkeypatch):
     res = client.get('/models/catalog?provider=huggingface&scope=local')
     assert res.status_code == 200
     assert res.json()['items'][0]['source_url'].startswith('https://huggingface.co/')
+
+
+def test_hf_local_entries_dedupes_by_local_path(monkeypatch):
+    monkeypatch.setattr(api_server.orchestrator.hf, 'configured_models', lambda: ['repo/model-a'])
+    monkeypatch.setattr(api_server.orchestrator.hf, 'model_metadata', lambda model_id: {
+        'installed': True,
+        'supports': {'chat': True, 'tools': False, 'vision': False, 'embeddings': False, 'streaming': False},
+        'location': '/tmp/models/shared',
+        'runtime': 'transformers_local',
+    })
+    monkeypatch.setattr(api_server.image_service, 'list_models', lambda refresh=True: [{
+        'provider': 'huggingface',
+        'model_id': 'local:model-a',
+        'display_name': 'model-a (local)',
+        'local_status': {'location': '/tmp/models/shared'},
+        'supported_features': {'img2img': True},
+        'runtime': 'diffusers_local',
+    }])
+
+    items = api_server._hf_local_entries()
+    assert len(items) == 1
