@@ -541,6 +541,7 @@ def test_images_runtime_endpoint(monkeypatch):
     res = client.get('/images/runtime')
     assert res.status_code == 200
     assert res.json()['effective_device'] == 'cpu'
+    assert 'low_memory_mode' in res.json()
 
 
 def test_images_doctor_endpoint(monkeypatch):
@@ -671,3 +672,15 @@ def test_images_validate_model_endpoint(monkeypatch):
     assert res.status_code == 200
     assert res.json()['loadable'] is False
     assert res.json()['detected_type'] == 'diffusers_local'
+
+
+def test_images_recommendations_endpoint(monkeypatch):
+    monkeypatch.setattr(api_server.image_service, 'recommended_settings', lambda model_id: {
+        'recommended_width': 512,
+        'recommended_height': 512,
+        'recommended_steps': 16,
+        'reason': 'Low-memory mode suggested for this hardware.',
+    })
+    res = client.get('/images/recommendations?model_id=local:test')
+    assert res.status_code == 200
+    assert res.json()['recommended_width'] == 512

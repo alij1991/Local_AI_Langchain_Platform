@@ -28,6 +28,8 @@ class _ImagesPageState extends State<ImagesPage> {
   String _errorMessage = '';
   String _errorDetails = '';
   bool _showHelp = true;
+  bool _lowMemoryMode = false;
+  Map<String, dynamic> _modelFit = {};
 
   @override
   void initState() {
@@ -46,10 +48,14 @@ class _ImagesPageState extends State<ImagesPage> {
         _selectedModel = _models.isNotEmpty ? _models.first['model_id']?.toString() : null;
       }
       _runtime = runtime;
+      _lowMemoryMode = (runtime['low_memory_mode'] == true);
       if (_models.isEmpty) {
         _status = 'No image models detected. Put a diffusers model folder in ./models and click Refresh models.';
       }
     });
+    if (_selectedModel != null) {
+      await _loadModelFit();
+    }
     if (_activeSession == null && _sessions.isNotEmpty) {
       await _openSession(_sessions.first['id'].toString());
     }
@@ -131,6 +137,29 @@ class _ImagesPageState extends State<ImagesPage> {
     }
   }
 
+
+  Future<void> _loadModelFit() async {
+    if (_selectedModel == null) return;
+    try {
+      final body = await widget.api.post('/images/validate-model', {'model_id': _selectedModel}) as Map<String, dynamic>;
+      if (!mounted) return;
+      setState(() => _modelFit = body);
+    } catch (_) {}
+  }
+
+  Future<void> _useRecommendedSettings() async {
+    if (_selectedModel == null) return;
+    try {
+      final rec = await widget.api.get('/images/recommendations?model_id=${Uri.encodeComponent(_selectedModel!)}') as Map<String, dynamic>;
+      if (!mounted) return;
+      setState(() {
+        _status = 'Applied recommended settings: ${rec['recommended_width']}x${rec['recommended_height']} steps ${rec['recommended_steps']}';
+      });
+    } catch (e) {
+      _captureError(e);
+    }
+  }
+
   Future<void> _generate() async {
     if (_activeSession == null || _selectedModel == null || _prompt.text.trim().isEmpty || _busy) return;
     setState(() {
@@ -142,11 +171,15 @@ class _ImagesPageState extends State<ImagesPage> {
     });
     try {
       setState(() => _status = 'Generating…');
-      await widget.api.post('/images/generate', {
+      final payload = {
         'session_id': _activeSession!['id'],
         'model_id': _selectedModel,
         'prompt': _prompt.text.trim(),
-      });
+        if (_lowMemoryMode) 'width': 512,
+        if (_lowMemoryMode) 'height': 512,
+        if (_lowMemoryMode) 'steps': 16,
+      };
+      await widget.api.post('/images/generate', payload);
       setState(() => _status = 'Saving image…');
       await _openSession(_activeSession!['id'].toString());
       _prompt.clear();
@@ -341,6 +374,8 @@ class _ImagesPageState extends State<ImagesPage> {
                                 if (_errorCode == 'invalid_model_format') const Text('Hint: This local model folder does not look like a valid Diffusers pipeline.'),
                                 if (_errorCode == 'dependency_error') const Text('Hint: Install/update diffusers, transformers, accelerate, safetensors, and torch.'),
                                 if (_errorCode == 'runtime_crash') const Text('Hint: Run Validate model and check backend logs for native runtime issues.'),
+                                if (_errorCode == 'insufficient_memory') const Text('Hint: Model is likely too large for current RAM/page file. Try low memory mode, smaller model, or increase page file.'),
+                                if (_errorCode == 'pagefile_too_small') const Text('Hint: Increase Windows paging file size, or switch to a smaller model / CUDA path.'),
                                 if (_errorDetails.isNotEmpty)
                                   ExpansionTile(
                                     title: const Text('Show details'),
@@ -356,18 +391,53 @@ class _ImagesPageState extends State<ImagesPage> {
                         DropdownButtonFormField<String>(
                           value: _selectedModel,
                           items: _models.map((m) => DropdownMenuItem(value: m['model_id'].toString(), child: Text(m['model_id'].toString()))).toList(),
-                          onChanged: (v) => setState(() => _selectedModel = v),
+                          onChanged: (v) { setState(() => _selectedModel = v); _loadModelFit(); },
                           decoration: const InputDecoration(labelText: 'Model'),
                         ),
                         const SizedBox(height: 8),
-                        Align(
-                          alignment: Alignment.centerLeft,
-                          child: FilledButton.tonalIcon(
-                            onPressed: _busy ? null : _validateModel,
-                            icon: const Icon(Icons.verified_outlined),
-                            label: const Text('Validate model'),
-                          ),
+                        Wrap(
+                          spacing: 8,
+                          runSpacing: 8,
+                          children: [
+                            FilledButton.tonalIcon(
+                              onPressed: _busy ? null : _validateModel,
+                              icon: const Icon(Icons.verified_outlined),
+                              label: const Text('Validate model'),
+                            ),
+                            FilledButton.tonalIcon(
+                              onPressed: _busy ? null : _useRecommendedSettings,
+                              icon: const Icon(Icons.tune),
+                              label: const Text('Use recommended settings'),
+                            ),
+                            FilledButton.tonalIcon(
+                              onPressed: _busy ? null : _load,
+                              icon: const Icon(Icons.refresh),
+                              label: const Text('Refresh runtime'),
+                            ),
+                          ],
                         ),
+                        const SizedBox(height: 8),
+                        SwitchListTile.adaptive(
+                          value: _lowMemoryMode,
+                          onChanged: _busy ? null : (v) => setState(() => _lowMemoryMode = v),
+                          title: const Text('Low memory mode'),
+                          subtitle: const Text('Uses conservative resolution/steps to improve reliability on limited RAM/VRAM.'),
+                        ),
+                        if (_modelFit.isNotEmpty)
+                          Card(
+                            child: Padding(
+                              padding: const EdgeInsets.all(10),
+                              child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+                                Text('Model Fit / Requirements', style: Theme.of(context).textTheme.titleSmall),
+                                Text('Fit: ${_modelFit['fit'] ?? 'unknown'} • Device: ${_modelFit['device_candidate'] ?? 'unknown'}'),
+                                Text('Folder size: ${_modelFit['folder_size_bytes'] ?? 'unknown'}'),
+                                Text('Estimated RAM: ${_modelFit['estimated_ram_required_bytes'] ?? 'unknown'}'),
+                                Text('Estimated VRAM: ${_modelFit['estimated_vram_required_bytes'] ?? 'unknown'}'),
+                                if ((_modelFit['warnings'] as List<dynamic>?)?.isNotEmpty == true)
+                                  Text('Warnings: ${(_modelFit['warnings'] as List<dynamic>).join(', ')}'),
+                              ]),
+                            ),
+                          ),
                         const SizedBox(height: 8),
                         TextField(controller: _prompt, minLines: 2, maxLines: 4, decoration: const InputDecoration(labelText: 'Prompt')),
                         const SizedBox(height: 8),
