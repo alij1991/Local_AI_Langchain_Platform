@@ -123,3 +123,13 @@ def test_doctor_contains_human_memory_fields(tmp_path):
     mem = rep.get('memory', {})
     assert 'available_ram_human' in mem
     assert 'available_virtual_memory_human' in mem
+
+
+def test_execution_plan_contains_expected_fields(tmp_path):
+    cfg = _cfg(tmp_path)
+    svc = ImageGenerationService(cfg)
+    plan = svc.build_image_execution_plan('google/flan-t5-base', requested={'width': 640, 'height': 640, 'steps': 12})
+    assert 'device_plan' in plan
+    assert 'torch_dtype' in plan
+    assert 'recommended_width' in plan
+    assert 'warnings' in plan

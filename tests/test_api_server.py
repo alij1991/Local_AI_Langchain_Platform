@@ -710,3 +710,11 @@ def test_models_hf_discover_size_human_present(monkeypatch):
     assert res.status_code == 200
     item = res.json()['items'][0]
     assert item['size_human']
+
+
+def test_images_runtime_includes_execution_plan(monkeypatch):
+    monkeypatch.setattr(api_server.image_service, 'get_device_status', lambda: {'effective_device': 'cpu', 'cuda_available': False, 'device_preference': 'auto'})
+    monkeypatch.setattr(api_server.image_service, 'build_image_execution_plan', lambda model_id: {'device_plan': 'cpu_low_memory', 'reason': 'cpu only', 'warnings': ['w']})
+    res = client.get('/images/runtime?model_id=local:test')
+    assert res.status_code == 200
+    assert res.json()['execution_plan']['device_plan'] == 'cpu_low_memory'

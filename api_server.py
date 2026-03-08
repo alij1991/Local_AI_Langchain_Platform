@@ -374,6 +374,8 @@ def _serialize_model(provider: str, model_id: str, display_name: str, installed:
             "installed": installed,
             "location": kwargs.get("location"),
             "last_seen": kwargs.get("last_seen"),
+            "resolved_snapshot_path": kwargs.get("resolved_snapshot_path"),
+            "cached_files_count": kwargs.get("cached_files_count"),
         },
         "provider_unavailable": kwargs.get("provider_unavailable", False),
         "metadata": {
@@ -395,6 +397,10 @@ def _serialize_model(provider: str, model_id: str, display_name: str, installed:
             "runtime": kwargs.get("runtime"),
             "runtimes": kwargs.get("runtimes"),
             "metadata_source": kwargs.get("metadata_source"),
+            "local_path": kwargs.get("location"),
+            "resolved_snapshot_path": kwargs.get("resolved_snapshot_path"),
+            "cached_files_count": kwargs.get("cached_files_count"),
+            "last_seen": kwargs.get("last_seen"),
         },
     }
 
@@ -640,6 +646,9 @@ def _hf_local_entries(search: str = "") -> list[dict[str, Any]]:
                 license=meta.get("license"),
                 metadata_completeness=meta.get("metadata_completeness"),
                 estimated_fields=meta.get("estimated_fields", []),
+                resolved_snapshot_path=meta.get("resolved_snapshot_path"),
+                cached_files_count=meta.get("cached_files_count"),
+                last_seen=meta.get("last_seen"),
             )
             | {
                 "task": meta.get("pipeline_tag") or "text-generation",
@@ -873,6 +882,9 @@ def models_catalog(provider: str | None = None, search: str = "", installed_only
             "last_modified": it.get("last_modified") or (it.get("metadata") or {}).get("last_modified"),
             "metadata_completeness": (it.get("metadata") or {}).get("metadata_completeness"),
             "estimated_fields": (it.get("metadata") or {}).get("estimated_fields", []),
+            "resolved_snapshot_path": (it.get("metadata") or {}).get("resolved_snapshot_path"),
+            "cached_files_count": (it.get("metadata") or {}).get("cached_files_count"),
+            "last_seen": (it.get("metadata") or {}).get("last_seen"),
             "raw": it,
         })
     return {"items": items, "count": len(items)}
@@ -913,6 +925,9 @@ def model_catalog_details(provider: str, model_id: str, refresh: bool = False) -
             license=meta.get("license"),
             metadata_completeness=meta.get("metadata_completeness"),
             estimated_fields=meta.get("estimated_fields", []),
+            resolved_snapshot_path=meta.get("resolved_snapshot_path"),
+            cached_files_count=meta.get("cached_files_count"),
+            last_seen=meta.get("last_seen"),
         ) | {"source_url": meta.get("source_url"), "capabilities": _normalize_capabilities(meta.get("supports", {}))}
 
     raise error_response("invalid_provider", f"Unknown provider: {provider}")
@@ -2124,11 +2139,19 @@ def images_models(refresh: bool = False) -> dict[str, Any]:
 
 
 @app.get("/images/runtime")
-def images_runtime() -> dict[str, Any]:
+def images_runtime(model_id: str | None = None) -> dict[str, Any]:
     body = image_service.get_device_status()
     body["low_memory_mode"] = bool(getattr(config, "hf_image_low_memory_mode", True))
     body["gpu_total_vram_human"] = format_bytes_human(body.get("gpu_total_vram_bytes"))
-    body["runtime_strategy"] = "cuda_fp16" if body.get("effective_device") == "cuda" else "cpu_only"
+    target_model = (model_id or config.hf_image_default_model or "").strip()
+    if target_model:
+        plan = image_service.build_image_execution_plan(target_model)
+        body["execution_plan"] = plan
+        body["runtime_strategy"] = plan.get("device_plan")
+        body["reason"] = plan.get("reason") or body.get("reason")
+        body["warnings"] = plan.get("warnings") or []
+    else:
+        body["runtime_strategy"] = "cuda" if body.get("effective_device") == "cuda" else "cpu_low_memory"
     return body
 
 
@@ -2143,6 +2166,7 @@ def images_validate_model(payload: ImageValidateRequest) -> dict[str, Any]:
     if not model_id:
         raise error_response("invalid_model", "model_id is required", status=400)
     result = image_service.validate_model(model_id)
+    result["execution_plan"] = image_service.build_image_execution_plan(model_id)
     return result
 
 
@@ -2249,6 +2273,10 @@ def images_generate(payload: ImageGenerateRequest, response: Response) -> dict[s
             "fallback_used": bool((result.metadata or {}).get("fallback_used")),
             "fallback_reason": (result.metadata or {}).get("fallback_reason"),
             "runtime_metadata": result.metadata or {},
+            "execution_plan": (result.metadata or {}).get("execution_plan"),
+            "quality_profile": (result.metadata or {}).get("quality_profile"),
+            "stages_run": (result.metadata or {}).get("stages_run"),
+            "enhancement_summary": (result.metadata or {}).get("enhancement_summary"),
         },
         run_id=run_id,
         operation="img2img" if parent_id else "text2img",
@@ -2265,6 +2293,10 @@ def images_generate(payload: ImageGenerateRequest, response: Response) -> dict[s
         "runtime_strategy": (result.metadata or {}).get("runtime_strategy"),
         "fallback_used": bool((result.metadata or {}).get("fallback_used")),
         "fallback_reason": (result.metadata or {}).get("fallback_reason"),
+        "execution_plan": (result.metadata or {}).get("execution_plan"),
+        "quality_profile": (result.metadata or {}).get("quality_profile"),
+        "stages_run": (result.metadata or {}).get("stages_run"),
+        "enhancement_summary": (result.metadata or {}).get("enhancement_summary"),
     }
 
 
@@ -2325,6 +2357,10 @@ def images_edit(payload: ImageEditRequest, response: Response) -> dict[str, Any]
             "fallback_used": bool((result.metadata or {}).get("fallback_used")),
             "fallback_reason": (result.metadata or {}).get("fallback_reason"),
             "runtime_metadata": result.metadata or {},
+            "execution_plan": (result.metadata or {}).get("execution_plan"),
+            "quality_profile": (result.metadata or {}).get("quality_profile"),
+            "stages_run": (result.metadata or {}).get("stages_run"),
+            "enhancement_summary": (result.metadata or {}).get("enhancement_summary"),
         },
         run_id=run_id,
         operation="edit",

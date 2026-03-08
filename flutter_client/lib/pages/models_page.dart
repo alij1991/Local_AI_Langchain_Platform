@@ -389,7 +389,8 @@ class _ModelsPageState extends State<ModelsPage> {
                       Text('Model ID: ${_selected!['model_id']}'),
                       Text('Task: ${_selected!['task'] ?? _selected!['pipeline_tag'] ?? 'unknown'}'),
                       Text('Runtime: ${_selected!['runtime'] ?? ((_selected!['metadata'] as Map<String, dynamic>?)?['runtime'] ?? 'Not available yet')}'),
-                      Text('Local path: ${_selected!['local_path'] ?? ((_selected!['raw'] as Map<String, dynamic>?)?['local_path'] ?? 'Not available yet')}'),
+                      Text('Local path: ${_selected!['local_path'] ?? ((_selected!['metadata'] as Map<String, dynamic>?)?['local_path'] ?? 'Not yet computed')}'),
+                      Text('Snapshot path: ${_selected!['resolved_snapshot_path'] ?? ((_selected!['metadata'] as Map<String, dynamic>?)?['resolved_snapshot_path'] ?? 'Unavailable')}'),
                       const SizedBox(height: 10),
                       Wrap(spacing: 6, runSpacing: 6, children: [
                         _capabilityChip('Chat', (_selected!['capabilities']?['supports_chat'] ?? _selected!['supports']?['chat']) == true),
@@ -399,7 +400,7 @@ class _ModelsPageState extends State<ModelsPage> {
                         _capabilityChip('Streaming', (_selected!['capabilities']?['supports_streaming'] ?? _selected!['supports_streaming']) == true),
                       ]),
                       const SizedBox(height: 10),
-                      Text('Size: ${_selected!['size_human'] ?? ((_selected!['metadata'] as Map<String, dynamic>?)?['size_human'] ?? 'Size not available yet')}'),
+                      Text('Size: ${_selected!['size_human'] ?? ((_selected!['metadata'] as Map<String, dynamic>?)?['size_human'] ?? 'Not yet computed')}'),
                       Text('Parameters: ${_selected!['parameters'] ?? ((_selected!['metadata'] as Map<String, dynamic>?)?['parameters'] ?? 'unknown')}'),
                       Text('Size bytes: ${_selected!['size_bytes'] ?? ((_selected!['metadata'] as Map<String, dynamic>?)?['size_bytes'] ?? 'n/a')}', style: Theme.of(context).textTheme.bodySmall),
                       Text('Context length: ${((_selected!['metadata'] as Map<String, dynamic>?)?['context_length'] ?? 'unknown')}'),
@@ -407,6 +408,8 @@ class _ModelsPageState extends State<ModelsPage> {
                       Text('License: ${((_selected!['metadata'] as Map<String, dynamic>?)?['license'] ?? _selected!['license'] ?? 'unknown')}'),
                       Text('Downloads/Likes: ${_selected!['downloads'] ?? ((_selected!['metadata'] as Map<String, dynamic>?)?['downloads'] ?? 'unknown')} / ${_selected!['likes'] ?? ((_selected!['metadata'] as Map<String, dynamic>?)?['likes'] ?? 'unknown')}'),
                       Text('Updated: ${_selected!['last_modified'] ?? ((_selected!['metadata'] as Map<String, dynamic>?)?['last_modified'] ?? 'unknown')}'),
+                      Text('Cached files: ${_selected!['cached_files_count'] ?? ((_selected!['metadata'] as Map<String, dynamic>?)?['cached_files_count'] ?? 'Unavailable')}'),
+                      Text('Last seen in cache: ${_selected!['last_seen'] ?? ((_selected!['metadata'] as Map<String, dynamic>?)?['last_seen'] ?? 'Unavailable')}'),
                       const SizedBox(height: 12),
                       Wrap(spacing: 8, children: [
                         FilledButton.tonalIcon(
