@@ -1,0 +1,1356 @@
+{
+  "run_id": "e7a8b228-32e3-4dc5-a616-fa8f50c95216",
+  "conversation_id": "e9a42226-952a-4659-acb7-29280169ce5c",
+  "agent_name": "assistant",
+  "model_provider": "ollama",
+  "model_id": "gemma3:latest",
+  "start_timestamp": "2026-02-24T22:45:53.767961+00:00",
+  "end_timestamp": "2026-02-24T22:49:42.065982+00:00",
+  "duration_ms": 228298,
+  "success": true,
+  "error": null,
+  "events": [
+    {
+      "event_type": "llm_start",
+      "name": "ChatOllama",
+      "inputs": {
+        "prompts": [
+          "System: You are a practical AI assistant.\nHuman: Hey I want to organize my wedding for 20th of June in Paris. and we want option to fly from Madrid to the wedding. can you plan it for us"
+        ]
+      },
+      "outputs": null,
+      "token_usage": null,
+      "duration_ms": null,
+      "timestamp": "2026-02-24T22:45:54.863905+00:00"
+    },
+    {
+      "event_type": "llm_stream",
+      "name": "llm",
+      "inputs": null,
+      "outputs": {
+        "chunk_count": 10,
+        "partial": "Okay, let’s get this Paris wedding planned"
+      },
+      "token_usage": null,
+      "duration_ms": null,
+      "timestamp": "2026-02-24T22:46:06.775663+00:00"
+    },
+    {
+      "event_type": "llm_stream",
+      "name": "llm",
+      "inputs": null,
+      "outputs": {
+        "chunk_count": 20,
+        "partial": "Okay, let’s get this Paris wedding planned! June 20th is a fantastic date"
+      },
+      "token_usage": null,
+      "duration_ms": null,
+      "timestamp": "2026-02-24T22:46:08.858403+00:00"
+    },
+    {
+      "event_type": "llm_stream",
+      "name": "llm",
+      "inputs": null,
+      "outputs": {
+        "chunk_count": 30,
+        "partial": "Okay, let’s get this Paris wedding planned! June 20th is a fantastic date. Flying from Madrid is definitely doable. Here’"
+      },
+      "token_usage": null,
+      "duration_ms": null,
+      "timestamp": "2026-02-24T22:46:10.885564+00:00"
+    },
+    {
+      "event_type": "llm_stream",
+      "name": "llm",
+      "inputs": null,
+      "outputs": {
+        "chunk_count": 40,
+        "partial": "Okay, let’s get this Paris wedding planned! June 20th is a fantastic date. Flying from Madrid is definitely doable. Here’s a breakdown of a plan, focusing on practicality"
+      },
+      "token_usage": null,
+      "duration_ms": null,
+      "timestamp": "2026-02-24T22:46:12.976066+00:00"
+    },
+    {
+      "event_type": "llm_stream",
+      "name": "llm",
+      "inputs": null,
+      "outputs": {
+        "chunk_count": 50,
+        "partial": "Okay, let’s get this Paris wedding planned! June 20th is a fantastic date. Flying from Madrid is definitely doable. Here’s a breakdown of a plan, focusing on practicality and getting us started.  I'll break"
+      },
+      "token_usage": null,
+      "duration_ms": null,
+      "timestamp": "2026-02-24T22:46:14.753398+00:00"
+    },
+    {
+      "event_type": "llm_stream",
+      "name": "llm",
+      "inputs": null,
+      "outputs": {
+        "chunk_count": 60,
+        "partial": "Okay, let’s get this Paris wedding planned! June 20th is a fantastic date. Flying from Madrid is definitely doable. Here’s a breakdown of a plan, focusing on practicality and getting us started.  I'll break this down into key areas and give you some initial"
+      },
+      "token_usage": null,
+      "duration_ms": null,
+      "timestamp": "2026-02-24T22:46:16.411486+00:00"
+    },
+    {
+      "event_type": "llm_stream",
+      "name": "llm",
+      "inputs": null,
+      "outputs": {
+        "chunk_count": 70,
+        "partial": "Okay, let’s get this Paris wedding planned! June 20th is a fantastic date. Flying from Madrid is definitely doable. Here’s a breakdown of a plan, focusing on practicality and getting us started.  I'll break this down into key areas and give you some initial options and considerations.  This is a starting point"
+      },
+      "token_usage": null,
+      "duration_ms": null,
+      "timestamp": "2026-02-24T22:46:18.190808+00:00"
+    },
+    {
+      "event_type": "llm_stream",
+      "name": "llm",
+      "inputs": null,
+      "outputs": {
+        "chunk_count": 80,
+        "partial": "Okay, let’s get this Paris wedding planned! June 20th is a fantastic date. Flying from Madrid is definitely doable. Here’s a breakdown of a plan, focusing on practicality and getting us started.  I'll break this down into key areas and give you some initial options and considerations.  This is a starting point – we’ll need to refine it based on"
+      },
+      "token_usage": null,
+      "duration_ms": null,
+      "timestamp": "2026-02-24T22:46:19.947441+00:00"
+    },
+    {
+      "event_type": "llm_stream",
+      "name": "llm",
+      "inputs": null,
+      "outputs": {
+        "chunk_count": 90,
+        "partial": "Okay, let’s get this Paris wedding planned! June 20th is a fantastic date. Flying from Madrid is definitely doable. Here’s a breakdown of a plan, focusing on practicality and getting us started.  I'll break this down into key areas and give you some initial options and considerations.  This is a starting point – we’ll need to refine it based on your budget and preferences.\n\n**1. Budget"
+      },
+      "token_usage": null,
+      "duration_ms": null,
+      "timestamp": "2026-02-24T22:46:21.919818+00:00"
+    },
+    {
+      "event_type": "llm_stream",
+      "name": "llm",
+      "inputs": null,
+      "outputs": {
+        "chunk_count": 100,
+        "partial": "Okay, let’s get this Paris wedding planned! June 20th is a fantastic date. Flying from Madrid is definitely doable. Here’s a breakdown of a plan, focusing on practicality and getting us started.  I'll break this down into key areas and give you some initial options and considerations.  This is a starting point – we’ll need to refine it based on your budget and preferences.\n\n**1. Budget - Let’s Talk Numbers (Rough Estimates)**"
+      },
+      "token_usage": null,
+      "duration_ms": null,
+      "timestamp": "2026-02-24T22:46:24.338157+00:00"
+    },
+    {
+      "event_type": "llm_stream",
+      "name": "llm",
+      "inputs": null,
+      "outputs": {
+        "chunk_count": 110,
+        "partial": "Okay, let’s get this Paris wedding planned! June 20th is a fantastic date. Flying from Madrid is definitely doable. Here’s a breakdown of a plan, focusing on practicality and getting us started.  I'll break this down into key areas and give you some initial options and considerations.  This is a starting point – we’ll need to refine it based on your budget and preferences.\n\n**1. Budget - Let’s Talk Numbers (Rough Estimates)**\n\nBefore we dive into specifics, we need a"
+      },
+      "token_usage": null,
+      "duration_ms": null,
+      "timestamp": "2026-02-24T22:46:26.753792+00:00"
+    },
+    {
+      "event_type": "llm_stream",
+      "name": "llm",
+      "inputs": null,
+      "outputs": {
+        "chunk_count": 120,
+        "partial": " Paris wedding planned! June 20th is a fantastic date. Flying from Madrid is definitely doable. Here’s a breakdown of a plan, focusing on practicality and getting us started.  I'll break this down into key areas and give you some initial options and considerations.  This is a starting point – we’ll need to refine it based on your budget and preferences.\n\n**1. Budget - Let’s Talk Numbers (Rough Estimates)**\n\nBefore we dive into specifics, we need a ballpark budget.  Paris weddings can range *sign"
+      },
+      "token_usage": null,
+      "duration_ms": null,
+      "timestamp": "2026-02-24T22:46:28.243235+00:00"
+    },
+    {
+      "event_type": "llm_stream",
+      "name": "llm",
+      "inputs": null,
+      "outputs": {
+        "chunk_count": 130,
+        "partial": "tastic date. Flying from Madrid is definitely doable. Here’s a breakdown of a plan, focusing on practicality and getting us started.  I'll break this down into key areas and give you some initial options and considerations.  This is a starting point – we’ll need to refine it based on your budget and preferences.\n\n**1. Budget - Let’s Talk Numbers (Rough Estimates)**\n\nBefore we dive into specifics, we need a ballpark budget.  Paris weddings can range *significantly*.  Let’s assume these ranges for"
+      },
+      "token_usage": null,
+      "duration_ms": null,
+      "timestamp": "2026-02-24T22:46:30.045675+00:00"
+    },
+    {
+      "event_type": "llm_stream",
+      "name": "llm",
+      "inputs": null,
+      "outputs": {
+        "chunk_count": 140,
+        "partial": "efinitely doable. Here’s a breakdown of a plan, focusing on practicality and getting us started.  I'll break this down into key areas and give you some initial options and considerations.  This is a starting point – we’ll need to refine it based on your budget and preferences.\n\n**1. Budget - Let’s Talk Numbers (Rough Estimates)**\n\nBefore we dive into specifics, we need a ballpark budget.  Paris weddings can range *significantly*.  Let’s assume these ranges for planning purposes:\n\n* **Basic (DIY,"
+      },
+      "token_usage": null,
+      "duration_ms": null,
+      "timestamp": "2026-02-24T22:46:31.867907+00:00"
+    },
+    {
+      "event_type": "llm_stream",
+      "name": "llm",
+      "inputs": null,
+      "outputs": {
+        "chunk_count": 150,
+        "partial": "eakdown of a plan, focusing on practicality and getting us started.  I'll break this down into key areas and give you some initial options and considerations.  This is a starting point – we’ll need to refine it based on your budget and preferences.\n\n**1. Budget - Let’s Talk Numbers (Rough Estimates)**\n\nBefore we dive into specifics, we need a ballpark budget.  Paris weddings can range *significantly*.  Let’s assume these ranges for planning purposes:\n\n* **Basic (DIY, smaller guest list):** €8,00"
+      },
+      "token_usage": null,
+      "duration_ms": null,
+      "timestamp": "2026-02-24T22:46:33.912490+00:00"
+    },
+    {
+      "event_type": "llm_stream",
+      "name": "llm",
+      "inputs": null,
+      "outputs": {
+        "chunk_count": 160,
+        "partial": " plan, focusing on practicality and getting us started.  I'll break this down into key areas and give you some initial options and considerations.  This is a starting point – we’ll need to refine it based on your budget and preferences.\n\n**1. Budget - Let’s Talk Numbers (Rough Estimates)**\n\nBefore we dive into specifics, we need a ballpark budget.  Paris weddings can range *significantly*.  Let’s assume these ranges for planning purposes:\n\n* **Basic (DIY, smaller guest list):** €8,000 - €15,000\n"
+      },
+      "token_usage": null,
+      "duration_ms": null,
+      "timestamp": "2026-02-24T22:46:35.729124+00:00"
+    },
+    {
+      "event_type": "llm_stream",
+      "name": "llm",
+      "inputs": null,
+      "outputs": {
+        "chunk_count": 170,
+        "partial": "tting us started.  I'll break this down into key areas and give you some initial options and considerations.  This is a starting point – we’ll need to refine it based on your budget and preferences.\n\n**1. Budget - Let’s Talk Numbers (Rough Estimates)**\n\nBefore we dive into specifics, we need a ballpark budget.  Paris weddings can range *significantly*.  Let’s assume these ranges for planning purposes:\n\n* **Basic (DIY, smaller guest list):** €8,000 - €15,000\n* **Mid-Range (Some professional help,"
+      },
+      "token_usage": null,
+      "duration_ms": null,
+      "timestamp": "2026-02-24T22:46:37.478157+00:00"
+    },
+    {
+      "event_type": "llm_stream",
+      "name": "llm",
+      "inputs": null,
+      "outputs": {
+        "chunk_count": 180,
+        "partial": "this down into key areas and give you some initial options and considerations.  This is a starting point – we’ll need to refine it based on your budget and preferences.\n\n**1. Budget - Let’s Talk Numbers (Rough Estimates)**\n\nBefore we dive into specifics, we need a ballpark budget.  Paris weddings can range *significantly*.  Let’s assume these ranges for planning purposes:\n\n* **Basic (DIY, smaller guest list):** €8,000 - €15,000\n* **Mid-Range (Some professional help, moderate guest list):** €15,0"
+      },
+      "token_usage": null,
+      "duration_ms": null,
+      "timestamp": "2026-02-24T22:46:39.319316+00:00"
+    },
+    {
+      "event_type": "llm_stream",
+      "name": "llm",
+      "inputs": null,
+      "outputs": {
+        "chunk_count": 190,
+        "partial": "to key areas and give you some initial options and considerations.  This is a starting point – we’ll need to refine it based on your budget and preferences.\n\n**1. Budget - Let’s Talk Numbers (Rough Estimates)**\n\nBefore we dive into specifics, we need a ballpark budget.  Paris weddings can range *significantly*.  Let’s assume these ranges for planning purposes:\n\n* **Basic (DIY, smaller guest list):** €8,000 - €15,000\n* **Mid-Range (Some professional help, moderate guest list):** €15,000 - €30,000"
+      },
+      "token_usage": null,
+      "duration_ms": null,
+      "timestamp": "2026-02-24T22:46:41.226627+00:00"
+    },
+    {
+      "event_type": "llm_stream",
+      "name": "llm",
+      "inputs": null,
+      "outputs": {
+        "chunk_count": 200,
+        "partial": "tial options and considerations.  This is a starting point – we’ll need to refine it based on your budget and preferences.\n\n**1. Budget - Let’s Talk Numbers (Rough Estimates)**\n\nBefore we dive into specifics, we need a ballpark budget.  Paris weddings can range *significantly*.  Let’s assume these ranges for planning purposes:\n\n* **Basic (DIY, smaller guest list):** €8,000 - €15,000\n* **Mid-Range (Some professional help, moderate guest list):** €15,000 - €30,000\n* **Luxury (Full-service planner,"
+      },
+      "token_usage": null,
+      "duration_ms": null,
+      "timestamp": "2026-02-24T22:46:43.141437+00:00"
+    },
+    {
+      "event_type": "llm_stream",
+      "name": "llm",
+      "inputs": null,
+      "outputs": {
+        "chunk_count": 210,
+        "partial": "ons.  This is a starting point – we’ll need to refine it based on your budget and preferences.\n\n**1. Budget - Let’s Talk Numbers (Rough Estimates)**\n\nBefore we dive into specifics, we need a ballpark budget.  Paris weddings can range *significantly*.  Let’s assume these ranges for planning purposes:\n\n* **Basic (DIY, smaller guest list):** €8,000 - €15,000\n* **Mid-Range (Some professional help, moderate guest list):** €15,000 - €30,000\n* **Luxury (Full-service planner, larger guest list):** €30,0"
+      },
+      "token_usage": null,
+      "duration_ms": null,
+      "timestamp": "2026-02-24T22:46:45.122469+00:00"
+    },
+    {
+      "event_type": "llm_stream",
+      "name": "llm",
+      "inputs": null,
+      "outputs": {
+        "chunk_count": 220,
+        "partial": " point – we’ll need to refine it based on your budget and preferences.\n\n**1. Budget - Let’s Talk Numbers (Rough Estimates)**\n\nBefore we dive into specifics, we need a ballpark budget.  Paris weddings can range *significantly*.  Let’s assume these ranges for planning purposes:\n\n* **Basic (DIY, smaller guest list):** €8,000 - €15,000\n* **Mid-Range (Some professional help, moderate guest list):** €15,000 - €30,000\n* **Luxury (Full-service planner, larger guest list):** €30,000+\n\n**Can you give me a"
+      },
+      "token_usage": null,
+      "duration_ms": null,
+      "timestamp": "2026-02-24T22:46:47.077476+00:00"
+    },
+    {
+      "event_type": "llm_stream",
+      "name": "llm",
+      "inputs": null,
+      "outputs": {
+        "chunk_count": 230,
+        "partial": " on your budget and preferences.\n\n**1. Budget - Let’s Talk Numbers (Rough Estimates)**\n\nBefore we dive into specifics, we need a ballpark budget.  Paris weddings can range *significantly*.  Let’s assume these ranges for planning purposes:\n\n* **Basic (DIY, smaller guest list):** €8,000 - €15,000\n* **Mid-Range (Some professional help, moderate guest list):** €15,000 - €30,000\n* **Luxury (Full-service planner, larger guest list):** €30,000+\n\n**Can you give me a rough idea of your budget range?** (e"
+      },
+      "token_usage": null,
+      "duration_ms": null,
+      "timestamp": "2026-02-24T22:46:49.031615+00:00"
+    },
+    {
+      "event_type": "llm_stream",
+      "name": "llm",
+      "inputs": null,
+      "outputs": {
+        "chunk_count": 240,
+        "partial": "es.\n\n**1. Budget - Let’s Talk Numbers (Rough Estimates)**\n\nBefore we dive into specifics, we need a ballpark budget.  Paris weddings can range *significantly*.  Let’s assume these ranges for planning purposes:\n\n* **Basic (DIY, smaller guest list):** €8,000 - €15,000\n* **Mid-Range (Some professional help, moderate guest list):** €15,000 - €30,000\n* **Luxury (Full-service planner, larger guest list):** €30,000+\n\n**Can you give me a rough idea of your budget range?** (e.g., \"We're aiming for around"
+      },
+      "token_usage": null,
+      "duration_ms": null,
+      "timestamp": "2026-02-24T22:46:51.113744+00:00"
+    },
+    {
+      "event_type": "llm_stream",
+      "name": "llm",
+      "inputs": null,
+      "outputs": {
+        "chunk_count": 250,
+        "partial": "t - Let’s Talk Numbers (Rough Estimates)**\n\nBefore we dive into specifics, we need a ballpark budget.  Paris weddings can range *significantly*.  Let’s assume these ranges for planning purposes:\n\n* **Basic (DIY, smaller guest list):** €8,000 - €15,000\n* **Mid-Range (Some professional help, moderate guest list):** €15,000 - €30,000\n* **Luxury (Full-service planner, larger guest list):** €30,000+\n\n**Can you give me a rough idea of your budget range?** (e.g., \"We're aiming for around €18,000,\" or \""
+      },
+      "token_usage": null,
+      "duration_ms": null,
+      "timestamp": "2026-02-24T22:46:53.071230+00:00"
+    },
+    {
+      "event_type": "llm_stream",
+      "name": "llm",
+      "inputs": null,
+      "outputs": {
+        "chunk_count": 260,
+        "partial": "tes)**\n\nBefore we dive into specifics, we need a ballpark budget.  Paris weddings can range *significantly*.  Let’s assume these ranges for planning purposes:\n\n* **Basic (DIY, smaller guest list):** €8,000 - €15,000\n* **Mid-Range (Some professional help, moderate guest list):** €15,000 - €30,000\n* **Luxury (Full-service planner, larger guest list):** €30,000+\n\n**Can you give me a rough idea of your budget range?** (e.g., \"We're aiming for around €18,000,\" or \"We're flexible, but ideally under €2"
+      },
+      "token_usage": null,
+      "duration_ms": null,
+      "timestamp": "2026-02-24T22:46:55.079962+00:00"
+    },
+    {
+      "event_type": "llm_stream",
+      "name": "llm",
+      "inputs": null,
+      "outputs": {
+        "chunk_count": 270,
+        "partial": "e we dive into specifics, we need a ballpark budget.  Paris weddings can range *significantly*.  Let’s assume these ranges for planning purposes:\n\n* **Basic (DIY, smaller guest list):** €8,000 - €15,000\n* **Mid-Range (Some professional help, moderate guest list):** €15,000 - €30,000\n* **Luxury (Full-service planner, larger guest list):** €30,000+\n\n**Can you give me a rough idea of your budget range?** (e.g., \"We're aiming for around €18,000,\" or \"We're flexible, but ideally under €25,000\")\n\n**2."
+      },
+      "token_usage": null,
+      "duration_ms": null,
+      "timestamp": "2026-02-24T22:46:56.961662+00:00"
+    },
+    {
+      "event_type": "llm_stream",
+      "name": "llm",
+      "inputs": null,
+      "outputs": {
+        "chunk_count": 280,
+        "partial": " ballpark budget.  Paris weddings can range *significantly*.  Let’s assume these ranges for planning purposes:\n\n* **Basic (DIY, smaller guest list):** €8,000 - €15,000\n* **Mid-Range (Some professional help, moderate guest list):** €15,000 - €30,000\n* **Luxury (Full-service planner, larger guest list):** €30,000+\n\n**Can you give me a rough idea of your budget range?** (e.g., \"We're aiming for around €18,000,\" or \"We're flexible, but ideally under €25,000\")\n\n**2. Flights (Madrid to Paris - June 20"
+      },
+      "token_usage": null,
+      "duration_ms": null,
+      "timestamp": "2026-02-24T22:46:58.943922+00:00"
+    },
+    {
+      "event_type": "llm_stream",
+      "name": "llm",
+      "inputs": null,
+      "outputs": {
+        "chunk_count": 290,
+        "partial": "ddings can range *significantly*.  Let’s assume these ranges for planning purposes:\n\n* **Basic (DIY, smaller guest list):** €8,000 - €15,000\n* **Mid-Range (Some professional help, moderate guest list):** €15,000 - €30,000\n* **Luxury (Full-service planner, larger guest list):** €30,000+\n\n**Can you give me a rough idea of your budget range?** (e.g., \"We're aiming for around €18,000,\" or \"We're flexible, but ideally under €25,000\")\n\n**2. Flights (Madrid to Paris - June 20th)**\n\n* **Airlines:** Iber"
+      },
+      "token_usage": null,
+      "duration_ms": null,
+      "timestamp": "2026-02-24T22:47:00.817169+00:00"
+    },
+    {
+      "event_type": "llm_stream",
+      "name": "llm",
+      "inputs": null,
+      "outputs": {
+        "chunk_count": 300,
+        "partial": "et’s assume these ranges for planning purposes:\n\n* **Basic (DIY, smaller guest list):** €8,000 - €15,000\n* **Mid-Range (Some professional help, moderate guest list):** €15,000 - €30,000\n* **Luxury (Full-service planner, larger guest list):** €30,000+\n\n**Can you give me a rough idea of your budget range?** (e.g., \"We're aiming for around €18,000,\" or \"We're flexible, but ideally under €25,000\")\n\n**2. Flights (Madrid to Paris - June 20th)**\n\n* **Airlines:** Iberia, Air France, Vueling are the most"
+      },
+      "token_usage": null,
+      "duration_ms": null,
+      "timestamp": "2026-02-24T22:47:02.744076+00:00"
+    },
+    {
+      "event_type": "llm_stream",
+      "name": "llm",
+      "inputs": null,
+      "outputs": {
+        "chunk_count": 310,
+        "partial": "urposes:\n\n* **Basic (DIY, smaller guest list):** €8,000 - €15,000\n* **Mid-Range (Some professional help, moderate guest list):** €15,000 - €30,000\n* **Luxury (Full-service planner, larger guest list):** €30,000+\n\n**Can you give me a rough idea of your budget range?** (e.g., \"We're aiming for around €18,000,\" or \"We're flexible, but ideally under €25,000\")\n\n**2. Flights (Madrid to Paris - June 20th)**\n\n* **Airlines:** Iberia, Air France, Vueling are the most common.\n* **Estimated Cost (Round Trip"
+      },
+      "token_usage": null,
+      "duration_ms": null,
+      "timestamp": "2026-02-24T22:47:04.585425+00:00"
+    },
+    {
+      "event_type": "llm_stream",
+      "name": "llm",
+      "inputs": null,
+      "outputs": {
+        "chunk_count": 320,
+        "partial": " smaller guest list):** €8,000 - €15,000\n* **Mid-Range (Some professional help, moderate guest list):** €15,000 - €30,000\n* **Luxury (Full-service planner, larger guest list):** €30,000+\n\n**Can you give me a rough idea of your budget range?** (e.g., \"We're aiming for around €18,000,\" or \"We're flexible, but ideally under €25,000\")\n\n**2. Flights (Madrid to Paris - June 20th)**\n\n* **Airlines:** Iberia, Air France, Vueling are the most common.\n* **Estimated Cost (Round Trip - Per Person):** €80 - €"
+      },
+      "token_usage": null,
+      "duration_ms": null,
+      "timestamp": "2026-02-24T22:47:06.538548+00:00"
+    },
+    {
+      "event_type": "llm_stream",
+      "name": "llm",
+      "inputs": null,
+      "outputs": {
+        "chunk_count": 330,
+        "partial": "0 - €15,000\n* **Mid-Range (Some professional help, moderate guest list):** €15,000 - €30,000\n* **Luxury (Full-service planner, larger guest list):** €30,000+\n\n**Can you give me a rough idea of your budget range?** (e.g., \"We're aiming for around €18,000,\" or \"We're flexible, but ideally under €25,000\")\n\n**2. Flights (Madrid to Paris - June 20th)**\n\n* **Airlines:** Iberia, Air France, Vueling are the most common.\n* **Estimated Cost (Round Trip - Per Person):** €80 - €250 (This fluctuates *wildly*"
+      },
+      "token_usage": null,
+      "duration_ms": null,
+      "timestamp": "2026-02-24T22:47:08.628905+00:00"
+    },
+    {
+      "event_type": "llm_stream",
+      "name": "llm",
+      "inputs": null,
+      "outputs": {
+        "chunk_count": 340,
+        "partial": "p, moderate guest list):** €15,000 - €30,000\n* **Luxury (Full-service planner, larger guest list):** €30,000+\n\n**Can you give me a rough idea of your budget range?** (e.g., \"We're aiming for around €18,000,\" or \"We're flexible, but ideally under €25,000\")\n\n**2. Flights (Madrid to Paris - June 20th)**\n\n* **Airlines:** Iberia, Air France, Vueling are the most common.\n* **Estimated Cost (Round Trip - Per Person):** €80 - €250 (This fluctuates *wildly* depending on booking time and demand. Booking 3"
+      },
+      "token_usage": null,
+      "duration_ms": null,
+      "timestamp": "2026-02-24T22:47:10.777686+00:00"
+    },
+    {
+      "event_type": "llm_stream",
+      "name": "llm",
+      "inputs": null,
+      "outputs": {
+        "chunk_count": 350,
+        "partial": "000\n* **Luxury (Full-service planner, larger guest list):** €30,000+\n\n**Can you give me a rough idea of your budget range?** (e.g., \"We're aiming for around €18,000,\" or \"We're flexible, but ideally under €25,000\")\n\n**2. Flights (Madrid to Paris - June 20th)**\n\n* **Airlines:** Iberia, Air France, Vueling are the most common.\n* **Estimated Cost (Round Trip - Per Person):** €80 - €250 (This fluctuates *wildly* depending on booking time and demand. Booking 3-6 months in advance is generally best).\n"
+      },
+      "token_usage": null,
+      "duration_ms": null,
+      "timestamp": "2026-02-24T22:47:12.891438+00:00"
+    },
+    {
+      "event_type": "llm_stream",
+      "name": "llm",
+      "inputs": null,
+      "outputs": {
+        "chunk_count": 360,
+        "partial": "t list):** €30,000+\n\n**Can you give me a rough idea of your budget range?** (e.g., \"We're aiming for around €18,000,\" or \"We're flexible, but ideally under €25,000\")\n\n**2. Flights (Madrid to Paris - June 20th)**\n\n* **Airlines:** Iberia, Air France, Vueling are the most common.\n* **Estimated Cost (Round Trip - Per Person):** €80 - €250 (This fluctuates *wildly* depending on booking time and demand. Booking 3-6 months in advance is generally best).\n* **Recommendation:** I can help you track flight"
+      },
+      "token_usage": null,
+      "duration_ms": null,
+      "timestamp": "2026-02-24T22:47:15.047236+00:00"
+    },
+    {
+      "event_type": "llm_stream",
+      "name": "llm",
+      "inputs": null,
+      "outputs": {
+        "chunk_count": 370,
+        "partial": "gh idea of your budget range?** (e.g., \"We're aiming for around €18,000,\" or \"We're flexible, but ideally under €25,000\")\n\n**2. Flights (Madrid to Paris - June 20th)**\n\n* **Airlines:** Iberia, Air France, Vueling are the most common.\n* **Estimated Cost (Round Trip - Per Person):** €80 - €250 (This fluctuates *wildly* depending on booking time and demand. Booking 3-6 months in advance is generally best).\n* **Recommendation:** I can help you track flight prices once we have a more concrete date.  "
+      },
+      "token_usage": null,
+      "duration_ms": null,
+      "timestamp": "2026-02-24T22:47:17.246833+00:00"
+    },
+    {
+      "event_type": "llm_stream",
+      "name": "llm",
+      "inputs": null,
+      "outputs": {
+        "chunk_count": 380,
+        "partial": " around €18,000,\" or \"We're flexible, but ideally under €25,000\")\n\n**2. Flights (Madrid to Paris - June 20th)**\n\n* **Airlines:** Iberia, Air France, Vueling are the most common.\n* **Estimated Cost (Round Trip - Per Person):** €80 - €250 (This fluctuates *wildly* depending on booking time and demand. Booking 3-6 months in advance is generally best).\n* **Recommendation:** I can help you track flight prices once we have a more concrete date.  I can use Google Flights or Skyscanner to monitor prices"
+      },
+      "token_usage": null,
+      "duration_ms": null,
+      "timestamp": "2026-02-24T22:47:19.213105+00:00"
+    },
+    {
+      "event_type": "llm_stream",
+      "name": "llm",
+      "inputs": null,
+      "outputs": {
+        "chunk_count": 390,
+        "partial": "exible, but ideally under €25,000\")\n\n**2. Flights (Madrid to Paris - June 20th)**\n\n* **Airlines:** Iberia, Air France, Vueling are the most common.\n* **Estimated Cost (Round Trip - Per Person):** €80 - €250 (This fluctuates *wildly* depending on booking time and demand. Booking 3-6 months in advance is generally best).\n* **Recommendation:** I can help you track flight prices once we have a more concrete date.  I can use Google Flights or Skyscanner to monitor prices and alert you to deals.\n\n**3."
+      },
+      "token_usage": null,
+      "duration_ms": null,
+      "timestamp": "2026-02-24T22:47:21.238667+00:00"
+    },
+    {
+      "event_type": "llm_stream",
+      "name": "llm",
+      "inputs": null,
+      "outputs": {
+        "chunk_count": 400,
+        "partial": "ights (Madrid to Paris - June 20th)**\n\n* **Airlines:** Iberia, Air France, Vueling are the most common.\n* **Estimated Cost (Round Trip - Per Person):** €80 - €250 (This fluctuates *wildly* depending on booking time and demand. Booking 3-6 months in advance is generally best).\n* **Recommendation:** I can help you track flight prices once we have a more concrete date.  I can use Google Flights or Skyscanner to monitor prices and alert you to deals.\n\n**3. Venue Options in Paris (Considering June 20"
+      },
+      "token_usage": null,
+      "duration_ms": null,
+      "timestamp": "2026-02-24T22:47:23.193738+00:00"
+    },
+    {
+      "event_type": "llm_stream",
+      "name": "llm",
+      "inputs": null,
+      "outputs": {
+        "chunk_count": 410,
+        "partial": "ines:** Iberia, Air France, Vueling are the most common.\n* **Estimated Cost (Round Trip - Per Person):** €80 - €250 (This fluctuates *wildly* depending on booking time and demand. Booking 3-6 months in advance is generally best).\n* **Recommendation:** I can help you track flight prices once we have a more concrete date.  I can use Google Flights or Skyscanner to monitor prices and alert you to deals.\n\n**3. Venue Options in Paris (Considering June 20th)**\n\nParis offers incredible venues! Here are"
+      },
+      "token_usage": null,
+      "duration_ms": null,
+      "timestamp": "2026-02-24T22:47:25.135640+00:00"
+    },
+    {
+      "event_type": "llm_stream",
+      "name": "llm",
+      "inputs": null,
+      "outputs": {
+        "chunk_count": 420,
+        "partial": "mon.\n* **Estimated Cost (Round Trip - Per Person):** €80 - €250 (This fluctuates *wildly* depending on booking time and demand. Booking 3-6 months in advance is generally best).\n* **Recommendation:** I can help you track flight prices once we have a more concrete date.  I can use Google Flights or Skyscanner to monitor prices and alert you to deals.\n\n**3. Venue Options in Paris (Considering June 20th)**\n\nParis offers incredible venues! Here are a few categories with estimated costs (again, these"
+      },
+      "token_usage": null,
+      "duration_ms": null,
+      "timestamp": "2026-02-24T22:47:27.020544+00:00"
+    },
+    {
+      "event_type": "llm_stream",
+      "name": "llm",
+      "inputs": null,
+      "outputs": {
+        "chunk_count": 430,
+        "partial": "und Trip - Per Person):** €80 - €250 (This fluctuates *wildly* depending on booking time and demand. Booking 3-6 months in advance is generally best).\n* **Recommendation:** I can help you track flight prices once we have a more concrete date.  I can use Google Flights or Skyscanner to monitor prices and alert you to deals.\n\n**3. Venue Options in Paris (Considering June 20th)**\n\nParis offers incredible venues! Here are a few categories with estimated costs (again, these are *very* broad):\n\n* **Ch"
+      },
+      "token_usage": null,
+      "duration_ms": null,
+      "timestamp": "2026-02-24T22:47:29.003934+00:00"
+    },
+    {
+      "event_type": "llm_stream",
+      "name": "llm",
+      "inputs": null,
+      "outputs": {
+        "chunk_count": 440,
+        "partial": "0 (This fluctuates *wildly* depending on booking time and demand. Booking 3-6 months in advance is generally best).\n* **Recommendation:** I can help you track flight prices once we have a more concrete date.  I can use Google Flights or Skyscanner to monitor prices and alert you to deals.\n\n**3. Venue Options in Paris (Considering June 20th)**\n\nParis offers incredible venues! Here are a few categories with estimated costs (again, these are *very* broad):\n\n* **Chateaux (Castles Outside Paris):** €"
+      },
+      "token_usage": null,
+      "duration_ms": null,
+      "timestamp": "2026-02-24T22:47:30.881506+00:00"
+    },
+    {
+      "event_type": "llm_stream",
+      "name": "llm",
+      "inputs": null,
+      "outputs": {
+        "chunk_count": 450,
+        "partial": "tuates *wildly* depending on booking time and demand. Booking 3-6 months in advance is generally best).\n* **Recommendation:** I can help you track flight prices once we have a more concrete date.  I can use Google Flights or Skyscanner to monitor prices and alert you to deals.\n\n**3. Venue Options in Paris (Considering June 20th)**\n\nParis offers incredible venues! Here are a few categories with estimated costs (again, these are *very* broad):\n\n* **Chateaux (Castles Outside Paris):** €5,000 - €20,"
+      },
+      "token_usage": null,
+      "duration_ms": null,
+      "timestamp": "2026-02-24T22:47:32.781284+00:00"
+    },
+    {
+      "event_type": "llm_stream",
+      "name": "llm",
+      "inputs": null,
+      "outputs": {
+        "chunk_count": 460,
+        "partial": "d demand. Booking 3-6 months in advance is generally best).\n* **Recommendation:** I can help you track flight prices once we have a more concrete date.  I can use Google Flights or Skyscanner to monitor prices and alert you to deals.\n\n**3. Venue Options in Paris (Considering June 20th)**\n\nParis offers incredible venues! Here are a few categories with estimated costs (again, these are *very* broad):\n\n* **Chateaux (Castles Outside Paris):** €5,000 - €20,000+ (Often include accommodation for guests"
+      },
+      "token_usage": null,
+      "duration_ms": null,
+      "timestamp": "2026-02-24T22:47:34.698452+00:00"
+    },
+    {
+      "event_type": "llm_stream",
+      "name": "llm",
+      "inputs": null,
+      "outputs": {
+        "chunk_count": 470,
+        "partial": "generally best).\n* **Recommendation:** I can help you track flight prices once we have a more concrete date.  I can use Google Flights or Skyscanner to monitor prices and alert you to deals.\n\n**3. Venue Options in Paris (Considering June 20th)**\n\nParis offers incredible venues! Here are a few categories with estimated costs (again, these are *very* broad):\n\n* **Chateaux (Castles Outside Paris):** €5,000 - €20,000+ (Often include accommodation for guests) – Great for a more rustic, fairytale feel"
+      },
+      "token_usage": null,
+      "duration_ms": null,
+      "timestamp": "2026-02-24T22:47:36.696408+00:00"
+    },
+    {
+      "event_type": "llm_stream",
+      "name": "llm",
+      "inputs": null,
+      "outputs": {
+        "chunk_count": 480,
+        "partial": "ndation:** I can help you track flight prices once we have a more concrete date.  I can use Google Flights or Skyscanner to monitor prices and alert you to deals.\n\n**3. Venue Options in Paris (Considering June 20th)**\n\nParis offers incredible venues! Here are a few categories with estimated costs (again, these are *very* broad):\n\n* **Chateaux (Castles Outside Paris):** €5,000 - €20,000+ (Often include accommodation for guests) – Great for a more rustic, fairytale feel.\n* **Historic Hotels:** €3,"
+      },
+      "token_usage": null,
+      "duration_ms": null,
+      "timestamp": "2026-02-24T22:47:38.562342+00:00"
+    },
+    {
+      "event_type": "llm_stream",
+      "name": "llm",
+      "inputs": null,
+      "outputs": {
+        "chunk_count": 490,
+        "partial": " can help you track flight prices once we have a more concrete date.  I can use Google Flights or Skyscanner to monitor prices and alert you to deals.\n\n**3. Venue Options in Paris (Considering June 20th)**\n\nParis offers incredible venues! Here are a few categories with estimated costs (again, these are *very* broad):\n\n* **Chateaux (Castles Outside Paris):** €5,000 - €20,000+ (Often include accommodation for guests) – Great for a more rustic, fairytale feel.\n* **Historic Hotels:** €3,000 - €10,00"
+      },
+      "token_usage": null,
+      "duration_ms": null,
+      "timestamp": "2026-02-24T22:47:40.526764+00:00"
+    },
+    {
+      "event_type": "llm_stream",
+      "name": "llm",
+      "inputs": null,
+      "outputs": {
+        "chunk_count": 500,
+        "partial": "ight prices once we have a more concrete date.  I can use Google Flights or Skyscanner to monitor prices and alert you to deals.\n\n**3. Venue Options in Paris (Considering June 20th)**\n\nParis offers incredible venues! Here are a few categories with estimated costs (again, these are *very* broad):\n\n* **Chateaux (Castles Outside Paris):** €5,000 - €20,000+ (Often include accommodation for guests) – Great for a more rustic, fairytale feel.\n* **Historic Hotels:** €3,000 - €10,000+ (e.g., Hotel Saint-"
+      },
+      "token_usage": null,
+      "duration_ms": null,
+      "timestamp": "2026-02-24T22:47:42.452073+00:00"
+    },
+    {
+      "event_type": "llm_stream",
+      "name": "llm",
+      "inputs": null,
+      "outputs": {
+        "chunk_count": 510,
+        "partial": "e.  I can use Google Flights or Skyscanner to monitor prices and alert you to deals.\n\n**3. Venue Options in Paris (Considering June 20th)**\n\nParis offers incredible venues! Here are a few categories with estimated costs (again, these are *very* broad):\n\n* **Chateaux (Castles Outside Paris):** €5,000 - €20,000+ (Often include accommodation for guests) – Great for a more rustic, fairytale feel.\n* **Historic Hotels:** €3,000 - €10,000+ (e.g., Hotel Saint-André des Arts, Le Bristol Paris – some have"
+      },
+      "token_usage": null,
+      "duration_ms": null,
+      "timestamp": "2026-02-24T22:47:44.365707+00:00"
+    },
+    {
+      "event_type": "llm_stream",
+      "name": "llm",
+      "inputs": null,
+      "outputs": {
+        "chunk_count": 520,
+        "partial": "scanner to monitor prices and alert you to deals.\n\n**3. Venue Options in Paris (Considering June 20th)**\n\nParis offers incredible venues! Here are a few categories with estimated costs (again, these are *very* broad):\n\n* **Chateaux (Castles Outside Paris):** €5,000 - €20,000+ (Often include accommodation for guests) – Great for a more rustic, fairytale feel.\n* **Historic Hotels:** €3,000 - €10,000+ (e.g., Hotel Saint-André des Arts, Le Bristol Paris – some have stunning event spaces)\n* **Rooftop"
+      },
+      "token_usage": null,
+      "duration_ms": null,
+      "timestamp": "2026-02-24T22:47:46.260643+00:00"
+    },
+    {
+      "event_type": "llm_stream",
+      "name": "llm",
+      "inputs": null,
+      "outputs": {
+        "chunk_count": 530,
+        "partial": "nd alert you to deals.\n\n**3. Venue Options in Paris (Considering June 20th)**\n\nParis offers incredible venues! Here are a few categories with estimated costs (again, these are *very* broad):\n\n* **Chateaux (Castles Outside Paris):** €5,000 - €20,000+ (Often include accommodation for guests) – Great for a more rustic, fairytale feel.\n* **Historic Hotels:** €3,000 - €10,000+ (e.g., Hotel Saint-André des Arts, Le Bristol Paris – some have stunning event spaces)\n* **Rooftop Restaurants/Bars:** €2,000"
+      },
+      "token_usage": null,
+      "duration_ms": null,
+      "timestamp": "2026-02-24T22:47:48.440659+00:00"
+    },
+    {
+      "event_type": "llm_stream",
+      "name": "llm",
+      "inputs": null,
+      "outputs": {
+        "chunk_count": 540,
+        "partial": "s.\n\n**3. Venue Options in Paris (Considering June 20th)**\n\nParis offers incredible venues! Here are a few categories with estimated costs (again, these are *very* broad):\n\n* **Chateaux (Castles Outside Paris):** €5,000 - €20,000+ (Often include accommodation for guests) – Great for a more rustic, fairytale feel.\n* **Historic Hotels:** €3,000 - €10,000+ (e.g., Hotel Saint-André des Arts, Le Bristol Paris – some have stunning event spaces)\n* **Rooftop Restaurants/Bars:** €2,000 - €8,000 (Great for"
+      },
+      "token_usage": null,
+      "duration_ms": null,
+      "timestamp": "2026-02-24T22:47:50.435488+00:00"
+    },
+    {
+      "event_type": "llm_stream",
+      "name": "llm",
+      "inputs": null,
+      "outputs": {
+        "chunk_count": 550,
+        "partial": "Considering June 20th)**\n\nParis offers incredible venues! Here are a few categories with estimated costs (again, these are *very* broad):\n\n* **Chateaux (Castles Outside Paris):** €5,000 - €20,000+ (Often include accommodation for guests) – Great for a more rustic, fairytale feel.\n* **Historic Hotels:** €3,000 - €10,000+ (e.g., Hotel Saint-André des Arts, Le Bristol Paris – some have stunning event spaces)\n* **Rooftop Restaurants/Bars:** €2,000 - €8,000 (Great for a chic, modern vibe)\n* **Private"
+      },
+      "token_usage": null,
+      "duration_ms": null,
+      "timestamp": "2026-02-24T22:47:52.388289+00:00"
+    },
+    {
+      "event_type": "llm_stream",
+      "name": "llm",
+      "inputs": null,
+      "outputs": {
+        "chunk_count": 560,
+        "partial": "aris offers incredible venues! Here are a few categories with estimated costs (again, these are *very* broad):\n\n* **Chateaux (Castles Outside Paris):** €5,000 - €20,000+ (Often include accommodation for guests) – Great for a more rustic, fairytale feel.\n* **Historic Hotels:** €3,000 - €10,000+ (e.g., Hotel Saint-André des Arts, Le Bristol Paris – some have stunning event spaces)\n* **Rooftop Restaurants/Bars:** €2,000 - €8,000 (Great for a chic, modern vibe)\n* **Private Apartments/Maison:** €1,50"
+      },
+      "token_usage": null,
+      "duration_ms": null,
+      "timestamp": "2026-02-24T22:47:54.256368+00:00"
+    },
+    {
+      "event_type": "llm_stream",
+      "name": "llm",
+      "inputs": null,
+      "outputs": {
+        "chunk_count": 570,
+        "partial": "edible venues! Here are a few categories with estimated costs (again, these are *very* broad):\n\n* **Chateaux (Castles Outside Paris):** €5,000 - €20,000+ (Often include accommodation for guests) – Great for a more rustic, fairytale feel.\n* **Historic Hotels:** €3,000 - €10,000+ (e.g., Hotel Saint-André des Arts, Le Bristol Paris – some have stunning event spaces)\n* **Rooftop Restaurants/Bars:** €2,000 - €8,000 (Great for a chic, modern vibe)\n* **Private Apartments/Maison:** €1,500 - €7,000 (More"
+      },
+      "token_usage": null,
+      "duration_ms": null,
+      "timestamp": "2026-02-24T22:47:56.223004+00:00"
+    },
+    {
+      "event_type": "llm_stream",
+      "name": "llm",
+      "inputs": null,
+      "outputs": {
+        "chunk_count": 580,
+        "partial": "th estimated costs (again, these are *very* broad):\n\n* **Chateaux (Castles Outside Paris):** €5,000 - €20,000+ (Often include accommodation for guests) – Great for a more rustic, fairytale feel.\n* **Historic Hotels:** €3,000 - €10,000+ (e.g., Hotel Saint-André des Arts, Le Bristol Paris – some have stunning event spaces)\n* **Rooftop Restaurants/Bars:** €2,000 - €8,000 (Great for a chic, modern vibe)\n* **Private Apartments/Maison:** €1,500 - €7,000 (More intimate, often with a Parisian charm)\n\n**"
+      },
+      "token_usage": null,
+      "duration_ms": null,
+      "timestamp": "2026-02-24T22:47:58.247105+00:00"
+    },
+    {
+      "event_type": "llm_stream",
+      "name": "llm",
+      "inputs": null,
+      "outputs": {
+        "chunk_count": 590,
+        "partial": "y* broad):\n\n* **Chateaux (Castles Outside Paris):** €5,000 - €20,000+ (Often include accommodation for guests) – Great for a more rustic, fairytale feel.\n* **Historic Hotels:** €3,000 - €10,000+ (e.g., Hotel Saint-André des Arts, Le Bristol Paris – some have stunning event spaces)\n* **Rooftop Restaurants/Bars:** €2,000 - €8,000 (Great for a chic, modern vibe)\n* **Private Apartments/Maison:** €1,500 - €7,000 (More intimate, often with a Parisian charm)\n\n**To help me narrow this down, what kind of"
+      },
+      "token_usage": null,
+      "duration_ms": null,
+      "timestamp": "2026-02-24T22:48:00.521832+00:00"
+    },
+    {
+      "event_type": "llm_stream",
+      "name": "llm",
+      "inputs": null,
+      "outputs": {
+        "chunk_count": 600,
+        "partial": "ide Paris):** €5,000 - €20,000+ (Often include accommodation for guests) – Great for a more rustic, fairytale feel.\n* **Historic Hotels:** €3,000 - €10,000+ (e.g., Hotel Saint-André des Arts, Le Bristol Paris – some have stunning event spaces)\n* **Rooftop Restaurants/Bars:** €2,000 - €8,000 (Great for a chic, modern vibe)\n* **Private Apartments/Maison:** €1,500 - €7,000 (More intimate, often with a Parisian charm)\n\n**To help me narrow this down, what kind of atmosphere are you envisioning?** (e."
+      },
+      "token_usage": null,
+      "duration_ms": null,
+      "timestamp": "2026-02-24T22:48:02.611387+00:00"
+    },
+    {
+      "event_type": "llm_stream",
+      "name": "llm",
+      "inputs": null,
+      "outputs": {
+        "chunk_count": 610,
+        "partial": "include accommodation for guests) – Great for a more rustic, fairytale feel.\n* **Historic Hotels:** €3,000 - €10,000+ (e.g., Hotel Saint-André des Arts, Le Bristol Paris – some have stunning event spaces)\n* **Rooftop Restaurants/Bars:** €2,000 - €8,000 (Great for a chic, modern vibe)\n* **Private Apartments/Maison:** €1,500 - €7,000 (More intimate, often with a Parisian charm)\n\n**To help me narrow this down, what kind of atmosphere are you envisioning?** (e.g., \"We want a classic, romantic castle"
+      },
+      "token_usage": null,
+      "duration_ms": null,
+      "timestamp": "2026-02-24T22:48:04.579941+00:00"
+    },
+    {
+      "event_type": "llm_stream",
+      "name": "llm",
+      "inputs": null,
+      "outputs": {
+        "chunk_count": 620,
+        "partial": "for a more rustic, fairytale feel.\n* **Historic Hotels:** €3,000 - €10,000+ (e.g., Hotel Saint-André des Arts, Le Bristol Paris – some have stunning event spaces)\n* **Rooftop Restaurants/Bars:** €2,000 - €8,000 (Great for a chic, modern vibe)\n* **Private Apartments/Maison:** €1,500 - €7,000 (More intimate, often with a Parisian charm)\n\n**To help me narrow this down, what kind of atmosphere are you envisioning?** (e.g., \"We want a classic, romantic castle,\" or \"Something modern and stylish,\" or \""
+      },
+      "token_usage": null,
+      "duration_ms": null,
+      "timestamp": "2026-02-24T22:48:06.573450+00:00"
+    },
+    {
+      "event_type": "llm_stream",
+      "name": "llm",
+      "inputs": null,
+      "outputs": {
+        "chunk_count": 630,
+        "partial": "\n* **Historic Hotels:** €3,000 - €10,000+ (e.g., Hotel Saint-André des Arts, Le Bristol Paris – some have stunning event spaces)\n* **Rooftop Restaurants/Bars:** €2,000 - €8,000 (Great for a chic, modern vibe)\n* **Private Apartments/Maison:** €1,500 - €7,000 (More intimate, often with a Parisian charm)\n\n**To help me narrow this down, what kind of atmosphere are you envisioning?** (e.g., \"We want a classic, romantic castle,\" or \"Something modern and stylish,\" or \"A cozy, intimate apartment\")\n\n**4."
+      },
+      "token_usage": null,
+      "duration_ms": null,
+      "timestamp": "2026-02-24T22:48:08.561738+00:00"
+    },
+    {
+      "event_type": "llm_stream",
+      "name": "llm",
+      "inputs": null,
+      "outputs": {
+        "chunk_count": 640,
+        "partial": "00+ (e.g., Hotel Saint-André des Arts, Le Bristol Paris – some have stunning event spaces)\n* **Rooftop Restaurants/Bars:** €2,000 - €8,000 (Great for a chic, modern vibe)\n* **Private Apartments/Maison:** €1,500 - €7,000 (More intimate, often with a Parisian charm)\n\n**To help me narrow this down, what kind of atmosphere are you envisioning?** (e.g., \"We want a classic, romantic castle,\" or \"Something modern and stylish,\" or \"A cozy, intimate apartment\")\n\n**4. Key Vendors (We'll need to book these"
+      },
+      "token_usage": null,
+      "duration_ms": null,
+      "timestamp": "2026-02-24T22:48:10.580945+00:00"
+    },
+    {
+      "event_type": "llm_stream",
+      "name": "llm",
+      "inputs": null,
+      "outputs": {
+        "chunk_count": 650,
+        "partial": "ristol Paris – some have stunning event spaces)\n* **Rooftop Restaurants/Bars:** €2,000 - €8,000 (Great for a chic, modern vibe)\n* **Private Apartments/Maison:** €1,500 - €7,000 (More intimate, often with a Parisian charm)\n\n**To help me narrow this down, what kind of atmosphere are you envisioning?** (e.g., \"We want a classic, romantic castle,\" or \"Something modern and stylish,\" or \"A cozy, intimate apartment\")\n\n**4. Key Vendors (We'll need to book these ASAP)**\n\n* **Wedding Planner (Optional but"
+      },
+      "token_usage": null,
+      "duration_ms": null,
+      "timestamp": "2026-02-24T22:48:12.567472+00:00"
+    },
+    {
+      "event_type": "llm_stream",
+      "name": "llm",
+      "inputs": null,
+      "outputs": {
+        "chunk_count": 660,
+        "partial": "stunning event spaces)\n* **Rooftop Restaurants/Bars:** €2,000 - €8,000 (Great for a chic, modern vibe)\n* **Private Apartments/Maison:** €1,500 - €7,000 (More intimate, often with a Parisian charm)\n\n**To help me narrow this down, what kind of atmosphere are you envisioning?** (e.g., \"We want a classic, romantic castle,\" or \"Something modern and stylish,\" or \"A cozy, intimate apartment\")\n\n**4. Key Vendors (We'll need to book these ASAP)**\n\n* **Wedding Planner (Optional but Recommended):** €2,000 -"
+      },
+      "token_usage": null,
+      "duration_ms": null,
+      "timestamp": "2026-02-24T22:48:14.755852+00:00"
+    },
+    {
+      "event_type": "llm_stream",
+      "name": "llm",
+      "inputs": null,
+      "outputs": {
+        "chunk_count": 670,
+        "partial": ")\n* **Rooftop Restaurants/Bars:** €2,000 - €8,000 (Great for a chic, modern vibe)\n* **Private Apartments/Maison:** €1,500 - €7,000 (More intimate, often with a Parisian charm)\n\n**To help me narrow this down, what kind of atmosphere are you envisioning?** (e.g., \"We want a classic, romantic castle,\" or \"Something modern and stylish,\" or \"A cozy, intimate apartment\")\n\n**4. Key Vendors (We'll need to book these ASAP)**\n\n* **Wedding Planner (Optional but Recommended):** €2,000 - €10,000+ (Especially"
+      },
+      "token_usage": null,
+      "duration_ms": null,
+      "timestamp": "2026-02-24T22:48:16.720941+00:00"
+    },
+    {
+      "event_type": "llm_stream",
+      "name": "llm",
+      "inputs": null,
+      "outputs": {
+        "chunk_count": 680,
+        "partial": "8,000 (Great for a chic, modern vibe)\n* **Private Apartments/Maison:** €1,500 - €7,000 (More intimate, often with a Parisian charm)\n\n**To help me narrow this down, what kind of atmosphere are you envisioning?** (e.g., \"We want a classic, romantic castle,\" or \"Something modern and stylish,\" or \"A cozy, intimate apartment\")\n\n**4. Key Vendors (We'll need to book these ASAP)**\n\n* **Wedding Planner (Optional but Recommended):** €2,000 - €10,000+ (Especially helpful for a destination wedding)\n* **Phot"
+      },
+      "token_usage": null,
+      "duration_ms": null,
+      "timestamp": "2026-02-24T22:48:18.727508+00:00"
+    },
+    {
+      "event_type": "llm_stream",
+      "name": "llm",
+      "inputs": null,
+      "outputs": {
+        "chunk_count": 690,
+        "partial": "c, modern vibe)\n* **Private Apartments/Maison:** €1,500 - €7,000 (More intimate, often with a Parisian charm)\n\n**To help me narrow this down, what kind of atmosphere are you envisioning?** (e.g., \"We want a classic, romantic castle,\" or \"Something modern and stylish,\" or \"A cozy, intimate apartment\")\n\n**4. Key Vendors (We'll need to book these ASAP)**\n\n* **Wedding Planner (Optional but Recommended):** €2,000 - €10,000+ (Especially helpful for a destination wedding)\n* **Photographer:** €1,500 - €"
+      },
+      "token_usage": null,
+      "duration_ms": null,
+      "timestamp": "2026-02-24T22:48:20.674239+00:00"
+    },
+    {
+      "event_type": "llm_stream",
+      "name": "llm",
+      "inputs": null,
+      "outputs": {
+        "chunk_count": 700,
+        "partial": "\n* **Private Apartments/Maison:** €1,500 - €7,000 (More intimate, often with a Parisian charm)\n\n**To help me narrow this down, what kind of atmosphere are you envisioning?** (e.g., \"We want a classic, romantic castle,\" or \"Something modern and stylish,\" or \"A cozy, intimate apartment\")\n\n**4. Key Vendors (We'll need to book these ASAP)**\n\n* **Wedding Planner (Optional but Recommended):** €2,000 - €10,000+ (Especially helpful for a destination wedding)\n* **Photographer:** €1,500 - €5,000\n* **Cater"
+      },
+      "token_usage": null,
+      "duration_ms": null,
+      "timestamp": "2026-02-24T22:48:22.561537+00:00"
+    },
+    {
+      "event_type": "llm_stream",
+      "name": "llm",
+      "inputs": null,
+      "outputs": {
+        "chunk_count": 710,
+        "partial": "rtments/Maison:** €1,500 - €7,000 (More intimate, often with a Parisian charm)\n\n**To help me narrow this down, what kind of atmosphere are you envisioning?** (e.g., \"We want a classic, romantic castle,\" or \"Something modern and stylish,\" or \"A cozy, intimate apartment\")\n\n**4. Key Vendors (We'll need to book these ASAP)**\n\n* **Wedding Planner (Optional but Recommended):** €2,000 - €10,000+ (Especially helpful for a destination wedding)\n* **Photographer:** €1,500 - €5,000\n* **Caterer:** €100 - €30"
+      },
+      "token_usage": null,
+      "duration_ms": null,
+      "timestamp": "2026-02-24T22:48:24.497091+00:00"
+    },
+    {
+      "event_type": "llm_stream",
+      "name": "llm",
+      "inputs": null,
+      "outputs": {
+        "chunk_count": 720,
+        "partial": "re intimate, often with a Parisian charm)\n\n**To help me narrow this down, what kind of atmosphere are you envisioning?** (e.g., \"We want a classic, romantic castle,\" or \"Something modern and stylish,\" or \"A cozy, intimate apartment\")\n\n**4. Key Vendors (We'll need to book these ASAP)**\n\n* **Wedding Planner (Optional but Recommended):** €2,000 - €10,000+ (Especially helpful for a destination wedding)\n* **Photographer:** €1,500 - €5,000\n* **Caterer:** €100 - €300 per person (depending on the menu)\n"
+      },
+      "token_usage": null,
+      "duration_ms": null,
+      "timestamp": "2026-02-24T22:48:26.382330+00:00"
+    },
+    {
+      "event_type": "llm_stream",
+      "name": "llm",
+      "inputs": null,
+      "outputs": {
+        "chunk_count": 730,
+        "partial": "ith a Parisian charm)\n\n**To help me narrow this down, what kind of atmosphere are you envisioning?** (e.g., \"We want a classic, romantic castle,\" or \"Something modern and stylish,\" or \"A cozy, intimate apartment\")\n\n**4. Key Vendors (We'll need to book these ASAP)**\n\n* **Wedding Planner (Optional but Recommended):** €2,000 - €10,000+ (Especially helpful for a destination wedding)\n* **Photographer:** €1,500 - €5,000\n* **Caterer:** €100 - €300 per person (depending on the menu)\n* **Florist:** €1,00"
+      },
+      "token_usage": null,
+      "duration_ms": null,
+      "timestamp": "2026-02-24T22:48:28.327705+00:00"
+    },
+    {
+      "event_type": "llm_stream",
+      "name": "llm",
+      "inputs": null,
+      "outputs": {
+        "chunk_count": 740,
+        "partial": "an charm)\n\n**To help me narrow this down, what kind of atmosphere are you envisioning?** (e.g., \"We want a classic, romantic castle,\" or \"Something modern and stylish,\" or \"A cozy, intimate apartment\")\n\n**4. Key Vendors (We'll need to book these ASAP)**\n\n* **Wedding Planner (Optional but Recommended):** €2,000 - €10,000+ (Especially helpful for a destination wedding)\n* **Photographer:** €1,500 - €5,000\n* **Caterer:** €100 - €300 per person (depending on the menu)\n* **Florist:** €1,000 - €5,000\n*"
+      },
+      "token_usage": null,
+      "duration_ms": null,
+      "timestamp": "2026-02-24T22:48:30.260042+00:00"
+    },
+    {
+      "event_type": "llm_stream",
+      "name": "llm",
+      "inputs": null,
+      "outputs": {
+        "chunk_count": 750,
+        "partial": "e narrow this down, what kind of atmosphere are you envisioning?** (e.g., \"We want a classic, romantic castle,\" or \"Something modern and stylish,\" or \"A cozy, intimate apartment\")\n\n**4. Key Vendors (We'll need to book these ASAP)**\n\n* **Wedding Planner (Optional but Recommended):** €2,000 - €10,000+ (Especially helpful for a destination wedding)\n* **Photographer:** €1,500 - €5,000\n* **Caterer:** €100 - €300 per person (depending on the menu)\n* **Florist:** €1,000 - €5,000\n* **Musician/DJ:** €800"
+      },
+      "token_usage": null,
+      "duration_ms": null,
+      "timestamp": "2026-02-24T22:48:32.257266+00:00"
+    },
+    {
+      "event_type": "llm_stream",
+      "name": "llm",
+      "inputs": null,
+      "outputs": {
+        "chunk_count": 760,
+        "partial": "down, what kind of atmosphere are you envisioning?** (e.g., \"We want a classic, romantic castle,\" or \"Something modern and stylish,\" or \"A cozy, intimate apartment\")\n\n**4. Key Vendors (We'll need to book these ASAP)**\n\n* **Wedding Planner (Optional but Recommended):** €2,000 - €10,000+ (Especially helpful for a destination wedding)\n* **Photographer:** €1,500 - €5,000\n* **Caterer:** €100 - €300 per person (depending on the menu)\n* **Florist:** €1,000 - €5,000\n* **Musician/DJ:** €800 - €3,000\n\n**5"
+      },
+      "token_usage": null,
+      "duration_ms": null,
+      "timestamp": "2026-02-24T22:48:34.156557+00:00"
+    },
+    {
+      "event_type": "llm_stream",
+      "name": "llm",
+      "inputs": null,
+      "outputs": {
+        "chunk_count": 770,
+        "partial": "envisioning?** (e.g., \"We want a classic, romantic castle,\" or \"Something modern and stylish,\" or \"A cozy, intimate apartment\")\n\n**4. Key Vendors (We'll need to book these ASAP)**\n\n* **Wedding Planner (Optional but Recommended):** €2,000 - €10,000+ (Especially helpful for a destination wedding)\n* **Photographer:** €1,500 - €5,000\n* **Caterer:** €100 - €300 per person (depending on the menu)\n* **Florist:** €1,000 - €5,000\n* **Musician/DJ:** €800 - €3,000\n\n**5. Logistics - The Details**\n\n* **Guest"
+      },
+      "token_usage": null,
+      "duration_ms": null,
+      "timestamp": "2026-02-24T22:48:36.254189+00:00"
+    },
+    {
+      "event_type": "llm_stream",
+      "name": "llm",
+      "inputs": null,
+      "outputs": {
+        "chunk_count": 780,
+        "partial": "castle,\" or \"Something modern and stylish,\" or \"A cozy, intimate apartment\")\n\n**4. Key Vendors (We'll need to book these ASAP)**\n\n* **Wedding Planner (Optional but Recommended):** €2,000 - €10,000+ (Especially helpful for a destination wedding)\n* **Photographer:** €1,500 - €5,000\n* **Caterer:** €100 - €300 per person (depending on the menu)\n* **Florist:** €1,000 - €5,000\n* **Musician/DJ:** €800 - €3,000\n\n**5. Logistics - The Details**\n\n* **Guest List:** Roughly how many people are you expecting?"
+      },
+      "token_usage": null,
+      "duration_ms": null,
+      "timestamp": "2026-02-24T22:48:38.294422+00:00"
+    },
+    {
+      "event_type": "llm_stream",
+      "name": "llm",
+      "inputs": null,
+      "outputs": {
+        "chunk_count": 790,
+        "partial": "\" or \"A cozy, intimate apartment\")\n\n**4. Key Vendors (We'll need to book these ASAP)**\n\n* **Wedding Planner (Optional but Recommended):** €2,000 - €10,000+ (Especially helpful for a destination wedding)\n* **Photographer:** €1,500 - €5,000\n* **Caterer:** €100 - €300 per person (depending on the menu)\n* **Florist:** €1,000 - €5,000\n* **Musician/DJ:** €800 - €3,000\n\n**5. Logistics - The Details**\n\n* **Guest List:** Roughly how many people are you expecting? (This impacts venue size, catering, etc.)"
+      },
+      "token_usage": null,
+      "duration_ms": null,
+      "timestamp": "2026-02-24T22:48:40.400406+00:00"
+    },
+    {
+      "event_type": "llm_stream",
+      "name": "llm",
+      "inputs": null,
+      "outputs": {
+        "chunk_count": 800,
+        "partial": "*4. Key Vendors (We'll need to book these ASAP)**\n\n* **Wedding Planner (Optional but Recommended):** €2,000 - €10,000+ (Especially helpful for a destination wedding)\n* **Photographer:** €1,500 - €5,000\n* **Caterer:** €100 - €300 per person (depending on the menu)\n* **Florist:** €1,000 - €5,000\n* **Musician/DJ:** €800 - €3,000\n\n**5. Logistics - The Details**\n\n* **Guest List:** Roughly how many people are you expecting? (This impacts venue size, catering, etc.)\n* **Accommodation:**  Do you want to"
+      },
+      "token_usage": null,
+      "duration_ms": null,
+      "timestamp": "2026-02-24T22:48:42.520206+00:00"
+    },
+    {
+      "event_type": "llm_stream",
+      "name": "llm",
+      "inputs": null,
+      "outputs": {
+        "chunk_count": 810,
+        "partial": "ASAP)**\n\n* **Wedding Planner (Optional but Recommended):** €2,000 - €10,000+ (Especially helpful for a destination wedding)\n* **Photographer:** €1,500 - €5,000\n* **Caterer:** €100 - €300 per person (depending on the menu)\n* **Florist:** €1,000 - €5,000\n* **Musician/DJ:** €800 - €3,000\n\n**5. Logistics - The Details**\n\n* **Guest List:** Roughly how many people are you expecting? (This impacts venue size, catering, etc.)\n* **Accommodation:**  Do you want to book a block of rooms at a hotel for your"
+      },
+      "token_usage": null,
+      "duration_ms": null,
+      "timestamp": "2026-02-24T22:48:44.543556+00:00"
+    },
+    {
+      "event_type": "llm_stream",
+      "name": "llm",
+      "inputs": null,
+      "outputs": {
+        "chunk_count": 820,
+        "partial": "Recommended):** €2,000 - €10,000+ (Especially helpful for a destination wedding)\n* **Photographer:** €1,500 - €5,000\n* **Caterer:** €100 - €300 per person (depending on the menu)\n* **Florist:** €1,000 - €5,000\n* **Musician/DJ:** €800 - €3,000\n\n**5. Logistics - The Details**\n\n* **Guest List:** Roughly how many people are you expecting? (This impacts venue size, catering, etc.)\n* **Accommodation:**  Do you want to book a block of rooms at a hotel for your guests?\n* **Legal Requirements:**  Getting"
+      },
+      "token_usage": null,
+      "duration_ms": null,
+      "timestamp": "2026-02-24T22:48:46.404348+00:00"
+    },
+    {
+      "event_type": "llm_stream",
+      "name": "llm",
+      "inputs": null,
+      "outputs": {
+        "chunk_count": 830,
+        "partial": "ation wedding)\n* **Photographer:** €1,500 - €5,000\n* **Caterer:** €100 - €300 per person (depending on the menu)\n* **Florist:** €1,000 - €5,000\n* **Musician/DJ:** €800 - €3,000\n\n**5. Logistics - The Details**\n\n* **Guest List:** Roughly how many people are you expecting? (This impacts venue size, catering, etc.)\n* **Accommodation:**  Do you want to book a block of rooms at a hotel for your guests?\n* **Legal Requirements:**  Getting legally married in France requires paperwork and a civil ceremony"
+      },
+      "token_usage": null,
+      "duration_ms": null,
+      "timestamp": "2026-02-24T22:48:48.398414+00:00"
+    },
+    {
+      "event_type": "llm_stream",
+      "name": "llm",
+      "inputs": null,
+      "outputs": {
+        "chunk_count": 840,
+        "partial": " €1,500 - €5,000\n* **Caterer:** €100 - €300 per person (depending on the menu)\n* **Florist:** €1,000 - €5,000\n* **Musician/DJ:** €800 - €3,000\n\n**5. Logistics - The Details**\n\n* **Guest List:** Roughly how many people are you expecting? (This impacts venue size, catering, etc.)\n* **Accommodation:**  Do you want to book a block of rooms at a hotel for your guests?\n* **Legal Requirements:**  Getting legally married in France requires paperwork and a civil ceremony, which can be complex. We'll need"
+      },
+      "token_usage": null,
+      "duration_ms": null,
+      "timestamp": "2026-02-24T22:48:50.325043+00:00"
+    },
+    {
+      "event_type": "llm_stream",
+      "name": "llm",
+      "inputs": null,
+      "outputs": {
+        "chunk_count": 850,
+        "partial": "erson (depending on the menu)\n* **Florist:** €1,000 - €5,000\n* **Musician/DJ:** €800 - €3,000\n\n**5. Logistics - The Details**\n\n* **Guest List:** Roughly how many people are you expecting? (This impacts venue size, catering, etc.)\n* **Accommodation:**  Do you want to book a block of rooms at a hotel for your guests?\n* **Legal Requirements:**  Getting legally married in France requires paperwork and a civil ceremony, which can be complex. We'll need to research this thoroughly. (This is often done"
+      },
+      "token_usage": null,
+      "duration_ms": null,
+      "timestamp": "2026-02-24T22:48:52.353255+00:00"
+    },
+    {
+      "event_type": "llm_stream",
+      "name": "llm",
+      "inputs": null,
+      "outputs": {
+        "chunk_count": 860,
+        "partial": "t:** €1,000 - €5,000\n* **Musician/DJ:** €800 - €3,000\n\n**5. Logistics - The Details**\n\n* **Guest List:** Roughly how many people are you expecting? (This impacts venue size, catering, etc.)\n* **Accommodation:**  Do you want to book a block of rooms at a hotel for your guests?\n* **Legal Requirements:**  Getting legally married in France requires paperwork and a civil ceremony, which can be complex. We'll need to research this thoroughly. (This is often done *after* the symbolic ceremony).\n\n\n**Let"
+      },
+      "token_usage": null,
+      "duration_ms": null,
+      "timestamp": "2026-02-24T22:48:54.265515+00:00"
+    },
+    {
+      "event_type": "llm_stream",
+      "name": "llm",
+      "inputs": null,
+      "outputs": {
+        "chunk_count": 870,
+        "partial": "/DJ:** €800 - €3,000\n\n**5. Logistics - The Details**\n\n* **Guest List:** Roughly how many people are you expecting? (This impacts venue size, catering, etc.)\n* **Accommodation:**  Do you want to book a block of rooms at a hotel for your guests?\n* **Legal Requirements:**  Getting legally married in France requires paperwork and a civil ceremony, which can be complex. We'll need to research this thoroughly. (This is often done *after* the symbolic ceremony).\n\n\n**Let's start with the basics.  I need"
+      },
+      "token_usage": null,
+      "duration_ms": null,
+      "timestamp": "2026-02-24T22:48:56.348036+00:00"
+    },
+    {
+      "event_type": "llm_stream",
+      "name": "llm",
+      "inputs": null,
+      "outputs": {
+        "chunk_count": 880,
+        "partial": "5. Logistics - The Details**\n\n* **Guest List:** Roughly how many people are you expecting? (This impacts venue size, catering, etc.)\n* **Accommodation:**  Do you want to book a block of rooms at a hotel for your guests?\n* **Legal Requirements:**  Getting legally married in France requires paperwork and a civil ceremony, which can be complex. We'll need to research this thoroughly. (This is often done *after* the symbolic ceremony).\n\n\n**Let's start with the basics.  I need to know:**\n\n1. **What's"
+      },
+      "token_usage": null,
+      "duration_ms": null,
+      "timestamp": "2026-02-24T22:48:58.216188+00:00"
+    },
+    {
+      "event_type": "llm_stream",
+      "name": "llm",
+      "inputs": null,
+      "outputs": {
+        "chunk_count": 890,
+        "partial": "t List:** Roughly how many people are you expecting? (This impacts venue size, catering, etc.)\n* **Accommodation:**  Do you want to book a block of rooms at a hotel for your guests?\n* **Legal Requirements:**  Getting legally married in France requires paperwork and a civil ceremony, which can be complex. We'll need to research this thoroughly. (This is often done *after* the symbolic ceremony).\n\n\n**Let's start with the basics.  I need to know:**\n\n1. **What's your approximate budget range?** (e.g"
+      },
+      "token_usage": null,
+      "duration_ms": null,
+      "timestamp": "2026-02-24T22:49:00.200067+00:00"
+    },
+    {
+      "event_type": "llm_stream",
+      "name": "llm",
+      "inputs": null,
+      "outputs": {
+        "chunk_count": 900,
+        "partial": "hly how many people are you expecting? (This impacts venue size, catering, etc.)\n* **Accommodation:**  Do you want to book a block of rooms at a hotel for your guests?\n* **Legal Requirements:**  Getting legally married in France requires paperwork and a civil ceremony, which can be complex. We'll need to research this thoroughly. (This is often done *after* the symbolic ceremony).\n\n\n**Let's start with the basics.  I need to know:**\n\n1. **What's your approximate budget range?** (e.g., €10,000 - €"
+      },
+      "token_usage": null,
+      "duration_ms": null,
+      "timestamp": "2026-02-24T22:49:02.077094+00:00"
+    },
+    {
+      "event_type": "llm_stream",
+      "name": "llm",
+      "inputs": null,
+      "outputs": {
+        "chunk_count": 910,
+        "partial": "ny people are you expecting? (This impacts venue size, catering, etc.)\n* **Accommodation:**  Do you want to book a block of rooms at a hotel for your guests?\n* **Legal Requirements:**  Getting legally married in France requires paperwork and a civil ceremony, which can be complex. We'll need to research this thoroughly. (This is often done *after* the symbolic ceremony).\n\n\n**Let's start with the basics.  I need to know:**\n\n1. **What's your approximate budget range?** (e.g., €10,000 - €20,000)\n2."
+      },
+      "token_usage": null,
+      "duration_ms": null,
+      "timestamp": "2026-02-24T22:49:04.001878+00:00"
+    },
+    {
+      "event_type": "llm_stream",
+      "name": "llm",
+      "inputs": null,
+      "outputs": {
+        "chunk_count": 920,
+        "partial": " size, catering, etc.)\n* **Accommodation:**  Do you want to book a block of rooms at a hotel for your guests?\n* **Legal Requirements:**  Getting legally married in France requires paperwork and a civil ceremony, which can be complex. We'll need to research this thoroughly. (This is often done *after* the symbolic ceremony).\n\n\n**Let's start with the basics.  I need to know:**\n\n1. **What's your approximate budget range?** (e.g., €10,000 - €20,000)\n2. **Roughly how many guests are you anticipating?"
+      },
+      "token_usage": null,
+      "duration_ms": null,
+      "timestamp": "2026-02-24T22:49:05.915299+00:00"
+    },
+    {
+      "event_type": "llm_stream",
+      "name": "llm",
+      "inputs": null,
+      "outputs": {
+        "chunk_count": 930,
+        "partial": "ng, etc.)\n* **Accommodation:**  Do you want to book a block of rooms at a hotel for your guests?\n* **Legal Requirements:**  Getting legally married in France requires paperwork and a civil ceremony, which can be complex. We'll need to research this thoroughly. (This is often done *after* the symbolic ceremony).\n\n\n**Let's start with the basics.  I need to know:**\n\n1. **What's your approximate budget range?** (e.g., €10,000 - €20,000)\n2. **Roughly how many guests are you anticipating?** (e.g., 30-"
+      },
+      "token_usage": null,
+      "duration_ms": null,
+      "timestamp": "2026-02-24T22:49:07.825519+00:00"
+    },
+    {
+      "event_type": "llm_stream",
+      "name": "llm",
+      "inputs": null,
+      "outputs": {
+        "chunk_count": 940,
+        "partial": "* **Accommodation:**  Do you want to book a block of rooms at a hotel for your guests?\n* **Legal Requirements:**  Getting legally married in France requires paperwork and a civil ceremony, which can be complex. We'll need to research this thoroughly. (This is often done *after* the symbolic ceremony).\n\n\n**Let's start with the basics.  I need to know:**\n\n1. **What's your approximate budget range?** (e.g., €10,000 - €20,000)\n2. **Roughly how many guests are you anticipating?** (e.g., 30-50, 50-80,"
+      },
+      "token_usage": null,
+      "duration_ms": null,
+      "timestamp": "2026-02-24T22:49:09.778796+00:00"
+    },
+    {
+      "event_type": "llm_stream",
+      "name": "llm",
+      "inputs": null,
+      "outputs": {
+        "chunk_count": 950,
+        "partial": "n:**  Do you want to book a block of rooms at a hotel for your guests?\n* **Legal Requirements:**  Getting legally married in France requires paperwork and a civil ceremony, which can be complex. We'll need to research this thoroughly. (This is often done *after* the symbolic ceremony).\n\n\n**Let's start with the basics.  I need to know:**\n\n1. **What's your approximate budget range?** (e.g., €10,000 - €20,000)\n2. **Roughly how many guests are you anticipating?** (e.g., 30-50, 50-80, 100+)\n3. **What"
+      },
+      "token_usage": null,
+      "duration_ms": null,
+      "timestamp": "2026-02-24T22:49:11.616489+00:00"
+    },
+    {
+      "event_type": "llm_stream",
+      "name": "llm",
+      "inputs": null,
+      "outputs": {
+        "chunk_count": 960,
+        "partial": "or your guests?\n* **Legal Requirements:**  Getting legally married in France requires paperwork and a civil ceremony, which can be complex. We'll need to research this thoroughly. (This is often done *after* the symbolic ceremony).\n\n\n**Let's start with the basics.  I need to know:**\n\n1. **What's your approximate budget range?** (e.g., €10,000 - €20,000)\n2. **Roughly how many guests are you anticipating?** (e.g., 30-50, 50-80, 100+)\n3. **What kind of atmosphere/venue style are you leaning towards"
+      },
+      "token_usage": null,
+      "duration_ms": null,
+      "timestamp": "2026-02-24T22:49:13.572396+00:00"
+    },
+    {
+      "event_type": "llm_stream",
+      "name": "llm",
+      "inputs": null,
+      "outputs": {
+        "chunk_count": 970,
+        "partial": "equirements:**  Getting legally married in France requires paperwork and a civil ceremony, which can be complex. We'll need to research this thoroughly. (This is often done *after* the symbolic ceremony).\n\n\n**Let's start with the basics.  I need to know:**\n\n1. **What's your approximate budget range?** (e.g., €10,000 - €20,000)\n2. **Roughly how many guests are you anticipating?** (e.g., 30-50, 50-80, 100+)\n3. **What kind of atmosphere/venue style are you leaning towards?** (e.g., Romantic castle,"
+      },
+      "token_usage": null,
+      "duration_ms": null,
+      "timestamp": "2026-02-24T22:49:15.576130+00:00"
+    },
+    {
+      "event_type": "llm_stream",
+      "name": "llm",
+      "inputs": null,
+      "outputs": {
+        "chunk_count": 980,
+        "partial": "ce requires paperwork and a civil ceremony, which can be complex. We'll need to research this thoroughly. (This is often done *after* the symbolic ceremony).\n\n\n**Let's start with the basics.  I need to know:**\n\n1. **What's your approximate budget range?** (e.g., €10,000 - €20,000)\n2. **Roughly how many guests are you anticipating?** (e.g., 30-50, 50-80, 100+)\n3. **What kind of atmosphere/venue style are you leaning towards?** (e.g., Romantic castle, chic rooftop, intimate apartment)\n\nOnce I have"
+      },
+      "token_usage": null,
+      "duration_ms": null,
+      "timestamp": "2026-02-24T22:49:18.004404+00:00"
+    },
+    {
+      "event_type": "llm_stream",
+      "name": "llm",
+      "inputs": null,
+      "outputs": {
+        "chunk_count": 990,
+        "partial": "mplex. We'll need to research this thoroughly. (This is often done *after* the symbolic ceremony).\n\n\n**Let's start with the basics.  I need to know:**\n\n1. **What's your approximate budget range?** (e.g., €10,000 - €20,000)\n2. **Roughly how many guests are you anticipating?** (e.g., 30-50, 50-80, 100+)\n3. **What kind of atmosphere/venue style are you leaning towards?** (e.g., Romantic castle, chic rooftop, intimate apartment)\n\nOnce I have this information, I can start researching specific venues,"
+      },
+      "token_usage": null,
+      "duration_ms": null,
+      "timestamp": "2026-02-24T22:49:20.311152+00:00"
+    },
+    {
+      "event_type": "llm_stream",
+      "name": "llm",
+      "inputs": null,
+      "outputs": {
+        "chunk_count": 1000,
+        "partial": ". (This is often done *after* the symbolic ceremony).\n\n\n**Let's start with the basics.  I need to know:**\n\n1. **What's your approximate budget range?** (e.g., €10,000 - €20,000)\n2. **Roughly how many guests are you anticipating?** (e.g., 30-50, 50-80, 100+)\n3. **What kind of atmosphere/venue style are you leaning towards?** (e.g., Romantic castle, chic rooftop, intimate apartment)\n\nOnce I have this information, I can start researching specific venues, flight options, and potential vendors.  Don'"
+      },
+      "token_usage": null,
+      "duration_ms": null,
+      "timestamp": "2026-02-24T22:49:22.326829+00:00"
+    },
+    {
+      "event_type": "llm_stream",
+      "name": "llm",
+      "inputs": null,
+      "outputs": {
+        "chunk_count": 1010,
+        "partial": "ony).\n\n\n**Let's start with the basics.  I need to know:**\n\n1. **What's your approximate budget range?** (e.g., €10,000 - €20,000)\n2. **Roughly how many guests are you anticipating?** (e.g., 30-50, 50-80, 100+)\n3. **What kind of atmosphere/venue style are you leaning towards?** (e.g., Romantic castle, chic rooftop, intimate apartment)\n\nOnce I have this information, I can start researching specific venues, flight options, and potential vendors.  Don't worry about having all the answers right now –"
+      },
+      "token_usage": null,
+      "duration_ms": null,
+      "timestamp": "2026-02-24T22:49:24.323154+00:00"
+    },
+    {
+      "event_type": "llm_stream",
+      "name": "llm",
+      "inputs": null,
+      "outputs": {
+        "chunk_count": 1020,
+        "partial": ".  I need to know:**\n\n1. **What's your approximate budget range?** (e.g., €10,000 - €20,000)\n2. **Roughly how many guests are you anticipating?** (e.g., 30-50, 50-80, 100+)\n3. **What kind of atmosphere/venue style are you leaning towards?** (e.g., Romantic castle, chic rooftop, intimate apartment)\n\nOnce I have this information, I can start researching specific venues, flight options, and potential vendors.  Don't worry about having all the answers right now – we'll work through it together!\n\n---"
+      },
+      "token_usage": null,
+      "duration_ms": null,
+      "timestamp": "2026-02-24T22:49:26.227711+00:00"
+    },
+    {
+      "event_type": "llm_stream",
+      "name": "llm",
+      "inputs": null,
+      "outputs": {
+        "chunk_count": 1030,
+        "partial": "approximate budget range?** (e.g., €10,000 - €20,000)\n2. **Roughly how many guests are you anticipating?** (e.g., 30-50, 50-80, 100+)\n3. **What kind of atmosphere/venue style are you leaning towards?** (e.g., Romantic castle, chic rooftop, intimate apartment)\n\nOnce I have this information, I can start researching specific venues, flight options, and potential vendors.  Don't worry about having all the answers right now – we'll work through it together!\n\n---\n\n**Disclaimer:** *I am an AI assistant"
+      },
+      "token_usage": null,
+      "duration_ms": null,
+      "timestamp": "2026-02-24T22:49:28.294857+00:00"
+    },
+    {
+      "event_type": "llm_stream",
+      "name": "llm",
+      "inputs": null,
+      "outputs": {
+        "chunk_count": 1040,
+        "partial": "ghly how many guests are you anticipating?** (e.g., 30-50, 50-80, 100+)\n3. **What kind of atmosphere/venue style are you leaning towards?** (e.g., Romantic castle, chic rooftop, intimate apartment)\n\nOnce I have this information, I can start researching specific venues, flight options, and potential vendors.  Don't worry about having all the answers right now – we'll work through it together!\n\n---\n\n**Disclaimer:** *I am an AI assistant and cannot book services or guarantee prices. The information"
+      },
+      "token_usage": null,
+      "duration_ms": null,
+      "timestamp": "2026-02-24T22:49:30.579660+00:00"
+    },
+    {
+      "event_type": "llm_stream",
+      "name": "llm",
+      "inputs": null,
+      "outputs": {
+        "chunk_count": 1050,
+        "partial": "0, 100+)\n3. **What kind of atmosphere/venue style are you leaning towards?** (e.g., Romantic castle, chic rooftop, intimate apartment)\n\nOnce I have this information, I can start researching specific venues, flight options, and potential vendors.  Don't worry about having all the answers right now – we'll work through it together!\n\n---\n\n**Disclaimer:** *I am an AI assistant and cannot book services or guarantee prices. The information provided is based on general industry knowledge and estimates."
+      },
+      "token_usage": null,
+      "duration_ms": null,
+      "timestamp": "2026-02-24T22:49:32.722280+00:00"
+    },
+    {
+      "event_type": "llm_stream",
+      "name": "llm",
+      "inputs": null,
+      "outputs": {
+        "chunk_count": 1060,
+        "partial": "u leaning towards?** (e.g., Romantic castle, chic rooftop, intimate apartment)\n\nOnce I have this information, I can start researching specific venues, flight options, and potential vendors.  Don't worry about having all the answers right now – we'll work through it together!\n\n---\n\n**Disclaimer:** *I am an AI assistant and cannot book services or guarantee prices. The information provided is based on general industry knowledge and estimates.  You will need to contact vendors and airlines directly"
+      },
+      "token_usage": null,
+      "duration_ms": null,
+      "timestamp": "2026-02-24T22:49:35.023398+00:00"
+    },
+    {
+      "event_type": "llm_stream",
+      "name": "llm",
+      "inputs": null,
+      "outputs": {
+        "chunk_count": 1070,
+        "partial": "c rooftop, intimate apartment)\n\nOnce I have this information, I can start researching specific venues, flight options, and potential vendors.  Don't worry about having all the answers right now – we'll work through it together!\n\n---\n\n**Disclaimer:** *I am an AI assistant and cannot book services or guarantee prices. The information provided is based on general industry knowledge and estimates.  You will need to contact vendors and airlines directly to confirm availability and pricing.*\n\nNow, let"
+      },
+      "token_usage": null,
+      "duration_ms": null,
+      "timestamp": "2026-02-24T22:49:37.188320+00:00"
+    },
+    {
+      "event_type": "llm_stream",
+      "name": "llm",
+      "inputs": null,
+      "outputs": {
+        "chunk_count": 1080,
+        "partial": " this information, I can start researching specific venues, flight options, and potential vendors.  Don't worry about having all the answers right now – we'll work through it together!\n\n---\n\n**Disclaimer:** *I am an AI assistant and cannot book services or guarantee prices. The information provided is based on general industry knowledge and estimates.  You will need to contact vendors and airlines directly to confirm availability and pricing.*\n\nNow, let's start with those initial questions!  Let"
+      },
+      "token_usage": null,
+      "duration_ms": null,
+      "timestamp": "2026-02-24T22:49:39.451694+00:00"
+    },
+    {
+      "event_type": "llm_stream",
+      "name": "llm",
+      "inputs": null,
+      "outputs": {
+        "chunk_count": 1090,
+        "partial": "ching specific venues, flight options, and potential vendors.  Don't worry about having all the answers right now – we'll work through it together!\n\n---\n\n**Disclaimer:** *I am an AI assistant and cannot book services or guarantee prices. The information provided is based on general industry knowledge and estimates.  You will need to contact vendors and airlines directly to confirm availability and pricing.*\n\nNow, let's start with those initial questions!  Let's get this planning process rolling."
+      },
+      "token_usage": null,
+      "duration_ms": null,
+      "timestamp": "2026-02-24T22:49:41.805383+00:00"
+    },
+    {
+      "event_type": "llm_end",
+      "name": "llm",
+      "inputs": null,
+      "outputs": "generations=[[ChatGenerationChunk(text='Okay, let’s get this Paris wedding planned! June 20th is a fantastic date. Flying from Madrid is definitely doable. Here’s a breakdown of a plan, focusing on practicality and getting us started.  I\\'ll break this down into key areas and give you some initial options and considerations.  This is a starting point – we’ll need to refine it based on your budget and preferences.\\n\\n**1. Budget - Let’s Talk Numbers (Rough Estimates)**\\n\\nBefore we dive into spec…",
+      "token_usage": null,
+      "duration_ms": 227072,
+      "timestamp": "2026-02-24T22:49:41.935380+00:00"
+    },
+    {
+      "event_type": "llm_stream",
+      "name": "stream",
+      "inputs": null,
+      "outputs": {
+        "chunk_count": 1090,
+        "partial": "ching specific venues, flight options, and potential vendors.  Don't worry about having all the answers right now – we'll work through it together!\n\n---\n\n**Disclaimer:** *I am an AI assistant and cannot book services or guarantee prices. The information provided is based on general industry knowledge and estimates.  You will need to contact vendors and airlines directly to confirm availability and pricing.*\n\nNow, let's start with those initial questions!  Let's get this planning process rolling."
+      },
+      "token_usage": null,
+      "duration_ms": null,
+      "timestamp": "2026-02-24T22:49:42.065982+00:00"
+    }
+  ]
+}
