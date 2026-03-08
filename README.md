@@ -374,7 +374,20 @@ curl -X POST "http://127.0.0.1:8000/models/hf/download" \
   -H "Content-Type: application/json" \
   -d '{"model_id":"sentence-transformers/all-MiniLM-L6-v2"}'
 ```
+The API returns a `download_id` and processes downloads in the background.
+
+Check progress/status:
+```bash
+curl "http://127.0.0.1:8000/models/hf/downloads"
+curl "http://127.0.0.1:8000/models/hf/downloads/<download_id>"
+```
+
 Downloads are stored under `./models/<model_id with / replaced by -->`.
+
+Metadata quality notes:
+- `size_bytes`, `parameters`, `context_length`, and `quantization` are best-effort (local inspection + inference).
+- Hub fields (`downloads`, `likes`, `library_name`, `license`, `pipeline_tag`) are used when available.
+- `source_url` points to `https://huggingface.co/<model_id>` and is always included for HF entries.
 
 Systems run now returns `run_id` in `POST /systems/{name}/run` so executions appear in Runs/Traces.
 

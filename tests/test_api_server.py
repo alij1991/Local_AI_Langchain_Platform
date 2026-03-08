@@ -594,3 +594,45 @@ def test_models_hf_discover_endpoint(monkeypatch):
     assert body['count'] == 1
     assert body['items'][0]['provider'] == 'huggingface'
     assert body['items'][0]['capabilities']['supports_embeddings'] is True
+
+
+def test_models_hf_download_job_and_status(monkeypatch):
+    def fake_run(job, payload):
+        api_server._set_job(job['download_id'], status='completed', progress_percent=100, local_path='/tmp/models/x')
+
+    class _Thread:
+        def __init__(self, target=None, args=(), daemon=None):
+            self._target = target
+            self._args = args
+
+        def start(self):
+            self._target(*self._args)
+
+    monkeypatch.setattr(api_server, '_run_hf_download', fake_run)
+    monkeypatch.setattr(api_server.threading, 'Thread', _Thread)
+
+    res = client.post('/models/hf/download', json={'model_id': 'sentence-transformers/all-MiniLM-L6-v2'})
+    assert res.status_code == 200
+    body = res.json()
+    assert body['download_id']
+
+    status = client.get(f"/models/hf/downloads/{body['download_id']}")
+    assert status.status_code == 200
+    assert status.json()['status'] == 'completed'
+
+
+def test_models_catalog_hf_includes_source_url(monkeypatch):
+    monkeypatch.setattr(api_server, '_hf_local_entries', lambda search='': [{
+        'provider': 'huggingface',
+        'model_id': 'sentence-transformers/all-MiniLM-L6-v2',
+        'display_name': 'all-MiniLM-L6-v2',
+        'local_status': {'installed': True, 'location': '/tmp/models/minilm'},
+        'supports': {'chat': False, 'tools': False, 'vision': False, 'embeddings': True, 'streaming': False},
+        'metadata': {'source_url': 'https://huggingface.co/sentence-transformers/all-MiniLM-L6-v2'},
+        'capabilities': {'supports_chat': False, 'supports_tools': False, 'supports_vision': False, 'supports_embeddings': True, 'supports_streaming': False},
+        'local_path': '/tmp/models/minilm',
+        'task': 'feature-extraction',
+    }])
+    res = client.get('/models/catalog?provider=huggingface&scope=local')
+    assert res.status_code == 200
+    assert res.json()['items'][0]['source_url'].startswith('https://huggingface.co/')
