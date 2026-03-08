@@ -24,6 +24,7 @@ class _ImagesPageState extends State<ImagesPage> {
   bool _busy = false;
   String _status = '';
   Map<String, dynamic> _runtime = {};
+  String _errorCode = '';
   String _errorMessage = '';
   String _errorDetails = '';
   bool _showHelp = true;
@@ -86,6 +87,7 @@ class _ImagesPageState extends State<ImagesPage> {
     final text = e.toString();
     String message = text;
     String details = '';
+    String code = '';
     final match = RegExp(r'\{.*\}$', dotAll: true).firstMatch(text);
     if (match != null) {
       try {
@@ -93,14 +95,40 @@ class _ImagesPageState extends State<ImagesPage> {
         final err = parsed['detail'] is Map<String, dynamic> ? parsed['detail']['error'] : null;
         if (err is Map<String, dynamic>) {
           message = (err['message'] ?? message).toString();
+          code = (err['code'] ?? '').toString();
           details = const JsonEncoder.withIndent('  ').convert(err);
         }
       } catch (_) {}
     }
     setState(() {
+      _errorCode = code;
       _errorMessage = message;
       _errorDetails = details;
     });
+  }
+
+
+  Future<void> _validateModel() async {
+    if (_selectedModel == null) return;
+    setState(() => _status = 'Validating model…');
+    try {
+      final body = await widget.api.post('/images/validate-model', {'model_id': _selectedModel}) as Map<String, dynamic>;
+      if (!mounted) return;
+      setState(() => _status = (body['loadable'] == true) ? 'Model validation passed' : 'Model validation failed');
+      showDialog<void>(
+        context: context,
+        builder: (ctx) => AlertDialog(
+          title: const Text('Model validation'),
+          content: SizedBox(
+            width: 560,
+            child: SelectableText(const JsonEncoder.withIndent('  ').convert(body)),
+          ),
+          actions: [TextButton(onPressed: () => Navigator.of(ctx).pop(), child: const Text('Close'))],
+        ),
+      );
+    } catch (e) {
+      _captureError(e);
+    }
   }
 
   Future<void> _generate() async {
@@ -108,6 +136,7 @@ class _ImagesPageState extends State<ImagesPage> {
     setState(() {
       _busy = true;
       _status = 'Loading model…';
+      _errorCode = '';
       _errorMessage = '';
       _errorDetails = '';
     });
@@ -134,6 +163,7 @@ class _ImagesPageState extends State<ImagesPage> {
     setState(() {
       _busy = true;
       _status = 'Applying edit…';
+      _errorCode = '';
       _errorMessage = '';
       _errorDetails = '';
     });
@@ -307,6 +337,10 @@ class _ImagesPageState extends State<ImagesPage> {
                               padding: const EdgeInsets.all(10),
                               child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
                                 Text(_errorMessage, style: TextStyle(color: Theme.of(context).colorScheme.onErrorContainer)),
+                                if (_errorCode.isNotEmpty) Text('Code: $_errorCode', style: TextStyle(color: Theme.of(context).colorScheme.onErrorContainer)),
+                                if (_errorCode == 'invalid_model_format') const Text('Hint: This local model folder does not look like a valid Diffusers pipeline.'),
+                                if (_errorCode == 'dependency_error') const Text('Hint: Install/update diffusers, transformers, accelerate, safetensors, and torch.'),
+                                if (_errorCode == 'runtime_crash') const Text('Hint: Run Validate model and check backend logs for native runtime issues.'),
                                 if (_errorDetails.isNotEmpty)
                                   ExpansionTile(
                                     title: const Text('Show details'),
@@ -324,6 +358,15 @@ class _ImagesPageState extends State<ImagesPage> {
                           items: _models.map((m) => DropdownMenuItem(value: m['model_id'].toString(), child: Text(m['model_id'].toString()))).toList(),
                           onChanged: (v) => setState(() => _selectedModel = v),
                           decoration: const InputDecoration(labelText: 'Model'),
+                        ),
+                        const SizedBox(height: 8),
+                        Align(
+                          alignment: Alignment.centerLeft,
+                          child: FilledButton.tonalIcon(
+                            onPressed: _busy ? null : _validateModel,
+                            icon: const Icon(Icons.verified_outlined),
+                            label: const Text('Validate model'),
+                          ),
                         ),
                         const SizedBox(height: 8),
                         TextField(controller: _prompt, minLines: 2, maxLines: 4, decoration: const InputDecoration(labelText: 'Prompt')),

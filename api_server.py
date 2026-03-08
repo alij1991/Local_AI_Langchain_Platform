@@ -226,6 +226,10 @@ class ImageEditRequest(BaseModel):
     params_json: dict[str, Any] = Field(default_factory=dict)
 
 
+class ImageValidateRequest(BaseModel):
+    model_id: str
+
+
 def error_response(code: str, message: str, details: Any = None, status: int = 400) -> HTTPException:
     return HTTPException(status_code=status, detail={"error": {"code": code, "message": message, "details": details}})
 
@@ -2041,6 +2045,15 @@ def images_runtime() -> dict[str, Any]:
 @app.get("/images/doctor")
 def images_doctor() -> dict[str, Any]:
     return image_service.doctor()
+
+
+@app.post("/images/validate-model")
+def images_validate_model(payload: ImageValidateRequest) -> dict[str, Any]:
+    model_id = payload.model_id.strip()
+    if not model_id:
+        raise error_response("invalid_model", "model_id is required", status=400)
+    result = image_service.validate_model(model_id)
+    return result
 
 
 @app.post("/images/models/refresh")

@@ -5,6 +5,8 @@ import json
 import os
 import random
 import time
+import traceback
+import multiprocessing as mp
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -30,6 +32,103 @@ def _require_pillow():
         raise RuntimeError("missing_dependency:pillow") from exc
 
 
+
+
+def _hf_cache_dir(model_id: str) -> Path | None:
+    root = Path(os.getenv("HF_HOME") or (Path.home() / ".cache" / "huggingface"))
+    candidate = root / "hub" / f"models--{model_id.replace('/', '--')}"
+    return candidate if candidate.exists() else None
+
+
+def _validate_diffusers_dir(path: Path) -> tuple[bool, list[str]]:
+    issues: list[str] = []
+    if not path.exists():
+        issues.append("model_path_missing")
+        return False, issues
+    if not (path / "model_index.json").exists():
+        issues.append("missing_model_index_json")
+    has_weights = any(path.rglob("*.safetensors")) or any(path.rglob("*.bin"))
+    if not has_weights:
+        issues.append("no_weight_files_detected")
+    return len(issues) == 0, issues
+
+
+def _diffusers_worker(payload: dict[str, Any], out_q: Any) -> None:
+    started = time.time()
+    try:
+        import torch
+        from diffusers import AutoPipelineForImage2Image, AutoPipelineForText2Image
+
+        model_id_or_path = str(payload["model_id_or_path"])
+        mode = str(payload["mode"])
+        local_files_only = bool(payload["local_files_only"])
+        device = str(payload["device"])
+        init_image_path = payload.get("init_image_path")
+
+        if mode == "img2img":
+            pipe = AutoPipelineForImage2Image.from_pretrained(model_id_or_path, local_files_only=local_files_only)
+        else:
+            pipe = AutoPipelineForText2Image.from_pretrained(model_id_or_path, local_files_only=local_files_only)
+        pipe.set_progress_bar_config(disable=True)
+        if device == "cuda":
+            pipe = pipe.to("cuda")
+
+        generator = torch.Generator(device=device if device == "cuda" else "cpu")
+        seed = payload.get("seed")
+        generator.manual_seed(int(seed) if seed is not None else random.randint(1, 2**31 - 1))
+
+        if init_image_path:
+            Image, _ = _require_pillow()
+            init_img = Image.open(str(init_image_path)).convert("RGB")
+            result = pipe(
+                prompt=payload["prompt"],
+                image=init_img,
+                negative_prompt=payload.get("negative_prompt"),
+                strength=float(payload["strength"]),
+                num_inference_steps=int(payload["steps"]),
+                guidance_scale=float(payload["guidance_scale"]),
+                generator=generator,
+            )
+        else:
+            result = pipe(
+                prompt=payload["prompt"],
+                negative_prompt=payload.get("negative_prompt"),
+                num_inference_steps=int(payload["steps"]),
+                guidance_scale=float(payload["guidance_scale"]),
+                width=int(payload["width"]),
+                height=int(payload["height"]),
+                generator=generator,
+            )
+        image = result.images[0]
+        buf = io.BytesIO()
+        image.save(buf, format="PNG")
+        out_q.put({
+            "ok": True,
+            "image_bytes": buf.getvalue(),
+            "metadata": {
+                "runtime": "diffusers_local",
+                "mode": mode,
+                "model_source": payload.get("model_source"),
+                "device_used": device,
+                "worker_elapsed_sec": round(time.time() - started, 3),
+            },
+        })
+    except RuntimeError as exc:
+        txt = str(exc).lower()
+        out_q.put({
+            "ok": False,
+            "error_code": "out_of_memory" if "out of memory" in txt else "generation_failed",
+            "error_message": str(exc),
+            "metadata": {"worker_traceback": traceback.format_exc()},
+        })
+    except Exception as exc:  # noqa: BLE001
+        out_q.put({
+            "ok": False,
+            "error_code": "model_load_failed",
+            "error_message": str(exc),
+            "metadata": {"worker_traceback": traceback.format_exc()},
+        })
+
 class ImageGenerationService:
     def __init__(self, config: AppConfig) -> None:
         self.config = config
@@ -48,9 +147,7 @@ class ImageGenerationService:
         return models
 
     def _cache_dir(self, model_id: str) -> Path | None:
-        root = Path(os.getenv("HF_HOME") or (Path.home() / ".cache" / "huggingface"))
-        candidate = root / "hub" / f"models--{model_id.replace('/', '--')}"
-        return candidate if candidate.exists() else None
+        return _hf_cache_dir(model_id)
 
     @staticmethod
     def _dir_size(path: Path) -> int:
@@ -64,12 +161,17 @@ class ImageGenerationService:
         status = {
             "torch_installed": False,
             "torch_version": None,
+            "diffusers_version": None,
+            "transformers_version": None,
+            "accelerate_version": None,
+            "safetensors_version": None,
             "cuda_available": False,
             "cuda_version": None,
             "gpu_name": None,
             "device_preference": pref,
             "effective_device": "cpu",
             "reason": "torch not installed",
+            "local_models_dir": str(self.local_models_dir),
         }
 
         try:
@@ -80,6 +182,18 @@ class ImageGenerationService:
         status["torch_installed"] = True
         status["torch_version"] = getattr(torch, "__version__", None)
         status["cuda_version"] = getattr(getattr(torch, "version", None), "cuda", None)
+
+        for pkg, field in [
+            ("diffusers", "diffusers_version"),
+            ("transformers", "transformers_version"),
+            ("accelerate", "accelerate_version"),
+            ("safetensors", "safetensors_version"),
+        ]:
+            try:
+                mod = __import__(pkg)
+                status[field] = getattr(mod, "__version__", None)
+            except Exception:
+                status[field] = None
 
         cuda_available = bool(torch.cuda.is_available())
         status["cuda_available"] = cuda_available
@@ -176,6 +290,58 @@ class ImageGenerationService:
 
         ok = all(bool(c.get("ok")) for c in checks)
         return {"ok": ok, "runtime": status, "checks": checks}
+
+    def validate_model(self, model_id: str) -> dict[str, Any]:
+        result: dict[str, Any] = {
+            "model_id": model_id,
+            "resolved_path": None,
+            "detected_type": "unknown",
+            "required_files": {"model_index_json": False, "weights_detected": False},
+            "pipeline_class_guess": "AutoPipelineForText2Image",
+            "loadable": False,
+            "warnings": [],
+            "errors": [],
+        }
+
+        try:
+            source, resolved = self._resolve_model_source(model_id)
+        except FileNotFoundError as exc:
+            result["errors"].append(str(exc))
+            return result
+        except ValueError:
+            result["errors"].append("invalid_model_format")
+            return result
+
+        if source == "remote":
+            result["detected_type"] = "huggingface_remote"
+            result["resolved_path"] = resolved
+            if not self._cache_dir(resolved) and not self.config.hf_image_allow_auto_download:
+                result["warnings"].append("remote_model_not_cached")
+            result["loadable"] = True
+            return result
+
+        path = Path(resolved)
+        result["detected_type"] = "diffusers_local"
+        result["resolved_path"] = str(path)
+        ok, issues = _validate_diffusers_dir(path)
+        result["required_files"]["model_index_json"] = (path / "model_index.json").exists()
+        result["required_files"]["weights_detected"] = any(path.rglob("*.safetensors")) or any(path.rglob("*.bin"))
+        if not ok:
+            result["errors"].extend(issues)
+            return result
+
+        model_index = path / "model_index.json"
+        if model_index.exists():
+            try:
+                cfg = json.loads(model_index.read_text(encoding="utf-8"))
+                classes = cfg.get("_class_name") or ""
+                if "Image2Image" in str(classes):
+                    result["pipeline_class_guess"] = "AutoPipelineForImage2Image"
+            except Exception:
+                result["warnings"].append("model_index_unreadable")
+
+        result["loadable"] = True
+        return result
 
     def _scan_local_models(self) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
         image_models: list[dict[str, Any]] = []
@@ -298,6 +464,71 @@ class ImageGenerationService:
             pipe = pipe.to("cuda")
         self._pipelines[key] = pipe
         return pipe
+
+    def _run_diffusers_isolated(
+        self,
+        *,
+        model_id_or_path: str,
+        model_source: str,
+        prompt: str,
+        negative_prompt: str | None,
+        seed: int | None,
+        steps: int,
+        guidance_scale: float,
+        width: int,
+        height: int,
+        init_image_path: str | None,
+        strength: float,
+        device: str,
+    ) -> ImageRuntimeResult:
+        if model_source == "remote" and not self._cache_dir(model_id_or_path) and not self.config.hf_image_allow_auto_download:
+            return ImageRuntimeResult(ok=False, error_code="model_not_found", error_message="Remote model is not cached locally. Put model under ./models or set HF_IMAGE_ALLOW_AUTO_DOWNLOAD=true.")
+
+        timeout_s = int(getattr(self.config, "hf_image_job_timeout_sec", 180) or 180)
+        ctx = mp.get_context("spawn")
+        q = ctx.Queue(maxsize=1)
+        mode = "img2img" if init_image_path else "text2img"
+        payload = {
+            "model_id_or_path": model_id_or_path,
+            "model_source": model_source,
+            "prompt": prompt,
+            "negative_prompt": negative_prompt,
+            "seed": seed,
+            "steps": steps,
+            "guidance_scale": guidance_scale,
+            "width": width,
+            "height": height,
+            "init_image_path": init_image_path,
+            "strength": strength,
+            "device": device,
+            "mode": mode,
+            "local_files_only": model_source == "local" or not self.config.hf_image_allow_auto_download,
+        }
+        proc = ctx.Process(target=_diffusers_worker, args=(payload, q), daemon=True)
+        proc.start()
+        proc.join(timeout=timeout_s)
+
+        if proc.is_alive():
+            proc.terminate()
+            proc.join(timeout=3)
+            return ImageRuntimeResult(ok=False, error_code="runtime_timeout", error_message=f"Image generation timed out after {timeout_s}s")
+
+        if proc.exitcode is None:
+            return ImageRuntimeResult(ok=False, error_code="runtime_crash", error_message="Image worker ended with unknown state")
+        if proc.exitcode != 0 and q.empty():
+            return ImageRuntimeResult(ok=False, error_code="runtime_crash", error_message=f"Image worker crashed with exit code {proc.exitcode}")
+
+        if q.empty():
+            return ImageRuntimeResult(ok=False, error_code="generation_failed", error_message="Image worker returned no result")
+
+        data = q.get()
+        return ImageRuntimeResult(
+            ok=bool(data.get("ok")),
+            image_bytes=data.get("image_bytes"),
+            error_code=data.get("error_code"),
+            error_message=data.get("error_message"),
+            metadata=data.get("metadata") or {},
+        )
 
     def _run_diffusers(
         self,
@@ -425,7 +656,7 @@ class ImageGenerationService:
                 }
                 return ImageRuntimeResult(ok=False, error_code="gpu_required", error_message=f"GPU required but unavailable. {details}")
 
-        result = self._run_diffusers(
+        result = self._run_diffusers_isolated(
             model_id_or_path=resolved_model,
             model_source=model_source,
             prompt=prompt,
@@ -447,7 +678,7 @@ class ImageGenerationService:
 
         allow_cpu_fallback = bool(self.config.hf_image_allow_cpu_fallback)
         if preferred == "cuda" and allow_cpu_fallback and result.error_code in {"out_of_memory", "provider_unavailable"}:
-            retry = self._run_diffusers(
+            retry = self._run_diffusers_isolated(
                 model_id_or_path=resolved_model,
                 model_source=model_source,
                 prompt=prompt,
