@@ -28,18 +28,39 @@ class _ModelsPageState extends State<ModelsPage> {
   String _discoverTask = '';
   String _discoverSort = 'downloads';
   Timer? _downloadsPoller;
+  Timer? _searchDebounce;
+  bool _downloadsPollingActive = false;
 
   @override
   void initState() {
     super.initState();
     _load();
-    _downloadsPoller = Timer.periodic(const Duration(seconds: 1), (_) => _loadDownloads());
   }
 
   @override
   void dispose() {
     _downloadsPoller?.cancel();
+    _searchDebounce?.cancel();
     super.dispose();
+  }
+
+
+  void _startDownloadsPolling() {
+    if (_downloadsPollingActive) return;
+    _downloadsPollingActive = true;
+    _downloadsPoller?.cancel();
+    _downloadsPoller = Timer.periodic(const Duration(seconds: 3), (_) => _loadDownloads());
+  }
+
+  void _stopDownloadsPolling() {
+    _downloadsPollingActive = false;
+    _downloadsPoller?.cancel();
+    _downloadsPoller = null;
+  }
+
+  void _scheduleReload() {
+    _searchDebounce?.cancel();
+    _searchDebounce = Timer(const Duration(milliseconds: 400), _load);
   }
 
   Future<void> _load() async {
@@ -71,18 +92,21 @@ class _ModelsPageState extends State<ModelsPage> {
           _selected = discoverItems.isEmpty ? null : discoverItems.first;
           _error = '';
         });
-        await _loadDownloads();
-        return;
+      } else {
+        setState(() {
+          _models = items;
+          _selected = _models.isEmpty
+              ? null
+              : (_selected != null ? _models.firstWhere((m) => m['id'] == _selected!['id'], orElse: () => _models.first) : _models.first);
+          _error = '';
+        });
       }
 
-      setState(() {
-        _models = items;
-        _selected = _models.isEmpty
-            ? null
-            : (_selected != null ? _models.firstWhere((m) => m['id'] == _selected!['id'], orElse: () => _models.first) : _models.first);
-        _error = '';
-      });
-      await _loadDownloads();
+      if (_provider == 'huggingface') {
+        await _loadDownloads();
+      } else {
+        _stopDownloadsPolling();
+      }
     } catch (e) {
       if (!mounted) return;
       setState(() => _error = '$e');
@@ -97,6 +121,11 @@ class _ModelsPageState extends State<ModelsPage> {
       final hadActive = _downloads.any((d) => _isActiveStatus((d['status'] ?? '').toString()));
       final hasActive = jobs.any((d) => _isActiveStatus((d['status'] ?? '').toString()));
       setState(() => _downloads = jobs);
+      if (hasActive) {
+        _startDownloadsPolling();
+      } else {
+        _stopDownloadsPolling();
+      }
       if (hadActive && !hasActive && _provider == 'huggingface' && _hfMode == 'local') {
         await _load();
       }
@@ -176,7 +205,7 @@ class _ModelsPageState extends State<ModelsPage> {
                 Expanded(
                   child: TextField(
                     decoration: const InputDecoration(prefixIcon: Icon(Icons.search), hintText: 'Search models'),
-                    onChanged: (v) => _search = v,
+                    onChanged: (v) { _search = v; _scheduleReload(); },
                     onSubmitted: (_) => _load(),
                   ),
                 ),
@@ -223,7 +252,7 @@ class _ModelsPageState extends State<ModelsPage> {
                         onChanged: (v) {
                           if (v == null) return;
                           setState(() => _discoverSort = v);
-                          _load();
+                          _scheduleReload();
                         },
                       ),
                     const SizedBox(width: 10),
@@ -239,7 +268,7 @@ class _ModelsPageState extends State<ModelsPage> {
                         onChanged: (v) {
                           if (v == null) return;
                           setState(() => _discoverTask = v);
-                          _load();
+                          _scheduleReload();
                         },
                       ),
                   ],
@@ -318,7 +347,7 @@ class _ModelsPageState extends State<ModelsPage> {
                       child: ListTile(
                         onTap: () => setState(() => _selected = m),
                         title: Text((m['name'] ?? m['display_name'] ?? '').toString()),
-                        subtitle: Text('${m['task'] ?? m['pipeline_tag'] ?? 'Task unknown'} • ${(m['size_bytes'] ?? 'Size unknown')}'),
+                        subtitle: Text('${m['task'] ?? m['pipeline_tag'] ?? 'Task unknown'} • ${m['size_bytes'] ?? ((m['metadata'] as Map<String, dynamic>?)?['size_bytes'] ?? 'Size not available yet')}'),
                         trailing: _hfMode == 'discover'
                             ? FilledButton.tonal(
                                 onPressed: isDownloading ? null : () => _downloadModel(modelId),
@@ -359,8 +388,8 @@ class _ModelsPageState extends State<ModelsPage> {
                       Text('Provider: ${_selected!['provider']}'),
                       Text('Model ID: ${_selected!['model_id']}'),
                       Text('Task: ${_selected!['task'] ?? _selected!['pipeline_tag'] ?? 'unknown'}'),
-                      Text('Runtime: ${_selected!['runtime'] ?? ((_selected!['metadata'] as Map<String, dynamic>?)?['runtime'] ?? 'unknown')}'),
-                      Text('Local path: ${_selected!['local_path'] ?? ((_selected!['raw'] as Map<String, dynamic>?)?['local_path'] ?? 'unknown')}'),
+                      Text('Runtime: ${_selected!['runtime'] ?? ((_selected!['metadata'] as Map<String, dynamic>?)?['runtime'] ?? 'Not available yet')}'),
+                      Text('Local path: ${_selected!['local_path'] ?? ((_selected!['raw'] as Map<String, dynamic>?)?['local_path'] ?? 'Not available yet')}'),
                       const SizedBox(height: 10),
                       Wrap(spacing: 6, runSpacing: 6, children: [
                         _capabilityChip('Chat', (_selected!['capabilities']?['supports_chat'] ?? _selected!['supports']?['chat']) == true),
@@ -370,7 +399,7 @@ class _ModelsPageState extends State<ModelsPage> {
                         _capabilityChip('Streaming', (_selected!['capabilities']?['supports_streaming'] ?? _selected!['supports_streaming']) == true),
                       ]),
                       const SizedBox(height: 10),
-                      Text('Size: ${((_selected!['metadata'] as Map<String, dynamic>?)?['size_bytes'] ?? _selected!['size_bytes'] ?? 'Size unknown')}'),
+                      Text('Size: ${((_selected!['metadata'] as Map<String, dynamic>?)?['size_bytes'] ?? _selected!['size_bytes'] ?? 'Size not available yet')}'),
                       Text('Parameters: ${((_selected!['metadata'] as Map<String, dynamic>?)?['parameters'] ?? 'unknown')}'),
                       Text('Context length: ${((_selected!['metadata'] as Map<String, dynamic>?)?['context_length'] ?? 'unknown')}'),
                       Text('Quantization: ${((_selected!['metadata'] as Map<String, dynamic>?)?['quantization'] ?? 'unknown')}'),
@@ -391,10 +420,10 @@ class _ModelsPageState extends State<ModelsPage> {
                             label: const Text('Refresh metadata'),
                           ),
                       ]),
-                      if ((((_selected!['metadata'] as Map<String, dynamic>?)?['metadata_completeness'] ?? _selected!['metadata_completeness']) == null))
+                      if ((((_selected!['metadata'] as Map<String, dynamic>?)?['metadata_completeness'] ?? _selected!['metadata_completeness']) != 'good'))
                         const Padding(
                           padding: EdgeInsets.only(top: 8),
-                          child: Text('Detailed metadata not available for this model yet.'),
+                          child: Text('Detailed metadata is partially available for this model.'),
                         ),
                     ]),
                   ),
