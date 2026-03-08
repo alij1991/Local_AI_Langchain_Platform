@@ -1,0 +1,1056 @@
+{
+  "run_id": "20fc1f2d-232a-4cc3-ae3f-75e50548365f",
+  "conversation_id": "e9a42226-952a-4659-acb7-29280169ce5c",
+  "agent_name": "wedding-plannar",
+  "model_provider": "ollama",
+  "model_id": "lfm2.5-thinking:latest",
+  "start_timestamp": "2026-02-24T22:44:07.503780+00:00",
+  "end_timestamp": "2026-02-24T22:44:34.552031+00:00",
+  "duration_ms": 27048,
+  "success": true,
+  "error": null,
+  "events": [
+    {
+      "event_type": "llm_start",
+      "name": "ChatOllama",
+      "inputs": {
+        "prompts": [
+          "System: You are a helpful AI assistant planning the whole wedding base on the date and location and finding the flight and venue options using the tools you have. if user provide their current location donot ask additional questions and get the result they want using the tools you have \nHuman: Hey I want to organize my wedding for 20th of June in Paris. and we want option to fly from Madrid to the wedding. can you plan it for us"
+        ]
+      },
+      "outputs": null,
+      "token_usage": null,
+      "duration_ms": null,
+      "timestamp": "2026-02-24T22:44:08.932637+00:00"
+    },
+    {
+      "event_type": "llm_stream",
+      "name": "llm",
+      "inputs": null,
+      "outputs": {
+        "chunk_count": 10,
+        "partial": ""
+      },
+      "token_usage": null,
+      "duration_ms": null,
+      "timestamp": "2026-02-24T22:44:09.787475+00:00"
+    },
+    {
+      "event_type": "llm_stream",
+      "name": "llm",
+      "inputs": null,
+      "outputs": {
+        "chunk_count": 20,
+        "partial": ""
+      },
+      "token_usage": null,
+      "duration_ms": null,
+      "timestamp": "2026-02-24T22:44:10.104335+00:00"
+    },
+    {
+      "event_type": "llm_stream",
+      "name": "llm",
+      "inputs": null,
+      "outputs": {
+        "chunk_count": 30,
+        "partial": ""
+      },
+      "token_usage": null,
+      "duration_ms": null,
+      "timestamp": "2026-02-24T22:44:10.394099+00:00"
+    },
+    {
+      "event_type": "llm_stream",
+      "name": "llm",
+      "inputs": null,
+      "outputs": {
+        "chunk_count": 40,
+        "partial": ""
+      },
+      "token_usage": null,
+      "duration_ms": null,
+      "timestamp": "2026-02-24T22:44:10.684923+00:00"
+    },
+    {
+      "event_type": "llm_stream",
+      "name": "llm",
+      "inputs": null,
+      "outputs": {
+        "chunk_count": 50,
+        "partial": ""
+      },
+      "token_usage": null,
+      "duration_ms": null,
+      "timestamp": "2026-02-24T22:44:10.973929+00:00"
+    },
+    {
+      "event_type": "llm_stream",
+      "name": "llm",
+      "inputs": null,
+      "outputs": {
+        "chunk_count": 60,
+        "partial": ""
+      },
+      "token_usage": null,
+      "duration_ms": null,
+      "timestamp": "2026-02-24T22:44:11.265078+00:00"
+    },
+    {
+      "event_type": "llm_stream",
+      "name": "llm",
+      "inputs": null,
+      "outputs": {
+        "chunk_count": 70,
+        "partial": ""
+      },
+      "token_usage": null,
+      "duration_ms": null,
+      "timestamp": "2026-02-24T22:44:11.553381+00:00"
+    },
+    {
+      "event_type": "llm_stream",
+      "name": "llm",
+      "inputs": null,
+      "outputs": {
+        "chunk_count": 80,
+        "partial": ""
+      },
+      "token_usage": null,
+      "duration_ms": null,
+      "timestamp": "2026-02-24T22:44:11.842751+00:00"
+    },
+    {
+      "event_type": "llm_stream",
+      "name": "llm",
+      "inputs": null,
+      "outputs": {
+        "chunk_count": 90,
+        "partial": ""
+      },
+      "token_usage": null,
+      "duration_ms": null,
+      "timestamp": "2026-02-24T22:44:12.161484+00:00"
+    },
+    {
+      "event_type": "llm_stream",
+      "name": "llm",
+      "inputs": null,
+      "outputs": {
+        "chunk_count": 100,
+        "partial": ""
+      },
+      "token_usage": null,
+      "duration_ms": null,
+      "timestamp": "2026-02-24T22:44:12.450382+00:00"
+    },
+    {
+      "event_type": "llm_stream",
+      "name": "llm",
+      "inputs": null,
+      "outputs": {
+        "chunk_count": 110,
+        "partial": ""
+      },
+      "token_usage": null,
+      "duration_ms": null,
+      "timestamp": "2026-02-24T22:44:12.741078+00:00"
+    },
+    {
+      "event_type": "llm_stream",
+      "name": "llm",
+      "inputs": null,
+      "outputs": {
+        "chunk_count": 120,
+        "partial": ""
+      },
+      "token_usage": null,
+      "duration_ms": null,
+      "timestamp": "2026-02-24T22:44:13.034295+00:00"
+    },
+    {
+      "event_type": "llm_stream",
+      "name": "llm",
+      "inputs": null,
+      "outputs": {
+        "chunk_count": 130,
+        "partial": ""
+      },
+      "token_usage": null,
+      "duration_ms": null,
+      "timestamp": "2026-02-24T22:44:13.322899+00:00"
+    },
+    {
+      "event_type": "llm_stream",
+      "name": "llm",
+      "inputs": null,
+      "outputs": {
+        "chunk_count": 140,
+        "partial": ""
+      },
+      "token_usage": null,
+      "duration_ms": null,
+      "timestamp": "2026-02-24T22:44:13.612709+00:00"
+    },
+    {
+      "event_type": "llm_stream",
+      "name": "llm",
+      "inputs": null,
+      "outputs": {
+        "chunk_count": 150,
+        "partial": ""
+      },
+      "token_usage": null,
+      "duration_ms": null,
+      "timestamp": "2026-02-24T22:44:13.901549+00:00"
+    },
+    {
+      "event_type": "llm_stream",
+      "name": "llm",
+      "inputs": null,
+      "outputs": {
+        "chunk_count": 160,
+        "partial": ""
+      },
+      "token_usage": null,
+      "duration_ms": null,
+      "timestamp": "2026-02-24T22:44:14.191585+00:00"
+    },
+    {
+      "event_type": "llm_stream",
+      "name": "llm",
+      "inputs": null,
+      "outputs": {
+        "chunk_count": 170,
+        "partial": ""
+      },
+      "token_usage": null,
+      "duration_ms": null,
+      "timestamp": "2026-02-24T22:44:14.481177+00:00"
+    },
+    {
+      "event_type": "llm_stream",
+      "name": "llm",
+      "inputs": null,
+      "outputs": {
+        "chunk_count": 180,
+        "partial": ""
+      },
+      "token_usage": null,
+      "duration_ms": null,
+      "timestamp": "2026-02-24T22:44:14.772036+00:00"
+    },
+    {
+      "event_type": "llm_stream",
+      "name": "llm",
+      "inputs": null,
+      "outputs": {
+        "chunk_count": 190,
+        "partial": ""
+      },
+      "token_usage": null,
+      "duration_ms": null,
+      "timestamp": "2026-02-24T22:44:15.064395+00:00"
+    },
+    {
+      "event_type": "llm_stream",
+      "name": "llm",
+      "inputs": null,
+      "outputs": {
+        "chunk_count": 200,
+        "partial": ""
+      },
+      "token_usage": null,
+      "duration_ms": null,
+      "timestamp": "2026-02-24T22:44:15.358133+00:00"
+    },
+    {
+      "event_type": "llm_stream",
+      "name": "llm",
+      "inputs": null,
+      "outputs": {
+        "chunk_count": 210,
+        "partial": ""
+      },
+      "token_usage": null,
+      "duration_ms": null,
+      "timestamp": "2026-02-24T22:44:15.651673+00:00"
+    },
+    {
+      "event_type": "llm_stream",
+      "name": "llm",
+      "inputs": null,
+      "outputs": {
+        "chunk_count": 220,
+        "partial": ""
+      },
+      "token_usage": null,
+      "duration_ms": null,
+      "timestamp": "2026-02-24T22:44:15.940246+00:00"
+    },
+    {
+      "event_type": "llm_stream",
+      "name": "llm",
+      "inputs": null,
+      "outputs": {
+        "chunk_count": 230,
+        "partial": ""
+      },
+      "token_usage": null,
+      "duration_ms": null,
+      "timestamp": "2026-02-24T22:44:16.230191+00:00"
+    },
+    {
+      "event_type": "llm_stream",
+      "name": "llm",
+      "inputs": null,
+      "outputs": {
+        "chunk_count": 240,
+        "partial": ""
+      },
+      "token_usage": null,
+      "duration_ms": null,
+      "timestamp": "2026-02-24T22:44:16.520905+00:00"
+    },
+    {
+      "event_type": "llm_stream",
+      "name": "llm",
+      "inputs": null,
+      "outputs": {
+        "chunk_count": 250,
+        "partial": ""
+      },
+      "token_usage": null,
+      "duration_ms": null,
+      "timestamp": "2026-02-24T22:44:16.812116+00:00"
+    },
+    {
+      "event_type": "llm_stream",
+      "name": "llm",
+      "inputs": null,
+      "outputs": {
+        "chunk_count": 260,
+        "partial": ""
+      },
+      "token_usage": null,
+      "duration_ms": null,
+      "timestamp": "2026-02-24T22:44:17.102553+00:00"
+    },
+    {
+      "event_type": "llm_stream",
+      "name": "llm",
+      "inputs": null,
+      "outputs": {
+        "chunk_count": 270,
+        "partial": ""
+      },
+      "token_usage": null,
+      "duration_ms": null,
+      "timestamp": "2026-02-24T22:44:17.396018+00:00"
+    },
+    {
+      "event_type": "llm_stream",
+      "name": "llm",
+      "inputs": null,
+      "outputs": {
+        "chunk_count": 280,
+        "partial": ""
+      },
+      "token_usage": null,
+      "duration_ms": null,
+      "timestamp": "2026-02-24T22:44:17.690999+00:00"
+    },
+    {
+      "event_type": "llm_stream",
+      "name": "llm",
+      "inputs": null,
+      "outputs": {
+        "chunk_count": 290,
+        "partial": ""
+      },
+      "token_usage": null,
+      "duration_ms": null,
+      "timestamp": "2026-02-24T22:44:17.983231+00:00"
+    },
+    {
+      "event_type": "llm_stream",
+      "name": "llm",
+      "inputs": null,
+      "outputs": {
+        "chunk_count": 300,
+        "partial": ""
+      },
+      "token_usage": null,
+      "duration_ms": null,
+      "timestamp": "2026-02-24T22:44:18.276130+00:00"
+    },
+    {
+      "event_type": "llm_stream",
+      "name": "llm",
+      "inputs": null,
+      "outputs": {
+        "chunk_count": 310,
+        "partial": ""
+      },
+      "token_usage": null,
+      "duration_ms": null,
+      "timestamp": "2026-02-24T22:44:18.567815+00:00"
+    },
+    {
+      "event_type": "llm_stream",
+      "name": "llm",
+      "inputs": null,
+      "outputs": {
+        "chunk_count": 320,
+        "partial": ""
+      },
+      "token_usage": null,
+      "duration_ms": null,
+      "timestamp": "2026-02-24T22:44:18.859808+00:00"
+    },
+    {
+      "event_type": "llm_stream",
+      "name": "llm",
+      "inputs": null,
+      "outputs": {
+        "chunk_count": 330,
+        "partial": ""
+      },
+      "token_usage": null,
+      "duration_ms": null,
+      "timestamp": "2026-02-24T22:44:19.150425+00:00"
+    },
+    {
+      "event_type": "llm_stream",
+      "name": "llm",
+      "inputs": null,
+      "outputs": {
+        "chunk_count": 340,
+        "partial": ""
+      },
+      "token_usage": null,
+      "duration_ms": null,
+      "timestamp": "2026-02-24T22:44:19.444437+00:00"
+    },
+    {
+      "event_type": "llm_stream",
+      "name": "llm",
+      "inputs": null,
+      "outputs": {
+        "chunk_count": 350,
+        "partial": ""
+      },
+      "token_usage": null,
+      "duration_ms": null,
+      "timestamp": "2026-02-24T22:44:19.737678+00:00"
+    },
+    {
+      "event_type": "llm_stream",
+      "name": "llm",
+      "inputs": null,
+      "outputs": {
+        "chunk_count": 360,
+        "partial": ""
+      },
+      "token_usage": null,
+      "duration_ms": null,
+      "timestamp": "2026-02-24T22:44:20.029062+00:00"
+    },
+    {
+      "event_type": "llm_stream",
+      "name": "llm",
+      "inputs": null,
+      "outputs": {
+        "chunk_count": 370,
+        "partial": ""
+      },
+      "token_usage": null,
+      "duration_ms": null,
+      "timestamp": "2026-02-24T22:44:20.321002+00:00"
+    },
+    {
+      "event_type": "llm_stream",
+      "name": "llm",
+      "inputs": null,
+      "outputs": {
+        "chunk_count": 380,
+        "partial": ""
+      },
+      "token_usage": null,
+      "duration_ms": null,
+      "timestamp": "2026-02-24T22:44:20.613562+00:00"
+    },
+    {
+      "event_type": "llm_stream",
+      "name": "llm",
+      "inputs": null,
+      "outputs": {
+        "chunk_count": 390,
+        "partial": ""
+      },
+      "token_usage": null,
+      "duration_ms": null,
+      "timestamp": "2026-02-24T22:44:20.903874+00:00"
+    },
+    {
+      "event_type": "llm_stream",
+      "name": "llm",
+      "inputs": null,
+      "outputs": {
+        "chunk_count": 400,
+        "partial": ""
+      },
+      "token_usage": null,
+      "duration_ms": null,
+      "timestamp": "2026-02-24T22:44:21.222919+00:00"
+    },
+    {
+      "event_type": "llm_stream",
+      "name": "llm",
+      "inputs": null,
+      "outputs": {
+        "chunk_count": 410,
+        "partial": ""
+      },
+      "token_usage": null,
+      "duration_ms": null,
+      "timestamp": "2026-02-24T22:44:21.516726+00:00"
+    },
+    {
+      "event_type": "llm_stream",
+      "name": "llm",
+      "inputs": null,
+      "outputs": {
+        "chunk_count": 420,
+        "partial": ""
+      },
+      "token_usage": null,
+      "duration_ms": null,
+      "timestamp": "2026-02-24T22:44:21.811275+00:00"
+    },
+    {
+      "event_type": "llm_stream",
+      "name": "llm",
+      "inputs": null,
+      "outputs": {
+        "chunk_count": 430,
+        "partial": ""
+      },
+      "token_usage": null,
+      "duration_ms": null,
+      "timestamp": "2026-02-24T22:44:22.110678+00:00"
+    },
+    {
+      "event_type": "llm_stream",
+      "name": "llm",
+      "inputs": null,
+      "outputs": {
+        "chunk_count": 440,
+        "partial": "Here’s a structured plan for"
+      },
+      "token_usage": null,
+      "duration_ms": null,
+      "timestamp": "2026-02-24T22:44:22.464669+00:00"
+    },
+    {
+      "event_type": "llm_stream",
+      "name": "llm",
+      "inputs": null,
+      "outputs": {
+        "chunk_count": 450,
+        "partial": "Here’s a structured plan for your Paris wedding on June 20th, lever"
+      },
+      "token_usage": null,
+      "duration_ms": null,
+      "timestamp": "2026-02-24T22:44:22.762204+00:00"
+    },
+    {
+      "event_type": "llm_stream",
+      "name": "llm",
+      "inputs": null,
+      "outputs": {
+        "chunk_count": 460,
+        "partial": "Here’s a structured plan for your Paris wedding on June 20th, leveraging your request for a Madrid-to-Paris flight"
+      },
+      "token_usage": null,
+      "duration_ms": null,
+      "timestamp": "2026-02-24T22:44:23.060766+00:00"
+    },
+    {
+      "event_type": "llm_stream",
+      "name": "llm",
+      "inputs": null,
+      "outputs": {
+        "chunk_count": 470,
+        "partial": "Here’s a structured plan for your Paris wedding on June 20th, leveraging your request for a Madrid-to-Paris flight:\n\n---\n\n### **Wedding Plan for"
+      },
+      "token_usage": null,
+      "duration_ms": null,
+      "timestamp": "2026-02-24T22:44:23.359833+00:00"
+    },
+    {
+      "event_type": "llm_stream",
+      "name": "llm",
+      "inputs": null,
+      "outputs": {
+        "chunk_count": 480,
+        "partial": "Here’s a structured plan for your Paris wedding on June 20th, leveraging your request for a Madrid-to-Paris flight:\n\n---\n\n### **Wedding Plan for June 20th in Paris**  \n**Date"
+      },
+      "token_usage": null,
+      "duration_ms": null,
+      "timestamp": "2026-02-24T22:44:23.661370+00:00"
+    },
+    {
+      "event_type": "llm_stream",
+      "name": "llm",
+      "inputs": null,
+      "outputs": {
+        "chunk_count": 490,
+        "partial": "Here’s a structured plan for your Paris wedding on June 20th, leveraging your request for a Madrid-to-Paris flight:\n\n---\n\n### **Wedding Plan for June 20th in Paris**  \n**Date:** June 20, 2024  \n**"
+      },
+      "token_usage": null,
+      "duration_ms": null,
+      "timestamp": "2026-02-24T22:44:23.956900+00:00"
+    },
+    {
+      "event_type": "llm_stream",
+      "name": "llm",
+      "inputs": null,
+      "outputs": {
+        "chunk_count": 500,
+        "partial": "Here’s a structured plan for your Paris wedding on June 20th, leveraging your request for a Madrid-to-Paris flight:\n\n---\n\n### **Wedding Plan for June 20th in Paris**  \n**Date:** June 20, 2024  \n**Location:** Paris, France  \n\n#### **1"
+      },
+      "token_usage": null,
+      "duration_ms": null,
+      "timestamp": "2026-02-24T22:44:24.258506+00:00"
+    },
+    {
+      "event_type": "llm_stream",
+      "name": "llm",
+      "inputs": null,
+      "outputs": {
+        "chunk_count": 510,
+        "partial": "Here’s a structured plan for your Paris wedding on June 20th, leveraging your request for a Madrid-to-Paris flight:\n\n---\n\n### **Wedding Plan for June 20th in Paris**  \n**Date:** June 20, 2024  \n**Location:** Paris, France  \n\n#### **1. Venue Options in Paris**  \n- **"
+      },
+      "token_usage": null,
+      "duration_ms": null,
+      "timestamp": "2026-02-24T22:44:24.556980+00:00"
+    },
+    {
+      "event_type": "llm_stream",
+      "name": "llm",
+      "inputs": null,
+      "outputs": {
+        "chunk_count": 520,
+        "partial": "Here’s a structured plan for your Paris wedding on June 20th, leveraging your request for a Madrid-to-Paris flight:\n\n---\n\n### **Wedding Plan for June 20th in Paris**  \n**Date:** June 20, 2024  \n**Location:** Paris, France  \n\n#### **1. Venue Options in Paris**  \n- **Champs-Élysées:** Elegant"
+      },
+      "token_usage": null,
+      "duration_ms": null,
+      "timestamp": "2026-02-24T22:44:24.856222+00:00"
+    },
+    {
+      "event_type": "llm_stream",
+      "name": "llm",
+      "inputs": null,
+      "outputs": {
+        "chunk_count": 530,
+        "partial": "Here’s a structured plan for your Paris wedding on June 20th, leveraging your request for a Madrid-to-Paris flight:\n\n---\n\n### **Wedding Plan for June 20th in Paris**  \n**Date:** June 20, 2024  \n**Location:** Paris, France  \n\n#### **1. Venue Options in Paris**  \n- **Champs-Élysées:** Elegant ballrooms like *Le Cinq* or *"
+      },
+      "token_usage": null,
+      "duration_ms": null,
+      "timestamp": "2026-02-24T22:44:25.150601+00:00"
+    },
+    {
+      "event_type": "llm_stream",
+      "name": "llm",
+      "inputs": null,
+      "outputs": {
+        "chunk_count": 540,
+        "partial": "Here’s a structured plan for your Paris wedding on June 20th, leveraging your request for a Madrid-to-Paris flight:\n\n---\n\n### **Wedding Plan for June 20th in Paris**  \n**Date:** June 20, 2024  \n**Location:** Paris, France  \n\n#### **1. Venue Options in Paris**  \n- **Champs-Élysées:** Elegant ballrooms like *Le Cinq* or *L’Étoile* for a classic French"
+      },
+      "token_usage": null,
+      "duration_ms": null,
+      "timestamp": "2026-02-24T22:44:25.447658+00:00"
+    },
+    {
+      "event_type": "llm_stream",
+      "name": "llm",
+      "inputs": null,
+      "outputs": {
+        "chunk_count": 550,
+        "partial": "Here’s a structured plan for your Paris wedding on June 20th, leveraging your request for a Madrid-to-Paris flight:\n\n---\n\n### **Wedding Plan for June 20th in Paris**  \n**Date:** June 20, 2024  \n**Location:** Paris, France  \n\n#### **1. Venue Options in Paris**  \n- **Champs-Élysées:** Elegant ballrooms like *Le Cinq* or *L’Étoile* for a classic French touch.  \n- **Montmartre:** Int"
+      },
+      "token_usage": null,
+      "duration_ms": null,
+      "timestamp": "2026-02-24T22:44:25.745945+00:00"
+    },
+    {
+      "event_type": "llm_stream",
+      "name": "llm",
+      "inputs": null,
+      "outputs": {
+        "chunk_count": 560,
+        "partial": "Here’s a structured plan for your Paris wedding on June 20th, leveraging your request for a Madrid-to-Paris flight:\n\n---\n\n### **Wedding Plan for June 20th in Paris**  \n**Date:** June 20, 2024  \n**Location:** Paris, France  \n\n#### **1. Venue Options in Paris**  \n- **Champs-Élysées:** Elegant ballrooms like *Le Cinq* or *L’Étoile* for a classic French touch.  \n- **Montmartre:** Intimate venues like *La Maison Rose* or *"
+      },
+      "token_usage": null,
+      "duration_ms": null,
+      "timestamp": "2026-02-24T22:44:26.042643+00:00"
+    },
+    {
+      "event_type": "llm_stream",
+      "name": "llm",
+      "inputs": null,
+      "outputs": {
+        "chunk_count": 570,
+        "partial": "Here’s a structured plan for your Paris wedding on June 20th, leveraging your request for a Madrid-to-Paris flight:\n\n---\n\n### **Wedding Plan for June 20th in Paris**  \n**Date:** June 20, 2024  \n**Location:** Paris, France  \n\n#### **1. Venue Options in Paris**  \n- **Champs-Élysées:** Elegant ballrooms like *Le Cinq* or *L’Étoile* for a classic French touch.  \n- **Montmartre:** Intimate venues like *La Maison Rose* or *Le Jardin des Plantes* for a romantic"
+      },
+      "token_usage": null,
+      "duration_ms": null,
+      "timestamp": "2026-02-24T22:44:26.339826+00:00"
+    },
+    {
+      "event_type": "llm_stream",
+      "name": "llm",
+      "inputs": null,
+      "outputs": {
+        "chunk_count": 580,
+        "partial": "Here’s a structured plan for your Paris wedding on June 20th, leveraging your request for a Madrid-to-Paris flight:\n\n---\n\n### **Wedding Plan for June 20th in Paris**  \n**Date:** June 20, 2024  \n**Location:** Paris, France  \n\n#### **1. Venue Options in Paris**  \n- **Champs-Élysées:** Elegant ballrooms like *Le Cinq* or *L’Étoile* for a classic French touch.  \n- **Montmartre:** Intimate venues like *La Maison Rose* or *Le Jardin des Plantes* for a romantic vibe.  \n- **Rue de Riv"
+      },
+      "token_usage": null,
+      "duration_ms": null,
+      "timestamp": "2026-02-24T22:44:26.643940+00:00"
+    },
+    {
+      "event_type": "llm_stream",
+      "name": "llm",
+      "inputs": null,
+      "outputs": {
+        "chunk_count": 590,
+        "partial": "tured plan for your Paris wedding on June 20th, leveraging your request for a Madrid-to-Paris flight:\n\n---\n\n### **Wedding Plan for June 20th in Paris**  \n**Date:** June 20, 2024  \n**Location:** Paris, France  \n\n#### **1. Venue Options in Paris**  \n- **Champs-Élysées:** Elegant ballrooms like *Le Cinq* or *L’Étoile* for a classic French touch.  \n- **Montmartre:** Intimate venues like *La Maison Rose* or *Le Jardin des Plantes* for a romantic vibe.  \n- **Rue de Rivoli:** Modern spaces like *Le 19*"
+      },
+      "token_usage": null,
+      "duration_ms": null,
+      "timestamp": "2026-02-24T22:44:26.947616+00:00"
+    },
+    {
+      "event_type": "llm_stream",
+      "name": "llm",
+      "inputs": null,
+      "outputs": {
+        "chunk_count": 600,
+        "partial": "e 20th, leveraging your request for a Madrid-to-Paris flight:\n\n---\n\n### **Wedding Plan for June 20th in Paris**  \n**Date:** June 20, 2024  \n**Location:** Paris, France  \n\n#### **1. Venue Options in Paris**  \n- **Champs-Élysées:** Elegant ballrooms like *Le Cinq* or *L’Étoile* for a classic French touch.  \n- **Montmartre:** Intimate venues like *La Maison Rose* or *Le Jardin des Plantes* for a romantic vibe.  \n- **Rue de Rivoli:** Modern spaces like *Le 19* or *Le 19* for contemporary aesthetics."
+      },
+      "token_usage": null,
+      "duration_ms": null,
+      "timestamp": "2026-02-24T22:44:27.242359+00:00"
+    },
+    {
+      "event_type": "llm_stream",
+      "name": "llm",
+      "inputs": null,
+      "outputs": {
+        "chunk_count": 610,
+        "partial": "for a Madrid-to-Paris flight:\n\n---\n\n### **Wedding Plan for June 20th in Paris**  \n**Date:** June 20, 2024  \n**Location:** Paris, France  \n\n#### **1. Venue Options in Paris**  \n- **Champs-Élysées:** Elegant ballrooms like *Le Cinq* or *L’Étoile* for a classic French touch.  \n- **Montmartre:** Intimate venues like *La Maison Rose* or *Le Jardin des Plantes* for a romantic vibe.  \n- **Rue de Rivoli:** Modern spaces like *Le 19* or *Le 19* for contemporary aesthetics.  \n\n#### **2. Flight Logistics**"
+      },
+      "token_usage": null,
+      "duration_ms": null,
+      "timestamp": "2026-02-24T22:44:27.540681+00:00"
+    },
+    {
+      "event_type": "llm_stream",
+      "name": "llm",
+      "inputs": null,
+      "outputs": {
+        "chunk_count": 620,
+        "partial": "\n\n---\n\n### **Wedding Plan for June 20th in Paris**  \n**Date:** June 20, 2024  \n**Location:** Paris, France  \n\n#### **1. Venue Options in Paris**  \n- **Champs-Élysées:** Elegant ballrooms like *Le Cinq* or *L’Étoile* for a classic French touch.  \n- **Montmartre:** Intimate venues like *La Maison Rose* or *Le Jardin des Plantes* for a romantic vibe.  \n- **Rue de Rivoli:** Modern spaces like *Le 19* or *Le 19* for contemporary aesthetics.  \n\n#### **2. Flight Logistics**  \n- **Departure:** Madrid (M"
+      },
+      "token_usage": null,
+      "duration_ms": null,
+      "timestamp": "2026-02-24T22:44:27.846557+00:00"
+    },
+    {
+      "event_type": "llm_stream",
+      "name": "llm",
+      "inputs": null,
+      "outputs": {
+        "chunk_count": 630,
+        "partial": "for June 20th in Paris**  \n**Date:** June 20, 2024  \n**Location:** Paris, France  \n\n#### **1. Venue Options in Paris**  \n- **Champs-Élysées:** Elegant ballrooms like *Le Cinq* or *L’Étoile* for a classic French touch.  \n- **Montmartre:** Intimate venues like *La Maison Rose* or *Le Jardin des Plantes* for a romantic vibe.  \n- **Rue de Rivoli:** Modern spaces like *Le 19* or *Le 19* for contemporary aesthetics.  \n\n#### **2. Flight Logistics**  \n- **Departure:** Madrid (MAD) to Paris (CDG) on June"
+      },
+      "token_usage": null,
+      "duration_ms": null,
+      "timestamp": "2026-02-24T22:44:28.147556+00:00"
+    },
+    {
+      "event_type": "llm_stream",
+      "name": "llm",
+      "inputs": null,
+      "outputs": {
+        "chunk_count": 640,
+        "partial": "** June 20, 2024  \n**Location:** Paris, France  \n\n#### **1. Venue Options in Paris**  \n- **Champs-Élysées:** Elegant ballrooms like *Le Cinq* or *L’Étoile* for a classic French touch.  \n- **Montmartre:** Intimate venues like *La Maison Rose* or *Le Jardin des Plantes* for a romantic vibe.  \n- **Rue de Rivoli:** Modern spaces like *Le 19* or *Le 19* for contemporary aesthetics.  \n\n#### **2. Flight Logistics**  \n- **Departure:** Madrid (MAD) to Paris (CDG) on June 19.  \n- **Recommended Airlines:**"
+      },
+      "token_usage": null,
+      "duration_ms": null,
+      "timestamp": "2026-02-24T22:44:28.445602+00:00"
+    },
+    {
+      "event_type": "llm_stream",
+      "name": "llm",
+      "inputs": null,
+      "outputs": {
+        "chunk_count": 650,
+        "partial": "ion:** Paris, France  \n\n#### **1. Venue Options in Paris**  \n- **Champs-Élysées:** Elegant ballrooms like *Le Cinq* or *L’Étoile* for a classic French touch.  \n- **Montmartre:** Intimate venues like *La Maison Rose* or *Le Jardin des Plantes* for a romantic vibe.  \n- **Rue de Rivoli:** Modern spaces like *Le 19* or *Le 19* for contemporary aesthetics.  \n\n#### **2. Flight Logistics**  \n- **Departure:** Madrid (MAD) to Paris (CDG) on June 19.  \n- **Recommended Airlines:** Iberia, Vueling, or easyJ"
+      },
+      "token_usage": null,
+      "duration_ms": null,
+      "timestamp": "2026-02-24T22:44:28.748078+00:00"
+    },
+    {
+      "event_type": "llm_stream",
+      "name": "llm",
+      "inputs": null,
+      "outputs": {
+        "chunk_count": 660,
+        "partial": "Options in Paris**  \n- **Champs-Élysées:** Elegant ballrooms like *Le Cinq* or *L’Étoile* for a classic French touch.  \n- **Montmartre:** Intimate venues like *La Maison Rose* or *Le Jardin des Plantes* for a romantic vibe.  \n- **Rue de Rivoli:** Modern spaces like *Le 19* or *Le 19* for contemporary aesthetics.  \n\n#### **2. Flight Logistics**  \n- **Departure:** Madrid (MAD) to Paris (CDG) on June 19.  \n- **Recommended Airlines:** Iberia, Vueling, or easyJet (direct flights available).  \n- **Tip"
+      },
+      "token_usage": null,
+      "duration_ms": null,
+      "timestamp": "2026-02-24T22:44:29.050971+00:00"
+    },
+    {
+      "event_type": "llm_stream",
+      "name": "llm",
+      "inputs": null,
+      "outputs": {
+        "chunk_count": 670,
+        "partial": " ballrooms like *Le Cinq* or *L’Étoile* for a classic French touch.  \n- **Montmartre:** Intimate venues like *La Maison Rose* or *Le Jardin des Plantes* for a romantic vibe.  \n- **Rue de Rivoli:** Modern spaces like *Le 19* or *Le 19* for contemporary aesthetics.  \n\n#### **2. Flight Logistics**  \n- **Departure:** Madrid (MAD) to Paris (CDG) on June 19.  \n- **Recommended Airlines:** Iberia, Vueling, or easyJet (direct flights available).  \n- **Tip:** Book early to secure seats and compare prices."
+      },
+      "token_usage": null,
+      "duration_ms": null,
+      "timestamp": "2026-02-24T22:44:29.352166+00:00"
+    },
+    {
+      "event_type": "llm_stream",
+      "name": "llm",
+      "inputs": null,
+      "outputs": {
+        "chunk_count": 680,
+        "partial": "oile* for a classic French touch.  \n- **Montmartre:** Intimate venues like *La Maison Rose* or *Le Jardin des Plantes* for a romantic vibe.  \n- **Rue de Rivoli:** Modern spaces like *Le 19* or *Le 19* for contemporary aesthetics.  \n\n#### **2. Flight Logistics**  \n- **Departure:** Madrid (MAD) to Paris (CDG) on June 19.  \n- **Recommended Airlines:** Iberia, Vueling, or easyJet (direct flights available).  \n- **Tip:** Book early to secure seats and compare prices.  \n\n#### **3. Key Details to Final"
+      },
+      "token_usage": null,
+      "duration_ms": null,
+      "timestamp": "2026-02-24T22:44:29.649167+00:00"
+    },
+    {
+      "event_type": "llm_stream",
+      "name": "llm",
+      "inputs": null,
+      "outputs": {
+        "chunk_count": 690,
+        "partial": ".  \n- **Montmartre:** Intimate venues like *La Maison Rose* or *Le Jardin des Plantes* for a romantic vibe.  \n- **Rue de Rivoli:** Modern spaces like *Le 19* or *Le 19* for contemporary aesthetics.  \n\n#### **2. Flight Logistics**  \n- **Departure:** Madrid (MAD) to Paris (CDG) on June 19.  \n- **Recommended Airlines:** Iberia, Vueling, or easyJet (direct flights available).  \n- **Tip:** Book early to secure seats and compare prices.  \n\n#### **3. Key Details to Finalize**  \n- **Venue Reservation:**"
+      },
+      "token_usage": null,
+      "duration_ms": null,
+      "timestamp": "2026-02-24T22:44:29.946260+00:00"
+    },
+    {
+      "event_type": "llm_stream",
+      "name": "llm",
+      "inputs": null,
+      "outputs": {
+        "chunk_count": 700,
+        "partial": "Maison Rose* or *Le Jardin des Plantes* for a romantic vibe.  \n- **Rue de Rivoli:** Modern spaces like *Le 19* or *Le 19* for contemporary aesthetics.  \n\n#### **2. Flight Logistics**  \n- **Departure:** Madrid (MAD) to Paris (CDG) on June 19.  \n- **Recommended Airlines:** Iberia, Vueling, or easyJet (direct flights available).  \n- **Tip:** Book early to secure seats and compare prices.  \n\n#### **3. Key Details to Finalize**  \n- **Venue Reservation:** Confirm availability and book promptly.  \n- **"
+      },
+      "token_usage": null,
+      "duration_ms": null,
+      "timestamp": "2026-02-24T22:44:30.245126+00:00"
+    },
+    {
+      "event_type": "llm_stream",
+      "name": "llm",
+      "inputs": null,
+      "outputs": {
+        "chunk_count": 710,
+        "partial": "es* for a romantic vibe.  \n- **Rue de Rivoli:** Modern spaces like *Le 19* or *Le 19* for contemporary aesthetics.  \n\n#### **2. Flight Logistics**  \n- **Departure:** Madrid (MAD) to Paris (CDG) on June 19.  \n- **Recommended Airlines:** Iberia, Vueling, or easyJet (direct flights available).  \n- **Tip:** Book early to secure seats and compare prices.  \n\n#### **3. Key Details to Finalize**  \n- **Venue Reservation:** Confirm availability and book promptly.  \n- **Catering:** Choose a Parisian bistro"
+      },
+      "token_usage": null,
+      "duration_ms": null,
+      "timestamp": "2026-02-24T22:44:30.545443+00:00"
+    },
+    {
+      "event_type": "llm_stream",
+      "name": "llm",
+      "inputs": null,
+      "outputs": {
+        "chunk_count": 720,
+        "partial": "Rivoli:** Modern spaces like *Le 19* or *Le 19* for contemporary aesthetics.  \n\n#### **2. Flight Logistics**  \n- **Departure:** Madrid (MAD) to Paris (CDG) on June 19.  \n- **Recommended Airlines:** Iberia, Vueling, or easyJet (direct flights available).  \n- **Tip:** Book early to secure seats and compare prices.  \n\n#### **3. Key Details to Finalize**  \n- **Venue Reservation:** Confirm availability and book promptly.  \n- **Catering:** Choose a Parisian bistro or Michelin-starred restaurant (e.g.,"
+      },
+      "token_usage": null,
+      "duration_ms": null,
+      "timestamp": "2026-02-24T22:44:30.846677+00:00"
+    },
+    {
+      "event_type": "llm_stream",
+      "name": "llm",
+      "inputs": null,
+      "outputs": {
+        "chunk_count": 730,
+        "partial": "ke *Le 19* or *Le 19* for contemporary aesthetics.  \n\n#### **2. Flight Logistics**  \n- **Departure:** Madrid (MAD) to Paris (CDG) on June 19.  \n- **Recommended Airlines:** Iberia, Vueling, or easyJet (direct flights available).  \n- **Tip:** Book early to secure seats and compare prices.  \n\n#### **3. Key Details to Finalize**  \n- **Venue Reservation:** Confirm availability and book promptly.  \n- **Catering:** Choose a Parisian bistro or Michelin-starred restaurant (e.g., *Le Comptoir du Relais*)."
+      },
+      "token_usage": null,
+      "duration_ms": null,
+      "timestamp": "2026-02-24T22:44:31.146122+00:00"
+    },
+    {
+      "event_type": "llm_stream",
+      "name": "llm",
+      "inputs": null,
+      "outputs": {
+        "chunk_count": 740,
+        "partial": "s.  \n\n#### **2. Flight Logistics**  \n- **Departure:** Madrid (MAD) to Paris (CDG) on June 19.  \n- **Recommended Airlines:** Iberia, Vueling, or easyJet (direct flights available).  \n- **Tip:** Book early to secure seats and compare prices.  \n\n#### **3. Key Details to Finalize**  \n- **Venue Reservation:** Confirm availability and book promptly.  \n- **Catering:** Choose a Parisian bistro or Michelin-starred restaurant (e.g., *Le Comptoir du Relais*).  \n- **Transport:** Arrange private transfers or"
+      },
+      "token_usage": null,
+      "duration_ms": null,
+      "timestamp": "2026-02-24T22:44:31.456035+00:00"
+    },
+    {
+      "event_type": "llm_stream",
+      "name": "llm",
+      "inputs": null,
+      "outputs": {
+        "chunk_count": 750,
+        "partial": "cs**  \n- **Departure:** Madrid (MAD) to Paris (CDG) on June 19.  \n- **Recommended Airlines:** Iberia, Vueling, or easyJet (direct flights available).  \n- **Tip:** Book early to secure seats and compare prices.  \n\n#### **3. Key Details to Finalize**  \n- **Venue Reservation:** Confirm availability and book promptly.  \n- **Catering:** Choose a Parisian bistro or Michelin-starred restaurant (e.g., *Le Comptoir du Relais*).  \n- **Transport:** Arrange private transfers or taxis for guests.  \n\n#### **4"
+      },
+      "token_usage": null,
+      "duration_ms": null,
+      "timestamp": "2026-02-24T22:44:31.764602+00:00"
+    },
+    {
+      "event_type": "llm_stream",
+      "name": "llm",
+      "inputs": null,
+      "outputs": {
+        "chunk_count": 760,
+        "partial": "drid (MAD) to Paris (CDG) on June 19.  \n- **Recommended Airlines:** Iberia, Vueling, or easyJet (direct flights available).  \n- **Tip:** Book early to secure seats and compare prices.  \n\n#### **3. Key Details to Finalize**  \n- **Venue Reservation:** Confirm availability and book promptly.  \n- **Catering:** Choose a Parisian bistro or Michelin-starred restaurant (e.g., *Le Comptoir du Relais*).  \n- **Transport:** Arrange private transfers or taxis for guests.  \n\n#### **4. Timeline**  \n- **June 18"
+      },
+      "token_usage": null,
+      "duration_ms": null,
+      "timestamp": "2026-02-24T22:44:32.065650+00:00"
+    },
+    {
+      "event_type": "llm_stream",
+      "name": "llm",
+      "inputs": null,
+      "outputs": {
+        "chunk_count": 770,
+        "partial": "9.  \n- **Recommended Airlines:** Iberia, Vueling, or easyJet (direct flights available).  \n- **Tip:** Book early to secure seats and compare prices.  \n\n#### **3. Key Details to Finalize**  \n- **Venue Reservation:** Confirm availability and book promptly.  \n- **Catering:** Choose a Parisian bistro or Michelin-starred restaurant (e.g., *Le Comptoir du Relais*).  \n- **Transport:** Arrange private transfers or taxis for guests.  \n\n#### **4. Timeline**  \n- **June 18:** Arrive in Paris, settle in, and"
+      },
+      "token_usage": null,
+      "duration_ms": null,
+      "timestamp": "2026-02-24T22:44:32.365403+00:00"
+    },
+    {
+      "event_type": "llm_stream",
+      "name": "llm",
+      "inputs": null,
+      "outputs": {
+        "chunk_count": 780,
+        "partial": "** Iberia, Vueling, or easyJet (direct flights available).  \n- **Tip:** Book early to secure seats and compare prices.  \n\n#### **3. Key Details to Finalize**  \n- **Venue Reservation:** Confirm availability and book promptly.  \n- **Catering:** Choose a Parisian bistro or Michelin-starred restaurant (e.g., *Le Comptoir du Relais*).  \n- **Transport:** Arrange private transfers or taxis for guests.  \n\n#### **4. Timeline**  \n- **June 18:** Arrive in Paris, settle in, and explore.  \n- **June 19:** Arr"
+      },
+      "token_usage": null,
+      "duration_ms": null,
+      "timestamp": "2026-02-24T22:44:32.676119+00:00"
+    },
+    {
+      "event_type": "llm_stream",
+      "name": "llm",
+      "inputs": null,
+      "outputs": {
+        "chunk_count": 790,
+        "partial": "ights available).  \n- **Tip:** Book early to secure seats and compare prices.  \n\n#### **3. Key Details to Finalize**  \n- **Venue Reservation:** Confirm availability and book promptly.  \n- **Catering:** Choose a Parisian bistro or Michelin-starred restaurant (e.g., *Le Comptoir du Relais*).  \n- **Transport:** Arrange private transfers or taxis for guests.  \n\n#### **4. Timeline**  \n- **June 18:** Arrive in Paris, settle in, and explore.  \n- **June 19:** Arrive early for setup; finalize details.  \n"
+      },
+      "token_usage": null,
+      "duration_ms": null,
+      "timestamp": "2026-02-24T22:44:32.977692+00:00"
+    },
+    {
+      "event_type": "llm_stream",
+      "name": "llm",
+      "inputs": null,
+      "outputs": {
+        "chunk_count": 800,
+        "partial": "p:** Book early to secure seats and compare prices.  \n\n#### **3. Key Details to Finalize**  \n- **Venue Reservation:** Confirm availability and book promptly.  \n- **Catering:** Choose a Parisian bistro or Michelin-starred restaurant (e.g., *Le Comptoir du Relais*).  \n- **Transport:** Arrange private transfers or taxis for guests.  \n\n#### **4. Timeline**  \n- **June 18:** Arrive in Paris, settle in, and explore.  \n- **June 19:** Arrive early for setup; finalize details.  \n- **June 20:** Ceremony at"
+      },
+      "token_usage": null,
+      "duration_ms": null,
+      "timestamp": "2026-02-24T22:44:33.279652+00:00"
+    },
+    {
+      "event_type": "llm_stream",
+      "name": "llm",
+      "inputs": null,
+      "outputs": {
+        "chunk_count": 810,
+        "partial": " prices.  \n\n#### **3. Key Details to Finalize**  \n- **Venue Reservation:** Confirm availability and book promptly.  \n- **Catering:** Choose a Parisian bistro or Michelin-starred restaurant (e.g., *Le Comptoir du Relais*).  \n- **Transport:** Arrange private transfers or taxis for guests.  \n\n#### **4. Timeline**  \n- **June 18:** Arrive in Paris, settle in, and explore.  \n- **June 19:** Arrive early for setup; finalize details.  \n- **June 20:** Ceremony at a chosen venue, followed by a reception.  "
+      },
+      "token_usage": null,
+      "duration_ms": null,
+      "timestamp": "2026-02-24T22:44:33.582896+00:00"
+    },
+    {
+      "event_type": "llm_stream",
+      "name": "llm",
+      "inputs": null,
+      "outputs": {
+        "chunk_count": 820,
+        "partial": "s to Finalize**  \n- **Venue Reservation:** Confirm availability and book promptly.  \n- **Catering:** Choose a Parisian bistro or Michelin-starred restaurant (e.g., *Le Comptoir du Relais*).  \n- **Transport:** Arrange private transfers or taxis for guests.  \n\n#### **4. Timeline**  \n- **June 18:** Arrive in Paris, settle in, and explore.  \n- **June 19:** Arrive early for setup; finalize details.  \n- **June 20:** Ceremony at a chosen venue, followed by a reception.  \n\n---\n\nLet me know if you’d like"
+      },
+      "token_usage": null,
+      "duration_ms": null,
+      "timestamp": "2026-02-24T22:44:33.891294+00:00"
+    },
+    {
+      "event_type": "llm_stream",
+      "name": "llm",
+      "inputs": null,
+      "outputs": {
+        "chunk_count": 830,
+        "partial": "nfirm availability and book promptly.  \n- **Catering:** Choose a Parisian bistro or Michelin-starred restaurant (e.g., *Le Comptoir du Relais*).  \n- **Transport:** Arrange private transfers or taxis for guests.  \n\n#### **4. Timeline**  \n- **June 18:** Arrive in Paris, settle in, and explore.  \n- **June 19:** Arrive early for setup; finalize details.  \n- **June 20:** Ceremony at a chosen venue, followed by a reception.  \n\n---\n\nLet me know if you’d like help refining specific aspects (e.g., budget"
+      },
+      "token_usage": null,
+      "duration_ms": null,
+      "timestamp": "2026-02-24T22:44:34.197250+00:00"
+    },
+    {
+      "event_type": "llm_stream",
+      "name": "llm",
+      "inputs": null,
+      "outputs": {
+        "chunk_count": 840,
+        "partial": "ook promptly.  \n- **Catering:** Choose a Parisian bistro or Michelin-starred restaurant (e.g., *Le Comptoir du Relais*).  \n- **Transport:** Arrange private transfers or taxis for guests.  \n\n#### **4. Timeline**  \n- **June 18:** Arrive in Paris, settle in, and explore.  \n- **June 19:** Arrive early for setup; finalize details.  \n- **June 20:** Ceremony at a chosen venue, followed by a reception.  \n\n---\n\nLet me know if you’d like help refining specific aspects (e.g., budget, guest list, themes)! 🌟"
+      },
+      "token_usage": null,
+      "duration_ms": null,
+      "timestamp": "2026-02-24T22:44:34.528638+00:00"
+    },
+    {
+      "event_type": "llm_end",
+      "name": "llm",
+      "inputs": null,
+      "outputs": "generations=[[ChatGenerationChunk(text='Here’s a structured plan for your Paris wedding on June 20th, leveraging your request for a Madrid-to-Paris flight:\\n\\n---\\n\\n### **Wedding Plan for June 20th in Paris**  \\n**Date:** June 20, 2024  \\n**Location:** Paris, France  \\n\\n#### **1. Venue Options in Paris**  \\n- **Champs-Élysées:** Elegant ballrooms like *Le Cinq* or *L’Étoile* for a classic French touch.  \\n- **Montmartre:** Intimate venues like *La Maison Rose* or *Le Jardin des Plantes* for a …",
+      "token_usage": null,
+      "duration_ms": 25602,
+      "timestamp": "2026-02-24T22:44:34.535477+00:00"
+    },
+    {
+      "event_type": "llm_stream",
+      "name": "stream",
+      "inputs": null,
+      "outputs": {
+        "chunk_count": 840,
+        "partial": "ook promptly.  \n- **Catering:** Choose a Parisian bistro or Michelin-starred restaurant (e.g., *Le Comptoir du Relais*).  \n- **Transport:** Arrange private transfers or taxis for guests.  \n\n#### **4. Timeline**  \n- **June 18:** Arrive in Paris, settle in, and explore.  \n- **June 19:** Arrive early for setup; finalize details.  \n- **June 20:** Ceremony at a chosen venue, followed by a reception.  \n\n---\n\nLet me know if you’d like help refining specific aspects (e.g., budget, guest list, themes)! 🌟"
+      },
+      "token_usage": null,
+      "duration_ms": null,
+      "timestamp": "2026-02-24T22:44:34.553031+00:00"
+    }
+  ]
+}
