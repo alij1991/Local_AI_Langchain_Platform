@@ -70,8 +70,21 @@ def test_generate_uses_cpu_fallback_when_gpu_required_but_unavailable(tmp_path, 
             metadata={'runtime': 'diffusers_local', 'device_used': 'cpu'},
         )
 
-    monkeypatch.setattr(svc, '_run_diffusers', _fake_run_diffusers)
+    monkeypatch.setattr(svc, '_cache_dir', lambda model_id: Path('/tmp'))
+    monkeypatch.setattr(svc, '_run_diffusers_isolated', _fake_run_diffusers)
 
     result = svc.generate(model_id='google/flan-t5-base', prompt='test')
     assert result.ok is True
     assert result.metadata and 'warning' in result.metadata
+
+
+def test_validate_model_reports_missing_files(tmp_path):
+    cfg = _cfg(tmp_path)
+    svc = ImageGenerationService(cfg)
+
+    models = Path(cfg.local_models_dir)
+    (models / 'broken-model').mkdir(parents=True)
+
+    report = svc.validate_model('local:broken-model')
+    assert report['loadable'] is False
+    assert 'invalid_model_format' in report['errors']

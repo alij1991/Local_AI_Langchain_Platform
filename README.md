@@ -397,6 +397,7 @@ Systems run now returns `run_id` in `POST /systems/{name}/run` so executions app
 New endpoints:
 - `GET /images/models`
 - `GET /images/runtime`
+- `POST /images/validate-model`
 - `POST /images/sessions`
 - `GET /images/sessions`
 - `GET /images/sessions/{session_id}`
@@ -415,7 +416,8 @@ Key env vars:
 - `HF_IMAGE_ALLOW_AUTO_DOWNLOAD` (default false)
 - `HF_IMAGE_ALLOW_PLACEHOLDER` (default false, dev fallback)
 - `HF_IMAGE_DEVICE` (`auto` | `cuda` | `cpu`)
-- `HF_IMAGE_ALLOW_CPU_FALLBACK` (default true; retry on CPU after CUDA failure)
+- `HF_IMAGE_ALLOW_CPU_FALLBACK` (default true; retry/override to CPU when CUDA is unavailable)
+- `HF_IMAGE_JOB_TIMEOUT_SEC` (default 180; terminates stuck image worker job)
 - `HF_API_TOKEN` (required for `hf_inference_api` runtime)
 
 For local runtime install:
@@ -425,6 +427,14 @@ pip install diffusers transformers accelerate safetensors huggingface_hub pillow
 
 The service does not silently download large models unless `HF_IMAGE_ALLOW_AUTO_DOWNLOAD=true`.
 
+Diffusers local folder requirements:
+- directory exists under `./models/<name>`
+- must include `model_index.json`
+- should include model weights (`*.safetensors` or `*.bin`)
+
+Troubleshooting:
+- use `POST /images/validate-model` to inspect a selected model folder before generation
+- use `GET /images/runtime` to inspect torch/diffusers/transformers/accelerate versions and device selection
 
 
 ## Local models folder (git-ignored)

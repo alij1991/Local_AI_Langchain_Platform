@@ -657,3 +657,17 @@ def test_hf_local_entries_dedupes_by_local_path(monkeypatch):
 
     items = api_server._hf_local_entries()
     assert len(items) == 1
+
+
+def test_images_validate_model_endpoint(monkeypatch):
+    monkeypatch.setattr(api_server.image_service, 'validate_model', lambda model_id: {
+        'model_id': model_id,
+        'resolved_path': '/tmp/models/x',
+        'detected_type': 'diffusers_local',
+        'loadable': False,
+        'errors': ['missing_model_index_json'],
+    })
+    res = client.post('/images/validate-model', json={'model_id': 'local:x'})
+    assert res.status_code == 200
+    assert res.json()['loadable'] is False
+    assert res.json()['detected_type'] == 'diffusers_local'
