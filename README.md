@@ -472,3 +472,19 @@ Refresh endpoints:
 - Prefer CUDA with a CUDA-enabled torch build when available to reduce CPU RAM pressure.
 - Use `POST /images/validate-model` to estimate fit before generating.
 - Use low memory mode (UI toggle / `HF_IMAGE_LOW_MEMORY_MODE=true`) for safer defaults on constrained systems.
+
+
+### GPU-first runtime policy
+- In `auto` mode, the platform attempts CUDA first for Hugging Face text/image runtimes when available.
+- If CUDA is unavailable or fails, the runtime falls back gracefully based on configured fallback/offload flags.
+- Runtime responses include `device_used`, `runtime_strategy`, and fallback metadata for debugging.
+
+### Size formatting behavior
+- API responses keep raw `size_bytes` for programmatic use.
+- UI-facing responses also include `size_human` (MB/GB/TB formatting).
+- If size cannot be determined after Hub/local checks, the UI shows `Size not available yet`.
+
+### Optional CUDA/offload dependencies
+- Core: `torch`, `transformers`, `diffusers`, `accelerate`, `safetensors`, `huggingface_hub`.
+- Optional: `xformers` for memory-efficient attention (when supported by your torch/CUDA build).
+- Use CUDA-enabled PyTorch builds for GPU acceleration.

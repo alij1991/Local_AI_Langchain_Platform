@@ -421,6 +421,7 @@ def test_models_catalog_endpoint():
         assert 'id' in sample
         assert 'provider' in sample
         assert 'supports_streaming' in sample
+        assert 'size_human' in sample
 
 
 def test_runs_view_endpoint_and_stream_summary(monkeypatch):
@@ -684,3 +685,28 @@ def test_images_recommendations_endpoint(monkeypatch):
     res = client.get('/images/recommendations?model_id=local:test')
     assert res.status_code == 200
     assert res.json()['recommended_width'] == 512
+
+
+def test_models_hf_discover_size_human_present(monkeypatch):
+    class _Model:
+        id = 'test/model'
+        pipeline_tag = 'text-generation'
+        tags = []
+        downloads = 1
+        likes = 1
+        last_modified = '2024-01-01T00:00:00'
+
+    class _Api:
+        def __init__(self, token=None):
+            pass
+        def list_models(self, **kwargs):
+            return [_Model()]
+
+    import huggingface_hub
+    monkeypatch.setattr(huggingface_hub, 'HfApi', _Api)
+    monkeypatch.setattr(api_server, '_hf_discover_meta', lambda model_id, ttl_s=600: {'size_bytes': 1024*1024*2048, 'size_estimate': 'hub_siblings_sum'})
+
+    res = client.get('/models/hf/discover?limit=1')
+    assert res.status_code == 200
+    item = res.json()['items'][0]
+    assert item['size_human']
