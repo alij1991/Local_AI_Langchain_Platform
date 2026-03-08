@@ -398,6 +398,7 @@ New endpoints:
 - `GET /images/models`
 - `GET /images/runtime`
 - `POST /images/validate-model`
+- `GET /images/recommendations?model_id=...`
 - `POST /images/sessions`
 - `GET /images/sessions`
 - `GET /images/sessions/{session_id}`
@@ -418,6 +419,7 @@ Key env vars:
 - `HF_IMAGE_DEVICE` (`auto` | `cuda` | `cpu`)
 - `HF_IMAGE_ALLOW_CPU_FALLBACK` (default true; retry/override to CPU when CUDA is unavailable)
 - `HF_IMAGE_JOB_TIMEOUT_SEC` (default 180; terminates stuck image worker job)
+- `HF_IMAGE_LOW_MEMORY_MODE` (default true; uses conservative loading/generation options for limited hardware)
 - `HF_API_TOKEN` (required for `hf_inference_api` runtime)
 
 For local runtime install:
@@ -450,3 +452,11 @@ Model discovery supports:
 Refresh endpoints:
 - `POST /images/models/refresh`
 - `POST /models/refresh`
+
+
+### Windows memory troubleshooting (Diffusers)
+- `pagefile_too_small` means Windows virtual memory (paging file) is not large enough to load the selected model.
+- Increase your Windows paging file size, or use a smaller/quantized image model.
+- Prefer CUDA with a CUDA-enabled torch build when available to reduce CPU RAM pressure.
+- Use `POST /images/validate-model` to estimate fit before generating.
+- Use low memory mode (UI toggle / `HF_IMAGE_LOW_MEMORY_MODE=true`) for safer defaults on constrained systems.

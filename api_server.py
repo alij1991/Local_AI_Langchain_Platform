@@ -2039,7 +2039,9 @@ def images_models(refresh: bool = False) -> dict[str, Any]:
 
 @app.get("/images/runtime")
 def images_runtime() -> dict[str, Any]:
-    return image_service.get_device_status()
+    body = image_service.get_device_status()
+    body["low_memory_mode"] = bool(getattr(config, "hf_image_low_memory_mode", True))
+    return body
 
 
 @app.get("/images/doctor")
@@ -2054,6 +2056,13 @@ def images_validate_model(payload: ImageValidateRequest) -> dict[str, Any]:
         raise error_response("invalid_model", "model_id is required", status=400)
     result = image_service.validate_model(model_id)
     return result
+
+
+@app.get("/images/recommendations")
+def images_recommendations(model_id: str) -> dict[str, Any]:
+    if not model_id.strip():
+        raise error_response("invalid_model", "model_id is required", status=400)
+    return image_service.recommended_settings(model_id.strip())
 
 
 @app.post("/images/models/refresh")

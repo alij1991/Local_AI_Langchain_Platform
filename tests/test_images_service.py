@@ -88,3 +88,29 @@ def test_validate_model_reports_missing_files(tmp_path):
     report = svc.validate_model('local:broken-model')
     assert report['loadable'] is False
     assert 'invalid_model_format' in report['errors']
+
+
+def test_validate_model_includes_memory_estimates(tmp_path):
+    cfg = _cfg(tmp_path)
+    svc = ImageGenerationService(cfg)
+
+    models = Path(cfg.local_models_dir)
+    mdir = models / 'ok-model'
+    mdir.mkdir(parents=True)
+    (mdir / 'model_index.json').write_text('{}', encoding='utf-8')
+    (mdir / 'weights.safetensors').write_bytes(b'1234')
+
+    report = svc.validate_model('local:ok-model')
+    assert report['folder_size_bytes'] is not None
+    assert report['estimated_ram_required_bytes'] is not None
+    assert report['device_candidate'] in {'cpu', 'cuda'}
+
+
+def test_recommended_settings_returns_defaults(tmp_path):
+    cfg = _cfg(tmp_path)
+    svc = ImageGenerationService(cfg)
+
+    rec = svc.recommended_settings('google/flan-t5-base')
+    assert 'recommended_width' in rec
+    assert 'recommended_height' in rec
+    assert 'recommended_steps' in rec

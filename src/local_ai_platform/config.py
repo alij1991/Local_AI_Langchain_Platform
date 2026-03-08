@@ -33,6 +33,7 @@ class AppConfig:
     hf_image_device: str = "auto"
     hf_image_allow_cpu_fallback: bool = True
     hf_image_job_timeout_sec: int = 180
+    hf_image_low_memory_mode: bool = True
     hf_api_token: str = ""
     local_models_dir: str = "./models"
 
@@ -63,6 +64,7 @@ def load_config() -> AppConfig:
         hf_image_device=os.getenv("HF_IMAGE_DEVICE", "auto"),
         hf_image_allow_cpu_fallback=_as_bool(os.getenv("HF_IMAGE_ALLOW_CPU_FALLBACK"), default=True),
         hf_image_job_timeout_sec=int(os.getenv("HF_IMAGE_JOB_TIMEOUT_SEC", "180")),
+        hf_image_low_memory_mode=_as_bool(os.getenv("HF_IMAGE_LOW_MEMORY_MODE"), default=True),
         hf_api_token=os.getenv("HF_API_TOKEN", ""),
         local_models_dir=os.getenv("LOCAL_MODELS_DIR", "./models"),
     )

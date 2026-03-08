@@ -53,6 +53,53 @@ def _validate_diffusers_dir(path: Path) -> tuple[bool, list[str]]:
     return len(issues) == 0, issues
 
 
+
+
+def _is_memory_error(exc: Exception) -> tuple[bool, str]:
+    txt = str(exc).lower()
+    if isinstance(exc, MemoryError):
+        return True, "insufficient_memory"
+    if "paging file" in txt and "too small" in txt:
+        return True, "pagefile_too_small"
+    if "cannot allocate memory" in txt or "not enough memory" in txt:
+        return True, "insufficient_memory"
+    return False, ""
+
+
+def _system_memory_snapshot() -> dict[str, Any]:
+    info = {
+        "available_ram_bytes": None,
+        "total_ram_bytes": None,
+        "available_virtual_memory_bytes": None,
+        "total_virtual_memory_bytes": None,
+    }
+    try:
+        import psutil  # type: ignore
+
+        vm = psutil.virtual_memory()
+        sm = psutil.swap_memory()
+        info["available_ram_bytes"] = int(getattr(vm, "available", 0) or 0)
+        info["total_ram_bytes"] = int(getattr(vm, "total", 0) or 0)
+        info["available_virtual_memory_bytes"] = int(getattr(sm, "free", 0) or 0) + info["available_ram_bytes"]
+        info["total_virtual_memory_bytes"] = int(getattr(sm, "total", 0) or 0) + info["total_ram_bytes"]
+    except Exception:
+        pass
+    return info
+
+
+def _estimate_memory_requirements(folder_size_bytes: int, device: str) -> dict[str, int]:
+    # Conservative heuristic for large diffusers checkpoints on load + runtime tensors
+    if device == "cuda":
+        est_vram = int(folder_size_bytes * 1.3)
+        est_ram = int(folder_size_bytes * 0.8)
+    else:
+        est_ram = int(folder_size_bytes * 2.2)
+        est_vram = int(folder_size_bytes * 0.2)
+    return {
+        "estimated_ram_required_bytes": max(est_ram, 512 * 1024 * 1024),
+        "estimated_vram_required_bytes": max(est_vram, 0),
+    }
+
 def _diffusers_worker(payload: dict[str, Any], out_q: Any) -> None:
     started = time.time()
     try:
@@ -65,10 +112,20 @@ def _diffusers_worker(payload: dict[str, Any], out_q: Any) -> None:
         device = str(payload["device"])
         init_image_path = payload.get("init_image_path")
 
+        load_kwargs: dict[str, Any] = {
+            "local_files_only": local_files_only,
+            "low_cpu_mem_usage": bool(payload.get("low_memory_mode", True)),
+        }
+        dtype_name = str(payload.get("torch_dtype") or "")
+        if dtype_name:
+            load_kwargs["torch_dtype"] = getattr(torch, dtype_name, None)
+        if payload.get("use_safetensors") is not None:
+            load_kwargs["use_safetensors"] = bool(payload.get("use_safetensors"))
+
         if mode == "img2img":
-            pipe = AutoPipelineForImage2Image.from_pretrained(model_id_or_path, local_files_only=local_files_only)
+            pipe = AutoPipelineForImage2Image.from_pretrained(model_id_or_path, **load_kwargs)
         else:
-            pipe = AutoPipelineForText2Image.from_pretrained(model_id_or_path, local_files_only=local_files_only)
+            pipe = AutoPipelineForText2Image.from_pretrained(model_id_or_path, **load_kwargs)
         pipe.set_progress_bar_config(disable=True)
         if device == "cuda":
             pipe = pipe.to("cuda")
@@ -115,16 +172,18 @@ def _diffusers_worker(payload: dict[str, Any], out_q: Any) -> None:
         })
     except RuntimeError as exc:
         txt = str(exc).lower()
+        mem_err, mem_code = _is_memory_error(exc)
         out_q.put({
             "ok": False,
-            "error_code": "out_of_memory" if "out of memory" in txt else "generation_failed",
+            "error_code": mem_code if mem_err else ("out_of_memory" if "out of memory" in txt else "generation_failed"),
             "error_message": str(exc),
             "metadata": {"worker_traceback": traceback.format_exc()},
         })
     except Exception as exc:  # noqa: BLE001
+        mem_err, mem_code = _is_memory_error(exc)
         out_q.put({
             "ok": False,
-            "error_code": "model_load_failed",
+            "error_code": mem_code if mem_err else "model_load_failed",
             "error_message": str(exc),
             "metadata": {"worker_traceback": traceback.format_exc()},
         })
@@ -289,15 +348,28 @@ class ImageGenerationService:
             checks.append({"name": "local_models", "ok": True, "count": len(local_models)})
 
         ok = all(bool(c.get("ok")) for c in checks)
-        return {"ok": ok, "runtime": status, "checks": checks}
+        return {
+            "ok": ok,
+            "runtime": status,
+            "checks": checks,
+            "memory": _system_memory_snapshot(),
+            "low_memory_mode": bool(getattr(self.config, "hf_image_low_memory_mode", True)),
+        }
 
     def validate_model(self, model_id: str) -> dict[str, Any]:
+        device_candidate = str(self.get_device_status().get("effective_device") or "cpu")
         result: dict[str, Any] = {
             "model_id": model_id,
             "resolved_path": None,
             "detected_type": "unknown",
+            "model_type": "unknown",
             "required_files": {"model_index_json": False, "weights_detected": False},
             "pipeline_class_guess": "AutoPipelineForText2Image",
+            "folder_size_bytes": None,
+            "estimated_ram_required_bytes": None,
+            "estimated_vram_required_bytes": None,
+            "device_candidate": device_candidate,
+            "fit": "maybe",
             "loadable": False,
             "warnings": [],
             "errors": [],
@@ -314,6 +386,7 @@ class ImageGenerationService:
 
         if source == "remote":
             result["detected_type"] = "huggingface_remote"
+            result["model_type"] = "diffusers_remote"
             result["resolved_path"] = resolved
             if not self._cache_dir(resolved) and not self.config.hf_image_allow_auto_download:
                 result["warnings"].append("remote_model_not_cached")
@@ -322,10 +395,28 @@ class ImageGenerationService:
 
         path = Path(resolved)
         result["detected_type"] = "diffusers_local"
+        result["model_type"] = "diffusers_text2img"
         result["resolved_path"] = str(path)
         ok, issues = _validate_diffusers_dir(path)
         result["required_files"]["model_index_json"] = (path / "model_index.json").exists()
         result["required_files"]["weights_detected"] = any(path.rglob("*.safetensors")) or any(path.rglob("*.bin"))
+        folder_size = self._dir_size(path) if path.exists() else 0
+        result["folder_size_bytes"] = folder_size
+        est = _estimate_memory_requirements(folder_size, device_candidate)
+        result.update(est)
+        mem = _system_memory_snapshot()
+        result["memory"] = mem
+        available_vmem = int(mem.get("available_virtual_memory_bytes") or 0)
+        need = int(est.get("estimated_ram_required_bytes") or 0)
+        if need and available_vmem:
+            if available_vmem >= need:
+                result["fit"] = "good"
+            elif available_vmem >= int(need * 0.7):
+                result["fit"] = "maybe"
+                result["warnings"].append("memory_tight")
+            else:
+                result["fit"] = "poor"
+                result["warnings"].append("likely_insufficient_memory")
         if not ok:
             result["errors"].extend(issues)
             return result
@@ -342,6 +433,16 @@ class ImageGenerationService:
 
         result["loadable"] = True
         return result
+
+    def recommended_settings(self, model_id: str) -> dict[str, Any]:
+        validation = self.validate_model(model_id)
+        fit = validation.get("fit")
+        low_mode = bool(getattr(self.config, "hf_image_low_memory_mode", True))
+        if fit == "poor" or low_mode:
+            return {"recommended_width": 512, "recommended_height": 512, "recommended_steps": 16, "reason": "Low-memory mode suggested for this hardware."}
+        if fit == "maybe":
+            return {"recommended_width": 768, "recommended_height": 768, "recommended_steps": 20, "reason": "Moderate memory pressure detected."}
+        return {"recommended_width": 1024, "recommended_height": 1024, "recommended_steps": 24, "reason": "Hardware fit appears good."}
 
     def _scan_local_models(self) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
         image_models: list[dict[str, Any]] = []
@@ -455,10 +556,20 @@ class ImageGenerationService:
             return self._pipelines[key]
         from diffusers import AutoPipelineForImage2Image, AutoPipelineForText2Image
 
+        load_kwargs: dict[str, Any] = {
+            "local_files_only": local_files_only,
+            "low_cpu_mem_usage": bool(payload.get("low_memory_mode", True)),
+        }
+        dtype_name = str(payload.get("torch_dtype") or "")
+        if dtype_name:
+            load_kwargs["torch_dtype"] = getattr(torch, dtype_name, None)
+        if payload.get("use_safetensors") is not None:
+            load_kwargs["use_safetensors"] = bool(payload.get("use_safetensors"))
+
         if mode == "img2img":
-            pipe = AutoPipelineForImage2Image.from_pretrained(model_id_or_path, local_files_only=local_files_only)
+            pipe = AutoPipelineForImage2Image.from_pretrained(model_id_or_path, **load_kwargs)
         else:
-            pipe = AutoPipelineForText2Image.from_pretrained(model_id_or_path, local_files_only=local_files_only)
+            pipe = AutoPipelineForText2Image.from_pretrained(model_id_or_path, **load_kwargs)
         pipe.set_progress_bar_config(disable=True)
         if device == "cuda":
             pipe = pipe.to("cuda")
@@ -484,6 +595,29 @@ class ImageGenerationService:
         if model_source == "remote" and not self._cache_dir(model_id_or_path) and not self.config.hf_image_allow_auto_download:
             return ImageRuntimeResult(ok=False, error_code="model_not_found", error_message="Remote model is not cached locally. Put model under ./models or set HF_IMAGE_ALLOW_AUTO_DOWNLOAD=true.")
 
+        preflight = self.validate_model((f"local:{Path(model_id_or_path).name}" if model_source == "local" else model_id_or_path))
+        if model_source == "local" and preflight.get("fit") == "poor":
+            mem = preflight.get("memory") or {}
+            return ImageRuntimeResult(
+                ok=False,
+                error_code="insufficient_memory",
+                error_message="This model likely exceeds available RAM / page file for loading.",
+                metadata={
+                    "available_ram": mem.get("available_ram_bytes"),
+                    "available_virtual_memory": mem.get("available_virtual_memory_bytes"),
+                    "folder_size": preflight.get("folder_size_bytes"),
+                    "estimated_needed": preflight.get("estimated_ram_required_bytes"),
+                    "device_candidate": preflight.get("device_candidate"),
+                    "suggestions": [
+                        "Increase Windows paging file size",
+                        "Use a smaller model",
+                        "Use CUDA if available with CUDA-enabled torch",
+                        "Enable low memory mode",
+                    ],
+                    "preflight": preflight,
+                },
+            )
+
         timeout_s = int(getattr(self.config, "hf_image_job_timeout_sec", 180) or 180)
         ctx = mp.get_context("spawn")
         q = ctx.Queue(maxsize=1)
@@ -503,6 +637,9 @@ class ImageGenerationService:
             "device": device,
             "mode": mode,
             "local_files_only": model_source == "local" or not self.config.hf_image_allow_auto_download,
+            "low_memory_mode": bool(getattr(self.config, "hf_image_low_memory_mode", True)),
+            "torch_dtype": ("float16" if device == "cuda" else "float32"),
+            "use_safetensors": True,
         }
         proc = ctx.Process(target=_diffusers_worker, args=(payload, q), daemon=True)
         proc.start()
