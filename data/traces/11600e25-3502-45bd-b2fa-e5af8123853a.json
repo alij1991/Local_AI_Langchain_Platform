@@ -1,0 +1,13 @@
+{
+  "run_id": "11600e25-3502-45bd-b2fa-e5af8123853a",
+  "conversation_id": null,
+  "agent_name": "system:test",
+  "model_provider": "unknown",
+  "model_id": "",
+  "start_timestamp": "2026-02-26T01:29:31.161765+00:00",
+  "end_timestamp": null,
+  "duration_ms": 1,
+  "success": null,
+  "error": null,
+  "events": []
+}
