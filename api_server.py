@@ -53,6 +53,7 @@ from local_ai_platform.repositories.prompt_drafts import (
     list_prompt_drafts,
 )
 from local_ai_platform.repositories.systems import delete_system, get_system, list_systems, upsert_system
+from local_ai_platform.formatting import format_bytes_human
 from local_ai_platform.repositories.tools_repo import (
     delete_mcp_server,
     delete_tool_db,
@@ -377,6 +378,7 @@ def _serialize_model(provider: str, model_id: str, display_name: str, installed:
         "provider_unavailable": kwargs.get("provider_unavailable", False),
         "metadata": {
             "size_bytes": kwargs.get("size_bytes"),
+            "size_human": format_bytes_human(kwargs.get("size_bytes")),
             "parameters": kwargs.get("parameters"),
             "quantization": kwargs.get("quantization"),
             "context_length": kwargs.get("context_length"),
@@ -862,6 +864,7 @@ def models_catalog(provider: str | None = None, search: str = "", installed_only
             "capabilities": it.get("capabilities") or _normalize_capabilities(supports),
             "source_url": (it.get("metadata") or {}).get("source_url") or (f"https://huggingface.co/{it.get('model_id')}" if it.get("provider") == "huggingface" else None),
             "size_bytes": it.get("size_bytes") or (it.get("metadata") or {}).get("size_bytes"),
+            "size_human": format_bytes_human(it.get("size_bytes") or (it.get("metadata") or {}).get("size_bytes")),
             "parameters": it.get("parameters") or (it.get("metadata") or {}).get("parameters"),
             "context_length": it.get("context_length") or (it.get("metadata") or {}).get("context_length"),
             "quantization": it.get("quantization") or (it.get("metadata") or {}).get("quantization"),
@@ -1019,6 +1022,7 @@ def models_hf_discover(q: str = "", task: str = "", sort: str = "downloads", lim
             "license": getattr(m, "license", None),
             "size_bytes": extra.get("size_bytes"),
             "size_estimate": extra.get("size_estimate"),
+            "size_human": format_bytes_human(extra.get("size_bytes")),
             "parameters": extra.get("parameters"),
             "context_length": extra.get("context_length"),
             "quantization": extra.get("quantization"),
@@ -2085,10 +2089,34 @@ def agent_definition(name: str) -> dict[str, Any]:
 
 
 # images
+@app.get("/hardware")
+def hardware_status() -> dict[str, Any]:
+    image_runtime = image_service.get_device_status()
+    return {
+        "torch_version": image_runtime.get("torch_version"),
+        "torch_cuda_build": image_runtime.get("cuda_version"),
+        "cuda_available": image_runtime.get("cuda_available"),
+        "gpu_name": image_runtime.get("gpu_name"),
+        "gpu_total_vram_bytes": image_runtime.get("gpu_total_vram_bytes"),
+        "gpu_total_vram_human": format_bytes_human(image_runtime.get("gpu_total_vram_bytes")),
+        "hf_model_device": config.hf_model_device,
+        "hf_image_device": config.hf_image_device,
+        "hf_low_memory_mode": bool(getattr(config, "hf_low_memory_mode", True)),
+        "hf_image_low_memory_mode": bool(getattr(config, "hf_image_low_memory_mode", True)),
+        "hf_enable_cpu_offload": bool(getattr(config, "hf_enable_cpu_offload", True)),
+        "hf_enable_memory_efficient_attention": bool(getattr(config, "hf_enable_memory_efficient_attention", False)),
+        "effective_image_device": image_runtime.get("effective_device"),
+    }
+
+
 @app.get("/images/models")
 def images_models(refresh: bool = False) -> dict[str, Any]:
+    items = image_service.list_models(refresh=refresh)
+    for row in items:
+        if "size_human" not in row:
+            row["size_human"] = format_bytes_human(row.get("size_bytes"))
     return {
-        "items": image_service.list_models(refresh=refresh),
+        "items": items,
         "runtime": config.hf_image_runtime,
         "require_gpu": bool(config.hf_image_require_gpu),
         "local_models_dir": str(Path(config.local_models_dir).resolve()),
@@ -2099,6 +2127,8 @@ def images_models(refresh: bool = False) -> dict[str, Any]:
 def images_runtime() -> dict[str, Any]:
     body = image_service.get_device_status()
     body["low_memory_mode"] = bool(getattr(config, "hf_image_low_memory_mode", True))
+    body["gpu_total_vram_human"] = format_bytes_human(body.get("gpu_total_vram_bytes"))
+    body["runtime_strategy"] = "cuda_fp16" if body.get("effective_device") == "cuda" else "cpu_only"
     return body
 
 
@@ -2120,7 +2150,9 @@ def images_validate_model(payload: ImageValidateRequest) -> dict[str, Any]:
 def images_recommendations(model_id: str) -> dict[str, Any]:
     if not model_id.strip():
         raise error_response("invalid_model", "model_id is required", status=400)
-    return image_service.recommended_settings(model_id.strip())
+    rec = image_service.recommended_settings(model_id.strip())
+    rec["fit"] = image_service.validate_model(model_id.strip()).get("fit")
+    return rec
 
 
 @app.post("/images/models/refresh")
@@ -2213,6 +2245,7 @@ def images_generate(payload: ImageGenerateRequest, response: Response) -> dict[s
             "params_json": payload.params_json,
             "runtime": (result.metadata or {}).get("runtime"),
             "device_used": (result.metadata or {}).get("device_used"),
+            "runtime_strategy": (result.metadata or {}).get("runtime_strategy"),
             "fallback_used": bool((result.metadata or {}).get("fallback_used")),
             "fallback_reason": (result.metadata or {}).get("fallback_reason"),
             "runtime_metadata": result.metadata or {},
@@ -2229,6 +2262,7 @@ def images_generate(payload: ImageGenerateRequest, response: Response) -> dict[s
         "session_id": payload.session_id,
         "metadata": result.metadata or {},
         "device_used": (result.metadata or {}).get("device_used"),
+        "runtime_strategy": (result.metadata or {}).get("runtime_strategy"),
         "fallback_used": bool((result.metadata or {}).get("fallback_used")),
         "fallback_reason": (result.metadata or {}).get("fallback_reason"),
     }
@@ -2287,6 +2321,7 @@ def images_edit(payload: ImageEditRequest, response: Response) -> dict[str, Any]
             "guidance_scale": payload.guidance_scale,
             "runtime": (result.metadata or {}).get("runtime"),
             "device_used": (result.metadata or {}).get("device_used"),
+            "runtime_strategy": (result.metadata or {}).get("runtime_strategy"),
             "fallback_used": bool((result.metadata or {}).get("fallback_used")),
             "fallback_reason": (result.metadata or {}).get("fallback_reason"),
             "runtime_metadata": result.metadata or {},
@@ -2303,6 +2338,7 @@ def images_edit(payload: ImageEditRequest, response: Response) -> dict[str, Any]
         "session_id": payload.session_id,
         "metadata": result.metadata or {},
         "device_used": (result.metadata or {}).get("device_used"),
+        "runtime_strategy": (result.metadata or {}).get("runtime_strategy"),
         "fallback_used": bool((result.metadata or {}).get("fallback_used")),
         "fallback_reason": (result.metadata or {}).get("fallback_reason"),
     }

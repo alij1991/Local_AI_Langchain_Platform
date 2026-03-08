@@ -347,7 +347,7 @@ class _ModelsPageState extends State<ModelsPage> {
                       child: ListTile(
                         onTap: () => setState(() => _selected = m),
                         title: Text((m['name'] ?? m['display_name'] ?? '').toString()),
-                        subtitle: Text('${m['task'] ?? m['pipeline_tag'] ?? 'Task unknown'} • ${m['size_bytes'] ?? ((m['metadata'] as Map<String, dynamic>?)?['size_bytes'] ?? 'Size not available yet')}'),
+                        subtitle: Text('${m['task'] ?? m['pipeline_tag'] ?? 'Task unknown'} • ${m['size_human'] ?? ((m['metadata'] as Map<String, dynamic>?)?['size_human'] ?? 'Size not available yet')}'),
                         trailing: _hfMode == 'discover'
                             ? FilledButton.tonal(
                                 onPressed: isDownloading ? null : () => _downloadModel(modelId),
@@ -399,8 +399,9 @@ class _ModelsPageState extends State<ModelsPage> {
                         _capabilityChip('Streaming', (_selected!['capabilities']?['supports_streaming'] ?? _selected!['supports_streaming']) == true),
                       ]),
                       const SizedBox(height: 10),
-                      Text('Size: ${((_selected!['metadata'] as Map<String, dynamic>?)?['size_bytes'] ?? _selected!['size_bytes'] ?? 'Size not available yet')}'),
-                      Text('Parameters: ${((_selected!['metadata'] as Map<String, dynamic>?)?['parameters'] ?? 'unknown')}'),
+                      Text('Size: ${_selected!['size_human'] ?? ((_selected!['metadata'] as Map<String, dynamic>?)?['size_human'] ?? 'Size not available yet')}'),
+                      Text('Parameters: ${_selected!['parameters'] ?? ((_selected!['metadata'] as Map<String, dynamic>?)?['parameters'] ?? 'unknown')}'),
+                      Text('Size bytes: ${_selected!['size_bytes'] ?? ((_selected!['metadata'] as Map<String, dynamic>?)?['size_bytes'] ?? 'n/a')}', style: Theme.of(context).textTheme.bodySmall),
                       Text('Context length: ${((_selected!['metadata'] as Map<String, dynamic>?)?['context_length'] ?? 'unknown')}'),
                       Text('Quantization: ${((_selected!['metadata'] as Map<String, dynamic>?)?['quantization'] ?? 'unknown')}'),
                       Text('License: ${((_selected!['metadata'] as Map<String, dynamic>?)?['license'] ?? _selected!['license'] ?? 'unknown')}'),

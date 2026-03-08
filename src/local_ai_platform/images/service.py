@@ -12,6 +12,7 @@ from pathlib import Path
 from typing import Any
 
 from local_ai_platform.config import AppConfig
+from local_ai_platform.formatting import format_bytes_human
 
 
 @dataclass
@@ -127,8 +128,29 @@ def _diffusers_worker(payload: dict[str, Any], out_q: Any) -> None:
         else:
             pipe = AutoPipelineForText2Image.from_pretrained(model_id_or_path, **load_kwargs)
         pipe.set_progress_bar_config(disable=True)
+        if bool(payload.get("enable_memory_efficient_attention", False)):
+            try:
+                pipe.enable_xformers_memory_efficient_attention()
+            except Exception:
+                pass
+        if bool(payload.get("low_memory_mode", True)):
+            try:
+                pipe.enable_attention_slicing()
+            except Exception:
+                pass
+            try:
+                pipe.enable_vae_slicing()
+            except Exception:
+                pass
         if device == "cuda":
-            pipe = pipe.to("cuda")
+            if bool(payload.get("enable_cpu_offload", False)):
+                try:
+                    pipe.enable_model_cpu_offload()
+                    payload["runtime_strategy"] = "hybrid_offload"
+                except Exception:
+                    pipe = pipe.to("cuda")
+            else:
+                pipe = pipe.to("cuda")
 
         generator = torch.Generator(device=device if device == "cuda" else "cpu")
         seed = payload.get("seed")
@@ -167,6 +189,7 @@ def _diffusers_worker(payload: dict[str, Any], out_q: Any) -> None:
                 "mode": mode,
                 "model_source": payload.get("model_source"),
                 "device_used": device,
+                "runtime_strategy": payload.get("runtime_strategy") or ("cuda_fp16" if device == "cuda" else "cpu_only"),
                 "worker_elapsed_sec": round(time.time() - started, 3),
             },
         })
@@ -227,6 +250,7 @@ class ImageGenerationService:
             "cuda_available": False,
             "cuda_version": None,
             "gpu_name": None,
+            "gpu_total_vram_bytes": None,
             "device_preference": pref,
             "effective_device": "cpu",
             "reason": "torch not installed",
@@ -259,6 +283,8 @@ class ImageGenerationService:
         if cuda_available:
             try:
                 status["gpu_name"] = torch.cuda.get_device_name(0)
+                props = torch.cuda.get_device_properties(0)
+                status["gpu_total_vram_bytes"] = int(getattr(props, "total_memory", 0) or 0)
             except Exception:
                 status["gpu_name"] = None
 
@@ -348,12 +374,26 @@ class ImageGenerationService:
             checks.append({"name": "local_models", "ok": True, "count": len(local_models)})
 
         ok = all(bool(c.get("ok")) for c in checks)
+        xformers_available = False
+        try:
+            import xformers  # noqa: F401
+            xformers_available = True
+        except Exception:
+            xformers_available = False
+        memory = _system_memory_snapshot()
         return {
             "ok": ok,
             "runtime": status,
             "checks": checks,
-            "memory": _system_memory_snapshot(),
+            "memory": {
+                **memory,
+                "available_ram_human": format_bytes_human(memory.get("available_ram_bytes")),
+                "available_virtual_memory_human": format_bytes_human(memory.get("available_virtual_memory_bytes")),
+            },
             "low_memory_mode": bool(getattr(self.config, "hf_image_low_memory_mode", True)),
+            "cpu_offload_enabled": bool(getattr(self.config, "hf_enable_cpu_offload", True)),
+            "memory_efficient_attention_enabled": bool(getattr(self.config, "hf_enable_memory_efficient_attention", False)),
+            "xformers_available": xformers_available,
         }
 
     def validate_model(self, model_id: str) -> dict[str, Any]:
@@ -402,8 +442,11 @@ class ImageGenerationService:
         result["required_files"]["weights_detected"] = any(path.rglob("*.safetensors")) or any(path.rglob("*.bin"))
         folder_size = self._dir_size(path) if path.exists() else 0
         result["folder_size_bytes"] = folder_size
+        result["folder_size_human"] = format_bytes_human(folder_size)
         est = _estimate_memory_requirements(folder_size, device_candidate)
         result.update(est)
+        result["estimated_ram_required_human"] = format_bytes_human(est.get("estimated_ram_required_bytes"))
+        result["estimated_vram_required_human"] = format_bytes_human(est.get("estimated_vram_required_bytes"))
         mem = _system_memory_snapshot()
         result["memory"] = mem
         available_vmem = int(mem.get("available_virtual_memory_bytes") or 0)
@@ -439,10 +482,10 @@ class ImageGenerationService:
         fit = validation.get("fit")
         low_mode = bool(getattr(self.config, "hf_image_low_memory_mode", True))
         if fit == "poor" or low_mode:
-            return {"recommended_width": 512, "recommended_height": 512, "recommended_steps": 16, "reason": "Low-memory mode suggested for this hardware."}
+            return {"recommended_width": 512, "recommended_height": 512, "recommended_steps": 16, "reason": "Low-memory mode suggested for this hardware.", "recommended_runtime_strategy": "hybrid_offload", "recommended_precision": "fp16_or_fp32"}
         if fit == "maybe":
-            return {"recommended_width": 768, "recommended_height": 768, "recommended_steps": 20, "reason": "Moderate memory pressure detected."}
-        return {"recommended_width": 1024, "recommended_height": 1024, "recommended_steps": 24, "reason": "Hardware fit appears good."}
+            return {"recommended_width": 768, "recommended_height": 768, "recommended_steps": 20, "reason": "Moderate memory pressure detected.", "recommended_runtime_strategy": "cuda_fp16_or_cpu_offload", "recommended_precision": "fp16"}
+        return {"recommended_width": 1024, "recommended_height": 1024, "recommended_steps": 24, "reason": "Hardware fit appears good.", "recommended_runtime_strategy": "cuda_fp16", "recommended_precision": "fp16"}
 
     def _scan_local_models(self) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
         image_models: list[dict[str, Any]] = []
@@ -471,6 +514,7 @@ class ImageGenerationService:
                         "supported_features": {"text2img": True, "img2img": True, "inpaint": False},
                         "runtime": "diffusers_local",
                         "size_bytes": size,
+                        "size_human": format_bytes_human(size),
                     }
                 )
                 continue
@@ -490,6 +534,7 @@ class ImageGenerationService:
                         "model_id": f"local:{model_name}",
                         "display_name": f"{model_name} (local)",
                         "size_bytes": size,
+                        "size_human": format_bytes_human(size),
                         "context_length": context,
                         "architecture": architecture,
                         "path": str(entry),
@@ -511,6 +556,7 @@ class ImageGenerationService:
                     "requirements": {"gpu_recommended": True, "memory_estimate": "8GB+ VRAM recommended"},
                     "supported_features": {"text2img": True, "img2img": True, "inpaint": False},
                     "runtime": self.config.hf_image_runtime,
+                    "size_human": format_bytes_human(self._dir_size(cache) if cache else None),
                 }
             )
 
@@ -571,8 +617,29 @@ class ImageGenerationService:
         else:
             pipe = AutoPipelineForText2Image.from_pretrained(model_id_or_path, **load_kwargs)
         pipe.set_progress_bar_config(disable=True)
+        if bool(payload.get("enable_memory_efficient_attention", False)):
+            try:
+                pipe.enable_xformers_memory_efficient_attention()
+            except Exception:
+                pass
+        if bool(payload.get("low_memory_mode", True)):
+            try:
+                pipe.enable_attention_slicing()
+            except Exception:
+                pass
+            try:
+                pipe.enable_vae_slicing()
+            except Exception:
+                pass
         if device == "cuda":
-            pipe = pipe.to("cuda")
+            if bool(payload.get("enable_cpu_offload", False)):
+                try:
+                    pipe.enable_model_cpu_offload()
+                    payload["runtime_strategy"] = "hybrid_offload"
+                except Exception:
+                    pipe = pipe.to("cuda")
+            else:
+                pipe = pipe.to("cuda")
         self._pipelines[key] = pipe
         return pipe
 
@@ -640,6 +707,9 @@ class ImageGenerationService:
             "low_memory_mode": bool(getattr(self.config, "hf_image_low_memory_mode", True)),
             "torch_dtype": ("float16" if device == "cuda" else "float32"),
             "use_safetensors": True,
+            "enable_cpu_offload": bool(getattr(self.config, "hf_enable_cpu_offload", True)),
+            "enable_memory_efficient_attention": bool(getattr(self.config, "hf_enable_memory_efficient_attention", False)),
+            "runtime_strategy": "cuda_fp16" if device == "cuda" else "cpu_only",
         }
         proc = ctx.Process(target=_diffusers_worker, args=(payload, q), daemon=True)
         proc.start()

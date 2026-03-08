@@ -164,7 +164,7 @@ class _ImagesPageState extends State<ImagesPage> {
     if (_activeSession == null || _selectedModel == null || _prompt.text.trim().isEmpty || _busy) return;
     setState(() {
       _busy = true;
-      _status = 'Loading model…';
+      _status = _runtime['effective_device'] == 'cuda' ? 'Loading model on GPU…' : 'Loading model on CPU…';
       _errorCode = '';
       _errorMessage = '';
       _errorDetails = '';
@@ -234,7 +234,9 @@ class _ImagesPageState extends State<ImagesPage> {
     final cuda = _runtime['cuda_available'] == true;
     final gpuName = _runtime['gpu_name']?.toString();
     if (cuda) {
-      return gpuName == null || gpuName.isEmpty ? 'GPU available' : 'GPU: $gpuName';
+      final vram = _runtime['gpu_total_vram_human']?.toString();
+      if (gpuName == null || gpuName.isEmpty) return 'GPU available';
+      return vram == null || vram.isEmpty ? 'GPU: $gpuName' : 'GPU: $gpuName ($vram)';
     }
     return 'CPU mode';
   }
@@ -430,9 +432,9 @@ class _ImagesPageState extends State<ImagesPage> {
                               child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
                                 Text('Model Fit / Requirements', style: Theme.of(context).textTheme.titleSmall),
                                 Text('Fit: ${_modelFit['fit'] ?? 'unknown'} • Device: ${_modelFit['device_candidate'] ?? 'unknown'}'),
-                                Text('Folder size: ${_modelFit['folder_size_bytes'] ?? 'unknown'}'),
-                                Text('Estimated RAM: ${_modelFit['estimated_ram_required_bytes'] ?? 'unknown'}'),
-                                Text('Estimated VRAM: ${_modelFit['estimated_vram_required_bytes'] ?? 'unknown'}'),
+                                Text('Folder size: ${_modelFit['folder_size_human'] ?? _modelFit['folder_size_bytes'] ?? 'unknown'}'),
+                                Text('Estimated RAM: ${_modelFit['estimated_ram_required_human'] ?? _modelFit['estimated_ram_required_bytes'] ?? 'unknown'}'),
+                                Text('Estimated VRAM: ${_modelFit['estimated_vram_required_human'] ?? _modelFit['estimated_vram_required_bytes'] ?? 'unknown'}'),
                                 if ((_modelFit['warnings'] as List<dynamic>?)?.isNotEmpty == true)
                                   Text('Warnings: ${(_modelFit['warnings'] as List<dynamic>).join(', ')}'),
                               ]),
@@ -467,8 +469,10 @@ class _ImagesPageState extends State<ImagesPage> {
                             final deviceUsed = (params['device_used'] ?? '').toString();
                             final fallback = params['fallback_used'] == true;
                             final fallbackReason = (params['fallback_reason'] ?? '').toString();
+                            final strategy = (params['runtime_strategy'] ?? '').toString();
                             return Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
                               if (deviceUsed.isNotEmpty) Text('Generated on: $deviceUsed'),
+                              if (strategy.isNotEmpty) Text('Strategy: $strategy'),
                               if (fallback) Text('Fallback to CPU: $fallbackReason', style: const TextStyle(color: Colors.orange)),
                             ]);
                           }),

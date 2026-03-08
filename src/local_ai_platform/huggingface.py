@@ -53,8 +53,8 @@ class HuggingFaceController:
                 pipe = pipeline(
                     task=task,
                     model=clean,
-                    device_map=self.config.hf_device,
-                    model_kwargs={"torch_dtype": "auto"},
+                    device_map=self.config.hf_model_device,
+                    model_kwargs={"torch_dtype": "auto", "low_cpu_mem_usage": bool(self.config.hf_low_memory_mode)},
                 )
                 break
             except Exception as exc:  # noqa: BLE001
