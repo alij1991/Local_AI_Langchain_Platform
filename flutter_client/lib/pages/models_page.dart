@@ -1,3 +1,5 @@
+import 'dart:async';
+
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:local_ai_flutter_client/services/api_client.dart';
@@ -13,6 +15,7 @@ class ModelsPage extends StatefulWidget {
 class _ModelsPageState extends State<ModelsPage> {
   List<Map<String, dynamic>> _models = [];
   List<Map<String, dynamic>> _discover = [];
+  List<Map<String, dynamic>> _downloads = [];
   Map<String, dynamic>? _selected;
   String _provider = 'all';
   String _search = '';
@@ -21,14 +24,22 @@ class _ModelsPageState extends State<ModelsPage> {
   bool _visionOnly = false;
   bool _streamingOnly = false;
   String _error = '';
-  String _hfMode = 'local'; // local | discover
+  String _hfMode = 'local';
   String _discoverTask = '';
   String _discoverSort = 'downloads';
+  Timer? _downloadsPoller;
 
   @override
   void initState() {
     super.initState();
     _load();
+    _downloadsPoller = Timer.periodic(const Duration(seconds: 1), (_) => _loadDownloads());
+  }
+
+  @override
+  void dispose() {
+    _downloadsPoller?.cancel();
+    super.dispose();
   }
 
   Future<void> _load() async {
@@ -44,7 +55,7 @@ class _ModelsPageState extends State<ModelsPage> {
 
     try {
       final body = await widget.api.get('/models/catalog${params.isEmpty ? '' : '?${params.join('&')}'}') as Map<String, dynamic>;
-      List<Map<String, dynamic>> items = ((body['items'] as List<dynamic>?) ?? []).cast<Map<String, dynamic>>();
+      final items = ((body['items'] as List<dynamic>?) ?? []).cast<Map<String, dynamic>>();
       if (_provider == 'huggingface' && _hfMode == 'discover') {
         final discoverParams = [
           if (_search.isNotEmpty) 'q=${Uri.encodeComponent(_search)}',
@@ -60,6 +71,7 @@ class _ModelsPageState extends State<ModelsPage> {
           _selected = discoverItems.isEmpty ? null : discoverItems.first;
           _error = '';
         });
+        await _loadDownloads();
         return;
       }
 
@@ -70,10 +82,43 @@ class _ModelsPageState extends State<ModelsPage> {
             : (_selected != null ? _models.firstWhere((m) => m['id'] == _selected!['id'], orElse: () => _models.first) : _models.first);
         _error = '';
       });
+      await _loadDownloads();
     } catch (e) {
       if (!mounted) return;
       setState(() => _error = '$e');
     }
+  }
+
+  Future<void> _loadDownloads() async {
+    try {
+      final body = await widget.api.get('/models/hf/downloads?limit=20') as Map<String, dynamic>;
+      if (!mounted) return;
+      final jobs = ((body['items'] as List<dynamic>?) ?? []).cast<Map<String, dynamic>>();
+      final hadActive = _downloads.any((d) => _isActiveStatus((d['status'] ?? '').toString()));
+      final hasActive = jobs.any((d) => _isActiveStatus((d['status'] ?? '').toString()));
+      setState(() => _downloads = jobs);
+      if (hadActive && !hasActive && _provider == 'huggingface' && _hfMode == 'local') {
+        await _load();
+      }
+    } catch (_) {}
+  }
+
+  bool _isActiveStatus(String s) => s == 'queued' || s == 'downloading' || s == 'extracting';
+
+  bool _isModelDownloading(String modelId) => _downloads.any((d) => d['model_id'] == modelId && _isActiveStatus((d['status'] ?? '').toString()));
+
+  String _downloadLabel(Map<String, dynamic> job) {
+    final status = (job['status'] ?? '').toString();
+    final progress = job['progress_percent'];
+    if (status == 'queued') return 'Preparing download…';
+    if (status == 'downloading') {
+      if (progress is num) return 'Downloading ${progress.toStringAsFixed(0)}%';
+      return 'Downloading files…';
+    }
+    if (status == 'extracting') return 'Finalizing…';
+    if (status == 'completed') return 'Completed';
+    if (status == 'failed') return 'Failed';
+    return status;
   }
 
   Future<void> _refreshModels() async {
@@ -86,14 +131,16 @@ class _ModelsPageState extends State<ModelsPage> {
   }
 
   Future<void> _downloadModel(String modelId) async {
-    await widget.api.post('/models/hf/download', {'model_id': modelId});
-    if (!mounted) return;
-    ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('Downloaded $modelId')));
-    setState(() {
-      _hfMode = 'local';
-      _provider = 'huggingface';
-    });
-    await _load();
+    if (_isModelDownloading(modelId)) return;
+    try {
+      await widget.api.post('/models/hf/download', {'model_id': modelId});
+      await _loadDownloads();
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('Started download for $modelId')));
+    } catch (e) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('Download failed to start: $e')));
+    }
   }
 
   Future<void> _refreshMetadata() async {
@@ -122,7 +169,7 @@ class _ModelsPageState extends State<ModelsPage> {
     return Row(
       children: [
         SizedBox(
-          width: 560,
+          width: 620,
           child: Column(
             children: [
               Row(children: [
@@ -232,6 +279,32 @@ class _ModelsPageState extends State<ModelsPage> {
                     ),
                   ),
                 ),
+              if (_provider == 'huggingface' && _downloads.isNotEmpty)
+                Card(
+                  margin: const EdgeInsets.only(top: 8),
+                  child: Padding(
+                    padding: const EdgeInsets.all(10),
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        Text('Downloads', style: Theme.of(context).textTheme.titleSmall),
+                        const SizedBox(height: 6),
+                        ..._downloads.take(4).map((d) {
+                          final progress = d['progress_percent'];
+                          return Padding(
+                            padding: const EdgeInsets.only(bottom: 8),
+                            child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+                              Text('${d['model_id']} • ${_downloadLabel(d)}'),
+                              const SizedBox(height: 4),
+                              LinearProgressIndicator(value: progress is num && _isActiveStatus((d['status'] ?? '').toString()) ? (progress / 100.0) : null),
+                              if ((d['status'] ?? '') == 'failed') Text((d['error_message'] ?? 'Download failed').toString(), style: const TextStyle(color: Colors.red)),
+                            ]),
+                          );
+                        }),
+                      ],
+                    ),
+                  ),
+                ),
               const SizedBox(height: 8),
               Expanded(
                 child: ListView.separated(
@@ -239,20 +312,23 @@ class _ModelsPageState extends State<ModelsPage> {
                   separatorBuilder: (_, __) => const SizedBox(height: 8),
                   itemBuilder: (_, i) {
                     final m = list[i];
+                    final modelId = (m['model_id'] ?? '').toString();
+                    final isDownloading = _isModelDownloading(modelId);
                     return Card(
                       child: ListTile(
                         onTap: () => setState(() => _selected = m),
                         title: Text((m['name'] ?? m['display_name'] ?? '').toString()),
-                        subtitle: Text((m['model_id'] ?? '').toString()),
+                        subtitle: Text('${m['task'] ?? m['pipeline_tag'] ?? 'Task unknown'} • ${(m['size_bytes'] ?? 'Size unknown')}'),
                         trailing: _hfMode == 'discover'
                             ? FilledButton.tonal(
-                                onPressed: () => _downloadModel((m['model_id'] ?? '').toString()),
-                                child: const Text('Download'),
+                                onPressed: isDownloading ? null : () => _downloadModel(modelId),
+                                child: Text(isDownloading ? 'Downloading…' : 'Download'),
                               )
                             : Chip(label: Text((m['provider'] ?? '').toString())),
                         isThreeLine: true,
                         dense: false,
                         contentPadding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+                        titleAlignment: ListTileTitleAlignment.center,
                       ),
                     );
                   },
@@ -282,7 +358,7 @@ class _ModelsPageState extends State<ModelsPage> {
                       const SizedBox(height: 6),
                       Text('Provider: ${_selected!['provider']}'),
                       Text('Model ID: ${_selected!['model_id']}'),
-                      Text('Task: ${_selected!['task'] ?? 'unknown'}'),
+                      Text('Task: ${_selected!['task'] ?? _selected!['pipeline_tag'] ?? 'unknown'}'),
                       Text('Runtime: ${_selected!['runtime'] ?? ((_selected!['metadata'] as Map<String, dynamic>?)?['runtime'] ?? 'unknown')}'),
                       Text('Local path: ${_selected!['local_path'] ?? ((_selected!['raw'] as Map<String, dynamic>?)?['local_path'] ?? 'unknown')}'),
                       const SizedBox(height: 10),
@@ -294,18 +370,32 @@ class _ModelsPageState extends State<ModelsPage> {
                         _capabilityChip('Streaming', (_selected!['capabilities']?['supports_streaming'] ?? _selected!['supports_streaming']) == true),
                       ]),
                       const SizedBox(height: 10),
-                      Text('Size: ${((_selected!['metadata'] as Map<String, dynamic>?)?['size_bytes'] ?? _selected!['size_bytes'] ?? 'unknown')}'),
+                      Text('Size: ${((_selected!['metadata'] as Map<String, dynamic>?)?['size_bytes'] ?? _selected!['size_bytes'] ?? 'Size unknown')}'),
                       Text('Parameters: ${((_selected!['metadata'] as Map<String, dynamic>?)?['parameters'] ?? 'unknown')}'),
                       Text('Context length: ${((_selected!['metadata'] as Map<String, dynamic>?)?['context_length'] ?? 'unknown')}'),
                       Text('Quantization: ${((_selected!['metadata'] as Map<String, dynamic>?)?['quantization'] ?? 'unknown')}'),
-                      if (_hfMode != 'discover') ...[
-                        const SizedBox(height: 12),
+                      Text('License: ${((_selected!['metadata'] as Map<String, dynamic>?)?['license'] ?? _selected!['license'] ?? 'unknown')}'),
+                      Text('Downloads/Likes: ${_selected!['downloads'] ?? ((_selected!['metadata'] as Map<String, dynamic>?)?['downloads'] ?? 'unknown')} / ${_selected!['likes'] ?? ((_selected!['metadata'] as Map<String, dynamic>?)?['likes'] ?? 'unknown')}'),
+                      Text('Updated: ${_selected!['last_modified'] ?? ((_selected!['metadata'] as Map<String, dynamic>?)?['last_modified'] ?? 'unknown')}'),
+                      const SizedBox(height: 12),
+                      Wrap(spacing: 8, children: [
                         FilledButton.tonalIcon(
-                          onPressed: _refreshMetadata,
-                          icon: const Icon(Icons.refresh),
-                          label: const Text('Refresh metadata'),
+                          onPressed: () => Clipboard.setData(ClipboardData(text: (_selected!['source_url'] ?? 'https://huggingface.co/${_selected!['model_id']}').toString())),
+                          icon: const Icon(Icons.link),
+                          label: const Text('Copy model link'),
                         ),
-                      ],
+                        if (_hfMode != 'discover')
+                          FilledButton.tonalIcon(
+                            onPressed: _refreshMetadata,
+                            icon: const Icon(Icons.refresh),
+                            label: const Text('Refresh metadata'),
+                          ),
+                      ]),
+                      if ((((_selected!['metadata'] as Map<String, dynamic>?)?['metadata_completeness'] ?? _selected!['metadata_completeness']) == null))
+                        const Padding(
+                          padding: EdgeInsets.only(top: 8),
+                          child: Text('Detailed metadata not available for this model yet.'),
+                        ),
                     ]),
                   ),
                 ),

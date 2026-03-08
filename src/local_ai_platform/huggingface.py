@@ -102,6 +102,13 @@ class HuggingFaceController:
             return f"~{estimate} (estimated)"
         return None
 
+    @staticmethod
+    def _safe_getattr(obj: Any, *names: str) -> Any:
+        for name in names:
+            if hasattr(obj, name):
+                return getattr(obj, name)
+        return None
+
     def model_metadata(self, model_id: str, refresh: bool = False) -> dict[str, Any]:
         key = model_id.strip()
         if not refresh and key in self._metadata_cache:
@@ -116,6 +123,13 @@ class HuggingFaceController:
             "size_bytes": None,
             "installed": False,
             "location": None,
+            "pipeline_tag": None,
+            "downloads": None,
+            "likes": None,
+            "last_modified": None,
+            "library_name": None,
+            "license": None,
+            "source_url": f"https://huggingface.co/{key}",
             "supports": {
                 "chat": True,
                 "tools": False,
@@ -126,6 +140,8 @@ class HuggingFaceController:
             },
             "tags": ["configured"],
             "metadata_source": "config",
+            "metadata_completeness": "partial",
+            "estimated_fields": [],
             "updated_at": int(time.time()),
         }
 
@@ -151,6 +167,8 @@ class HuggingFaceController:
                     cfg = json.loads(chosen_cfg.read_text(encoding="utf-8"))
                     info["context_length"] = cfg.get("max_position_embeddings") or cfg.get("n_positions") or cfg.get("seq_length")
                     info["parameters"] = self._estimate_params(cfg)
+                    if isinstance(info["parameters"], str) and info["parameters"].startswith("~"):
+                        info["estimated_fields"].append("parameters")
                     q = cfg.get("quantization_config")
                     if q:
                         info["quantization"] = q.get("quant_method") or str(q)
@@ -166,15 +184,28 @@ class HuggingFaceController:
             from huggingface_hub import model_info
 
             remote = model_info(key)
-            if getattr(remote, "pipeline_tag", None) in {"image-text-to-text", "image-to-text"}:
+            pipeline_tag = self._safe_getattr(remote, "pipeline_tag")
+            info["pipeline_tag"] = pipeline_tag
+            if pipeline_tag in {"image-text-to-text", "image-to-text", "text-to-image"}:
                 info["supports"]["vision"] = True
-            if getattr(remote, "pipeline_tag", None) in {"feature-extraction", "sentence-similarity"}:
+            if pipeline_tag in {"feature-extraction", "sentence-similarity"}:
                 info["supports"]["embeddings"] = True
-            if getattr(remote, "downloads", None) is not None:
-                info["tags"] = sorted(set(info["tags"] + ["hub"]))
+            info["downloads"] = self._safe_getattr(remote, "downloads")
+            info["likes"] = self._safe_getattr(remote, "likes")
+            info["library_name"] = self._safe_getattr(remote, "library_name")
+            info["license"] = self._safe_getattr(remote, "license")
+            info["last_modified"] = str(self._safe_getattr(remote, "last_modified", "lastModified") or "") or None
+            remote_tags = self._safe_getattr(remote, "tags")
+            if remote_tags:
+                info["tags"] = sorted(set(info["tags"] + list(remote_tags)))
+            info["tags"] = sorted(set(info["tags"] + ["hub"]))
             info["metadata_source"] = "hub+local" if info["installed"] else "hub"
         except Exception:
             pass
+
+        known = [info.get("size_bytes"), info.get("parameters"), info.get("context_length"), info.get("pipeline_tag"), info.get("downloads")]
+        if sum(1 for x in known if x not in {None, ""}) >= 3:
+            info["metadata_completeness"] = "good"
 
         self._metadata_cache[key] = info
         return info

@@ -5,6 +5,8 @@ import logging
 import os
 import re
 import shutil
+import threading
+import time
 import uuid
 from dataclasses import asdict
 from pathlib import Path
@@ -235,6 +237,8 @@ orchestrator = AgentOrchestrator(config)
 controller = OllamaController(config)
 trace_store = TraceStore(cfg=type("Cfg", (), {"enabled": config.trace_enabled, "verbose": config.trace_verbose, "store_dir": config.trace_store_dir})())
 image_service = ImageGenerationService(config)
+_download_jobs: dict[str, dict[str, Any]] = {}
+_download_lock = threading.Lock()
 if os.getenv("LANGSMITH_TRACING", "").strip().lower() in {"1", "true", "yes", "on"}:
     os.environ.setdefault("LANGCHAIN_TRACING_V2", "true")
     if os.getenv("LANGSMITH_API_KEY"):
@@ -372,6 +376,14 @@ def _serialize_model(provider: str, model_id: str, display_name: str, installed:
             "quantization": kwargs.get("quantization"),
             "context_length": kwargs.get("context_length"),
             "license": kwargs.get("license"),
+            "library_name": kwargs.get("library_name"),
+            "downloads": kwargs.get("downloads"),
+            "likes": kwargs.get("likes"),
+            "last_modified": kwargs.get("last_modified"),
+            "pipeline_tag": kwargs.get("pipeline_tag"),
+            "source_url": kwargs.get("source_url"),
+            "metadata_completeness": kwargs.get("metadata_completeness"),
+            "estimated_fields": kwargs.get("estimated_fields", []),
             "tags": kwargs.get("tags", []),
             "runtime": kwargs.get("runtime"),
             "runtimes": kwargs.get("runtimes"),
@@ -606,9 +618,18 @@ def _hf_local_entries(search: str = "") -> list[dict[str, Any]]:
                 runtime=meta.get("runtime"),
                 runtimes=meta.get("runtimes", ["transformers_local"]),
                 metadata_source=meta.get("metadata_source", "local_cache"),
+                downloads=meta.get("downloads"),
+                likes=meta.get("likes"),
+                last_modified=meta.get("last_modified"),
+                pipeline_tag=meta.get("pipeline_tag"),
+                source_url=meta.get("source_url"),
+                library_name=meta.get("library_name"),
+                license=meta.get("license"),
+                metadata_completeness=meta.get("metadata_completeness"),
+                estimated_fields=meta.get("estimated_fields", []),
             )
             | {
-                "task": "text-generation",
+                "task": meta.get("pipeline_tag") or "text-generation",
                 "local_path": meta.get("location"),
                 "capabilities": _normalize_capabilities(supports),
                 "available_locally": True,
@@ -705,6 +726,15 @@ def model_catalog(provider: str | None = None, search: str = "", installed_only:
                         runtime=meta.get("runtime"),
                         runtimes=meta.get("runtimes", ["transformers_local"]),
                         metadata_source=meta.get("metadata_source"),
+                        downloads=meta.get("downloads"),
+                        likes=meta.get("likes"),
+                        last_modified=meta.get("last_modified"),
+                        pipeline_tag=meta.get("pipeline_tag"),
+                        source_url=meta.get("source_url"),
+                        library_name=meta.get("library_name"),
+                        license=meta.get("license"),
+                        metadata_completeness=meta.get("metadata_completeness"),
+                        estimated_fields=meta.get("estimated_fields", []),
                     )
                     | {"capabilities": _normalize_capabilities(supports), "local_path": meta.get("location")}
                 )
@@ -811,9 +841,15 @@ def models_catalog(provider: str | None = None, search: str = "", installed_only
             "supports": supports,
             "runtime": (it.get("metadata") or {}).get("runtime"),
             "metadata_source": (it.get("metadata") or {}).get("metadata_source"),
-            "task": it.get("task"),
+            "task": it.get("task") or ((it.get("metadata") or {}).get("pipeline_tag")),
             "local_path": it.get("local_path") or ((it.get("local_status") or {}).get("location")),
             "capabilities": it.get("capabilities") or _normalize_capabilities(supports),
+            "source_url": (it.get("metadata") or {}).get("source_url") or (f"https://huggingface.co/{it.get('model_id')}" if it.get("provider") == "huggingface" else None),
+            "downloads": (it.get("metadata") or {}).get("downloads"),
+            "likes": (it.get("metadata") or {}).get("likes"),
+            "last_modified": (it.get("metadata") or {}).get("last_modified"),
+            "metadata_completeness": (it.get("metadata") or {}).get("metadata_completeness"),
+            "estimated_fields": (it.get("metadata") or {}).get("estimated_fields", []),
             "raw": it,
         })
     return {"items": items, "count": len(items)}
@@ -845,7 +881,16 @@ def model_catalog_details(provider: str, model_id: str, refresh: bool = False) -
             runtime=meta.get("runtime"),
             runtimes=meta.get("runtimes", ["transformers_local"]),
             metadata_source=meta.get("metadata_source"),
-        )
+            downloads=meta.get("downloads"),
+            likes=meta.get("likes"),
+            last_modified=meta.get("last_modified"),
+            pipeline_tag=meta.get("pipeline_tag"),
+            source_url=meta.get("source_url"),
+            library_name=meta.get("library_name"),
+            license=meta.get("license"),
+            metadata_completeness=meta.get("metadata_completeness"),
+            estimated_fields=meta.get("estimated_fields", []),
+        ) | {"source_url": meta.get("source_url"), "capabilities": _normalize_capabilities(meta.get("supports", {}))}
 
     raise error_response("invalid_provider", f"Unknown provider: {provider}")
 
@@ -901,8 +946,11 @@ def models_hf_discover(q: str = "", task: str = "", sort: str = "downloads", lim
             "downloads": getattr(m, "downloads", None),
             "likes": getattr(m, "likes", None),
             "last_modified": str(getattr(m, "last_modified", "") or "") or None,
+            "library_name": getattr(m, "library_name", None),
+            "license": getattr(m, "license", None),
             "size_bytes": None,
             "size_estimate": "unknown",
+            "source_url": f"https://huggingface.co/{model_id}",
             "capabilities": _caps(m),
             "local_status": {"installed": bool(orchestrator.hf.model_metadata(model_id).get("installed"))},
             "remote": True,
@@ -912,16 +960,44 @@ def models_hf_discover(q: str = "", task: str = "", sort: str = "downloads", lim
     return {"items": items, "cursor": next_cursor, "count": len(items)}
 
 
-@app.post("/models/hf/download")
-def models_hf_download(payload: HFDownloadRequest) -> dict[str, Any]:
+def _now_ts() -> int:
+    return int(time.time())
+
+
+def _download_job(model_id: str) -> dict[str, Any]:
+    return {
+        "download_id": str(uuid.uuid4()),
+        "model_id": model_id,
+        "status": "queued",
+        "progress_percent": 0,
+        "bytes_downloaded": None,
+        "total_bytes": None,
+        "speed_bytes_per_sec": None,
+        "started_at": _now_ts(),
+        "updated_at": _now_ts(),
+        "error_message": None,
+        "local_path": None,
+    }
+
+
+def _set_job(download_id: str, **updates: Any) -> None:
+    with _download_lock:
+        job = _download_jobs.get(download_id)
+        if not job:
+            return
+        job.update(updates)
+        job["updated_at"] = _now_ts()
+
+
+def _run_hf_download(job: dict[str, Any], payload: HFDownloadRequest) -> None:
+    download_id = job["download_id"]
     model_id = payload.model_id.strip()
-    if not model_id:
-        raise error_response("invalid_model", "model_id is required", status=400)
     target = Path(config.local_models_dir).resolve() / model_id.replace("/", "--")
     target.mkdir(parents=True, exist_ok=True)
     try:
         from huggingface_hub import snapshot_download
 
+        _set_job(download_id, status="downloading", progress_percent=10)
         out = snapshot_download(
             repo_id=model_id,
             local_dir=str(target),
@@ -929,11 +1005,40 @@ def models_hf_download(payload: HFDownloadRequest) -> dict[str, Any]:
             revision=payload.revision,
             allow_patterns=payload.allow_patterns,
         )
+        _set_job(download_id, status="extracting", progress_percent=85)
+        image_service.refresh_models()
+        _set_job(download_id, status="completed", progress_percent=100, local_path=out)
     except Exception as exc:
-        raise error_response("provider_unavailable", f"Download failed: {exc}", status=502)
+        _set_job(download_id, status="failed", error_message=str(exc), progress_percent=None)
 
-    image_service.refresh_models()
-    return {"downloaded": True, "model_id": model_id, "local_path": out}
+
+@app.post("/models/hf/download")
+def models_hf_download(payload: HFDownloadRequest) -> dict[str, Any]:
+    model_id = payload.model_id.strip()
+    if not model_id:
+        raise error_response("invalid_model", "model_id is required", status=400)
+    job = _download_job(model_id)
+    with _download_lock:
+        _download_jobs[job["download_id"]] = job
+    t = threading.Thread(target=_run_hf_download, args=(job, payload), daemon=True)
+    t.start()
+    return job
+
+
+@app.get("/models/hf/downloads")
+def models_hf_downloads(limit: int = 20) -> dict[str, Any]:
+    with _download_lock:
+        items = sorted(_download_jobs.values(), key=lambda x: x.get("updated_at", 0), reverse=True)[: max(1, min(limit, 100))]
+    return {"items": items, "count": len(items)}
+
+
+@app.get("/models/hf/downloads/{download_id}")
+def models_hf_download_status(download_id: str) -> dict[str, Any]:
+    with _download_lock:
+        job = _download_jobs.get(download_id)
+    if not job:
+        raise error_response("not_found", "Download not found", status=404)
+    return job
 
 
 def _default_assistant_definition() -> dict[str, Any]:
