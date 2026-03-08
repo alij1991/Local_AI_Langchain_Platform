@@ -376,6 +376,8 @@ def _serialize_model(provider: str, model_id: str, display_name: str, installed:
             "last_seen": kwargs.get("last_seen"),
             "resolved_snapshot_path": kwargs.get("resolved_snapshot_path"),
             "cached_files_count": kwargs.get("cached_files_count"),
+            "snapshot_reason": kwargs.get("snapshot_reason"),
+            "cache_scan_reason": kwargs.get("cache_scan_reason"),
         },
         "provider_unavailable": kwargs.get("provider_unavailable", False),
         "metadata": {
@@ -401,6 +403,8 @@ def _serialize_model(provider: str, model_id: str, display_name: str, installed:
             "resolved_snapshot_path": kwargs.get("resolved_snapshot_path"),
             "cached_files_count": kwargs.get("cached_files_count"),
             "last_seen": kwargs.get("last_seen"),
+            "snapshot_reason": kwargs.get("snapshot_reason"),
+            "cache_scan_reason": kwargs.get("cache_scan_reason"),
         },
     }
 
@@ -649,6 +653,8 @@ def _hf_local_entries(search: str = "") -> list[dict[str, Any]]:
                 resolved_snapshot_path=meta.get("resolved_snapshot_path"),
                 cached_files_count=meta.get("cached_files_count"),
                 last_seen=meta.get("last_seen"),
+                snapshot_reason=meta.get("snapshot_reason"),
+                cache_scan_reason=meta.get("cache_scan_reason"),
             )
             | {
                 "task": meta.get("pipeline_tag") or "text-generation",
@@ -885,6 +891,8 @@ def models_catalog(provider: str | None = None, search: str = "", installed_only
             "resolved_snapshot_path": (it.get("metadata") or {}).get("resolved_snapshot_path"),
             "cached_files_count": (it.get("metadata") or {}).get("cached_files_count"),
             "last_seen": (it.get("metadata") or {}).get("last_seen"),
+            "snapshot_reason": (it.get("metadata") or {}).get("snapshot_reason"),
+            "cache_scan_reason": (it.get("metadata") or {}).get("cache_scan_reason"),
             "raw": it,
         })
     return {"items": items, "count": len(items)}
@@ -928,6 +936,8 @@ def model_catalog_details(provider: str, model_id: str, refresh: bool = False) -
             resolved_snapshot_path=meta.get("resolved_snapshot_path"),
             cached_files_count=meta.get("cached_files_count"),
             last_seen=meta.get("last_seen"),
+            snapshot_reason=meta.get("snapshot_reason"),
+            cache_scan_reason=meta.get("cache_scan_reason"),
         ) | {"source_url": meta.get("source_url"), "capabilities": _normalize_capabilities(meta.get("supports", {}))}
 
     raise error_response("invalid_provider", f"Unknown provider: {provider}")
@@ -2217,7 +2227,7 @@ def images_file(session_id: str, image_id: str):
 
 @app.post("/images/generate")
 def images_generate(payload: ImageGenerateRequest, response: Response) -> dict[str, Any]:
-    logger.info("images_generate model=%s session=%s", payload.model_id, payload.session_id)
+    logger.info("images_generate.received model=%s session=%s size=%sx%s steps=%s", payload.model_id, payload.session_id, payload.width, payload.height, payload.steps)
     session = get_image_session(payload.session_id)
     if not session:
         raise error_response("not_found", "Image session not found", status=404)
@@ -2232,6 +2242,7 @@ def images_generate(payload: ImageGenerateRequest, response: Response) -> dict[s
         parent_id = payload.init_image_id
 
     run_id, recorder, _ = _build_trace(f"image:{payload.model_id}", payload.session_id)
+    logger.info("images_generate.plan_start model=%s run_id=%s", payload.model_id, run_id)
     result = image_service.generate(
         model_id=payload.model_id,
         prompt=payload.prompt,
@@ -2245,13 +2256,36 @@ def images_generate(payload: ImageGenerateRequest, response: Response) -> dict[s
         strength=payload.strength,
         params_json=payload.params_json,
     )
+    logger.info(
+        "images_generate.completed ok=%s code=%s device=%s strategy=%s run_id=%s",
+        result.ok,
+        getattr(result, "error_code", None),
+        (result.metadata or {}).get("device_used"),
+        (result.metadata or {}).get("runtime_strategy"),
+        run_id,
+    )
     if not result.ok or not result.image_bytes:
+        logger.warning(
+            "images_generate.failed model=%s session=%s run_id=%s code=%s message=%s metadata=%s",
+            payload.model_id,
+            payload.session_id,
+            run_id,
+            result.error_code,
+            result.error_message,
+            result.metadata,
+        )
         _finalize_trace(recorder, success=False, error=result.error_message or result.error_code or "generation failed")
-        raise error_response(result.error_code or "provider_unavailable", result.error_message or "Image generation failed", details=result.metadata or {}, status=400)
+        raise error_response(
+            result.error_code or "provider_unavailable",
+            result.error_message or "Image generation failed",
+            details={**(result.metadata or {}), "run_id": run_id},
+            status=400,
+        )
 
     image_id = str(uuid.uuid4())
     file_path = image_output_path(payload.session_id, image_id)
     file_path.write_bytes(result.image_bytes)
+    logger.info("images_generate.saved image_id=%s run_id=%s path=%s", image_id, run_id, str(file_path))
     row = add_image(
         payload.session_id,
         payload.model_id,
@@ -2333,7 +2367,12 @@ def images_edit(payload: ImageEditRequest, response: Response) -> dict[str, Any]
             result.metadata = {"runtime": "basic_edit", "fallback": True, "source_error": result.error_message}
         except Exception as exc:  # noqa: BLE001
             _finalize_trace(recorder, success=False, error=str(exc))
-            raise error_response(result.error_code or "provider_unavailable", result.error_message or str(exc), details=result.metadata or {}, status=400)
+            raise error_response(
+                result.error_code or "provider_unavailable",
+                result.error_message or str(exc),
+                details={**(result.metadata or {}), "run_id": run_id},
+                status=400,
+            )
 
     image_id = str(uuid.uuid4())
     file_path = image_output_path(payload.session_id, image_id)

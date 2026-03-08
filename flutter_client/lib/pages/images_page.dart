@@ -1,6 +1,7 @@
 import 'dart:convert';
 
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:local_ai_flutter_client/services/api_client.dart';
 
 class ImagesPage extends StatefulWidget {
@@ -38,6 +39,7 @@ class _ImagesPageState extends State<ImagesPage> {
   int _height = 1024;
   int _steps = 20;
   double _guidance = 7.0;
+  int _loadVersion = 0;
 
   @override
   void initState() {
@@ -45,10 +47,26 @@ class _ImagesPageState extends State<ImagesPage> {
     _load();
   }
 
+  @override
+  void dispose() {
+    _prompt.dispose();
+    _instruction.dispose();
+    super.dispose();
+  }
+
+  void _safeSetState(VoidCallback fn) {
+    if (!mounted) return;
+    setState(fn);
+  }
+
   Future<void> _load({bool refreshModels = false}) async {
+    final int requestId = ++_loadVersion;
     final sessions = await widget.api.get('/images/sessions') as Map<String, dynamic>;
+    if (!mounted || requestId != _loadVersion) return;
     final models = await widget.api.get('/images/models${refreshModels ? '?refresh=true' : ''}') as Map<String, dynamic>;
+    if (!mounted || requestId != _loadVersion) return;
     final runtime = await widget.api.get('/images/runtime${_selectedModel != null ? '?model_id=${Uri.encodeComponent(_selectedModel!)}' : ''}') as Map<String, dynamic>;
+    if (!mounted || requestId != _loadVersion) return;
     setState(() {
       _sessions = ((sessions['items'] as List<dynamic>?) ?? []).cast<Map<String, dynamic>>();
       _models = ((models['items'] as List<dynamic>?) ?? []).cast<Map<String, dynamic>>();
@@ -63,6 +81,7 @@ class _ImagesPageState extends State<ImagesPage> {
     });
     if (_selectedModel != null) {
       await _loadModelFit();
+      if (!mounted || requestId != _loadVersion) return;
     }
     if (_activeSession == null && _sessions.isNotEmpty) {
       await _openSession(_sessions.first['id'].toString());
@@ -70,20 +89,24 @@ class _ImagesPageState extends State<ImagesPage> {
   }
 
   Future<void> _refreshModels() async {
-    setState(() => _status = 'Refreshing models…');
+    _safeSetState(() => _status = 'Refreshing models…');
     await widget.api.post('/images/models/refresh', {});
+    if (!mounted) return;
     await _load(refreshModels: true);
-    if (mounted) setState(() => _status = 'Models refreshed');
+    _safeSetState(() => _status = 'Models refreshed');
   }
 
   Future<void> _createSession() async {
     final body = await widget.api.post('/images/sessions', {'title': 'New image session'}) as Map<String, dynamic>;
+    if (!mounted) return;
     await _load();
+    if (!mounted) return;
     await _openSession(body['session_id'].toString());
   }
 
   Future<void> _openSession(String id) async {
     final body = await widget.api.get('/images/sessions/$id') as Map<String, dynamic>;
+    if (!mounted) return;
     setState(() {
       _activeSession = body;
       final imgs = ((body['images'] as List<dynamic>?) ?? []).cast<Map<String, dynamic>>();
@@ -98,6 +121,7 @@ class _ImagesPageState extends State<ImagesPage> {
   }
 
   void _captureError(Object e) {
+    if (!mounted) return;
     final text = e.toString();
     String message = text;
     String details = '';
@@ -114,7 +138,7 @@ class _ImagesPageState extends State<ImagesPage> {
         }
       } catch (_) {}
     }
-    setState(() {
+    _safeSetState(() {
       _errorCode = code;
       _errorMessage = message;
       _errorDetails = details;
@@ -124,7 +148,7 @@ class _ImagesPageState extends State<ImagesPage> {
 
   Future<void> _validateModel() async {
     if (_selectedModel == null) return;
-    setState(() => _status = 'Validating model…');
+    _safeSetState(() => _status = 'Validating model…');
     try {
       final body = await widget.api.post('/images/validate-model', {'model_id': _selectedModel}) as Map<String, dynamic>;
       if (!mounted) return;
@@ -173,7 +197,7 @@ class _ImagesPageState extends State<ImagesPage> {
 
   Future<void> _generate() async {
     if (_activeSession == null || _selectedModel == null || _prompt.text.trim().isEmpty || _busy) return;
-    setState(() {
+    _safeSetState(() {
       _busy = true;
       _status = _runtime['effective_device'] == 'cuda' ? 'Loading model on GPU…' : 'Loading model on CPU…';
       _errorCode = '';
@@ -181,7 +205,7 @@ class _ImagesPageState extends State<ImagesPage> {
       _errorDetails = '';
     });
     try {
-      setState(() => _status = 'Generating base image…');
+      _safeSetState(() => _status = 'Generating base image…');
       final payload = {
         'session_id': _activeSession!['id'],
         'model_id': _selectedModel,
@@ -202,23 +226,25 @@ class _ImagesPageState extends State<ImagesPage> {
         },
       };
       await widget.api.post('/images/generate', payload);
-      if (_enableRefine) setState(() => _status = 'Refining image…');
-      if (_enableUpscale) setState(() => _status = 'Upscaling image…');
-      if (_enablePostprocess) setState(() => _status = 'Postprocessing image…');
-      setState(() => _status = 'Saving image…');
+      if (!mounted) return;
+      if (_enableRefine) _safeSetState(() => _status = 'Refining image…');
+      if (_enableUpscale) _safeSetState(() => _status = 'Upscaling image…');
+      if (_enablePostprocess) _safeSetState(() => _status = 'Postprocessing image…');
+      _safeSetState(() => _status = 'Saving image…');
       await _openSession(_activeSession!['id'].toString());
+      if (!mounted) return;
       _prompt.clear();
-      setState(() => _status = 'Completed');
+      _safeSetState(() => _status = 'Completed');
     } catch (e) {
       _captureError(e);
     } finally {
-      if (mounted) setState(() => _busy = false);
+      _safeSetState(() => _busy = false);
     }
   }
 
   Future<void> _applyEdit() async {
     if (_activeSession == null || _selectedModel == null || _selectedImageId == null || _instruction.text.trim().isEmpty || _busy) return;
-    setState(() {
+    _safeSetState(() {
       _busy = true;
       _status = 'Applying edit…';
       _errorCode = '';
@@ -232,13 +258,15 @@ class _ImagesPageState extends State<ImagesPage> {
         'model_id': _selectedModel,
         'instruction': _instruction.text.trim(),
       });
+      if (!mounted) return;
       await _openSession(_activeSession!['id'].toString());
+      if (!mounted) return;
       _instruction.clear();
-      setState(() => _status = 'Edit completed');
+      _safeSetState(() => _status = 'Edit completed');
     } catch (e) {
       _captureError(e);
     } finally {
-      if (mounted) setState(() => _busy = false);
+      _safeSetState(() => _busy = false);
     }
   }
 
@@ -410,7 +438,17 @@ class _ImagesPageState extends State<ImagesPage> {
                                 if (_errorDetails.isNotEmpty)
                                   ExpansionTile(
                                     title: const Text('Show details'),
-                                    children: [SelectableText(_errorDetails)],
+                                    children: [
+                                      SelectableText(_errorDetails),
+                                      Align(
+                                        alignment: Alignment.centerRight,
+                                        child: TextButton.icon(
+                                          onPressed: () => Clipboard.setData(ClipboardData(text: _errorDetails)),
+                                          icon: const Icon(Icons.copy),
+                                          label: const Text('Copy details'),
+                                        ),
+                                      ),
+                                    ],
                                   ),
                               ]),
                             ),
@@ -454,6 +492,7 @@ class _ImagesPageState extends State<ImagesPage> {
                             ListTile(dense: true, title: Text('Torch: ${(_runtime['torch_version'] ?? 'n/a').toString()} • CUDA build: ${(_runtime['cuda_version'] ?? 'none').toString()}')),
                             ListTile(dense: true, title: Text('CUDA available: ${(_runtime['cuda_available'] == true)} • Effective: ${(_runtime['effective_device'] ?? 'cpu')}')),
                             ListTile(dense: true, title: Text('Execution plan: ${((_runtime['execution_plan'] as Map<String, dynamic>?)?['device_plan'] ?? _runtime['runtime_strategy'] ?? 'unknown')}')),
+                            ListTile(dense: true, title: Text('Expected timeout: ${((_runtime['execution_plan'] as Map<String, dynamic>?)?['expected_timeout_sec'] ?? 'n/a')}s')),
                             if (((_runtime['warnings'] as List<dynamic>?) ?? const []).isNotEmpty)
                               Padding(
                                 padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 4),
