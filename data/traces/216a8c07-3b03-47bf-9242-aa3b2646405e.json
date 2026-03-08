@@ -1,0 +1,13 @@
+{
+  "run_id": "216a8c07-3b03-47bf-9242-aa3b2646405e",
+  "conversation_id": "fde7b939-6d58-40a1-9a82-bec699cfdbc0",
+  "agent_name": "image:shallowdream204/BitDance-14B-64x",
+  "model_provider": "unknown",
+  "model_id": "",
+  "start_timestamp": "2026-03-07T22:33:34.043529+00:00",
+  "end_timestamp": "2026-03-07T22:33:34.052805+00:00",
+  "duration_ms": 9,
+  "success": false,
+  "error": "GPU required but unavailable. {'torch_version': '2.10.0+cpu', 'torch_cuda_version': None, 'cuda_available': False, 'suggestion': 'Install CUDA-enabled torch or set HF_IMAGE_REQUIRE_GPU=false.'}",
+  "events": []
+}
