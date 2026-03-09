@@ -209,6 +209,7 @@ class ImageGenerateRequest(BaseModel):
     height: int = 1024
     init_image_id: str | None = None
     strength: float = 0.65
+    timeout_sec: int | None = None
     params_json: dict[str, Any] = Field(default_factory=dict)
 
 
@@ -224,6 +225,7 @@ class ImageEditRequest(BaseModel):
     steps: int = 20
     guidance_scale: float = 7.0
     strength: float = 0.65
+    timeout_sec: int | None = None
     params_json: dict[str, Any] = Field(default_factory=dict)
 
 
@@ -1094,21 +1096,27 @@ def _set_job(download_id: str, **updates: Any) -> None:
 def _run_hf_download(job: dict[str, Any], payload: HFDownloadRequest) -> None:
     download_id = job["download_id"]
     model_id = payload.model_id.strip()
-    target = Path(config.local_models_dir).resolve() / model_id.replace("/", "--")
-    target.mkdir(parents=True, exist_ok=True)
     try:
         from huggingface_hub import snapshot_download
 
         _set_job(download_id, status="downloading", progress_percent=10)
-        out = snapshot_download(
-            repo_id=model_id,
-            local_dir=str(target),
-            local_dir_use_symlinks=False,
-            revision=payload.revision,
-            allow_patterns=payload.allow_patterns,
-        )
+        mode = str(getattr(config, "hf_cache_mode", "standard") or "standard").strip().lower()
+        if mode not in {"standard", "custom"}:
+            mode = "standard"
+        kwargs: dict[str, Any] = {
+            "repo_id": model_id,
+            "revision": payload.revision,
+            "allow_patterns": payload.allow_patterns,
+        }
+        if mode == "custom" and str(getattr(config, "hf_cache_dir", "") or "").strip():
+            kwargs["cache_dir"] = str(getattr(config, "hf_cache_dir")).strip()
+        out = snapshot_download(**kwargs)
         _set_job(download_id, status="extracting", progress_percent=85)
         image_service.refresh_models()
+        try:
+            orchestrator.hf.model_metadata(model_id, refresh=True)
+        except Exception:
+            pass
         _set_job(download_id, status="completed", progress_percent=100, local_path=out)
     except Exception as exc:
         _set_job(download_id, status="failed", error_message=str(exc), progress_percent=None)
@@ -2153,6 +2161,7 @@ def images_runtime(model_id: str | None = None) -> dict[str, Any]:
     body = image_service.get_device_status()
     body["low_memory_mode"] = bool(getattr(config, "hf_image_low_memory_mode", True))
     body["gpu_total_vram_human"] = format_bytes_human(body.get("gpu_total_vram_bytes"))
+    body["image_runtime_strategy"] = str(getattr(config, "image_runtime_strategy", "auto"))
     target_model = (model_id or config.hf_image_default_model or "").strip()
     if target_model:
         plan = image_service.build_image_execution_plan(target_model)
@@ -2255,6 +2264,7 @@ def images_generate(payload: ImageGenerateRequest, response: Response) -> dict[s
         init_image_path=init_path,
         strength=payload.strength,
         params_json=payload.params_json,
+        timeout_sec=payload.timeout_sec,
     )
     logger.info(
         "images_generate.completed ok=%s code=%s device=%s strategy=%s run_id=%s",
@@ -2301,6 +2311,7 @@ def images_generate(payload: ImageGenerateRequest, response: Response) -> dict[s
             "height": payload.height,
             "strength": payload.strength,
             "params_json": payload.params_json,
+            "timeout_sec": payload.timeout_sec,
             "runtime": (result.metadata or {}).get("runtime"),
             "device_used": (result.metadata or {}).get("device_used"),
             "runtime_strategy": (result.metadata or {}).get("runtime_strategy"),
@@ -2311,6 +2322,7 @@ def images_generate(payload: ImageGenerateRequest, response: Response) -> dict[s
             "quality_profile": (result.metadata or {}).get("quality_profile"),
             "stages_run": (result.metadata or {}).get("stages_run"),
             "enhancement_summary": (result.metadata or {}).get("enhancement_summary"),
+            "effective_settings": (result.metadata or {}).get("effective_settings"),
         },
         run_id=run_id,
         operation="img2img" if parent_id else "text2img",
@@ -2331,6 +2343,7 @@ def images_generate(payload: ImageGenerateRequest, response: Response) -> dict[s
         "quality_profile": (result.metadata or {}).get("quality_profile"),
         "stages_run": (result.metadata or {}).get("stages_run"),
         "enhancement_summary": (result.metadata or {}).get("enhancement_summary"),
+        "effective_settings": (result.metadata or {}).get("effective_settings"),
     }
 
 
@@ -2356,6 +2369,7 @@ def images_edit(payload: ImageEditRequest, response: Response) -> dict[str, Any]
         init_image_path=str(base.get("file_path")),
         strength=payload.strength,
         params_json=payload.params_json,
+        timeout_sec=payload.timeout_sec,
     )
 
     if (not result.ok or not result.image_bytes) and payload.instruction:
@@ -2400,6 +2414,7 @@ def images_edit(payload: ImageEditRequest, response: Response) -> dict[str, Any]
             "quality_profile": (result.metadata or {}).get("quality_profile"),
             "stages_run": (result.metadata or {}).get("stages_run"),
             "enhancement_summary": (result.metadata or {}).get("enhancement_summary"),
+            "effective_settings": (result.metadata or {}).get("effective_settings"),
         },
         run_id=run_id,
         operation="edit",

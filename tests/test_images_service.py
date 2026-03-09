@@ -133,3 +133,44 @@ def test_execution_plan_contains_expected_fields(tmp_path):
     assert 'torch_dtype' in plan
     assert 'recommended_width' in plan
     assert 'warnings' in plan
+
+
+def test_generate_uses_timeout_and_returns_effective_settings(tmp_path, monkeypatch):
+    cfg = _cfg(tmp_path)
+    cfg.hf_image_runtime = 'diffusers_local'
+    svc = ImageGenerationService(cfg)
+
+    monkeypatch.setattr(svc, '_resolve_model_source', lambda model_id: ('remote', model_id))
+    monkeypatch.setattr(svc, '_cache_dir', lambda model_id: Path('/tmp'))
+    monkeypatch.setattr(svc, 'build_image_execution_plan', lambda model_id, requested=None: {
+        'device_plan': 'cpu_low_memory',
+        'torch_dtype': 'float32',
+        'use_attention_slicing': True,
+        'use_vae_tiling': True,
+        'use_model_cpu_offload': False,
+        'use_sequential_cpu_offload': False,
+        'recommended_width': 640,
+        'recommended_height': 640,
+        'recommended_steps': 12,
+        'expected_timeout_sec': 333,
+        'warnings': [],
+        'reason': 'test',
+    })
+
+    observed = {}
+
+    def _fake_run_diffusers(**kwargs):
+        observed.update(kwargs)
+        return ImageRuntimeResult(ok=True, image_bytes=b'x', metadata={'runtime': 'diffusers_local', 'device_used': kwargs['device'], 'runtime_strategy': kwargs['execution_plan'].get('device_plan')})
+
+    monkeypatch.setattr(svc, '_run_diffusers_isolated', _fake_run_diffusers)
+
+    res = svc.generate(model_id='Tongyi-MAI/Z-Image-Turbo', prompt='p', params_json={'timeout_sec': 444, 'width': 512, 'height': 512, 'steps': 16, 'guidance_scale': 5.5})
+    assert res.ok is True
+    assert observed['timeout_s'] == 444
+    eff = (res.metadata or {}).get('effective_settings') or {}
+    assert eff.get('width') == 512
+    assert eff.get('height') == 512
+    assert eff.get('steps') == 16
+    assert float(eff.get('guidance_scale')) == 5.5
+    assert eff.get('timeout_s') == 444

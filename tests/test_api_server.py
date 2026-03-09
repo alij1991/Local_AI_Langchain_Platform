@@ -718,3 +718,48 @@ def test_images_runtime_includes_execution_plan(monkeypatch):
     res = client.get('/images/runtime?model_id=local:test')
     assert res.status_code == 200
     assert res.json()['execution_plan']['device_plan'] == 'cpu_low_memory'
+
+
+def test_run_hf_download_uses_standard_cache(monkeypatch):
+    calls = {}
+
+    def _fake_snapshot_download(**kwargs):
+        calls.update(kwargs)
+        return '/tmp/hf/snapshot'
+
+    import huggingface_hub
+    monkeypatch.setattr(huggingface_hub, 'snapshot_download', _fake_snapshot_download)
+    monkeypatch.setattr(api_server.image_service, 'refresh_models', lambda: {'items': []})
+    monkeypatch.setattr(api_server.orchestrator.hf, 'model_metadata', lambda model_id, refresh=False: {'installed': True})
+    monkeypatch.setattr(api_server.config, 'hf_cache_mode', 'standard', raising=False)
+    monkeypatch.setattr(api_server.config, 'hf_cache_dir', '', raising=False)
+
+    job = {'download_id': 'job1'}
+    api_server._download_jobs['job1'] = {'download_id': 'job1', 'updated_at': 0}
+    payload = api_server.HFDownloadRequest(model_id='Tongyi-MAI/Z-Image-Turbo')
+    api_server._run_hf_download(job, payload)
+
+    assert calls['repo_id'] == 'Tongyi-MAI/Z-Image-Turbo'
+    assert 'local_dir' not in calls
+
+
+def test_run_hf_download_uses_custom_cache_when_configured(monkeypatch):
+    calls = {}
+
+    def _fake_snapshot_download(**kwargs):
+        calls.update(kwargs)
+        return '/tmp/hf/snapshot'
+
+    import huggingface_hub
+    monkeypatch.setattr(huggingface_hub, 'snapshot_download', _fake_snapshot_download)
+    monkeypatch.setattr(api_server.image_service, 'refresh_models', lambda: {'items': []})
+    monkeypatch.setattr(api_server.orchestrator.hf, 'model_metadata', lambda model_id, refresh=False: {'installed': True})
+    monkeypatch.setattr(api_server.config, 'hf_cache_mode', 'custom', raising=False)
+    monkeypatch.setattr(api_server.config, 'hf_cache_dir', '/tmp/my_hf_cache', raising=False)
+
+    job = {'download_id': 'job2'}
+    api_server._download_jobs['job2'] = {'download_id': 'job2', 'updated_at': 0}
+    payload = api_server.HFDownloadRequest(model_id='Tongyi-MAI/Z-Image-Turbo')
+    api_server._run_hf_download(job, payload)
+
+    assert calls['cache_dir'] == '/tmp/my_hf_cache'

@@ -40,6 +40,9 @@ class AppConfig:
     hf_enable_cpu_offload: bool = True
     hf_enable_memory_efficient_attention: bool = False
     local_models_dir: str = "./models"
+    hf_cache_mode: str = "standard"
+    hf_cache_dir: str = ""
+    image_runtime_strategy: str = "auto"
 
 
 def load_config() -> AppConfig:
@@ -75,4 +78,7 @@ def load_config() -> AppConfig:
         hf_enable_memory_efficient_attention=_as_bool(os.getenv("HF_ENABLE_MEMORY_EFFICIENT_ATTENTION"), default=False),
         hf_api_token=os.getenv("HF_API_TOKEN", ""),
         local_models_dir=os.getenv("LOCAL_MODELS_DIR", "./models"),
+        hf_cache_mode=os.getenv("HF_CACHE_MODE", "standard"),
+        hf_cache_dir=os.getenv("HF_CACHE_DIR", ""),
+        image_runtime_strategy=os.getenv("IMAGE_RUNTIME_STRATEGY", "auto"),
     )

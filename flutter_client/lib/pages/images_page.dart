@@ -39,6 +39,7 @@ class _ImagesPageState extends State<ImagesPage> {
   int _height = 1024;
   int _steps = 20;
   double _guidance = 7.0;
+  int _timeoutSec = 300;
   int _loadVersion = 0;
 
   @override
@@ -214,6 +215,7 @@ class _ImagesPageState extends State<ImagesPage> {
         'height': _lowMemoryMode ? 512 : _height,
         'steps': _lowMemoryMode ? 16 : _steps,
         'guidance_scale': _guidance,
+        'timeout_sec': _timeoutSec,
         'params_json': {
           'quality_profile': _qualityProfile,
           'enable_refine': _enableRefine,
@@ -223,6 +225,7 @@ class _ImagesPageState extends State<ImagesPage> {
           'height': _lowMemoryMode ? 512 : _height,
           'steps': _lowMemoryMode ? 16 : _steps,
           'guidance_scale': _guidance,
+          'timeout_sec': _timeoutSec,
         },
       };
       await widget.api.post('/images/generate', payload);
@@ -493,6 +496,7 @@ class _ImagesPageState extends State<ImagesPage> {
                             ListTile(dense: true, title: Text('CUDA available: ${(_runtime['cuda_available'] == true)} • Effective: ${(_runtime['effective_device'] ?? 'cpu')}')),
                             ListTile(dense: true, title: Text('Execution plan: ${((_runtime['execution_plan'] as Map<String, dynamic>?)?['device_plan'] ?? _runtime['runtime_strategy'] ?? 'unknown')}')),
                             ListTile(dense: true, title: Text('Expected timeout: ${((_runtime['execution_plan'] as Map<String, dynamic>?)?['expected_timeout_sec'] ?? 'n/a')}s')),
+                            Align(alignment: Alignment.centerRight, child: TextButton(onPressed: _busy ? null : () { final rec = (((_runtime['execution_plan'] as Map<String, dynamic>?)?['expected_timeout_sec'] as num?)?.toInt() ?? _timeoutSec); setState(() => _timeoutSec = rec); }, child: const Text('Use recommended timeout'))),
                             if (((_runtime['warnings'] as List<dynamic>?) ?? const []).isNotEmpty)
                               Padding(
                                 padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 4),
@@ -522,6 +526,7 @@ class _ImagesPageState extends State<ImagesPage> {
                                 SizedBox(width: 110, child: TextFormField(initialValue: _width.toString(), decoration: const InputDecoration(labelText: 'Width'), keyboardType: TextInputType.number, onChanged: (v) => _width = int.tryParse(v) ?? _width)),
                                 SizedBox(width: 110, child: TextFormField(initialValue: _height.toString(), decoration: const InputDecoration(labelText: 'Height'), keyboardType: TextInputType.number, onChanged: (v) => _height = int.tryParse(v) ?? _height)),
                                 SizedBox(width: 110, child: TextFormField(initialValue: _steps.toString(), decoration: const InputDecoration(labelText: 'Steps'), keyboardType: TextInputType.number, onChanged: (v) => _steps = int.tryParse(v) ?? _steps)),
+                                SizedBox(width: 130, child: TextFormField(initialValue: _timeoutSec.toString(), decoration: const InputDecoration(labelText: 'Timeout (s)'), keyboardType: TextInputType.number, onChanged: (v) => _timeoutSec = int.tryParse(v) ?? _timeoutSec)),
                               ],
                             ),
                             const SizedBox(height: 6),
@@ -552,6 +557,23 @@ class _ImagesPageState extends State<ImagesPage> {
                                   Text('Warnings: ${(_modelFit['warnings'] as List<dynamic>).join(', ')}'),
                               ]),
                             ),
+                          ),
+                        const SizedBox(height: 8),
+                        Card(
+                          child: Padding(
+                            padding: const EdgeInsets.all(10),
+                            child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+                              Text('Effective settings preview', style: Theme.of(context).textTheme.titleSmall),
+                              Text('Profile: $_qualityProfile • ${_lowMemoryMode ? 'Low memory override active' : 'Manual settings active'}'),
+                              Text('Size: ${_lowMemoryMode ? 512 : _width}x${_lowMemoryMode ? 512 : _height} • Steps: ${_lowMemoryMode ? 16 : _steps} • Guidance: ${_guidance.toStringAsFixed(1)}'),
+                              Text('Timeout: ${_timeoutSec}s • Refine: $_enableRefine • Upscale: $_enableUpscale'),
+                            ]),
+                          ),
+                        ),
+                        if ((((_runtime['execution_plan'] as Map<String, dynamic>?)?['expected_timeout_sec'] as num?)?.toInt() ?? 0) > _timeoutSec)
+                          const Padding(
+                            padding: EdgeInsets.only(top: 4),
+                            child: Text('Configured timeout is below recommended for this runtime/model.', style: TextStyle(color: Colors.orange)),
                           ),
                         const SizedBox(height: 8),
                         TextField(controller: _prompt, minLines: 2, maxLines: 4, decoration: const InputDecoration(labelText: 'Prompt')),
@@ -585,12 +607,14 @@ class _ImagesPageState extends State<ImagesPage> {
                             final strategy = (params['runtime_strategy'] ?? '').toString();
                             final profile = (params['quality_profile'] ?? '').toString();
                             final stages = ((params['stages_run'] as List<dynamic>?) ?? const []).join(', ');
+                            final eff = (params['effective_settings'] as Map<String, dynamic>?);
                             return Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
                               if (deviceUsed.isNotEmpty) Text('Generated on: $deviceUsed'),
                               if (strategy.isNotEmpty) Text('Strategy: $strategy'),
                               if (profile.isNotEmpty) Text('Profile: $profile'),
                               if (stages.isNotEmpty) Text('Stages: $stages'),
                               if (fallback) Text('Fallback to CPU: $fallbackReason', style: const TextStyle(color: Colors.orange)),
+                              if (eff != null) Text('Effective: ${eff['width']}x${eff['height']} • steps ${eff['steps']} • guidance ${eff['guidance_scale']} • timeout ${eff['timeout_s']}s'),
                             ]);
                           }),
                           const SizedBox(height: 8),
