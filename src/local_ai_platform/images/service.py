@@ -7,6 +7,7 @@ import os
 import random
 import time
 import traceback
+import tempfile
 import multiprocessing as mp
 from dataclasses import dataclass
 from pathlib import Path
@@ -116,9 +117,21 @@ def _quality_profile_defaults(profile: str) -> dict[str, Any]:
         return {"width": 512, "height": 512, "steps": 14, "guidance_scale": 6.0, "refine": False, "upscale": False, "postprocess": False}
     return {"width": 768, "height": 768, "steps": 20, "guidance_scale": 7.0, "refine": False, "upscale": False, "postprocess": False}
 
+
+
+def _write_stage_marker(stage_file: str | None, stage: str) -> None:
+    if not stage_file:
+        return
+    try:
+        Path(stage_file).write_text(stage, encoding="utf-8")
+    except Exception:
+        pass
+
 def _diffusers_worker(payload: dict[str, Any], out_q: Any) -> None:
     started = time.time()
     stage = "bootstrap"
+    stage_file = str(payload.get("stage_file") or "") or None
+    _write_stage_marker(stage_file, stage)
     try:
         import torch
         from diffusers import AutoPipelineForImage2Image, AutoPipelineForText2Image
@@ -140,6 +153,7 @@ def _diffusers_worker(payload: dict[str, Any], out_q: Any) -> None:
             load_kwargs["use_safetensors"] = bool(payload.get("use_safetensors"))
 
         stage = "pipeline_load"
+        _write_stage_marker(stage_file, stage)
         if mode == "img2img":
             pipe = AutoPipelineForImage2Image.from_pretrained(model_id_or_path, **load_kwargs)
         else:
@@ -179,6 +193,7 @@ def _diffusers_worker(payload: dict[str, Any], out_q: Any) -> None:
         generator.manual_seed(int(seed) if seed is not None else random.randint(1, 2**31 - 1))
 
         stage = "inference"
+        _write_stage_marker(stage_file, stage)
         if init_image_path:
             Image, _ = _require_pillow()
             init_img = Image.open(str(init_image_path)).convert("RGB")
@@ -215,6 +230,7 @@ def _diffusers_worker(payload: dict[str, Any], out_q: Any) -> None:
                 "runtime_strategy": payload.get("runtime_strategy") or ("cuda_fp16" if device == "cuda" else "cpu_only"),
                 "execution_plan": payload.get("execution_plan") or {},
                 "stage": "completed",
+                "selected_args": {"width": int(payload["width"]), "height": int(payload["height"]), "steps": int(payload["steps"]), "guidance_scale": float(payload["guidance_scale"])},
                 "worker_elapsed_sec": round(time.time() - started, 3),
             },
         })
@@ -378,8 +394,32 @@ class ImageGenerationService:
         cuda_available = bool(status.get("cuda_available"))
         low_memory_mode = bool(getattr(self.config, "hf_image_low_memory_mode", True))
 
+        strategy_mode = str(getattr(self.config, "image_runtime_strategy", "auto") or "auto").strip().lower()
+
         if cuda_available:
-            if gpu_vram and est_vram and gpu_vram < int(est_vram * 0.7):
+            if strategy_mode == "safest":
+                plan.update({
+                    "device_plan": "cuda_with_cpu_offload",
+                    "torch_dtype": "float16",
+                    "use_model_cpu_offload": True,
+                    "use_sequential_cpu_offload": True,
+                    "use_attention_slicing": True,
+                    "use_vae_tiling": True,
+                    "reason": "Safest strategy selected: CUDA with conservative offload.",
+                    "expected_timeout_sec": 320,
+                })
+            elif strategy_mode == "performance":
+                plan.update({
+                    "device_plan": "cuda",
+                    "torch_dtype": "float16",
+                    "use_model_cpu_offload": False,
+                    "use_sequential_cpu_offload": False,
+                    "use_attention_slicing": False,
+                    "use_vae_tiling": False,
+                    "reason": "Performance strategy selected: direct CUDA execution.",
+                    "expected_timeout_sec": 200,
+                })
+            elif gpu_vram and est_vram and gpu_vram < int(est_vram * 0.7):
                 plan.update({
                     "device_plan": "cuda_with_cpu_offload",
                     "torch_dtype": "float16",
@@ -838,6 +878,9 @@ class ImageGenerationService:
         q = ctx.Queue(maxsize=1)
         mode = "img2img" if init_image_path else "text2img"
         execution_plan = execution_plan or {}
+        stage_file = tempfile.NamedTemporaryFile(prefix="img_stage_", suffix=".txt", delete=False)
+        stage_file_path = stage_file.name
+        stage_file.close()
         payload = {
             "model_id_or_path": model_id_or_path,
             "model_source": model_source,
@@ -864,6 +907,7 @@ class ImageGenerationService:
             "use_sequential_cpu_offload": bool(execution_plan.get("use_sequential_cpu_offload", False)),
             "runtime_strategy": execution_plan.get("device_plan") or ("cuda_fp16" if device == "cuda" else "cpu_only"),
             "execution_plan": execution_plan,
+            "stage_file": stage_file_path,
         }
         proc = ctx.Process(target=_diffusers_worker, args=(payload, q), daemon=True)
         proc.start()
@@ -884,15 +928,25 @@ class ImageGenerationService:
                 },
             )
 
+        last_stage = "unknown"
+        try:
+            last_stage = Path(stage_file_path).read_text(encoding="utf-8").strip() or "unknown"
+        except Exception:
+            pass
+
         if proc.exitcode is None:
-            return ImageRuntimeResult(ok=False, error_code="runtime_crash", error_message="Image worker ended with unknown state")
+            return ImageRuntimeResult(ok=False, error_code="runtime_crash", error_message="Image worker ended with unknown state", metadata={"exit_code": None, "stage": last_stage, "model_id": model_id_or_path, "device_attempted": device, "strategy": execution_plan.get("device_plan"), "selected_args": {"width": width, "height": height, "steps": steps, "guidance_scale": guidance_scale}})
         if proc.exitcode != 0 and q.empty():
-            return ImageRuntimeResult(ok=False, error_code="runtime_crash", error_message=f"Image worker crashed with exit code {proc.exitcode}")
+            return ImageRuntimeResult(ok=False, error_code="runtime_crash", error_message="Image worker crashed unexpectedly.", metadata={"exit_code": proc.exitcode, "stage": last_stage, "model_id": model_id_or_path, "device_attempted": device, "strategy": execution_plan.get("device_plan"), "selected_args": {"width": width, "height": height, "steps": steps, "guidance_scale": guidance_scale}})
 
         if q.empty():
             return ImageRuntimeResult(ok=False, error_code="generation_failed", error_message="Image worker returned no result")
 
         data = q.get()
+        try:
+            Path(stage_file_path).unlink(missing_ok=True)
+        except Exception:
+            pass
         if not bool(data.get("ok")):
             logger.warning(
                 "image.worker.failed code=%s message=%s device=%s strategy=%s",
@@ -989,6 +1043,7 @@ class ImageGenerationService:
         init_image_path: str | None = None,
         strength: float = 0.65,
         params_json: dict[str, Any] | None = None,
+        timeout_sec: int | None = None,
     ) -> ImageRuntimeResult:
         if self.config.hf_image_runtime not in {"diffusers_local", "hf_inference_api"}:
             return ImageRuntimeResult(ok=False, error_code="provider_unavailable", error_message=f"Unsupported runtime: {self.config.hf_image_runtime}")
@@ -1018,7 +1073,8 @@ class ImageGenerationService:
         enable_refine = bool(params.get("enable_refine", qd["refine"]))
         enable_upscale = bool(params.get("enable_upscale", qd["upscale"]))
         enable_postprocess = bool(params.get("enable_postprocess", qd["postprocess"]))
-        timeout_s = int(params.get("timeout_sec") or execution_plan.get("expected_timeout_sec") or getattr(self.config, "hf_image_job_timeout_sec", 180) or 180)
+        timeout_s = int(timeout_sec or params.get("timeout_sec") or execution_plan.get("expected_timeout_sec") or getattr(self.config, "hf_image_job_timeout_sec", 180) or 180)
+        timeout_s = max(60, min(timeout_s, 3600))
 
         logger.info(
             "image.generate.plan model=%s source=%s plan=%s timeout_s=%s width=%s height=%s steps=%s",
@@ -1110,7 +1166,7 @@ class ImageGenerationService:
             timeout_s=timeout_s,
         )
 
-        if not result.ok and preferred == "cuda" and bool(self.config.hf_image_allow_cpu_fallback) and result.error_code in {"out_of_memory", "provider_unavailable"}:
+        if not result.ok and preferred == "cuda" and bool(self.config.hf_image_allow_cpu_fallback) and result.error_code in {"out_of_memory", "provider_unavailable", "runtime_crash"}:
             execution_plan["warnings"] = list(execution_plan.get("warnings") or []) + ["Base generation on CUDA failed; fell back to CPU."]
             retry = self._run_diffusers_isolated(
                 model_id_or_path=resolved_model,
@@ -1125,7 +1181,7 @@ class ImageGenerationService:
                 init_image_path=init_image_path,
                 strength=strength,
                 device="cpu",
-                execution_plan={**execution_plan, "device_plan": "cpu_low_memory", "torch_dtype": "float32"},
+                execution_plan={**execution_plan, "device_plan": "cpu_low_memory", "torch_dtype": "float32", "use_model_cpu_offload": False, "use_sequential_cpu_offload": False, "use_attention_slicing": True, "use_vae_tiling": True},
                 timeout_s=max(timeout_s, 420),
             )
             if retry.ok:
@@ -1188,6 +1244,18 @@ class ImageGenerationService:
                 "refine": enable_refine,
                 "upscale": enable_upscale,
                 "postprocess": enable_postprocess,
+            },
+            "effective_settings": {
+                "width": width,
+                "height": height,
+                "steps": steps,
+                "guidance_scale": guidance_scale,
+                "seed": seed,
+                "quality_profile": profile,
+                "timeout_s": timeout_s,
+                "enable_refine": enable_refine,
+                "enable_upscale": enable_upscale,
+                "enable_postprocess": enable_postprocess,
             },
         }
         if cpu_override_warning:
