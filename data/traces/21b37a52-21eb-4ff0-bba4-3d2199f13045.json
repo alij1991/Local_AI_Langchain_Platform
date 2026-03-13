@@ -1,0 +1,13 @@
+{
+  "run_id": "21b37a52-21eb-4ff0-bba4-3d2199f13045",
+  "conversation_id": "a310438a-6f58-4032-bca3-52b1d9e15b3b",
+  "agent_name": "image:shallowdream204/BitDance-14B-64x",
+  "model_provider": "unknown",
+  "model_id": "",
+  "start_timestamp": "2026-03-12T23:32:10.387539+00:00",
+  "end_timestamp": "2026-03-12T23:32:46.832047+00:00",
+  "duration_ms": 36444,
+  "success": false,
+  "error": "No module named 'diffusers'",
+  "events": []
+}
