@@ -574,13 +574,84 @@ class ImageGenerationService:
             "runtime_note": runtime_note,
         }
 
+
+    def _detect_local_model_type(self, path: Path) -> dict[str, Any]:
+        model_index = path / "model_index.json"
+        config_json = path / "config.json"
+        has_weights = any(path.rglob("*.safetensors")) or any(path.rglob("*.bin"))
+        has_tokenizer = any((path / n).exists() for n in ["tokenizer.json", "tokenizer_config.json", "vocab.json", "merges.txt", "spiece.model"])
+        has_vision = any((path / n).exists() for n in ["projector.safetensors", "vision_head.safetensors", "vision_head_config.json"])
+        has_index = (path / "model.safetensors.index.json").exists()
+
+        if model_index.exists():
+            pipeline_kind = "diffusers_text2img"
+            supported_tasks = ["text-to-image", "image-to-image"]
+            runtime_candidate = "diffusers_local"
+            loadable_for_images = True
+            model_type = "diffusers_text2img"
+            try:
+                cfg = json.loads(model_index.read_text(encoding="utf-8"))
+                cls_name = str(cfg.get("_class_name") or "")
+                if "Image2Image" in cls_name:
+                    pipeline_kind = "diffusers_img2img"
+                    model_type = "diffusers_img2img"
+                if "Inpaint" in cls_name:
+                    supported_tasks.append("inpainting")
+            except Exception:
+                pass
+            return {
+                "model_type": model_type,
+                "runtime_candidate": runtime_candidate,
+                "supported_tasks": supported_tasks,
+                "loadable_for_images": loadable_for_images,
+                "pipeline_kind": pipeline_kind,
+                "explanation": "Diffusers pipeline detected via model_index.json.",
+                "required_files": {"model_index_json": True, "weights_detected": has_weights},
+            }
+
+        if config_json.exists() and has_weights:
+            if has_vision:
+                return {
+                    "model_type": "transformers_multimodal",
+                    "runtime_candidate": "transformers_local",
+                    "supported_tasks": ["chat", "multimodal"],
+                    "loadable_for_images": False,
+                    "pipeline_kind": None,
+                    "explanation": "Transformers multimodal model detected (vision/projector artifacts present) but no Diffusers model_index.json.",
+                    "required_files": {"model_index_json": False, "weights_detected": True},
+                    "found_files": [n for n in ["config.json", "model.safetensors.index.json", "tokenizer.json", "projector.safetensors", "vision_head.safetensors"] if (path / n).exists()],
+                }
+            if has_tokenizer or has_index:
+                return {
+                    "model_type": "transformers_text",
+                    "runtime_candidate": "transformers_local",
+                    "supported_tasks": ["text-generation"],
+                    "loadable_for_images": False,
+                    "pipeline_kind": None,
+                    "explanation": "Transformers text model detected (config/weights/tokenizer) but no Diffusers model_index.json.",
+                    "required_files": {"model_index_json": False, "weights_detected": True},
+                }
+
+        return {
+            "model_type": "unknown_local_model",
+            "runtime_candidate": "unknown",
+            "supported_tasks": [],
+            "loadable_for_images": False,
+            "pipeline_kind": None,
+            "explanation": "Local folder is not a recognized Diffusers image pipeline.",
+            "required_files": {"model_index_json": model_index.exists(), "weights_detected": has_weights},
+        }
+
     def validate_model(self, model_id: str) -> dict[str, Any]:
         device_candidate = str(self.get_device_status().get("effective_device") or "cpu")
         result: dict[str, Any] = {
             "model_id": model_id,
             "resolved_path": None,
             "detected_type": "unknown",
-            "model_type": "unknown",
+            "model_type": "unknown_local_model",
+            "runtime_candidate": "unknown",
+            "supported_tasks": [],
+            "loadable_for_images": False,
             "required_files": {"model_index_json": False, "weights_detected": False},
             "pipeline_class_guess": "AutoPipelineForText2Image",
             "folder_size_bytes": None,
@@ -591,6 +662,7 @@ class ImageGenerationService:
             "loadable": False,
             "warnings": [],
             "errors": [],
+            "explanation": "",
         }
 
         try:
@@ -598,26 +670,54 @@ class ImageGenerationService:
         except FileNotFoundError as exc:
             result["errors"].append(str(exc))
             return result
-        except ValueError:
-            result["errors"].append("invalid_model_format")
-            return result
 
         if source == "remote":
             result["detected_type"] = "huggingface_remote"
-            result["model_type"] = "diffusers_remote"
             result["resolved_path"] = resolved
-            if not self._cache_dir(resolved) and not self.config.hf_image_allow_auto_download:
-                result["warnings"].append("remote_model_not_cached")
-            result["loadable"] = True
+            cache = self._cache_dir(resolved)
+            if cache and cache.exists():
+                det = self._detect_local_model_type(cache)
+                result.update({
+                    "model_type": det.get("model_type"),
+                    "runtime_candidate": det.get("runtime_candidate"),
+                    "supported_tasks": det.get("supported_tasks"),
+                    "loadable_for_images": bool(det.get("loadable_for_images")),
+                    "required_files": det.get("required_files") or result["required_files"],
+                    "explanation": det.get("explanation") or "",
+                })
+                result["detected_type"] = "huggingface_cached_local"
+                result["resolved_path"] = str(cache)
+                folder_size = self._dir_size(cache)
+                result["folder_size_bytes"] = folder_size
+                result["folder_size_human"] = format_bytes_human(folder_size)
+                est = _estimate_memory_requirements(folder_size, device_candidate)
+                result.update(est)
+                result["estimated_ram_required_human"] = format_bytes_human(est.get("estimated_ram_required_bytes"))
+                result["estimated_vram_required_human"] = format_bytes_human(est.get("estimated_vram_required_bytes"))
+            else:
+                result["model_type"] = "diffusers_remote"
+                result["runtime_candidate"] = "diffusers_local"
+                result["supported_tasks"] = ["text-to-image", "image-to-image"]
+                result["loadable_for_images"] = True
+                if not self.config.hf_image_allow_auto_download:
+                    result["warnings"].append("remote_model_not_cached")
+                result["explanation"] = "Remote model id provided; cache snapshot not found locally yet."
+            result["loadable"] = bool(result["loadable_for_images"])
             return result
 
         path = Path(resolved)
-        result["detected_type"] = "diffusers_local"
-        result["model_type"] = "diffusers_text2img"
         result["resolved_path"] = str(path)
-        ok, issues = _validate_diffusers_dir(path)
-        result["required_files"]["model_index_json"] = (path / "model_index.json").exists()
-        result["required_files"]["weights_detected"] = any(path.rglob("*.safetensors")) or any(path.rglob("*.bin"))
+        det = self._detect_local_model_type(path)
+        result.update({
+            "detected_type": det.get("model_type") or "unknown",
+            "model_type": det.get("model_type") or "unknown_local_model",
+            "runtime_candidate": det.get("runtime_candidate") or "unknown",
+            "supported_tasks": det.get("supported_tasks") or [],
+            "loadable_for_images": bool(det.get("loadable_for_images")),
+            "required_files": det.get("required_files") or result["required_files"],
+            "explanation": det.get("explanation") or "",
+        })
+
         folder_size = self._dir_size(path) if path.exists() else 0
         result["folder_size_bytes"] = folder_size
         result["folder_size_human"] = format_bytes_human(folder_size)
@@ -638,21 +738,24 @@ class ImageGenerationService:
             else:
                 result["fit"] = "poor"
                 result["warnings"].append("likely_insufficient_memory")
-        if not ok:
-            result["errors"].extend(issues)
+
+        if result["loadable_for_images"]:
+            ok, issues = _validate_diffusers_dir(path)
+            if not ok:
+                result["errors"].extend(issues)
+                result["loadable"] = False
+                return result
+            result["pipeline_class_guess"] = "AutoPipelineForImage2Image" if result["model_type"] == "diffusers_img2img" else "AutoPipelineForText2Image"
+            result["loadable"] = True
             return result
 
-        model_index = path / "model_index.json"
-        if model_index.exists():
-            try:
-                cfg = json.loads(model_index.read_text(encoding="utf-8"))
-                classes = cfg.get("_class_name") or ""
-                if "Image2Image" in str(classes):
-                    result["pipeline_class_guess"] = "AutoPipelineForImage2Image"
-            except Exception:
-                result["warnings"].append("model_index_unreadable")
-
-        result["loadable"] = True
+        result["errors"].append("unsupported_model_format")
+        result["errors"].append("invalid_model_format")
+        result["loadable"] = False
+        found = [f.name for f in path.iterdir() if f.is_file()][:60] if path.exists() else []
+        result["found_files"] = found
+        result["expected_files"] = ["model_index.json"]
+        result["guidance"] = "Use a local Diffusers pipeline folder (with model_index.json, unet/vae/scheduler components) for Images generation."
         return result
 
     def recommended_settings(self, model_id: str) -> dict[str, Any]:
@@ -680,14 +783,21 @@ class ImageGenerationService:
                 continue
             model_name = entry.name
             size = self._dir_size(entry)
-            model_index = entry / "model_index.json"
-            config_json = entry / "config.json"
+            det = self._detect_local_model_type(entry)
 
-            if model_index.exists():
+            base = {
+                "model_type": det.get("model_type"),
+                "runtime_candidate": det.get("runtime_candidate"),
+                "supported_tasks": det.get("supported_tasks"),
+                "loadable_for_images": bool(det.get("loadable_for_images")),
+                "explanation": det.get("explanation"),
+            }
+
+            if bool(det.get("loadable_for_images")):
                 image_models.append(
                     {
                         "provider": "huggingface",
-                        "task": ["text-to-image", "image-to-image"],
+                        "task": det.get("supported_tasks") or ["text-to-image"],
                         "model_id": f"local:{model_name}",
                         "display_name": f"{model_name} (local)",
                         "local_status": {"downloaded": True, "cached": True, "location": str(entry)},
@@ -696,17 +806,18 @@ class ImageGenerationService:
                         "runtime": "diffusers_local",
                         "size_bytes": size,
                         "size_human": format_bytes_human(size),
+                        **base,
                     }
                 )
-                continue
-
-            if config_json.exists():
+            else:
                 context = None
                 architecture = None
                 try:
-                    cfg = json.loads(config_json.read_text(encoding="utf-8"))
-                    context = cfg.get("max_position_embeddings") or cfg.get("n_positions")
-                    architecture = cfg.get("model_type")
+                    cfgp = entry / "config.json"
+                    if cfgp.exists():
+                        cfg = json.loads(cfgp.read_text(encoding="utf-8"))
+                        context = cfg.get("max_position_embeddings") or cfg.get("n_positions")
+                        architecture = cfg.get("model_type")
                 except Exception:
                     pass
                 text_models.append(
@@ -719,6 +830,7 @@ class ImageGenerationService:
                         "context_length": context,
                         "architecture": architecture,
                         "path": str(entry),
+                        **base,
                     }
                 )
         return image_models, text_models
@@ -772,8 +884,6 @@ class ImageGenerationService:
             path = self.local_models_dir / local_name
             if not path.exists():
                 raise FileNotFoundError(f"Local model not found: {path}")
-            if not (path / "model_index.json").exists():
-                raise ValueError("invalid_model_format")
             return "local", str(path)
         return "remote", model_id
 
@@ -1056,8 +1166,24 @@ class ImageGenerationService:
             model_source, resolved_model = self._resolve_model_source(model_id)
         except FileNotFoundError as exc:
             return ImageRuntimeResult(ok=False, error_code="model_not_found", error_message=str(exc))
-        except ValueError:
-            return ImageRuntimeResult(ok=False, error_code="invalid_model_format", error_message="Local model folder is missing model_index.json")
+
+        preflight = self.validate_model(model_id)
+        if model_source == "local" and not bool(preflight.get("loadable_for_images")):
+            return ImageRuntimeResult(
+                ok=False,
+                error_code="unsupported_model_format",
+                error_message="This local model folder is not a Diffusers image pipeline and cannot be used by the current Images generator.",
+                metadata={
+                    "model_id": model_id,
+                    "resolved_path": preflight.get("resolved_path"),
+                    "detected_model_type": preflight.get("model_type"),
+                    "runtime_candidate": preflight.get("runtime_candidate"),
+                    "expected_files": preflight.get("expected_files") or ["model_index.json"],
+                    "found_files": preflight.get("found_files") or [],
+                    "explanation": preflight.get("explanation"),
+                    "guidance": preflight.get("guidance"),
+                },
+            )
 
         requested = {
             "width": int(params.get("width") or width or qd["width"]),
