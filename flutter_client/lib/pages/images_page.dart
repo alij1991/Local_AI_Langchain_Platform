@@ -77,7 +77,7 @@ class _ImagesPageState extends State<ImagesPage> {
       _runtime = runtime;
       _lowMemoryMode = (runtime['low_memory_mode'] == true);
       if (_models.isEmpty) {
-        _status = 'No image models detected. Put a diffusers model folder in ./models and click Refresh models.';
+        _status = 'No image models detected. Download a diffusers model via HuggingFace and click Refresh.';
       }
     });
     if (_selectedModel != null) {
@@ -307,24 +307,43 @@ class _ImagesPageState extends State<ImagesPage> {
     final selected = images.where((i) => i['id'].toString() == _selectedImageId).cast<Map<String, dynamic>?>().firstOrNull;
     final selectedUrl = _imageUrlFor(_selectedImageId);
 
+    final colors = Theme.of(context).colorScheme;
+
     return Column(
       children: [
         if (_busy) const LinearProgressIndicator(),
-        if (_status.isNotEmpty)
-          Padding(
-            padding: const EdgeInsets.symmetric(vertical: 6),
-            child: Align(alignment: Alignment.centerLeft, child: Text(_status)),
+        Padding(
+          padding: const EdgeInsets.only(bottom: 8),
+          child: Row(
+            children: [
+              Container(
+                padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
+                decoration: BoxDecoration(
+                  color: _runtime['cuda_available'] == true ? colors.primaryContainer : colors.surfaceContainerHighest,
+                  borderRadius: BorderRadius.circular(16),
+                ),
+                child: Row(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    Icon(
+                      _runtime['cuda_available'] == true ? Icons.memory : Icons.computer,
+                      size: 14,
+                      color: _runtime['cuda_available'] == true ? colors.onPrimaryContainer : colors.onSurfaceVariant,
+                    ),
+                    const SizedBox(width: 4),
+                    Text(_runtimeChipText(), style: TextStyle(fontSize: 12, color: _runtime['cuda_available'] == true ? colors.onPrimaryContainer : colors.onSurfaceVariant)),
+                  ],
+                ),
+              ),
+              const SizedBox(width: 8),
+              if (_status.isNotEmpty)
+                Expanded(child: Text(_status, style: TextStyle(fontSize: 13, color: colors.onSurfaceVariant), maxLines: 1, overflow: TextOverflow.ellipsis))
+              else
+                const Spacer(),
+              IconButton(onPressed: _load, icon: const Icon(Icons.refresh, size: 20), tooltip: 'Refresh runtime'),
+            ],
           ),
-        Row(children: [
-          Chip(
-            label: Text(_runtimeChipText()),
-            backgroundColor: _runtime['cuda_available'] == true ? Colors.green.shade50 : null,
-          ),
-          const SizedBox(width: 8),
-          IconButton(onPressed: _load, icon: const Icon(Icons.refresh), tooltip: 'Refresh runtime status'),
-          const SizedBox(width: 8),
-          Expanded(child: Text('Preference: ${(_runtime['device_preference'] ?? 'auto').toString()} • Effective: ${(_runtime['effective_device'] ?? 'cpu').toString()} • ${(_runtime['reason'] ?? '').toString()}')),
-        ]),
+        ),
         Expanded(
           child: Row(
             children: [
@@ -407,7 +426,7 @@ class _ImagesPageState extends State<ImagesPage> {
                               child: Column(
                                 crossAxisAlignment: CrossAxisAlignment.start,
                                 children: [
-                                  Text('1) Put a diffusers model folder in ./models or configure HF cache.'),
+                                  Text('1) Download a diffusers model from HuggingFace (it caches to ~/.cache/huggingface).'),
                                   Text('2) Click Refresh models.'),
                                   Text('3) Select model and enter prompt.'),
                                   Text('4) Click Generate.'),
@@ -422,7 +441,7 @@ class _ImagesPageState extends State<ImagesPage> {
                         if (_models.isEmpty)
                           const ListTile(
                             leading: Icon(Icons.info_outline),
-                            title: Text('No image models detected. Put a diffusers model folder in ./models and click Refresh models.'),
+                            title: Text('No image models detected. Download a diffusers model via HuggingFace and click Refresh.'),
                           ),
                         if (_errorMessage.isNotEmpty) ...[
                           const SizedBox(height: 8),
@@ -461,7 +480,7 @@ class _ImagesPageState extends State<ImagesPage> {
                         Text('Generate', style: Theme.of(context).textTheme.titleMedium),
                         const SizedBox(height: 8),
                         DropdownButtonFormField<String>(
-                          value: _selectedModel,
+                          initialValue: _selectedModel,
                           items: _models.map((m) => DropdownMenuItem(value: m['model_id'].toString(), child: Text(m['model_id'].toString()))).toList(),
                           onChanged: (v) { setState(() => _selectedModel = v); _loadModelFit(); },
                           decoration: const InputDecoration(labelText: 'Model'),
@@ -505,7 +524,7 @@ class _ImagesPageState extends State<ImagesPage> {
                           ],
                         ),
                         DropdownButtonFormField<String>(
-                          value: _qualityProfile,
+                          initialValue: _qualityProfile,
                           decoration: const InputDecoration(labelText: 'Quality profile'),
                           items: const [
                             DropdownMenuItem(value: 'fast', child: Text('Fast')),

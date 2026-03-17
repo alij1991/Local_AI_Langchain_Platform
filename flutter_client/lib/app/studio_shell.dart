@@ -1,5 +1,4 @@
 import 'package:flutter/material.dart';
-import 'package:local_ai_flutter_client/models/studio_models.dart';
 import 'package:local_ai_flutter_client/pages/agents_page.dart';
 import 'package:local_ai_flutter_client/pages/chat_page.dart';
 import 'package:local_ai_flutter_client/pages/models_page.dart';
@@ -19,27 +18,33 @@ class StudioShell extends StatefulWidget {
 
 class _StudioShellState extends State<StudioShell> {
   final api = ApiClient(baseUrl: const String.fromEnvironment('API_URL', defaultValue: 'http://127.0.0.1:8000'));
-  AppSection section = AppSection.chat;
+  int _selectedIndex = 0;
+
+  late final List<Widget> _pages;
+
+  @override
+  void initState() {
+    super.initState();
+    _pages = [
+      ChatPage(api: api),
+      ModelsPage(api: api),
+      AgentsPage(api: api),
+      PromptBuilderPage(api: api),
+      ToolsPage(api: api),
+      SystemsPage(api: api),
+      ImagesPage(api: api),
+      RunsPage(api: api),
+    ];
+  }
 
   @override
   Widget build(BuildContext context) {
-    final pages = {
-      AppSection.chat: ChatPage(api: api),
-      AppSection.models: ModelsPage(api: api),
-      AppSection.agents: AgentsPage(api: api),
-      AppSection.promptBuilder: PromptBuilderPage(api: api),
-      AppSection.tools: ToolsPage(api: api),
-      AppSection.systems: SystemsPage(api: api),
-      AppSection.images: ImagesPage(api: api),
-      AppSection.runs: RunsPage(api: api),
-    };
-
     return Scaffold(
       body: Row(
         children: [
           NavigationRail(
-            selectedIndex: AppSection.values.indexOf(section),
-            onDestinationSelected: (i) => setState(() => section = AppSection.values[i]),
+            selectedIndex: _selectedIndex,
+            onDestinationSelected: (i) => setState(() => _selectedIndex = i),
             labelType: NavigationRailLabelType.all,
             destinations: const [
               NavigationRailDestination(icon: Icon(Icons.chat), label: Text('Chat')),
@@ -53,7 +58,12 @@ class _StudioShellState extends State<StudioShell> {
             ],
           ),
           const VerticalDivider(width: 1),
-          Expanded(child: Padding(padding: const EdgeInsets.all(16), child: pages[section]!)),
+          Expanded(
+            child: Padding(
+              padding: const EdgeInsets.all(16),
+              child: IndexedStack(index: _selectedIndex, children: _pages),
+            ),
+          ),
         ],
       ),
     );

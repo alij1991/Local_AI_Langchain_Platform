@@ -258,10 +258,6 @@ class ImageGenerationService:
         self._pipelines: dict[tuple[str, str, str], Any] = {}
         self._models_cache: dict[str, Any] = {"ts": 0.0, "items": []}
 
-    @property
-    def local_models_dir(self) -> Path:
-        return Path(self.config.local_models_dir).resolve()
-
     def configured_models(self) -> list[str]:
         raw = self.config.hf_image_model_catalog or ""
         models = [x.strip() for x in raw.split(",") if x.strip()]
@@ -295,7 +291,6 @@ class ImageGenerationService:
             "device_preference": pref,
             "effective_device": "cpu",
             "reason": "torch not installed",
-            "local_models_dir": str(self.local_models_dir),
         }
 
         try:
@@ -538,8 +533,8 @@ class ImageGenerationService:
                 {
                     "name": "local_models",
                     "ok": False,
-                    "message": f"No image models found in {self.local_models_dir}.",
-                    "suggestion": "Add a diffusers model folder containing model_index.json or configure HF cache.",
+                    "message": "No image models found in HuggingFace cache.",
+                    "suggestion": "Download a diffusers model via HuggingFace or set HF_IMAGE_ALLOW_AUTO_DOWNLOAD=true.",
                 }
             )
         else:
@@ -771,69 +766,61 @@ class ImageGenerationService:
             "execution_plan": plan,
         }
 
-    def _scan_local_models(self) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    def _scan_hf_cache_models(self) -> list[dict[str, Any]]:
+        """Scan HuggingFace cache for diffusers image models."""
         image_models: list[dict[str, Any]] = []
-        text_models: list[dict[str, Any]] = []
-        root = self.local_models_dir
-        if not root.exists():
-            return image_models, text_models
+        hf_root = Path(os.getenv("HF_HOME") or (Path.home() / ".cache" / "huggingface"))
+        hub_dir = hf_root / "hub"
+        if not hub_dir.exists():
+            return image_models
 
-        for entry in root.iterdir():
-            if not entry.is_dir():
+        for d in hub_dir.iterdir():
+            if not d.is_dir() or not d.name.startswith("models--"):
                 continue
-            model_name = entry.name
-            size = self._dir_size(entry)
-            det = self._detect_local_model_type(entry)
+            # Convert "models--org--name" back to "org/name"
+            model_id = d.name.replace("models--", "").replace("--", "/", 1)
 
-            base = {
+            # Find the latest snapshot
+            snapshots_dir = d / "snapshots"
+            if not snapshots_dir.exists():
+                continue
+            try:
+                snapshot_dirs = sorted(
+                    [s for s in snapshots_dir.iterdir() if s.is_dir()],
+                    key=lambda p: p.stat().st_mtime,
+                    reverse=True,
+                )
+            except Exception:
+                continue
+            if not snapshot_dirs:
+                continue
+            snapshot = snapshot_dirs[0]
+
+            # Check if this is a diffusers image model
+            det = self._detect_local_model_type(snapshot)
+            if not det.get("loadable_for_images"):
+                continue
+
+            size = self._dir_size(d)
+            image_models.append({
+                "provider": "huggingface",
+                "task": det.get("supported_tasks") or ["text-to-image"],
+                "model_id": model_id,
+                "display_name": model_id,
+                "local_status": {"downloaded": True, "cached": True, "location": str(snapshot)},
+                "requirements": {"gpu_recommended": True, "memory_estimate": "8GB+ VRAM recommended"},
+                "supported_features": {"text2img": True, "img2img": True, "inpaint": False},
+                "runtime": "diffusers_local",
+                "size_bytes": size,
+                "size_human": format_bytes_human(size),
                 "model_type": det.get("model_type"),
                 "runtime_candidate": det.get("runtime_candidate"),
                 "supported_tasks": det.get("supported_tasks"),
-                "loadable_for_images": bool(det.get("loadable_for_images")),
+                "loadable_for_images": True,
                 "explanation": det.get("explanation"),
-            }
+            })
 
-            if bool(det.get("loadable_for_images")):
-                image_models.append(
-                    {
-                        "provider": "huggingface",
-                        "task": det.get("supported_tasks") or ["text-to-image"],
-                        "model_id": f"local:{model_name}",
-                        "display_name": f"{model_name} (local)",
-                        "local_status": {"downloaded": True, "cached": True, "location": str(entry)},
-                        "requirements": {"gpu_recommended": True, "memory_estimate": "Depends on model"},
-                        "supported_features": {"text2img": True, "img2img": True, "inpaint": False},
-                        "runtime": "diffusers_local",
-                        "size_bytes": size,
-                        "size_human": format_bytes_human(size),
-                        **base,
-                    }
-                )
-            else:
-                context = None
-                architecture = None
-                try:
-                    cfgp = entry / "config.json"
-                    if cfgp.exists():
-                        cfg = json.loads(cfgp.read_text(encoding="utf-8"))
-                        context = cfg.get("max_position_embeddings") or cfg.get("n_positions")
-                        architecture = cfg.get("model_type")
-                except Exception:
-                    pass
-                text_models.append(
-                    {
-                        "provider": "local",
-                        "model_id": f"local:{model_name}",
-                        "display_name": f"{model_name} (local)",
-                        "size_bytes": size,
-                        "size_human": format_bytes_human(size),
-                        "context_length": context,
-                        "architecture": architecture,
-                        "path": str(entry),
-                        **base,
-                    }
-                )
-        return image_models, text_models
+        return image_models
 
     def refresh_models(self) -> dict[str, Any]:
         configured_items: list[dict[str, Any]] = []
@@ -853,10 +840,19 @@ class ImageGenerationService:
                 }
             )
 
-        local_image_models, local_text_models = self._scan_local_models()
-        all_items = configured_items + local_image_models
-        self._models_cache = {"ts": time.time(), "items": all_items, "local_text_models": local_text_models}
-        return {"items": all_items, "local_text_models": local_text_models}
+        # Scan HF cache for image models (replaces ./models scanning)
+        hf_image_models = self._scan_hf_cache_models()
+
+        # Merge: avoid duplicates between configured and HF cache
+        seen_ids = {item["model_id"] for item in configured_items}
+        for m in hf_image_models:
+            if m["model_id"] not in seen_ids:
+                configured_items.append(m)
+                seen_ids.add(m["model_id"])
+
+        all_items = configured_items
+        self._models_cache = {"ts": time.time(), "items": all_items}
+        return {"items": all_items}
 
     def list_models(self, refresh: bool = False) -> list[dict[str, Any]]:
         if refresh or not self._models_cache.get("items"):
@@ -864,9 +860,8 @@ class ImageGenerationService:
         return list(self._models_cache["items"])
 
     def list_local_text_models(self, refresh: bool = False) -> list[dict[str, Any]]:
-        if refresh or "local_text_models" not in self._models_cache:
-            self.refresh_models()
-        return list(self._models_cache.get("local_text_models", []))
+        """Kept for backward compat but no longer scans ./models."""
+        return []
 
     def _generate_placeholder(self, prompt: str, width: int, height: int) -> bytes:
         Image, _ = _require_pillow()
@@ -881,10 +876,27 @@ class ImageGenerationService:
     def _resolve_model_source(self, model_id: str) -> tuple[str, str]:
         if model_id.startswith("local:"):
             local_name = model_id.split(":", 1)[1]
-            path = self.local_models_dir / local_name
-            if not path.exists():
-                raise FileNotFoundError(f"Local model not found: {path}")
-            return "local", str(path)
+            # Check HF cache
+            cache = self._cache_dir(local_name)
+            if cache and cache.exists():
+                return "local", str(cache)
+            raise FileNotFoundError(f"Local model not found in HF cache: {local_name}")
+        # Check if model is in HF cache (for direct model IDs like "org/name")
+        cache = self._cache_dir(model_id)
+        if cache and cache.exists():
+            # Find latest snapshot
+            snapshots_dir = cache / "snapshots"
+            if snapshots_dir.exists():
+                try:
+                    snapshot_dirs = sorted(
+                        [s for s in snapshots_dir.iterdir() if s.is_dir()],
+                        key=lambda p: p.stat().st_mtime,
+                        reverse=True,
+                    )
+                    if snapshot_dirs:
+                        return "local", str(snapshot_dirs[0])
+                except Exception:
+                    pass
         return "remote", model_id
 
     def _load_pipeline(self, model_id_or_path: str, mode: str, local_files_only: bool, device: str) -> Any:
@@ -958,7 +970,7 @@ class ImageGenerationService:
         timeout_s: int | None = None,
     ) -> ImageRuntimeResult:
         if model_source == "remote" and not self._cache_dir(model_id_or_path) and not self.config.hf_image_allow_auto_download:
-            return ImageRuntimeResult(ok=False, error_code="model_not_found", error_message="Remote model is not cached locally. Put model under ./models or set HF_IMAGE_ALLOW_AUTO_DOWNLOAD=true.")
+            return ImageRuntimeResult(ok=False, error_code="model_not_found", error_message="Remote model is not cached locally. Download the model via HuggingFace or set HF_IMAGE_ALLOW_AUTO_DOWNLOAD=true.")
 
         preflight = self.validate_model((f"local:{Path(model_id_or_path).name}" if model_source == "local" else model_id_or_path))
         if model_source == "local" and preflight.get("fit") == "poor":
@@ -1096,7 +1108,7 @@ class ImageGenerationService:
             return ImageRuntimeResult(ok=False, error_code="missing_dependency", error_message="Install torch/diffusers/transformers/accelerate/safetensors")
 
         if model_source == "remote" and not self._cache_dir(model_id_or_path) and not self.config.hf_image_allow_auto_download:
-            return ImageRuntimeResult(ok=False, error_code="model_not_found", error_message="Remote model is not cached locally. Put model under ./models or set HF_IMAGE_ALLOW_AUTO_DOWNLOAD=true.")
+            return ImageRuntimeResult(ok=False, error_code="model_not_found", error_message="Remote model is not cached locally. Download the model via HuggingFace or set HF_IMAGE_ALLOW_AUTO_DOWNLOAD=true.")
 
         try:
             mode = "img2img" if init_image_path else "text2img"

@@ -46,7 +46,7 @@ class AttachmentChips extends StatelessWidget {
             final kb = ((file.size) / 1024).toStringAsFixed(1);
             return InputChip(
               avatar: const Icon(Icons.insert_drive_file, size: 16),
-              label: Text('${file.name} (${kb} KB)'),
+              label: Text('${file.name} ($kb KB)'),
               onDeleted: enabled ? () => controller.removeAt(i) : null,
             );
           }).toList(),

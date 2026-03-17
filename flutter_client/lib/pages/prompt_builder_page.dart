@@ -4,7 +4,6 @@ import 'package:local_ai_flutter_client/services/api_client.dart';
 
 class PromptBuilderPage extends StatefulWidget {
   const PromptBuilderPage({super.key, required this.api});
-
   final ApiClient api;
 
   @override
@@ -41,10 +40,7 @@ class _PromptBuilderPageState extends State<PromptBuilderPage> {
   }
 
   Future<void> _generate() async {
-    setState(() {
-      _loading = true;
-      _status = '';
-    });
+    setState(() { _loading = true; _status = ''; });
     try {
       final req = {
         'goal': _goal.text.trim(),
@@ -55,14 +51,13 @@ class _PromptBuilderPageState extends State<PromptBuilderPage> {
         'output_format': _outputFormat,
       };
       final res = await widget.api.post('/agents/prompt-draft', req) as Map<String, dynamic>;
-
       setState(() {
         _output = (res['prompt_text'] ?? '').toString();
-        _status = (res['used_fallback'] == true) ? 'Generated with fallback template.' : 'Generated with model refinement.';
+        _status = (res['used_fallback'] == true) ? 'Generated with fallback template' : 'Generated with model refinement';
       });
       await _loadHistory();
     } catch (e) {
-      setState(() => _status = 'Failed to generate: $e');
+      setState(() => _status = 'Failed: $e');
     } finally {
       if (mounted) setState(() => _loading = false);
     }
@@ -85,111 +80,216 @@ class _PromptBuilderPageState extends State<PromptBuilderPage> {
 
   @override
   Widget build(BuildContext context) {
+    final colors = Theme.of(context).colorScheme;
+
     return Row(
       children: [
+        // Builder form
         Expanded(
-          child: SelectionArea(
-            child: ListView(
-              children: [
-                Text('Prompt Builder', style: Theme.of(context).textTheme.headlineSmall),
-                const SizedBox(height: 8),
-                TextField(controller: _goal, decoration: const InputDecoration(labelText: 'Goal *')),
-                const SizedBox(height: 8),
-                TextField(controller: _context, minLines: 3, maxLines: 5, decoration: const InputDecoration(labelText: 'Context')),
-                const SizedBox(height: 8),
-                TextField(controller: _requirements, minLines: 3, maxLines: 5, decoration: const InputDecoration(labelText: 'Requirements (one per line)')),
-                const SizedBox(height: 8),
-                TextField(controller: _constraints, minLines: 3, maxLines: 5, decoration: const InputDecoration(labelText: 'Constraints (one per line)')),
-                const SizedBox(height: 8),
-                Row(
-                  children: [
-                    Expanded(
-                      child: DropdownButtonFormField<String>(
-                        value: _targetStack,
-                        decoration: const InputDecoration(labelText: 'Target stack'),
-                        items: const [
-                          DropdownMenuItem(value: 'general', child: Text('general')),
-                          DropdownMenuItem(value: 'python-fastapi', child: Text('python-fastapi')),
-                          DropdownMenuItem(value: 'flutter', child: Text('flutter')),
-                        ],
-                        onChanged: (v) => setState(() => _targetStack = v ?? 'general'),
-                      ),
+          child: Card(
+            child: Padding(
+              padding: const EdgeInsets.all(20),
+              child: ListView(
+                children: [
+                  Text('Prompt Builder', style: Theme.of(context).textTheme.titleLarge),
+                  const SizedBox(height: 16),
+
+                  TextField(
+                    controller: _goal,
+                    decoration: InputDecoration(
+                      labelText: 'Goal *',
+                      hintText: 'What should the prompt accomplish?',
+                      border: OutlineInputBorder(borderRadius: BorderRadius.circular(8)),
                     ),
-                    const SizedBox(width: 8),
-                    Expanded(
-                      child: DropdownButtonFormField<String>(
-                        value: _outputFormat,
-                        decoration: const InputDecoration(labelText: 'Output format'),
-                        items: const [
-                          DropdownMenuItem(value: 'text', child: Text('text')),
-                          DropdownMenuItem(value: 'json', child: Text('json')),
-                          DropdownMenuItem(value: 'markdown', child: Text('markdown')),
-                        ],
-                        onChanged: (v) => setState(() => _outputFormat = v ?? 'markdown'),
-                      ),
-                    ),
-                  ],
-                ),
-                const SizedBox(height: 8),
-                Row(
-                  children: [
-                    FilledButton.icon(onPressed: _loading ? null : _generate, icon: const Icon(Icons.auto_fix_high), label: const Text('Generate')),
-                    const SizedBox(width: 8),
-                    FilledButton.tonalIcon(
-                      onPressed: _output.isEmpty ? null : () => Clipboard.setData(ClipboardData(text: _output)),
-                      icon: const Icon(Icons.copy),
-                      label: const Text('Copy'),
-                    ),
-                    const SizedBox(width: 8),
-                    FilledButton.tonal(
-                      onPressed: () => setState(() {
-                        _output = '';
-                        _status = '';
-                      }),
-                      child: const Text('Clear'),
-                    ),
-                  ],
-                ),
-                if (_status.isNotEmpty) ...[
-                  const SizedBox(height: 8),
-                  Text(_status),
-                ],
-                const SizedBox(height: 12),
-                Card(
-                  child: Padding(
-                    padding: const EdgeInsets.all(12),
-                    child: _loading ? const Center(child: CircularProgressIndicator()) : SelectableText(_output.isEmpty ? 'Generated prompt will appear here.' : _output),
                   ),
-                ),
-              ],
+                  const SizedBox(height: 12),
+
+                  TextField(
+                    controller: _context,
+                    minLines: 3,
+                    maxLines: 5,
+                    decoration: InputDecoration(
+                      labelText: 'Context',
+                      hintText: 'Background information or domain context...',
+                      border: OutlineInputBorder(borderRadius: BorderRadius.circular(8)),
+                      alignLabelWithHint: true,
+                    ),
+                  ),
+                  const SizedBox(height: 12),
+
+                  TextField(
+                    controller: _requirements,
+                    minLines: 3,
+                    maxLines: 5,
+                    decoration: InputDecoration(
+                      labelText: 'Requirements (one per line)',
+                      hintText: 'Each line becomes a requirement...',
+                      border: OutlineInputBorder(borderRadius: BorderRadius.circular(8)),
+                      alignLabelWithHint: true,
+                    ),
+                  ),
+                  const SizedBox(height: 12),
+
+                  TextField(
+                    controller: _constraints,
+                    minLines: 3,
+                    maxLines: 5,
+                    decoration: InputDecoration(
+                      labelText: 'Constraints (one per line)',
+                      hintText: 'Limitations or boundaries...',
+                      border: OutlineInputBorder(borderRadius: BorderRadius.circular(8)),
+                      alignLabelWithHint: true,
+                    ),
+                  ),
+                  const SizedBox(height: 12),
+
+                  Row(
+                    children: [
+                      Expanded(
+                        child: DropdownButtonFormField<String>(
+                          initialValue: _targetStack,
+                          decoration: InputDecoration(
+                            labelText: 'Target stack',
+                            border: OutlineInputBorder(borderRadius: BorderRadius.circular(8)),
+                            contentPadding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
+                          ),
+                          isDense: true,
+                          items: const [
+                            DropdownMenuItem(value: 'general', child: Text('General')),
+                            DropdownMenuItem(value: 'python-fastapi', child: Text('Python / FastAPI')),
+                            DropdownMenuItem(value: 'flutter', child: Text('Flutter')),
+                          ],
+                          onChanged: (v) => setState(() => _targetStack = v ?? 'general'),
+                        ),
+                      ),
+                      const SizedBox(width: 12),
+                      Expanded(
+                        child: DropdownButtonFormField<String>(
+                          initialValue: _outputFormat,
+                          decoration: InputDecoration(
+                            labelText: 'Output format',
+                            border: OutlineInputBorder(borderRadius: BorderRadius.circular(8)),
+                            contentPadding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
+                          ),
+                          isDense: true,
+                          items: const [
+                            DropdownMenuItem(value: 'text', child: Text('Text')),
+                            DropdownMenuItem(value: 'json', child: Text('JSON')),
+                            DropdownMenuItem(value: 'markdown', child: Text('Markdown')),
+                          ],
+                          onChanged: (v) => setState(() => _outputFormat = v ?? 'markdown'),
+                        ),
+                      ),
+                    ],
+                  ),
+                  const SizedBox(height: 16),
+
+                  Row(
+                    children: [
+                      FilledButton.icon(
+                        onPressed: _loading ? null : _generate,
+                        icon: _loading
+                            ? const SizedBox(width: 16, height: 16, child: CircularProgressIndicator(strokeWidth: 2))
+                            : const Icon(Icons.auto_fix_high, size: 18),
+                        label: const Text('Generate'),
+                      ),
+                      const SizedBox(width: 8),
+                      FilledButton.tonalIcon(
+                        onPressed: _output.isEmpty
+                            ? null
+                            : () {
+                                Clipboard.setData(ClipboardData(text: _output));
+                                ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('Copied to clipboard'), duration: Duration(seconds: 1)));
+                              },
+                        icon: const Icon(Icons.copy, size: 18),
+                        label: const Text('Copy'),
+                      ),
+                      const SizedBox(width: 8),
+                      TextButton(
+                        onPressed: () => setState(() { _output = ''; _status = ''; }),
+                        child: const Text('Clear'),
+                      ),
+                    ],
+                  ),
+
+                  if (_status.isNotEmpty) ...[
+                    const SizedBox(height: 8),
+                    Text(_status, style: TextStyle(fontSize: 13, color: _status.startsWith('Failed') ? colors.error : colors.primary)),
+                  ],
+
+                  const SizedBox(height: 16),
+
+                  // Output
+                  Container(
+                    width: double.infinity,
+                    constraints: const BoxConstraints(minHeight: 160),
+                    padding: const EdgeInsets.all(16),
+                    decoration: BoxDecoration(
+                      color: colors.surfaceContainerLow,
+                      borderRadius: BorderRadius.circular(8),
+                      border: Border.all(color: colors.outlineVariant.withValues(alpha: 0.3)),
+                    ),
+                    child: _loading
+                        ? const Center(child: CircularProgressIndicator())
+                        : SelectableText(
+                            _output.isEmpty ? 'Generated prompt will appear here...' : _output,
+                            style: TextStyle(
+                              height: 1.5,
+                              color: _output.isEmpty ? colors.onSurfaceVariant.withValues(alpha: 0.5) : null,
+                            ),
+                          ),
+                  ),
+                ],
+              ),
             ),
           ),
         ),
+
         const SizedBox(width: 12),
+
+        // History sidebar
         SizedBox(
-          width: 340,
+          width: 320,
           child: Column(
             children: [
-              Row(children: [
-                Expanded(child: Text('History', style: Theme.of(context).textTheme.titleMedium)),
-                IconButton(onPressed: _loadHistory, icon: const Icon(Icons.refresh)),
-              ]),
-              Expanded(
-                child: ListView.builder(
-                  itemCount: _history.length,
-                  itemBuilder: (_, i) {
-                    final d = _history[i];
-                    final text = (d['output_prompt_text'] ?? '').toString();
-                    final title = (d['title'] ?? d['id']).toString();
-                    return Card(
-                      child: ListTile(
-                        title: Text(title, maxLines: 1, overflow: TextOverflow.ellipsis),
-                        subtitle: Text(text, maxLines: 2, overflow: TextOverflow.ellipsis),
-                        trailing: TextButton(onPressed: () => _restore(d), child: const Text('Load')),
-                      ),
-                    );
-                  },
+              Padding(
+                padding: const EdgeInsets.only(bottom: 8),
+                child: Row(
+                  children: [
+                    Icon(Icons.history, size: 18, color: colors.onSurfaceVariant),
+                    const SizedBox(width: 6),
+                    Expanded(child: Text('History', style: Theme.of(context).textTheme.titleSmall)),
+                    IconButton(onPressed: _loadHistory, icon: const Icon(Icons.refresh, size: 18), tooltip: 'Refresh'),
+                  ],
                 ),
+              ),
+              Expanded(
+                child: _history.isEmpty
+                    ? Center(
+                        child: Text('No drafts yet', style: TextStyle(color: colors.onSurfaceVariant)),
+                      )
+                    : ListView.builder(
+                        itemCount: _history.length,
+                        itemBuilder: (_, i) {
+                          final d = _history[i];
+                          final text = (d['output_prompt_text'] ?? '').toString();
+                          final title = (d['title'] ?? d['id']).toString();
+                          return Card(
+                            color: colors.surfaceContainerLow,
+                            margin: const EdgeInsets.only(bottom: 4),
+                            child: ListTile(
+                              dense: true,
+                              title: Text(title, maxLines: 1, overflow: TextOverflow.ellipsis, style: const TextStyle(fontWeight: FontWeight.w500)),
+                              subtitle: Text(text, maxLines: 2, overflow: TextOverflow.ellipsis, style: TextStyle(fontSize: 12, color: colors.onSurfaceVariant)),
+                              trailing: IconButton(
+                                icon: Icon(Icons.restore, size: 18, color: colors.primary),
+                                onPressed: () => _restore(d),
+                                tooltip: 'Load draft',
+                              ),
+                            ),
+                          );
+                        },
+                      ),
               ),
             ],
           ),

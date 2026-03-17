@@ -411,7 +411,7 @@ class _SystemsPageState extends State<SystemsPage> {
                 Text('Active System: ${_selectedName ?? 'none'}'),
                 const SizedBox(width: 12),
                 if (_runInFlight) const Icon(Icons.sync, size: 16),
-                if (_runStatus.isNotEmpty) Text(_runInFlight ? _runStatus : '$_runStatus${_lastDurationMs != null ? ' • ${_lastDurationMs} ms' : ''}'),
+                if (_runStatus.isNotEmpty) Text(_runInFlight ? _runStatus : '$_runStatus${_lastDurationMs != null ? ' • $_lastDurationMs ms' : ''}'),
                 if (!_runInFlight && _runStatus == 'Completed') ...[
                   const SizedBox(width: 6),
                   const Icon(Icons.check_circle, color: Colors.green, size: 16),
@@ -583,14 +583,14 @@ class _SystemsPageState extends State<SystemsPage> {
                             Text('Node: ${selectedNode.id.substring(0, selectedNode.id.length > 8 ? 8 : selectedNode.id.length)}'),
                             const SizedBox(height: 8),
                             DropdownButtonFormField<String>(
-                              value: _agents.contains(selectedNode.agent) ? selectedNode.agent : (_agents.isNotEmpty ? _agents.first : null),
+                              initialValue: _agents.contains(selectedNode.agent) ? selectedNode.agent : (_agents.isNotEmpty ? _agents.first : null),
                               decoration: const InputDecoration(labelText: 'Agent'),
                               items: _agents.map((a) => DropdownMenuItem(value: a, child: Text(a))).toList(),
                               onChanged: (v) => setState(() => selectedNode.agent = v ?? selectedNode.agent),
                             ),
                             const SizedBox(height: 8),
                             DropdownButtonFormField<String>(
-                              value: selectedNode.role,
+                              initialValue: selectedNode.role,
                               decoration: const InputDecoration(labelText: 'Role (what this node does)'),
                               items: const [
                                 DropdownMenuItem(value: 'planner', child: Text('Planner')),
@@ -648,7 +648,7 @@ class _SystemsPageState extends State<SystemsPage> {
                           }),
                           if (selectedEdge != null) ...[
                             DropdownButtonFormField<String>(
-                              value: selectedEdge.ruleType,
+                              initialValue: selectedEdge.ruleType,
                               decoration: const InputDecoration(labelText: 'Routing rule'),
                               items: const [
                                 DropdownMenuItem(value: 'always', child: Text('always')),

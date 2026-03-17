@@ -4,41 +4,75 @@ from local_ai_platform.config import AppConfig
 from local_ai_platform.images.service import ImageGenerationService, ImageRuntimeResult
 
 
-def _cfg(tmp_path: Path) -> AppConfig:
+def _cfg() -> AppConfig:
     return AppConfig(
         ollama_base_url='http://127.0.0.1:11434',
         default_model='gemma3:1b',
         prompt_builder_model='gemma3:1b',
-        hf_default_model='google/flan-t5-base',
-        hf_model_catalog='google/flan-t5-base',
+        hf_default_model='',
+        hf_model_catalog='',
         hf_device='auto',
         gradio_share=False,
         gradio_server_port=7860,
         api_server_port=8000,
-        local_models_dir=str(tmp_path / 'models'),
     )
 
 
-def test_local_model_scan_detects_diffusers_and_transformers(tmp_path):
-    cfg = _cfg(tmp_path)
-    models = Path(cfg.local_models_dir)
-    (models / 'img-model').mkdir(parents=True)
-    (models / 'img-model' / 'model_index.json').write_text('{}', encoding='utf-8')
+def _setup_hf_cache(tmp_path: Path, model_id: str, files: dict[str, str] | None = None) -> Path:
+    """Create a fake HF cache structure for a model.
 
-    (models / 'text-model').mkdir(parents=True)
-    (models / 'text-model' / 'config.json').write_text('{"model_type":"llama","max_position_embeddings":4096}', encoding='utf-8')
+    Returns the snapshot directory path.
+    Structure: tmp_path/hub/models--org--name/snapshots/abc123/
+    """
+    safe_name = model_id.replace('/', '--')
+    snapshot = tmp_path / 'hub' / f'models--{safe_name}' / 'snapshots' / 'abc123'
+    snapshot.mkdir(parents=True)
+    if files:
+        for name, content in files.items():
+            (snapshot / name).write_text(content, encoding='utf-8')
+    return snapshot
+
+
+def test_hf_cache_scan_detects_diffusers_model(tmp_path, monkeypatch):
+    cfg = _cfg()
+    monkeypatch.setenv('HF_HOME', str(tmp_path))
+
+    # Create a diffusers image model (has model_index.json)
+    _setup_hf_cache(tmp_path, 'test-org/img-model', {
+        'model_index.json': '{}',
+    })
 
     svc = ImageGenerationService(cfg)
     body = svc.refresh_models()
 
-    assert any(m['model_id'] == 'local:img-model' for m in body['items'])
-    assert any(m['model_id'] == 'local:text-model' for m in body['local_text_models'])
+    assert any(m['model_id'] == 'test-org/img-model' for m in body['items'])
 
 
-def test_doctor_reports_local_models_missing(tmp_path):
-    cfg = _cfg(tmp_path)
+def test_hf_cache_scan_ignores_text_models(tmp_path, monkeypatch):
+    cfg = _cfg()
+    monkeypatch.setenv('HF_HOME', str(tmp_path))
+
+    # Create a text model (no model_index.json, has config.json + tokenizer)
+    snap = _setup_hf_cache(tmp_path, 'test-org/text-model', {
+        'config.json': '{"model_type":"llama","max_position_embeddings":4096}',
+        'tokenizer.json': '{}',
+    })
+    (snap / 'model.safetensors').write_bytes(b'\x00' * 100)
+
     svc = ImageGenerationService(cfg)
+    body = svc.refresh_models()
 
+    # Text model should NOT appear in image models
+    assert not any(m['model_id'] == 'test-org/text-model' for m in body['items'])
+
+
+def test_doctor_reports_local_models_missing(tmp_path, monkeypatch):
+    cfg = _cfg()
+    monkeypatch.setenv('HF_HOME', str(tmp_path))
+    # Create empty hub dir so scan runs but finds nothing
+    (tmp_path / 'hub').mkdir(parents=True)
+
+    svc = ImageGenerationService(cfg)
     report = svc.doctor()
 
     assert 'checks' in report
@@ -47,10 +81,11 @@ def test_doctor_reports_local_models_missing(tmp_path):
 
 
 def test_generate_uses_cpu_fallback_when_gpu_required_but_unavailable(tmp_path, monkeypatch):
-    cfg = _cfg(tmp_path)
+    cfg = _cfg()
     cfg.hf_image_runtime = 'diffusers_local'
     cfg.hf_image_require_gpu = True
     cfg.hf_image_allow_cpu_fallback = True
+    monkeypatch.setenv('HF_HOME', str(tmp_path))
     svc = ImageGenerationService(cfg)
 
     monkeypatch.setattr(svc, '_resolve_model_source', lambda model_id: ('remote', model_id))
@@ -73,51 +108,55 @@ def test_generate_uses_cpu_fallback_when_gpu_required_but_unavailable(tmp_path, 
     monkeypatch.setattr(svc, '_cache_dir', lambda model_id: Path('/tmp'))
     monkeypatch.setattr(svc, '_run_diffusers_isolated', _fake_run_diffusers)
 
-    result = svc.generate(model_id='google/flan-t5-base', prompt='test')
+    result = svc.generate(model_id='some-org/test-model', prompt='test')
     assert result.ok is True
     assert result.metadata and 'warning' in result.metadata
 
 
-def test_validate_model_reports_missing_files(tmp_path):
-    cfg = _cfg(tmp_path)
+def test_validate_model_reports_missing_files(tmp_path, monkeypatch):
+    cfg = _cfg()
+    monkeypatch.setenv('HF_HOME', str(tmp_path))
+
+    # Create a model with no model_index.json (broken for images)
+    _setup_hf_cache(tmp_path, 'test-org/broken-model')
+
     svc = ImageGenerationService(cfg)
-
-    models = Path(cfg.local_models_dir)
-    (models / 'broken-model').mkdir(parents=True)
-
-    report = svc.validate_model('local:broken-model')
+    report = svc.validate_model('test-org/broken-model')
     assert report['loadable'] is False
-    assert 'invalid_model_format' in report['errors']
 
 
-def test_validate_model_includes_memory_estimates(tmp_path):
-    cfg = _cfg(tmp_path)
+def test_validate_model_includes_memory_estimates(tmp_path, monkeypatch):
+    cfg = _cfg()
+    monkeypatch.setenv('HF_HOME', str(tmp_path))
+
+    # Create a valid diffusers model with model_index.json + weights
+    snap = _setup_hf_cache(tmp_path, 'test-org/ok-model', {
+        'model_index.json': '{}',
+    })
+    (snap / 'weights.safetensors').write_bytes(b'1234')
+
     svc = ImageGenerationService(cfg)
-
-    models = Path(cfg.local_models_dir)
-    mdir = models / 'ok-model'
-    mdir.mkdir(parents=True)
-    (mdir / 'model_index.json').write_text('{}', encoding='utf-8')
-    (mdir / 'weights.safetensors').write_bytes(b'1234')
-
-    report = svc.validate_model('local:ok-model')
+    report = svc.validate_model('test-org/ok-model')
     assert report['folder_size_bytes'] is not None
     assert report['estimated_ram_required_bytes'] is not None
     assert report['device_candidate'] in {'cpu', 'cuda'}
 
 
-def test_recommended_settings_returns_defaults(tmp_path):
-    cfg = _cfg(tmp_path)
+def test_recommended_settings_returns_defaults(tmp_path, monkeypatch):
+    cfg = _cfg()
+    monkeypatch.setenv('HF_HOME', str(tmp_path))
     svc = ImageGenerationService(cfg)
 
-    rec = svc.recommended_settings('google/flan-t5-base')
+    rec = svc.recommended_settings('some-org/test-model')
     assert 'recommended_width' in rec
     assert 'recommended_height' in rec
     assert 'recommended_steps' in rec
 
 
-def test_doctor_contains_human_memory_fields(tmp_path):
-    cfg = _cfg(tmp_path)
+def test_doctor_contains_human_memory_fields(tmp_path, monkeypatch):
+    cfg = _cfg()
+    monkeypatch.setenv('HF_HOME', str(tmp_path))
+    (tmp_path / 'hub').mkdir(parents=True)
     svc = ImageGenerationService(cfg)
     rep = svc.doctor()
     mem = rep.get('memory', {})
@@ -125,10 +164,11 @@ def test_doctor_contains_human_memory_fields(tmp_path):
     assert 'available_virtual_memory_human' in mem
 
 
-def test_execution_plan_contains_expected_fields(tmp_path):
-    cfg = _cfg(tmp_path)
+def test_execution_plan_contains_expected_fields(tmp_path, monkeypatch):
+    cfg = _cfg()
+    monkeypatch.setenv('HF_HOME', str(tmp_path))
     svc = ImageGenerationService(cfg)
-    plan = svc.build_image_execution_plan('google/flan-t5-base', requested={'width': 640, 'height': 640, 'steps': 12})
+    plan = svc.build_image_execution_plan('some-org/test-model', requested={'width': 640, 'height': 640, 'steps': 12})
     assert 'device_plan' in plan
     assert 'torch_dtype' in plan
     assert 'recommended_width' in plan
@@ -136,8 +176,9 @@ def test_execution_plan_contains_expected_fields(tmp_path):
 
 
 def test_generate_uses_timeout_and_returns_effective_settings(tmp_path, monkeypatch):
-    cfg = _cfg(tmp_path)
+    cfg = _cfg()
     cfg.hf_image_runtime = 'diffusers_local'
+    monkeypatch.setenv('HF_HOME', str(tmp_path))
     svc = ImageGenerationService(cfg)
 
     monkeypatch.setattr(svc, '_resolve_model_source', lambda model_id: ('remote', model_id))
@@ -165,7 +206,7 @@ def test_generate_uses_timeout_and_returns_effective_settings(tmp_path, monkeypa
 
     monkeypatch.setattr(svc, '_run_diffusers_isolated', _fake_run_diffusers)
 
-    res = svc.generate(model_id='Tongyi-MAI/Z-Image-Turbo', prompt='p', params_json={'timeout_sec': 444, 'width': 512, 'height': 512, 'steps': 16, 'guidance_scale': 5.5})
+    res = svc.generate(model_id='some-org/test-model', prompt='p', params_json={'timeout_sec': 444, 'width': 512, 'height': 512, 'steps': 16, 'guidance_scale': 5.5})
     assert res.ok is True
     assert observed['timeout_s'] == 444
     eff = (res.metadata or {}).get('effective_settings') or {}

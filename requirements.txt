@@ -1,0 +1,36 @@
+# ── Core ──────────────────────────────────────────────────────────
+langchain-core>=0.3.0
+langchain>=0.3.0
+langchain-ollama>=0.2.0
+langgraph>=0.2.0
+pydantic>=2.0
+
+# ── Providers ─────────────────────────────────────────────────────
+ollama>=0.4.0               # Ollama Python SDK
+transformers>=4.40.0        # HuggingFace Transformers
+torch>=2.0.0                # PyTorch (CPU or GPU)
+langchain-huggingface>=0.1.0
+
+# Optional providers (install as needed)
+# llama-cpp-python>=0.3.0   # Direct GGUF inference (pip install llama-cpp-python)
+# langchain-openai>=0.2.0   # For LM Studio/vLLM LangChain integration
+
+# ── Async ─────────────────────────────────────────────────────────
+aiosqlite>=0.20.0           # Async SQLite
+aiohttp>=3.9.0              # Async HTTP client
+
+# ── Memory ────────────────────────────────────────────────────────
+tiktoken>=0.7.0             # Fast token counting
+# chromadb>=0.5.0           # Vector store (optional, for VectorMemory)
+
+# ── Tools ─────────────────────────────────────────────────────────
+# langchain-tavily>=0.1.0   # Web search (needs TAVILY_API_KEY)
+
+# ── Image generation ─────────────────────────────────────────────
+# diffusers>=0.30.0         # HuggingFace image generation
+# accelerate>=0.30.0        # GPU acceleration
+
+# ── API / UI ──────────────────────────────────────────────────────
+fastapi>=0.110.0
+uvicorn>=0.30.0
+# gradio>=4.0               # Optional web UI
