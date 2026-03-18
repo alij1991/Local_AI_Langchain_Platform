@@ -61,6 +61,7 @@ class AppConfig:
     hf_image_job_timeout_sec: int = 180
     hf_image_low_memory_mode: bool = True
     image_runtime_strategy: str = "auto"
+    image_models_dir: str = "./models/image"
 
     # ── Memory / vector store ─────────────────────────────────────
     vector_store_dir: str = "./data/vectorstore"
@@ -117,6 +118,7 @@ def load_config() -> AppConfig:
         hf_image_job_timeout_sec=int(os.getenv("HF_IMAGE_JOB_TIMEOUT_SEC", "180")),
         hf_image_low_memory_mode=_as_bool(os.getenv("HF_IMAGE_LOW_MEMORY_MODE"), default=True),
         image_runtime_strategy=os.getenv("IMAGE_RUNTIME_STRATEGY", "auto"),
+        image_models_dir=os.getenv("IMAGE_MODELS_DIR", "./models/image"),
 
         # Memory
         vector_store_dir=os.getenv("VECTOR_STORE_DIR", "./data/vectorstore"),

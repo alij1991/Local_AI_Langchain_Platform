@@ -50,7 +50,12 @@ from local_ai_platform.repositories.models import upsert_model_entry, list_model
 from local_ai_platform.repositories.systems import list_systems, get_system, upsert_system, delete_system
 from local_ai_platform.tracing import load_trace_config, TraceConfig, TraceRecorder, TraceStore, LocalTraceCallbackHandler
 
-logger = logging.getLogger(__name__)
+logger = logging.getLogger("api_server")
+logger.setLevel(logging.INFO)
+if not logger.handlers:
+    _handler = logging.StreamHandler()
+    _handler.setFormatter(logging.Formatter("%(levelname)s:     %(name)s - %(message)s"))
+    logger.addHandler(_handler)
 
 # ── Globals ───────────────────────────────────────────────────────
 
@@ -113,6 +118,7 @@ def _invalidate_cache(prefix: str = "") -> None:
 async def lifespan(app: FastAPI):
     global router, orchestrator, ollama_ctrl, hf_ctrl, trace_store, image_service
 
+    logger.info("Starting up Local AI Platform…")
     init_db()
     router = build_router_from_config(config)
     orchestrator = AgentOrchestrator(config, router=router)
@@ -121,7 +127,18 @@ async def lifespan(app: FastAPI):
     trace_store = TraceStore(load_trace_config())
     image_service = ImageGenerationService(config)
 
+    # Eager model scan so first request is fast
+    try:
+        img_models = image_service.refresh_models()
+        img_count = len(img_models.get("items", []))
+        standalone = sum(1 for m in img_models.get("items", []) if m.get("loadable_for_images"))
+        components = img_count - standalone
+        logger.info("Image service: %d model(s) found (%d standalone, %d components)", img_count, standalone, components)
+    except Exception as exc:
+        logger.warning("Image service model scan failed at startup: %s", exc)
+
     # Restore saved agents from DB
+    agents_loaded = 0
     for agent_row in list_agents_db():
         defn = agent_row.get("json_definition", {})
         if isinstance(defn, str):
@@ -134,8 +151,11 @@ async def lifespan(app: FastAPI):
             settings=defn.get("settings", {}),
             role=defn.get("role", "general"),
         )
+        agents_loaded += 1
 
+    logger.info("Startup complete — %d agents loaded", agents_loaded)
     yield
+    logger.info("Shutting down Local AI Platform")
 
 
 app = FastAPI(title="Local AI Platform", version="2.0.0", lifespan=lifespan)
@@ -582,7 +602,8 @@ def _sum_safetensors_params(sf_data: dict[str, Any]) -> int | None:
 
 
 # Architecture-based param estimation for diffusion models with no safetensors info
-_DIFFUSION_SIZE_HINTS: dict[str, int] = {
+# Param counts for diffusion architectures (used for param_count_human display)
+_DIFFUSION_PARAM_HINTS: dict[str, int] = {
     "sdxl": int(6.6e9),
     "sd-xl": int(6.6e9),
     "stable-diffusion-xl": int(6.6e9),
@@ -601,6 +622,29 @@ _DIFFUSION_SIZE_HINTS: dict[str, int] = {
     "pixart": int(0.6e9),
     "playground": int(1.0e9),
     "wuerstchen": int(1.0e9),
+}
+
+# Actual pipeline download sizes (FP32 safetensors, configs, tokenizer)
+# Measured with snapshot_download allow_patterns filter — what we actually download.
+_DIFFUSION_DOWNLOAD_BYTES: dict[str, int] = {
+    "sdxl": int(14.2e9),
+    "sd-xl": int(14.2e9),
+    "stable-diffusion-xl": int(14.2e9),
+    "sd3": int(16e9),
+    "stable-diffusion-3": int(16e9),
+    "flux": int(24e9),
+    "sd-1": int(5.5e9),
+    "sd-2": int(5.5e9),
+    "stable-diffusion-v1": int(5.5e9),
+    "stable-diffusion-2": int(5.5e9),
+    "controlnet": int(2.8e9),
+    "kandinsky": int(6.6e9),
+    "sd-turbo": int(5.5e9),
+    "if-i": int(8.6e9),
+    "deepfloyd": int(8.6e9),
+    "pixart": int(2.4e9),
+    "playground": int(4e9),
+    "wuerstchen": int(4e9),
 }
 
 
@@ -624,15 +668,36 @@ def _estimate_hf_params(model_id: str, tags: list[str]) -> int | None:
 
     # Fallback: architecture-based estimation for diffusion models
     text_lower = f"{model_id.lower()}"
-    for pattern, est_params in _DIFFUSION_SIZE_HINTS.items():
+    for pattern, est_params in _DIFFUSION_PARAM_HINTS.items():
         if pattern in text_lower:
             return est_params
 
     return None
 
 
-def _params_to_size_bytes(param_count: int) -> int:
-    """Estimate download size from parameter count (assumes FP16 = 2 bytes per param)."""
+def _estimate_diffusion_download_bytes(model_id: str) -> int | None:
+    """Look up actual pipeline download size for known diffusion architectures."""
+    text_lower = model_id.lower()
+    for pattern, dl_bytes in _DIFFUSION_DOWNLOAD_BYTES.items():
+        if pattern in text_lower:
+            return dl_bytes
+    return None
+
+
+def _params_to_size_bytes(param_count: int, pipeline_tag: str = "", model_id: str = "") -> int:
+    """Estimate download size from parameter count.
+
+    For text-to-image models, uses measured pipeline download sizes
+    (full diffusers pipeline: unet + vae + text_encoder + configs).
+    For other models, assumes FP16 = 2 bytes per param.
+    """
+    if pipeline_tag in ("text-to-image", "image-to-image"):
+        dl = _estimate_diffusion_download_bytes(model_id)
+        if dl:
+            return dl
+        # Generic diffusers fallback: full pipeline is roughly 5x the param count
+        # (FP32 unet + vae + text_encoder + safety_checker + configs)
+        return int(param_count * 5)
     return param_count * 2
 
 
@@ -802,8 +867,8 @@ async def discover_hf_models(
             if not param_count:
                 param_count = _estimate_hf_params(model_id, tags)
 
-            size_bytes = _params_to_size_bytes(param_count) if param_count else None
             pipeline_tag = model.get("pipeline_tag", "") or ""
+            size_bytes = _params_to_size_bytes(param_count, pipeline_tag, model_id) if param_count else _estimate_diffusion_download_bytes(model_id)
             description = _synthesize_hf_description(model_id, pipeline_tag, tags, param_count)
             capabilities = _extract_hf_capabilities(pipeline_tag, tags)
 
@@ -874,7 +939,7 @@ async def get_vllm_library(search: str = ""):
             if not param_count:
                 param_count = _estimate_hf_params(model_id, tags)
 
-            size_bytes = _params_to_size_bytes(param_count) if param_count else None
+            size_bytes = _params_to_size_bytes(param_count, model_id=model_id) if param_count else None
             is_serving = model_id in vllm_serving
 
             items.append({
@@ -902,20 +967,107 @@ async def get_vllm_library(search: str = ""):
     return {"items": items}
 
 
+# ── HF download tracking ──────────────────────────────────────────
+
+_hf_downloads: dict[str, dict[str, Any]] = {}  # model_id → {status, progress, error, ...}
+
+
+def _hf_download_worker(model_id: str, token: str | None) -> None:
+    """Background thread that downloads a HF model via snapshot_download.
+
+    Uses allow_patterns to grab ONLY the pipeline component files that
+    diffusers/transformers actually need:
+      - model_index.json and all config/scheduler JSON inside subdirs
+      - .safetensors weights inside subdirs (unet/, vae/, text_encoder/, etc.)
+      - tokenizer files (vocab, merges, spiece, tokenizer.json)
+      - top-level config.json and README
+    Skips root-level multi-GB pruned checkpoints (v1-5-pruned*.safetensors)
+    and all legacy .bin/.ckpt/.h5/.msgpack formats.
+    """
+    import threading
+    _hf_downloads[model_id] = {"model_id": model_id, "status": "downloading", "progress": 0.0, "error": None, "thread": threading.current_thread().name}
+    try:
+        from huggingface_hub import snapshot_download
+
+        # Whitelist only files that diffusers pipelines actually load.
+        # Subdirectory safetensors (unet/, vae/, text_encoder/) are matched
+        # by "*/*.safetensors".  Root-level pruned checkpoints like
+        # "v1-5-pruned.safetensors" do NOT match because they have no "/".
+        snapshot_download(
+            repo_id=model_id,
+            token=token or None,
+            resume_download=True,
+            allow_patterns=[
+                "model_index.json",         # Pipeline manifest
+                "*.json",                   # Top-level configs
+                "*/*.json",                 # Subdir configs (scheduler, tokenizer, etc.)
+                "*/*.safetensors",          # Subdir weights (unet, vae, text_encoder)
+                "*/*.txt",                  # merges.txt, vocab.txt
+                "*/*.model",               # spiece.model (sentencepiece tokenizers)
+                "*/tokenizer.json",         # Fast tokenizer
+                "*.md",                     # README
+            ],
+            ignore_patterns=[
+                "*non_ema*",                # Training artifacts
+                "*.bin",                    # Legacy pytorch format
+                "*.ckpt",                   # Legacy checkpoint format
+                "*.msgpack",               # Flax weights
+                "*.h5",                    # TF weights
+                "*fp16*",                  # FP16 duplicates (diffusers can cast at load)
+                "flax_model*",             # Flax
+                "tf_model*",               # TensorFlow
+                "openvino_*",              # OpenVINO
+            ],
+        )
+        _hf_downloads[model_id]["status"] = "completed"
+        _hf_downloads[model_id]["progress"] = 1.0
+        logger.info("HF download completed: %s", model_id)
+        # Invalidate model caches so new model shows up
+        _invalidate_cache("models")
+        if image_service:
+            try:
+                image_service.refresh_models()
+            except Exception:
+                pass
+    except Exception as exc:
+        _hf_downloads[model_id]["status"] = "failed"
+        _hf_downloads[model_id]["error"] = str(exc)
+        logger.warning("HF download failed for %s: %s", model_id, exc)
+
+
 @app.get("/models/hf/downloads")
 async def get_hf_downloads(limit: int = 20):
-    """Return active/recent HF download jobs (stub — no background downloader yet)."""
-    return {"items": []}
+    """Return active/recent HF download jobs."""
+    items = []
+    for mid, info in list(_hf_downloads.items()):
+        items.append({
+            "model_id": info["model_id"],
+            "status": info["status"],
+            "progress": info.get("progress", 0.0),
+            "error": info.get("error"),
+        })
+    return {"items": items[:limit]}
 
 
 @app.post("/models/hf/download")
 async def start_hf_download(body: dict[str, Any]):
-    """Start downloading a HF model (stub)."""
+    """Start downloading a HF model in a background thread."""
+    import threading
+
     model_id = body.get("model_id", "")
     if not model_id:
         raise HTTPException(400, "model_id required")
-    # In the future, this would start a background download task
-    return {"status": "queued", "model_id": model_id}
+
+    # Check if already downloading
+    existing = _hf_downloads.get(model_id)
+    if existing and existing.get("status") == "downloading":
+        return {"status": "already_downloading", "model_id": model_id}
+
+    token = (config.hf_api_token or "").strip() or None
+    thread = threading.Thread(target=_hf_download_worker, args=(model_id, token), daemon=True)
+    thread.start()
+    logger.info("Started HF download: %s", model_id)
+    return {"status": "downloading", "model_id": model_id}
 
 
 @app.get("/model-catalog/{provider}/{model_id:path}/details")
@@ -1622,6 +1774,14 @@ async def get_image_recommendations(model_id: str | None = None):
         return {"recommended_width": 512, "recommended_height": 512, "recommended_steps": 20}
 
 
+@app.get("/images/generate/progress")
+async def get_generation_progress():
+    """Poll current image generation progress (stage, step, elapsed time)."""
+    if not image_service:
+        return {"active": False}
+    return image_service.get_generation_progress()
+
+
 @app.post("/images/generate")
 async def generate_image(body: dict[str, Any]):
     if not image_service:
@@ -1645,6 +1805,10 @@ async def generate_image(body: dict[str, Any]):
         strength=float(body.get("strength", 0.65)),
         params_json=body.get("params_json"),
         timeout_sec=body.get("timeout_sec"),
+        controlnet_type=body.get("controlnet_type"),
+        control_image_path=body.get("control_image_path"),
+        controlnet_model_id=body.get("controlnet_model_id"),
+        controlnet_conditioning_scale=float(body.get("controlnet_conditioning_scale", 1.0)),
     )
 
     if not result.ok:
@@ -1714,6 +1878,47 @@ async def edit_image(body: dict[str, Any]):
         })
 
     return {"status": "ok", "metadata": result.metadata}
+
+
+@app.post("/images/preprocess")
+async def preprocess_control_image_endpoint(body: dict[str, Any]):
+    """Preview a ControlNet preprocessor result."""
+    if not image_service:
+        raise HTTPException(503, "Image service not initialized")
+    cn_type = body.get("controlnet_type", "")
+    image_path = body.get("image_path", "")
+    if not cn_type or not image_path:
+        raise HTTPException(400, "controlnet_type and image_path required")
+    try:
+        import base64
+        result_bytes = image_service.preprocess_control_image(
+            image_path=image_path,
+            controlnet_type=cn_type,
+            width=int(body.get("width", 512)),
+            height=int(body.get("height", 512)),
+        )
+        return {"processed_image_base64": base64.b64encode(result_bytes).decode("utf-8"), "controlnet_type": cn_type}
+    except Exception as exc:
+        raise HTTPException(500, str(exc))
+
+
+@app.get("/images/controlnet/types")
+async def list_controlnet_types():
+    """Available ControlNet types for the Flutter UI dropdown."""
+    types = [
+        {"type": "canny", "name": "Canny Edge Detection", "description": "Preserves edges and outlines."},
+        {"type": "openpose", "name": "OpenPose", "description": "Detects body poses and hand positions."},
+        {"type": "depth", "name": "Depth Map", "description": "Maintains 3D spatial layout."},
+        {"type": "scribble", "name": "Scribble", "description": "Interprets rough sketches."},
+        {"type": "lineart", "name": "Line Art", "description": "Renders clean line drawings."},
+        {"type": "segmentation", "name": "Segmentation", "description": "Object region composition."},
+        {"type": "normal", "name": "Normal Map", "description": "Surface lighting control."},
+    ]
+    available = False
+    if image_service:
+        status = image_service.get_device_status()
+        available = bool(status.get("controlnet_available"))
+    return {"items": types, "available": available}
 
 
 # ── Runs (trace viewer) ──────────────────────────────────────────

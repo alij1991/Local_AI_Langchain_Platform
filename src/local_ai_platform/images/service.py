@@ -127,6 +127,190 @@ def _write_stage_marker(stage_file: str | None, stage: str) -> None:
     except Exception:
         pass
 
+# ── ControlNet constants ──────────────────────────────────────────
+
+CONTROLNET_DEFAULTS: dict[str, str] = {
+    "canny": "lllyasviel/control_v11p_sd15_canny",
+    "openpose": "lllyasviel/control_v11p_sd15_openpose",
+    "depth": "lllyasviel/control_v11f1p_sd15_depth",
+    "scribble": "lllyasviel/control_v11p_sd15_scribble",
+    "lineart": "lllyasviel/control_v11p_sd15_lineart",
+    "segmentation": "lllyasviel/control_v11p_sd15_seg",
+    "normal": "lllyasviel/control_v11p_sd15_normalbae",
+}
+
+CONTROLNET_PREPROCESSORS: dict[str, tuple[str, str, str | None]] = {
+    "canny": ("controlnet_aux", "CannyDetector", None),
+    "openpose": ("controlnet_aux", "OpenposeDetector", "lllyasviel/ControlNet"),
+    "depth": ("controlnet_aux", "MidasDetector", "lllyasviel/ControlNet"),
+    "scribble": ("controlnet_aux", "HEDdetector", "lllyasviel/ControlNet"),
+    "lineart": ("controlnet_aux", "LineartDetector", "lllyasviel/ControlNet"),
+    "normal": ("controlnet_aux", "NormalBaeDetector", "lllyasviel/ControlNet"),
+}
+
+
+# ── sd.cpp subprocess worker ──────────────────────────────────────
+
+def _sdcpp_worker(payload: dict[str, Any], out_q: Any) -> None:
+    """Subprocess worker for stable-diffusion.cpp inference."""
+    started = time.time()
+    try:
+        from stable_diffusion_cpp import StableDiffusion
+
+        sd = StableDiffusion(
+            model_path=str(payload["model_path"]),
+            wtype="default",
+            n_threads=int(payload.get("n_threads", -1)),
+        )
+
+        images = sd.txt_to_img(
+            prompt=payload["prompt"],
+            negative_prompt=payload.get("negative_prompt") or "",
+            width=int(payload["width"]),
+            height=int(payload["height"]),
+            sample_steps=int(payload["steps"]),
+            cfg_scale=float(payload["guidance_scale"]),
+            seed=int(payload.get("seed") or -1),
+            sample_method="euler_a",
+        )
+
+        Image, _ = _require_pillow()
+        buf = io.BytesIO()
+        images[0].save(buf, format="PNG")
+        out_q.put({
+            "ok": True,
+            "image_bytes": buf.getvalue(),
+            "metadata": {
+                "runtime": "sdcpp",
+                "device_used": "cpu+gpu",
+                "model_path": str(payload["model_path"]),
+                "worker_elapsed_sec": round(time.time() - started, 3),
+            },
+        })
+    except Exception as exc:  # noqa: BLE001
+        out_q.put({
+            "ok": False,
+            "error_code": "sdcpp_failed",
+            "error_message": str(exc),
+            "metadata": {"worker_traceback": traceback.format_exc()},
+        })
+
+
+# ── ControlNet subprocess worker ──────────────────────────────────
+
+def _controlnet_worker(payload: dict[str, Any], out_q: Any) -> None:
+    """Subprocess worker for ControlNet generation."""
+    started = time.time()
+    stage = "bootstrap"
+    try:
+        import torch
+        from PIL import Image
+        from diffusers import StableDiffusionControlNetPipeline, ControlNetModel
+
+        cn_type = str(payload["controlnet_type"])
+        cn_model_id = str(payload.get("controlnet_model_id") or CONTROLNET_DEFAULTS.get(cn_type, ""))
+        base_model = str(payload["base_model"])
+        device = str(payload.get("device", "cpu"))
+
+        # 1. Load and preprocess control image
+        stage = "preprocess"
+        source_img = Image.open(payload["control_image_path"]).convert("RGB")
+        source_img = source_img.resize((int(payload["width"]), int(payload["height"])))
+
+        # Get preprocessor
+        pkg, cls_name, pretrained = CONTROLNET_PREPROCESSORS.get(cn_type, (None, None, None))
+        if not pkg:
+            out_q.put({"ok": False, "error_code": "unknown_controlnet_type", "error_message": f"Unknown type: {cn_type}"})
+            return
+
+        mod = __import__(pkg, fromlist=[cls_name])
+        detector_cls = getattr(mod, cls_name)
+        detector = detector_cls.from_pretrained(pretrained) if pretrained else detector_cls()
+        control_image = detector(source_img)
+
+        # 2. Load ControlNet model
+        stage = "load_controlnet"
+        controlnet = ControlNetModel.from_pretrained(
+            cn_model_id,
+            torch_dtype=torch.float16 if device == "cuda" else torch.float32,
+            local_files_only=bool(payload.get("local_files_only", False)),
+        )
+
+        # 3. Build pipeline
+        stage = "load_pipeline"
+        load_kwargs: dict[str, Any] = {
+            "controlnet": controlnet,
+            "torch_dtype": torch.float16 if device == "cuda" else torch.float32,
+            "safety_checker": None,
+            "local_files_only": bool(payload.get("local_files_only", False)),
+            "low_cpu_mem_usage": True,
+        }
+        pipe = StableDiffusionControlNetPipeline.from_pretrained(base_model, **load_kwargs)
+        pipe.set_progress_bar_config(disable=True)
+
+        # Memory optimizations
+        try:
+            pipe.enable_xformers_memory_efficient_attention()
+        except Exception:
+            pass
+        if bool(payload.get("low_memory_mode", True)):
+            try:
+                pipe.enable_attention_slicing()
+            except Exception:
+                pass
+            try:
+                pipe.enable_vae_slicing()
+            except Exception:
+                pass
+
+        if device == "cuda":
+            if bool(payload.get("use_model_cpu_offload", False)):
+                try:
+                    pipe.enable_model_cpu_offload()
+                except Exception:
+                    pipe = pipe.to("cuda")
+            else:
+                pipe = pipe.to("cuda")
+
+        # 4. Generate
+        stage = "inference"
+        generator = torch.Generator(device=device if device == "cuda" else "cpu")
+        seed = payload.get("seed")
+        generator.manual_seed(int(seed) if seed is not None else random.randint(1, 2**31 - 1))
+
+        result = pipe(
+            prompt=payload["prompt"],
+            negative_prompt=payload.get("negative_prompt"),
+            image=control_image,
+            num_inference_steps=int(payload["steps"]),
+            guidance_scale=float(payload["guidance_scale"]),
+            controlnet_conditioning_scale=float(payload.get("controlnet_conditioning_scale", 1.0)),
+            generator=generator,
+        )
+
+        buf = io.BytesIO()
+        result.images[0].save(buf, format="PNG")
+        out_q.put({
+            "ok": True,
+            "image_bytes": buf.getvalue(),
+            "metadata": {
+                "runtime": "diffusers_controlnet",
+                "controlnet_type": cn_type,
+                "controlnet_model": cn_model_id,
+                "device_used": device,
+                "worker_elapsed_sec": round(time.time() - started, 3),
+            },
+        })
+    except Exception as exc:  # noqa: BLE001
+        mem_err, mem_code = _is_memory_error(exc)
+        out_q.put({
+            "ok": False,
+            "error_code": mem_code if mem_err else "controlnet_failed",
+            "error_message": str(exc),
+            "metadata": {"worker_traceback": traceback.format_exc(), "stage": stage},
+        })
+
+
 def _diffusers_worker(payload: dict[str, Any], out_q: Any) -> None:
     started = time.time()
     stage = "bootstrap"
@@ -193,7 +377,13 @@ def _diffusers_worker(payload: dict[str, Any], out_q: Any) -> None:
         generator.manual_seed(int(seed) if seed is not None else random.randint(1, 2**31 - 1))
 
         stage = "inference"
-        _write_stage_marker(stage_file, stage)
+        total_steps = int(payload["steps"])
+        _write_stage_marker(stage_file, f"inference:0/{total_steps}")
+
+        def _step_callback(pipe_obj: Any, step: int, timestep: Any, callback_kwargs: dict[str, Any]) -> dict[str, Any]:
+            _write_stage_marker(stage_file, f"inference:{step + 1}/{total_steps}")
+            return callback_kwargs
+
         if init_image_path:
             Image, _ = _require_pillow()
             init_img = Image.open(str(init_image_path)).convert("RGB")
@@ -202,19 +392,21 @@ def _diffusers_worker(payload: dict[str, Any], out_q: Any) -> None:
                 image=init_img,
                 negative_prompt=payload.get("negative_prompt"),
                 strength=float(payload["strength"]),
-                num_inference_steps=int(payload["steps"]),
+                num_inference_steps=total_steps,
                 guidance_scale=float(payload["guidance_scale"]),
                 generator=generator,
+                callback_on_step_end=_step_callback,
             )
         else:
             result = pipe(
                 prompt=payload["prompt"],
                 negative_prompt=payload.get("negative_prompt"),
-                num_inference_steps=int(payload["steps"]),
+                num_inference_steps=total_steps,
                 guidance_scale=float(payload["guidance_scale"]),
                 width=int(payload["width"]),
                 height=int(payload["height"]),
                 generator=generator,
+                callback_on_step_end=_step_callback,
             )
         image = result.images[0]
         buf = io.BytesIO()
@@ -257,6 +449,55 @@ class ImageGenerationService:
         self.config = config
         self._pipelines: dict[tuple[str, str, str], Any] = {}
         self._models_cache: dict[str, Any] = {"ts": 0.0, "items": []}
+        # Progress tracking for the current generation job
+        self._current_stage_file: str | None = None
+        self._current_job_started: float = 0.0
+        self._current_job_model: str = ""
+
+    def get_generation_progress(self) -> dict[str, Any]:
+        """Read current generation progress from the stage file."""
+        if not self._current_stage_file:
+            return {"active": False}
+        try:
+            raw = Path(self._current_stage_file).read_text(encoding="utf-8").strip()
+        except Exception:
+            raw = ""
+        elapsed = round(time.time() - self._current_job_started, 1) if self._current_job_started else 0.0
+        # Parse stage like "inference:5/20" or "pipeline_load"
+        stage = raw
+        step = 0
+        total_steps = 0
+        percent = 0.0
+        if ":" in raw:
+            parts = raw.split(":", 1)
+            stage = parts[0]
+            frac = parts[1]
+            if "/" in frac:
+                try:
+                    step, total_steps = int(frac.split("/")[0]), int(frac.split("/")[1])
+                    percent = round(step / total_steps * 100, 1) if total_steps > 0 else 0.0
+                except ValueError:
+                    pass
+        # Map stage names to human-readable labels
+        stage_labels = {
+            "bootstrap": "Initializing…",
+            "pipeline_load": "Loading model into memory…",
+            "inference": f"Generating ({step}/{total_steps} steps)" if total_steps else "Generating…",
+            "preprocess": "Preprocessing control image…",
+            "load_controlnet": "Loading ControlNet model…",
+            "load_pipeline": "Loading pipeline…",
+        }
+        label = stage_labels.get(stage, stage or "Working…")
+        return {
+            "active": True,
+            "stage": stage,
+            "label": label,
+            "step": step,
+            "total_steps": total_steps,
+            "percent": percent,
+            "elapsed_sec": elapsed,
+            "model": self._current_job_model,
+        }
 
     def configured_models(self) -> list[str]:
         raw = self.config.hf_image_model_catalog or ""
@@ -271,6 +512,259 @@ class ImageGenerationService:
     @staticmethod
     def _dir_size(path: Path) -> int:
         return sum(p.stat().st_size for p in path.rglob("*") if p.is_file())
+
+    # ── GGUF model helpers ────────────────────────────────────────
+
+    def _is_gguf_model(self, model_id: str) -> bool:
+        """Check if model_id refers to a GGUF SD model."""
+        if model_id.lower().endswith(".gguf"):
+            return True
+        if model_id.startswith("gguf:"):
+            return True
+        return self._resolve_gguf_path(model_id) is not None
+
+    def _resolve_gguf_path(self, model_id: str) -> Path | None:
+        """Find GGUF file. Search: direct path, image_models_dir, image_models_dir/filename."""
+        clean = model_id.removeprefix("gguf:").strip()
+
+        # Direct path
+        p = Path(clean)
+        if p.exists() and p.suffix == ".gguf":
+            return p
+
+        # In configured image models directory
+        models_dir = Path(getattr(self.config, "image_models_dir", "./models/image"))
+        for candidate in [models_dir / clean, models_dir / f"{clean}.gguf"]:
+            if candidate.exists():
+                return candidate
+
+        # Recursive search
+        if models_dir.exists():
+            for gguf in models_dir.rglob("*.gguf"):
+                if clean.lower() in gguf.stem.lower():
+                    return gguf
+        return None
+
+    def _scan_gguf_image_models(self) -> list[dict[str, Any]]:
+        """Scan image_models_dir for GGUF SD model files."""
+        items: list[dict[str, Any]] = []
+        models_dir = Path(getattr(self.config, "image_models_dir", "./models/image"))
+        if not models_dir.exists():
+            return items
+
+        sd_patterns = {"sd", "stable-diffusion", "sdxl", "flux", "stable_diffusion"}
+        llm_patterns = {"llama", "mistral", "qwen", "gemma", "phi", "codellama", "deepseek", "command"}
+
+        for gguf in models_dir.rglob("*.gguf"):
+            name_lower = gguf.stem.lower()
+            # Only include files that look like SD models
+            if not any(p in name_lower for p in sd_patterns):
+                continue
+            if any(p in name_lower for p in llm_patterns):
+                continue
+
+            size = gguf.stat().st_size
+            items.append({
+                "provider": "sdcpp",
+                "task": ["text-to-image"],
+                "model_id": f"gguf:{gguf.name}",
+                "display_name": f"{gguf.stem} (GGUF)",
+                "local_status": {"downloaded": True, "cached": True, "location": str(gguf)},
+                "requirements": {"gpu_recommended": False, "memory_estimate": "2-4GB RAM"},
+                "runtime": "sdcpp",
+                "size_bytes": size,
+                "size_human": format_bytes_human(size),
+                "model_type": "sdcpp_gguf",
+                "runtime_candidate": "sdcpp",
+                "supported_tasks": ["text-to-image"],
+                "loadable_for_images": True,
+                "explanation": "GGUF quantized Stable Diffusion model for sd.cpp (fast CPU+GPU inference).",
+                "supported_features": {"text2img": True, "img2img": False, "inpaint": False, "controlnet": False},
+            })
+        return items
+
+    # ── sd.cpp generation ─────────────────────────────────────────
+
+    def _generate_sdcpp(
+        self,
+        *,
+        model_id: str,
+        prompt: str,
+        negative_prompt: str | None,
+        seed: int | None,
+        steps: int,
+        guidance_scale: float,
+        width: int,
+        height: int,
+        timeout_sec: int | None,
+    ) -> ImageRuntimeResult:
+        """Generate via stable-diffusion.cpp in an isolated subprocess."""
+        try:
+            from stable_diffusion_cpp import StableDiffusion  # noqa: F401
+        except ImportError:
+            return ImageRuntimeResult(
+                ok=False, error_code="sdcpp_not_installed",
+                error_message="stable-diffusion-cpp-python not installed. Run: pip install stable-diffusion-cpp-python",
+            )
+
+        gguf_path = self._resolve_gguf_path(model_id)
+        if not gguf_path:
+            return ImageRuntimeResult(ok=False, error_code="model_not_found", error_message=f"GGUF model not found: {model_id}")
+
+        timeout_s = int(timeout_sec or getattr(self.config, "hf_image_job_timeout_sec", 180) or 180)
+        ctx = mp.get_context("spawn")
+        q: Any = ctx.Queue(maxsize=1)
+        payload = {
+            "model_path": str(gguf_path),
+            "prompt": prompt,
+            "negative_prompt": negative_prompt or "",
+            "seed": seed,
+            "steps": steps,
+            "guidance_scale": guidance_scale,
+            "width": min(width, 768),   # GGUF models work best at SD 1.5 resolutions
+            "height": min(height, 768),
+            "n_threads": -1,
+        }
+        # Simple progress tracking for sdcpp (no stage_file, just model/time)
+        self._current_stage_file = None
+        self._current_job_started = time.time()
+        self._current_job_model = model_id
+        proc = ctx.Process(target=_sdcpp_worker, args=(payload, q), daemon=True)
+        proc.start()
+        proc.join(timeout=timeout_s)
+
+        self._current_job_started = 0.0
+        if proc.is_alive():
+            proc.terminate()
+            proc.join(timeout=3)
+            return ImageRuntimeResult(ok=False, error_code="runtime_timeout", error_message=f"SD.cpp generation timed out after {timeout_s}s")
+
+        if q.empty():
+            return ImageRuntimeResult(ok=False, error_code="generation_failed", error_message="SD.cpp worker returned no result",
+                                       metadata={"exit_code": proc.exitcode})
+
+        data = q.get()
+        return ImageRuntimeResult(
+            ok=bool(data.get("ok")),
+            image_bytes=data.get("image_bytes"),
+            error_code=data.get("error_code"),
+            error_message=data.get("error_message"),
+            metadata=data.get("metadata") or {},
+        )
+
+    # ── ControlNet generation ─────────────────────────────────────
+
+    def _generate_controlnet(
+        self,
+        *,
+        model_id: str,
+        prompt: str,
+        negative_prompt: str | None,
+        seed: int | None,
+        steps: int,
+        guidance_scale: float,
+        width: int,
+        height: int,
+        init_image_path: str | None,
+        strength: float,
+        controlnet_type: str,
+        control_image_path: str,
+        controlnet_model_id: str | None,
+        controlnet_conditioning_scale: float,
+        timeout_sec: int | None,
+    ) -> ImageRuntimeResult:
+        """Generate via ControlNet pipeline in an isolated subprocess."""
+        try:
+            from diffusers import ControlNetModel  # noqa: F401
+            import controlnet_aux  # noqa: F401
+        except ImportError as exc:
+            return ImageRuntimeResult(
+                ok=False, error_code="missing_dependency",
+                error_message=f"ControlNet requires diffusers + controlnet-aux. Missing: {exc}",
+            )
+
+        if not control_image_path or not Path(control_image_path).exists():
+            return ImageRuntimeResult(ok=False, error_code="missing_control_image",
+                                       error_message="A control image is required for ControlNet generation.")
+
+        try:
+            model_source, resolved_model = self._resolve_model_source(model_id)
+        except FileNotFoundError as exc:
+            return ImageRuntimeResult(ok=False, error_code="model_not_found", error_message=str(exc))
+
+        device_status = self.get_device_status()
+        device = "cuda" if device_status.get("cuda_available") else "cpu"
+        # ControlNet + SD 1.5 needs ~3.5GB VRAM in fp16; use CPU offload if tight
+        gpu_vram = int(device_status.get("gpu_total_vram_bytes") or 0)
+        use_cpu_offload = device == "cuda" and gpu_vram > 0 and gpu_vram < 6 * 1024**3
+
+        timeout_s = int(timeout_sec or getattr(self.config, "hf_image_job_timeout_sec", 180) or 180)
+        ctx = mp.get_context("spawn")
+        q: Any = ctx.Queue(maxsize=1)
+        payload = {
+            "base_model": resolved_model,
+            "controlnet_type": controlnet_type,
+            "controlnet_model_id": controlnet_model_id or CONTROLNET_DEFAULTS.get(controlnet_type, ""),
+            "control_image_path": control_image_path,
+            "controlnet_conditioning_scale": controlnet_conditioning_scale,
+            "prompt": prompt,
+            "negative_prompt": negative_prompt or "",
+            "seed": seed,
+            "steps": steps,
+            "guidance_scale": guidance_scale,
+            "width": min(width, 768),
+            "height": min(height, 768),
+            "device": device,
+            "local_files_only": model_source == "local" or not self.config.hf_image_allow_auto_download,
+            "low_memory_mode": bool(self.config.hf_image_low_memory_mode),
+            "use_model_cpu_offload": use_cpu_offload,
+        }
+        self._current_stage_file = None
+        self._current_job_started = time.time()
+        self._current_job_model = model_id
+        proc = ctx.Process(target=_controlnet_worker, args=(payload, q), daemon=True)
+        proc.start()
+        proc.join(timeout=timeout_s)
+
+        self._current_job_started = 0.0
+        if proc.is_alive():
+            proc.terminate()
+            proc.join(timeout=3)
+            return ImageRuntimeResult(ok=False, error_code="runtime_timeout",
+                                       error_message=f"ControlNet generation timed out after {timeout_s}s")
+
+        if q.empty():
+            return ImageRuntimeResult(ok=False, error_code="generation_failed",
+                                       error_message="ControlNet worker returned no result")
+
+        data = q.get()
+        return ImageRuntimeResult(
+            ok=bool(data.get("ok")),
+            image_bytes=data.get("image_bytes"),
+            error_code=data.get("error_code"),
+            error_message=data.get("error_message"),
+            metadata=data.get("metadata") or {},
+        )
+
+    def preprocess_control_image(self, image_path: str, controlnet_type: str,
+                                  width: int = 512, height: int = 512) -> bytes:
+        """Run a ControlNet preprocessor and return the result as PNG bytes."""
+        Image, _ = _require_pillow()
+
+        pkg, cls_name, pretrained = CONTROLNET_PREPROCESSORS.get(controlnet_type, (None, None, None))
+        if not pkg:
+            raise ValueError(f"Unknown ControlNet type: {controlnet_type}")
+
+        mod = __import__(pkg, fromlist=[cls_name])
+        detector_cls = getattr(mod, cls_name)
+        detector = detector_cls.from_pretrained(pretrained) if pretrained else detector_cls()
+
+        source = Image.open(image_path).convert("RGB").resize((width, height))
+        result = detector(source)
+
+        buf = io.BytesIO()
+        result.save(buf, format="PNG")
+        return buf.getvalue()
 
     def get_device_status(self) -> dict[str, Any]:
         pref = (self.config.hf_image_device or "auto").strip().lower()
@@ -291,6 +785,9 @@ class ImageGenerationService:
             "device_preference": pref,
             "effective_device": "cpu",
             "reason": "torch not installed",
+            "sdcpp_available": False,
+            "controlnet_available": False,
+            "available_controlnet_types": [],
         }
 
         try:
@@ -348,6 +845,25 @@ class ImageGenerationService:
             else:
                 status["reason"] = "cuda not available"
             status["effective_device"] = "cpu"
+
+        # SD.cpp and ControlNet availability
+        status["sdcpp_available"] = False
+        try:
+            from stable_diffusion_cpp import StableDiffusion  # noqa: F401
+            status["sdcpp_available"] = True
+        except ImportError:
+            pass
+
+        status["controlnet_available"] = False
+        status["available_controlnet_types"] = []
+        try:
+            from diffusers import ControlNetModel  # noqa: F401
+            import controlnet_aux  # noqa: F401
+            status["controlnet_available"] = True
+            status["available_controlnet_types"] = list(CONTROLNET_DEFAULTS.keys())
+        except ImportError:
+            pass
+
         return status
 
     def build_image_execution_plan(
@@ -604,6 +1120,38 @@ class ImageGenerationService:
                 "required_files": {"model_index_json": True, "weights_detected": has_weights},
             }
 
+        # Check for diffusers component models (ControlNet, VAE, etc.)
+        if config_json.exists() and has_weights and not has_tokenizer:
+            try:
+                cfg = json.loads(config_json.read_text(encoding="utf-8"))
+                cls_name = str(cfg.get("_class_name") or "")
+                diffusers_ver = cfg.get("_diffusers_version")
+                if diffusers_ver and not has_tokenizer:
+                    # This is a diffusers component (ControlNet, VAE, T2IAdapter, etc.)
+                    component_type = "diffusers_component"
+                    explanation = f"Diffusers component model ({cls_name})."
+                    if "ControlNet" in cls_name:
+                        component_type = "controlnet"
+                        explanation = f"ControlNet model ({cls_name}). Requires a base model (e.g. SDXL) to generate images."
+                    elif "AutoencoderKL" in cls_name or "VQModel" in cls_name:
+                        component_type = "vae"
+                        explanation = f"VAE component ({cls_name}). Used as part of a diffusers pipeline, not standalone."
+                    elif "T2IAdapter" in cls_name:
+                        component_type = "t2i_adapter"
+                        explanation = f"T2I-Adapter model ({cls_name}). Requires a base model to generate images."
+                    return {
+                        "model_type": component_type,
+                        "runtime_candidate": "diffusers_local",
+                        "supported_tasks": ["image-conditioning"],
+                        "loadable_for_images": False,
+                        "pipeline_kind": None,
+                        "explanation": explanation,
+                        "required_files": {"model_index_json": False, "weights_detected": True},
+                        "is_component": True,
+                    }
+            except Exception:
+                pass
+
         if config_json.exists() and has_weights:
             if has_vision:
                 return {
@@ -796,29 +1344,37 @@ class ImageGenerationService:
                 continue
             snapshot = snapshot_dirs[0]
 
-            # Check if this is a diffusers image model
+            # Check if this is a diffusers image model or component
             det = self._detect_local_model_type(snapshot)
-            if not det.get("loadable_for_images"):
+            is_standalone = bool(det.get("loadable_for_images"))
+            is_component = bool(det.get("is_component"))
+
+            if not is_standalone and not is_component:
                 continue
 
             size = self._dir_size(d)
-            image_models.append({
+            entry: dict[str, Any] = {
                 "provider": "huggingface",
-                "task": det.get("supported_tasks") or ["text-to-image"],
+                "task": det.get("supported_tasks") or (["text-to-image"] if is_standalone else ["image-conditioning"]),
                 "model_id": model_id,
                 "display_name": model_id,
                 "local_status": {"downloaded": True, "cached": True, "location": str(snapshot)},
                 "requirements": {"gpu_recommended": True, "memory_estimate": "8GB+ VRAM recommended"},
-                "supported_features": {"text2img": True, "img2img": True, "inpaint": False},
                 "runtime": "diffusers_local",
                 "size_bytes": size,
                 "size_human": format_bytes_human(size),
                 "model_type": det.get("model_type"),
                 "runtime_candidate": det.get("runtime_candidate"),
                 "supported_tasks": det.get("supported_tasks"),
-                "loadable_for_images": True,
+                "loadable_for_images": is_standalone,
                 "explanation": det.get("explanation"),
-            })
+            }
+            if is_standalone:
+                entry["supported_features"] = {"text2img": True, "img2img": True, "inpaint": False}
+            else:
+                entry["is_component"] = True
+                entry["supported_features"] = {"text2img": False, "img2img": False, "inpaint": False}
+            image_models.append(entry)
 
         return image_models
 
@@ -851,6 +1407,14 @@ class ImageGenerationService:
                 seen_ids.add(m["model_id"])
 
         all_items = configured_items
+
+        # Scan for GGUF SD models
+        gguf_models = self._scan_gguf_image_models()
+        for m in gguf_models:
+            if m["model_id"] not in seen_ids:
+                all_items.append(m)
+                seen_ids.add(m["model_id"])
+
         self._models_cache = {"ts": time.time(), "items": all_items}
         return {"items": all_items}
 
@@ -1003,6 +1567,10 @@ class ImageGenerationService:
         stage_file = tempfile.NamedTemporaryFile(prefix="img_stage_", suffix=".txt", delete=False)
         stage_file_path = stage_file.name
         stage_file.close()
+        # Expose for progress polling
+        self._current_stage_file = stage_file_path
+        self._current_job_started = time.time()
+        self._current_job_model = model_id_or_path
         payload = {
             "model_id_or_path": model_id_or_path,
             "model_source": model_source,
@@ -1038,6 +1606,8 @@ class ImageGenerationService:
         if proc.is_alive():
             proc.terminate()
             proc.join(timeout=3)
+            self._current_stage_file = None
+            self._current_job_started = 0.0
             return ImageRuntimeResult(
                 ok=False,
                 error_code="runtime_timeout",
@@ -1057,14 +1627,20 @@ class ImageGenerationService:
             pass
 
         if proc.exitcode is None:
+            self._current_stage_file = None
+            self._current_job_started = 0.0
             return ImageRuntimeResult(ok=False, error_code="runtime_crash", error_message="Image worker ended with unknown state", metadata={"exit_code": None, "stage": last_stage, "model_id": model_id_or_path, "device_attempted": device, "strategy": execution_plan.get("device_plan"), "selected_args": {"width": width, "height": height, "steps": steps, "guidance_scale": guidance_scale}})
         if proc.exitcode != 0 and q.empty():
+            self._current_stage_file = None
+            self._current_job_started = 0.0
             return ImageRuntimeResult(ok=False, error_code="runtime_crash", error_message="Image worker crashed unexpectedly.", metadata={"exit_code": proc.exitcode, "stage": last_stage, "model_id": model_id_or_path, "device_attempted": device, "strategy": execution_plan.get("device_plan"), "selected_args": {"width": width, "height": height, "steps": steps, "guidance_scale": guidance_scale}})
 
         if q.empty():
             return ImageRuntimeResult(ok=False, error_code="generation_failed", error_message="Image worker returned no result")
 
         data = q.get()
+        self._current_stage_file = None
+        self._current_job_started = 0.0
         try:
             Path(stage_file_path).unlink(missing_ok=True)
         except Exception:
@@ -1166,7 +1742,34 @@ class ImageGenerationService:
         strength: float = 0.65,
         params_json: dict[str, Any] | None = None,
         timeout_sec: int | None = None,
+        # ControlNet parameters
+        controlnet_type: str | None = None,
+        control_image_path: str | None = None,
+        controlnet_model_id: str | None = None,
+        controlnet_conditioning_scale: float = 1.0,
     ) -> ImageRuntimeResult:
+        # Route 1: GGUF model → sd.cpp backend
+        if self._is_gguf_model(model_id):
+            return self._generate_sdcpp(
+                model_id=model_id, prompt=prompt, negative_prompt=negative_prompt,
+                seed=seed, steps=steps, guidance_scale=guidance_scale,
+                width=width, height=height, timeout_sec=timeout_sec,
+            )
+
+        # Route 2: ControlNet requested → diffusers ControlNet pipeline
+        if controlnet_type or control_image_path:
+            return self._generate_controlnet(
+                model_id=model_id, prompt=prompt, negative_prompt=negative_prompt,
+                seed=seed, steps=steps, guidance_scale=guidance_scale,
+                width=width, height=height, init_image_path=init_image_path,
+                strength=strength, controlnet_type=controlnet_type or "canny",
+                control_image_path=control_image_path or init_image_path or "",
+                controlnet_model_id=controlnet_model_id,
+                controlnet_conditioning_scale=controlnet_conditioning_scale,
+                timeout_sec=timeout_sec,
+            )
+
+        # Route 3 (existing): diffusers text2img/img2img
         if self.config.hf_image_runtime not in {"diffusers_local", "hf_inference_api"}:
             return ImageRuntimeResult(ok=False, error_code="provider_unavailable", error_message=f"Unsupported runtime: {self.config.hf_image_runtime}")
 

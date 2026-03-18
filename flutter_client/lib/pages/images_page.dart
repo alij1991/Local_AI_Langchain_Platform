@@ -1,5 +1,7 @@
+import 'dart:async';
 import 'dart:convert';
 
+import 'package:file_picker/file_picker.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:local_ai_flutter_client/services/api_client.dart';
@@ -41,6 +43,15 @@ class _ImagesPageState extends State<ImagesPage> {
   double _guidance = 7.0;
   int _timeoutSec = 300;
   int _loadVersion = 0;
+  Timer? _progressPoller;
+  double _progressPercent = 0.0;
+
+  // ControlNet state
+  bool _enableControlNet = false;
+  String? _controlNetType;
+  String? _controlImagePath;
+  double _controlNetScale = 1.0;
+  List<Map<String, dynamic>> _controlNetTypes = [];
 
   @override
   void initState() {
@@ -50,6 +61,7 @@ class _ImagesPageState extends State<ImagesPage> {
 
   @override
   void dispose() {
+    _progressPoller?.cancel();
     _prompt.dispose();
     _instruction.dispose();
     super.dispose();
@@ -60,26 +72,77 @@ class _ImagesPageState extends State<ImagesPage> {
     setState(fn);
   }
 
+  void _startProgressPolling() {
+    _progressPoller?.cancel();
+    _progressPercent = 0.0;
+    _progressPoller = Timer.periodic(const Duration(seconds: 1), (_) => _pollProgress());
+  }
+
+  void _stopProgressPolling() {
+    _progressPoller?.cancel();
+    _progressPoller = null;
+    _progressPercent = 0.0;
+  }
+
+  Future<void> _pollProgress() async {
+    if (!mounted || !_busy) {
+      _stopProgressPolling();
+      return;
+    }
+    try {
+      final data = await widget.api.get('/images/generate/progress') as Map<String, dynamic>;
+      if (!mounted || !_busy) return;
+      final active = data['active'] == true;
+      if (!active) return;
+      final label = (data['label'] ?? '').toString();
+      final elapsed = (data['elapsed_sec'] as num?)?.toDouble() ?? 0.0;
+      final percent = (data['percent'] as num?)?.toDouble() ?? 0.0;
+      final elapsedStr = elapsed > 60
+          ? '${(elapsed / 60).toStringAsFixed(0)}m ${(elapsed % 60).toStringAsFixed(0)}s'
+          : '${elapsed.toStringAsFixed(0)}s';
+      _safeSetState(() {
+        _status = '$label  ($elapsedStr elapsed)';
+        _progressPercent = percent / 100.0;
+      });
+    } catch (_) {}
+  }
+
   Future<void> _load({bool refreshModels = false}) async {
     final int requestId = ++_loadVersion;
     final sessions = await widget.api.get('/images/sessions') as Map<String, dynamic>;
     if (!mounted || requestId != _loadVersion) return;
     final models = await widget.api.get('/images/models${refreshModels ? '?refresh=true' : ''}') as Map<String, dynamic>;
+    debugPrint("models : $models");
     if (!mounted || requestId != _loadVersion) return;
     final runtime = await widget.api.get('/images/runtime${_selectedModel != null ? '?model_id=${Uri.encodeComponent(_selectedModel!)}' : ''}') as Map<String, dynamic>;
     if (!mounted || requestId != _loadVersion) return;
     setState(() {
       _sessions = ((sessions['items'] as List<dynamic>?) ?? []).cast<Map<String, dynamic>>();
       _models = ((models['items'] as List<dynamic>?) ?? []).cast<Map<String, dynamic>>();
+      // Prefer standalone models for auto-selection
+      final standaloneModels = _models.where((m) => m['loadable_for_images'] == true).toList();
       if (_selectedModel == null || !_models.any((m) => m['model_id'].toString() == _selectedModel)) {
-        _selectedModel = _models.isNotEmpty ? _models.first['model_id']?.toString() : null;
+        _selectedModel = standaloneModels.isNotEmpty
+            ? standaloneModels.first['model_id']?.toString()
+            : (_models.isNotEmpty ? _models.first['model_id']?.toString() : null);
       }
       _runtime = runtime;
       _lowMemoryMode = (runtime['low_memory_mode'] == true);
       if (_models.isEmpty) {
         _status = 'No image models detected. Download a diffusers model via HuggingFace and click Refresh.';
+      } else if (standaloneModels.isEmpty) {
+        _status = 'Found ${_models.length} image component(s) but no standalone pipeline. Download a full diffusers pipeline (e.g. stabilityai/stable-diffusion-xl-base-1.0).';
       }
     });
+    // Load ControlNet types
+    try {
+      final cnTypes = await widget.api.get('/images/controlnet/types') as Map<String, dynamic>;
+      if (mounted && requestId == _loadVersion) {
+        setState(() {
+          _controlNetTypes = ((cnTypes['items'] as List<dynamic>?) ?? []).cast<Map<String, dynamic>>();
+        });
+      }
+    } catch (_) {}
     if (_selectedModel != null) {
       await _loadModelFit();
       if (!mounted || requestId != _loadVersion) return;
@@ -102,7 +165,7 @@ class _ImagesPageState extends State<ImagesPage> {
     if (!mounted) return;
     await _load();
     if (!mounted) return;
-    await _openSession(body['session_id'].toString());
+    await _openSession(body['id'].toString());
   }
 
   Future<void> _openSession(String id) async {
@@ -196,17 +259,34 @@ class _ImagesPageState extends State<ImagesPage> {
     }
   }
 
+  bool get _isSelectedModelComponent {
+    if (_selectedModel == null) return false;
+    final m = _models.cast<Map<String, dynamic>?>().firstWhere(
+        (m) => m?['model_id']?.toString() == _selectedModel, orElse: () => null);
+    return m != null && m['is_component'] == true;
+  }
+
+  String? get _selectedModelExplanation {
+    if (_selectedModel == null) return null;
+    final m = _models.cast<Map<String, dynamic>?>().firstWhere(
+        (m) => m?['model_id']?.toString() == _selectedModel, orElse: () => null);
+    return m?['explanation']?.toString();
+  }
+
   Future<void> _generate() async {
     if (_activeSession == null || _selectedModel == null || _prompt.text.trim().isEmpty || _busy) return;
+    if (_isSelectedModelComponent) return;
     _safeSetState(() {
       _busy = true;
       _status = _runtime['effective_device'] == 'cuda' ? 'Loading model on GPU…' : 'Loading model on CPU…';
       _errorCode = '';
       _errorMessage = '';
       _errorDetails = '';
+      _progressPercent = 0.0;
     });
+    _startProgressPolling();
     try {
-      _safeSetState(() => _status = 'Generating base image…');
+      _safeSetState(() => _status = 'Submitting generation request…');
       final payload = {
         'session_id': _activeSession!['id'],
         'model_id': _selectedModel,
@@ -227,6 +307,11 @@ class _ImagesPageState extends State<ImagesPage> {
           'guidance_scale': _guidance,
           'timeout_sec': _timeoutSec,
         },
+        if (_enableControlNet && _controlNetType != null) ...{
+          'controlnet_type': _controlNetType,
+          'control_image_path': _controlImagePath,
+          'controlnet_conditioning_scale': _controlNetScale,
+        },
       };
       await widget.api.post('/images/generate', payload);
       if (!mounted) return;
@@ -241,12 +326,17 @@ class _ImagesPageState extends State<ImagesPage> {
     } catch (e) {
       _captureError(e);
     } finally {
-      _safeSetState(() => _busy = false);
+      _stopProgressPolling();
+      _safeSetState(() {
+        _busy = false;
+        _progressPercent = 0.0;
+      });
     }
   }
 
   Future<void> _applyEdit() async {
     if (_activeSession == null || _selectedModel == null || _selectedImageId == null || _instruction.text.trim().isEmpty || _busy) return;
+    if (_isSelectedModelComponent) return;
     _safeSetState(() {
       _busy = true;
       _status = 'Applying edit…';
@@ -337,7 +427,32 @@ class _ImagesPageState extends State<ImagesPage> {
               ),
               const SizedBox(width: 8),
               if (_status.isNotEmpty)
-                Expanded(child: Text(_status, style: TextStyle(fontSize: 13, color: colors.onSurfaceVariant), maxLines: 1, overflow: TextOverflow.ellipsis))
+                Expanded(
+                  child: Column(
+                    mainAxisSize: MainAxisSize.min,
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Text(_status, style: TextStyle(fontSize: 13, color: colors.onSurfaceVariant), maxLines: 1, overflow: TextOverflow.ellipsis),
+                      if (_busy && _progressPercent > 0) ...[
+                        const SizedBox(height: 3),
+                        ClipRRect(
+                          borderRadius: BorderRadius.circular(2),
+                          child: LinearProgressIndicator(
+                            value: _progressPercent,
+                            minHeight: 4,
+                            backgroundColor: colors.surfaceContainerHighest,
+                          ),
+                        ),
+                      ] else if (_busy) ...[
+                        const SizedBox(height: 3),
+                        ClipRRect(
+                          borderRadius: BorderRadius.circular(2),
+                          child: const LinearProgressIndicator(minHeight: 4),
+                        ),
+                      ],
+                    ],
+                  ),
+                )
               else
                 const Spacer(),
               IconButton(onPressed: _load, icon: const Icon(Icons.refresh, size: 20), tooltip: 'Refresh runtime'),
@@ -481,7 +596,20 @@ class _ImagesPageState extends State<ImagesPage> {
                         const SizedBox(height: 8),
                         DropdownButtonFormField<String>(
                           initialValue: _selectedModel,
-                          items: _models.map((m) => DropdownMenuItem(value: m['model_id'].toString(), child: Text(m['model_id'].toString()))).toList(),
+                          isExpanded: true,
+                          items: _models.map((m) {
+                            final id = m['model_id'].toString();
+                            final isComponent = m['is_component'] == true;
+                            final modelType = (m['model_type'] ?? '').toString();
+                            final label = isComponent ? '$id ($modelType)' : id;
+                            return DropdownMenuItem(
+                              value: id,
+                              child: Text(label, overflow: TextOverflow.ellipsis, style: TextStyle(
+                                color: isComponent ? Theme.of(context).colorScheme.onSurfaceVariant : null,
+                                fontStyle: isComponent ? FontStyle.italic : FontStyle.normal,
+                              )),
+                            );
+                          }).toList(),
                           onChanged: (v) { setState(() => _selectedModel = v); _loadModelFit(); },
                           decoration: const InputDecoration(labelText: 'Model'),
                         ),
@@ -521,6 +649,10 @@ class _ImagesPageState extends State<ImagesPage> {
                                 padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 4),
                                 child: Text('Warnings: ${(_runtime['warnings'] as List<dynamic>).join(', ')}'),
                               ),
+                            if (_runtime['sdcpp_available'] == true)
+                              const ListTile(dense: true, title: Text('SD.cpp: available (fast GGUF inference)')),
+                            if (_runtime['controlnet_available'] == true)
+                              ListTile(dense: true, title: Text('ControlNet: available (${(_runtime['available_controlnet_types'] as List?)?.length ?? 0} types)')),
                           ],
                         ),
                         DropdownButtonFormField<String>(
@@ -594,21 +726,107 @@ class _ImagesPageState extends State<ImagesPage> {
                             padding: EdgeInsets.only(top: 4),
                             child: Text('Configured timeout is below recommended for this runtime/model.', style: TextStyle(color: Colors.orange)),
                           ),
+                        if (_isSelectedModelComponent) ...[
+                          const SizedBox(height: 8),
+                          Card(
+                            color: Theme.of(context).colorScheme.tertiaryContainer,
+                            child: Padding(
+                              padding: const EdgeInsets.all(12),
+                              child: Row(
+                                children: [
+                                  Icon(Icons.info_outline, color: Theme.of(context).colorScheme.onTertiaryContainer),
+                                  const SizedBox(width: 10),
+                                  Expanded(child: Text(
+                                    _selectedModelExplanation ?? 'This is an auxiliary component model, not a standalone image generator.',
+                                    style: TextStyle(color: Theme.of(context).colorScheme.onTertiaryContainer, fontSize: 13),
+                                  )),
+                                ],
+                              ),
+                            ),
+                          ),
+                        ],
                         const SizedBox(height: 8),
-                        TextField(controller: _prompt, minLines: 2, maxLines: 4, decoration: const InputDecoration(labelText: 'Prompt')),
+                        TextField(
+                          controller: _prompt,
+                          minLines: 2,
+                          maxLines: 4,
+                          enabled: !_isSelectedModelComponent,
+                          decoration: const InputDecoration(labelText: 'Prompt'),
+                        ),
+                        ExpansionTile(
+                          title: const Text('ControlNet'),
+                          subtitle: Text(_enableControlNet ? 'Active: ${_controlNetType ?? "none"}' : 'Off'),
+                          initiallyExpanded: false,
+                          children: [
+                            SwitchListTile.adaptive(
+                              value: _enableControlNet,
+                              onChanged: _busy ? null : (v) => setState(() => _enableControlNet = v),
+                              title: const Text('Enable ControlNet'),
+                              subtitle: const Text('Guide generation with a reference image structure'),
+                            ),
+                            if (_enableControlNet) ...[
+                              Padding(
+                                padding: const EdgeInsets.symmetric(horizontal: 16),
+                                child: DropdownButtonFormField<String>(
+                                  initialValue: _controlNetType,
+                                  items: _controlNetTypes.map((t) => DropdownMenuItem(
+                                    value: t['type'] as String,
+                                    child: Text('${t["name"]} — ${t["description"]}'),
+                                  )).toList(),
+                                  onChanged: (v) => setState(() => _controlNetType = v),
+                                  decoration: const InputDecoration(labelText: 'Control type'),
+                                ),
+                              ),
+                              const SizedBox(height: 8),
+                              Padding(
+                                padding: const EdgeInsets.symmetric(horizontal: 16),
+                                child: Row(children: [
+                                  Expanded(child: Text(_controlImagePath ?? 'No control image selected', overflow: TextOverflow.ellipsis)),
+                                  const SizedBox(width: 8),
+                                  FilledButton.tonalIcon(
+                                    onPressed: _busy ? null : () async {
+                                      final result = await FilePicker.platform.pickFiles(type: FileType.image);
+                                      if (result != null && result.files.single.path != null) {
+                                        setState(() => _controlImagePath = result.files.single.path);
+                                      }
+                                    },
+                                    icon: const Icon(Icons.image, size: 16),
+                                    label: const Text('Pick image'),
+                                  ),
+                                ]),
+                              ),
+                              const SizedBox(height: 8),
+                              Padding(
+                                padding: const EdgeInsets.symmetric(horizontal: 16),
+                                child: Column(children: [
+                                  Slider(value: _controlNetScale, min: 0.0, max: 2.0, divisions: 20,
+                                    label: _controlNetScale.toStringAsFixed(1),
+                                    onChanged: _busy ? null : (v) => setState(() => _controlNetScale = v)),
+                                  Text('Control strength: ${_controlNetScale.toStringAsFixed(1)}'),
+                                ]),
+                              ),
+                            ],
+                          ],
+                        ),
                         const SizedBox(height: 8),
                         FilledButton.icon(
-                          onPressed: _busy ? null : _generate,
+                          onPressed: (_busy || _isSelectedModelComponent) ? null : _generate,
                           icon: _busy ? const SizedBox(width: 14, height: 14, child: CircularProgressIndicator(strokeWidth: 2)) : const Icon(Icons.auto_awesome),
-                          label: const Text('Generate'),
+                          label: Text(_isSelectedModelComponent ? 'Cannot generate (component model)' : 'Generate'),
                         ),
                         const Divider(height: 24),
                         Text('Edit conversation', style: Theme.of(context).textTheme.titleMedium),
                         const SizedBox(height: 8),
-                        TextField(controller: _instruction, minLines: 2, maxLines: 4, decoration: const InputDecoration(labelText: 'Instruction (e.g. make it cinematic, rotate)')),
+                        TextField(
+                          controller: _instruction,
+                          minLines: 2,
+                          maxLines: 4,
+                          enabled: !_isSelectedModelComponent,
+                          decoration: const InputDecoration(labelText: 'Instruction (e.g. make it cinematic, rotate)'),
+                        ),
                         const SizedBox(height: 8),
                         FilledButton.tonalIcon(
-                          onPressed: _busy ? null : _applyEdit,
+                          onPressed: (_busy || _isSelectedModelComponent) ? null : _applyEdit,
                           icon: const Icon(Icons.edit),
                           label: const Text('Apply edit'),
                         ),
