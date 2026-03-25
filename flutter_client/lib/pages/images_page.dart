@@ -75,7 +75,7 @@ class _ImagesPageState extends State<ImagesPage> {
   void _startProgressPolling() {
     _progressPoller?.cancel();
     _progressPercent = 0.0;
-    _progressPoller = Timer.periodic(const Duration(seconds: 1), (_) => _pollProgress());
+    _progressPoller = Timer.periodic(const Duration(seconds: 3), (_) => _pollProgress());
   }
 
   void _stopProgressPolling() {

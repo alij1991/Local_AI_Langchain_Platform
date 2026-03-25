@@ -259,7 +259,10 @@ def _controlnet_worker(payload: dict[str, Any], out_q: Any) -> None:
             except Exception:
                 pass
             try:
-                pipe.enable_vae_slicing()
+                if hasattr(pipe.vae, 'enable_slicing'):
+                    pipe.vae.enable_slicing()
+                else:
+                    pipe.enable_vae_slicing()
             except Exception:
                 pass
 
@@ -317,8 +320,29 @@ def _diffusers_worker(payload: dict[str, Any], out_q: Any) -> None:
     stage_file = str(payload.get("stage_file") or "") or None
     _write_stage_marker(stage_file, stage)
     try:
+        import os
+
+        # Set thread-count env vars BEFORE importing torch/numpy.
+        # These control OpenMP / MKL / oneDNN thread pools that torch
+        # uses for CPU inference.  torch.set_num_threads() alone is not
+        # enough because some backends read the env vars at import time.
+        cpu_count = os.cpu_count() or 4
+        cpu_threads = str(max(cpu_count, 1))
+        os.environ["OMP_NUM_THREADS"] = cpu_threads
+        os.environ["MKL_NUM_THREADS"] = cpu_threads
+        os.environ["OPENBLAS_NUM_THREADS"] = cpu_threads
+        os.environ["VECLIB_MAXIMUM_THREADS"] = cpu_threads
+        os.environ["NUMEXPR_NUM_THREADS"] = cpu_threads
+
         import torch
         from diffusers import AutoPipelineForImage2Image, AutoPipelineForText2Image
+
+        # Also set via the torch API (belt + suspenders).
+        torch.set_num_threads(max(cpu_count, 1))
+        try:
+            torch.set_num_interop_threads(max(cpu_count // 2, 1))
+        except RuntimeError:
+            pass  # Already set or called too late in this process
 
         model_id_or_path = str(payload["model_id_or_path"])
         mode = str(payload["mode"])
@@ -332,7 +356,14 @@ def _diffusers_worker(payload: dict[str, Any], out_q: Any) -> None:
         }
         dtype_name = str(payload.get("torch_dtype") or "")
         if dtype_name:
-            load_kwargs["torch_dtype"] = getattr(torch, dtype_name, None)
+            resolved_dtype = getattr(torch, dtype_name, None)
+            # Verify the dtype works on this device; fall back to float32.
+            if resolved_dtype is not None and resolved_dtype != torch.float32:
+                try:
+                    torch.zeros(1, dtype=resolved_dtype, device="cpu")
+                except Exception:
+                    resolved_dtype = torch.float32
+            load_kwargs["torch_dtype"] = resolved_dtype
         if payload.get("use_safetensors") is not None:
             load_kwargs["use_safetensors"] = bool(payload.get("use_safetensors"))
 
@@ -343,6 +374,14 @@ def _diffusers_worker(payload: dict[str, Any], out_q: Any) -> None:
         else:
             pipe = AutoPipelineForText2Image.from_pretrained(model_id_or_path, **load_kwargs)
         pipe.set_progress_bar_config(disable=True)
+        # Disable the NSFW safety checker — it produces frequent false positives
+        # (especially on low-res images and simple prompts like "a sky"), returning
+        # solid black images instead.  This is a local-only tool; the user is
+        # responsible for the content they generate.
+        if hasattr(pipe, "safety_checker") and pipe.safety_checker is not None:
+            pipe.safety_checker = None
+        if hasattr(pipe, "feature_extractor") and pipe.feature_extractor is not None:
+            pipe.feature_extractor = None
         if bool(payload.get("enable_memory_efficient_attention", False)):
             try:
                 pipe.enable_xformers_memory_efficient_attention()
@@ -353,9 +392,23 @@ def _diffusers_worker(payload: dict[str, Any], out_q: Any) -> None:
                 pipe.enable_attention_slicing()
             except Exception:
                 pass
+        # VAE slicing: processes batch elements one at a time (saves memory for batch>1)
+        try:
+            if hasattr(pipe.vae, 'enable_slicing'):
+                pipe.vae.enable_slicing()
+            elif hasattr(pipe, 'enable_vae_slicing'):
+                pipe.enable_vae_slicing()
+        except Exception:
+            pass
+        # VAE tiling: processes spatial regions in tiles during encode/decode.
+        # This is the critical memory-saving feature — without it, VAE decode
+        # allocates the full image tensor at once and can OOM on tight RAM.
         if bool(payload.get("use_vae_tiling", payload.get("low_memory_mode", True))):
             try:
-                pipe.enable_vae_slicing()
+                if hasattr(pipe.vae, 'enable_tiling'):
+                    pipe.vae.enable_tiling()
+                elif hasattr(pipe, 'enable_vae_tiling'):
+                    pipe.enable_vae_tiling()
             except Exception:
                 pass
         if device == "cuda":
@@ -371,6 +424,33 @@ def _diffusers_worker(payload: dict[str, Any], out_q: Any) -> None:
                     pipe = pipe.to("cuda")
             else:
                 pipe = pipe.to("cuda")
+        # Force VAE to float32 to avoid black images and dtype mismatches
+        # on GPUs with poor fp16 support (e.g. MX150, GTX 1050).
+        # MUST be after enable_model_cpu_offload() which re-wraps modules.
+        # We also monkey-patch VAE.decode to cast inputs to float32, because
+        # accelerate hooks can cause the latents (fp16 from UNet) to arrive
+        # at the VAE whose weights are fp32, triggering a conv2d dtype error.
+        if dtype_name == "float16" and hasattr(pipe, "vae"):
+            try:
+                pipe.vae = pipe.vae.to(dtype=torch.float32)
+            except Exception:
+                pass
+            if hasattr(pipe.vae, "config"):
+                try:
+                    pipe.vae.config.force_upcast = True
+                except Exception:
+                    pass
+            # Patch decode to auto-cast fp16 latents → fp32
+            _orig_decode = pipe.vae.decode
+            def _safe_decode(*args: Any, **kwargs: Any) -> Any:
+                if args:
+                    z = args[0]
+                    if hasattr(z, "dtype") and z.dtype == torch.float16:
+                        args = (z.to(torch.float32),) + args[1:]
+                if "z" in kwargs and hasattr(kwargs["z"], "dtype") and kwargs["z"].dtype == torch.float16:
+                    kwargs["z"] = kwargs["z"].to(torch.float32)
+                return _orig_decode(*args, **kwargs)
+            pipe.vae.decode = _safe_decode
 
         generator = torch.Generator(device=device if device == "cuda" else "cpu")
         seed = payload.get("seed")
@@ -381,7 +461,8 @@ def _diffusers_worker(payload: dict[str, Any], out_q: Any) -> None:
         _write_stage_marker(stage_file, f"inference:0/{total_steps}")
 
         def _step_callback(pipe_obj: Any, step: int, timestep: Any, callback_kwargs: dict[str, Any]) -> dict[str, Any]:
-            _write_stage_marker(stage_file, f"inference:{step + 1}/{total_steps}")
+            clamped = min(step + 1, total_steps)
+            _write_stage_marker(stage_file, f"inference:{clamped}/{total_steps}")
             return callback_kwargs
 
         if init_image_path:
@@ -408,6 +489,7 @@ def _diffusers_worker(payload: dict[str, Any], out_q: Any) -> None:
                 generator=generator,
                 callback_on_step_end=_step_callback,
             )
+        _write_stage_marker(stage_file, "saving")
         image = result.images[0]
         buf = io.BytesIO()
         image.save(buf, format="PNG")
@@ -483,6 +565,8 @@ class ImageGenerationService:
             "bootstrap": "Initializing…",
             "pipeline_load": "Loading model into memory…",
             "inference": f"Generating ({step}/{total_steps} steps)" if total_steps else "Generating…",
+            "vae_decode": "Decoding image (VAE)…",
+            "saving": "Saving image…",
             "preprocess": "Preprocessing control image…",
             "load_controlnet": "Loading ControlNet model…",
             "load_pipeline": "Loading pipeline…",
@@ -861,7 +945,7 @@ class ImageGenerationService:
             import controlnet_aux  # noqa: F401
             status["controlnet_available"] = True
             status["available_controlnet_types"] = list(CONTROLNET_DEFAULTS.keys())
-        except ImportError:
+        except (ImportError, AttributeError, Exception):
             pass
 
         return status
@@ -907,16 +991,22 @@ class ImageGenerationService:
 
         strategy_mode = str(getattr(self.config, "image_runtime_strategy", "auto") or "auto").strip().lower()
 
+        # Threshold: GPUs with <3GB VRAM (e.g. MX150, GT 1030) cannot fit
+        # even a single SD 1.5 component reliably.  Model-level CPU offload
+        # causes constant GPU↔CPU thrashing that is *slower* than pure CPU.
+        # In this case, run entirely on CPU with multithreaded inference.
+        _VERY_LOW_VRAM_THRESHOLD = 3 * (1024 ** 3)  # 3 GB
+
         if cuda_available:
             if strategy_mode == "safest":
                 plan.update({
                     "device_plan": "cuda_with_cpu_offload",
                     "torch_dtype": "float16",
                     "use_model_cpu_offload": True,
-                    "use_sequential_cpu_offload": True,
+                    "use_sequential_cpu_offload": False,
                     "use_attention_slicing": True,
                     "use_vae_tiling": True,
-                    "reason": "Safest strategy selected: CUDA with conservative offload.",
+                    "reason": "Safest strategy selected: CUDA with model-level CPU offload.",
                     "expected_timeout_sec": 320,
                 })
             elif strategy_mode == "performance":
@@ -930,15 +1020,38 @@ class ImageGenerationService:
                     "reason": "Performance strategy selected: direct CUDA execution.",
                     "expected_timeout_sec": 200,
                 })
+            elif gpu_vram and gpu_vram < _VERY_LOW_VRAM_THRESHOLD:
+                # GPU has too little VRAM for even model-level CPU offload to
+                # be practical (constant GPU↔CPU transfers are slower than
+                # pure CPU with multithreaded inference).  Use CPU-optimized
+                # plan instead, with all available CPU threads.
+                import os
+                cpu_threads = os.cpu_count() or 4
+                plan.update({
+                    "device_plan": "cpu_multithreaded",
+                    "torch_dtype": "float32",
+                    "use_model_cpu_offload": False,
+                    "use_sequential_cpu_offload": False,
+                    "use_attention_slicing": True,
+                    "use_vae_tiling": True,
+                    "cpu_threads": cpu_threads,
+                    "reason": (
+                        f"GPU has only {gpu_vram / (1024**3):.1f} GB VRAM (<3 GB) — too little "
+                        f"for model offload.  Using CPU with {cpu_threads} threads and "
+                        f"VAE tiling for lower-memory generation."
+                    ),
+                    "expected_timeout_sec": 600,
+                    "practical_on_cpu": True,
+                })
             elif gpu_vram and est_vram and gpu_vram < int(est_vram * 0.7):
                 plan.update({
                     "device_plan": "cuda_with_cpu_offload",
                     "torch_dtype": "float16",
                     "use_model_cpu_offload": True,
-                    "use_sequential_cpu_offload": True,
+                    "use_sequential_cpu_offload": False,
                     "use_attention_slicing": True,
                     "use_vae_tiling": True,
-                    "reason": "CUDA available but VRAM is tight relative to model footprint; enabling CPU offload.",
+                    "reason": "CUDA available but VRAM is tight; using model-level CPU offload (component by component).",
                     "expected_timeout_sec": 300,
                 })
             else:
@@ -1475,7 +1588,14 @@ class ImageGenerationService:
         }
         dtype_name = str(payload.get("torch_dtype") or "")
         if dtype_name:
-            load_kwargs["torch_dtype"] = getattr(torch, dtype_name, None)
+            resolved_dtype = getattr(torch, dtype_name, None)
+            # Verify the dtype works on this device; fall back to float32.
+            if resolved_dtype is not None and resolved_dtype != torch.float32:
+                try:
+                    torch.zeros(1, dtype=resolved_dtype, device="cpu")
+                except Exception:
+                    resolved_dtype = torch.float32
+            load_kwargs["torch_dtype"] = resolved_dtype
         if payload.get("use_safetensors") is not None:
             load_kwargs["use_safetensors"] = bool(payload.get("use_safetensors"))
 
@@ -1494,9 +1614,23 @@ class ImageGenerationService:
                 pipe.enable_attention_slicing()
             except Exception:
                 pass
+        # VAE slicing: processes batch elements one at a time (saves memory for batch>1)
+        try:
+            if hasattr(pipe.vae, 'enable_slicing'):
+                pipe.vae.enable_slicing()
+            elif hasattr(pipe, 'enable_vae_slicing'):
+                pipe.enable_vae_slicing()
+        except Exception:
+            pass
+        # VAE tiling: processes spatial regions in tiles during encode/decode.
+        # This is the critical memory-saving feature — without it, VAE decode
+        # allocates the full image tensor at once and can OOM on tight RAM.
         if bool(payload.get("use_vae_tiling", payload.get("low_memory_mode", True))):
             try:
-                pipe.enable_vae_slicing()
+                if hasattr(pipe.vae, 'enable_tiling'):
+                    pipe.vae.enable_tiling()
+                elif hasattr(pipe, 'enable_vae_tiling'):
+                    pipe.enable_vae_tiling()
             except Exception:
                 pass
         if device == "cuda":
@@ -1604,6 +1738,12 @@ class ImageGenerationService:
         proc.join(timeout=timeout_s)
 
         if proc.is_alive():
+            # Read the last stage BEFORE killing the process
+            last_stage = "unknown"
+            try:
+                last_stage = Path(stage_file_path).read_text(encoding="utf-8").strip() or "unknown"
+            except Exception:
+                pass
             proc.terminate()
             proc.join(timeout=3)
             self._current_stage_file = None
@@ -1611,10 +1751,11 @@ class ImageGenerationService:
             return ImageRuntimeResult(
                 ok=False,
                 error_code="runtime_timeout",
-                error_message=f"Image generation timed out after {timeout_s}s",
+                error_message=f"Image generation timed out after {timeout_s}s (stuck at: {last_stage})",
                 metadata={
                     "timeout_sec": timeout_s,
                     "device_requested": device,
+                    "last_stage": last_stage,
                     "execution_plan": execution_plan or {},
                     "suggestion": "Use recommended settings or smaller resolution/steps for CPU mode.",
                 },
@@ -1815,6 +1956,9 @@ class ImageGenerationService:
         enable_upscale = bool(params.get("enable_upscale", qd["upscale"]))
         enable_postprocess = bool(params.get("enable_postprocess", qd["postprocess"]))
         timeout_s = int(timeout_sec or params.get("timeout_sec") or execution_plan.get("expected_timeout_sec") or getattr(self.config, "hf_image_job_timeout_sec", 180) or 180)
+        # Ensure timeout is at least as long as the plan's expected time
+        plan_expected = int(execution_plan.get("expected_timeout_sec") or 180)
+        timeout_s = max(timeout_s, plan_expected)
         timeout_s = max(60, min(timeout_s, 3600))
 
         logger.info(
@@ -1860,6 +2004,10 @@ class ImageGenerationService:
         device_status = self.get_device_status()
         plan_device = str(execution_plan.get("device_plan") or "cpu_low_memory")
         preferred = "cuda" if plan_device in {"cuda", "cuda_with_cpu_offload"} else "cpu"
+        # cpu_multithreaded: GPU VRAM is too small; run entirely on CPU with
+        # all available threads for faster, more reliable generation.
+        if plan_device == "cpu_multithreaded":
+            preferred = "cpu"
 
         cpu_override_warning: str | None = None
         if self.config.hf_image_require_gpu and not device_status.get("cuda_available"):

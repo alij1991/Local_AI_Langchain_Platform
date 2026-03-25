@@ -6,8 +6,10 @@ Run with:
 """
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
+from pathlib import Path
 import re
 import time
 import uuid
@@ -16,7 +18,7 @@ from typing import Any
 
 from fastapi import FastAPI, HTTPException, Query, Request
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import StreamingResponse
+from fastapi.responses import FileResponse, StreamingResponse
 from pydantic import BaseModel, Field
 
 from local_ai_platform.config import load_config
@@ -1711,6 +1713,36 @@ async def get_image_session(session_id: str):
         raise HTTPException(500, str(exc))
 
 
+@app.get("/images/files/{session_id}/{filename}")
+async def serve_image_file(session_id: str, filename: str):
+    """Serve a generated image file.
+
+    The filename is typically '{image_id}.png'. We first try a direct disk
+    lookup, then fall back to a DB lookup (the image record ID and the
+    filename UUID on disk may differ).
+    """
+    # 1. Direct path check
+    file_path = Path("data/images") / session_id / filename
+    if not file_path.exists():
+        # 2. Fallback: look up the DB record by image ID
+        image_id = filename.rsplit(".", 1)[0] if "." in filename else filename
+        try:
+            from local_ai_platform.repositories.images_repo import get_image
+            record = get_image(image_id)
+            if record and record.get("file_path"):
+                file_path = Path(record["file_path"])
+        except Exception:
+            pass
+    if not file_path.exists():
+        raise HTTPException(404, "Image file not found")
+    # Safety: ensure resolved path stays inside data/images
+    try:
+        file_path.resolve().relative_to(Path("data/images").resolve())
+    except ValueError:
+        raise HTTPException(403, "Invalid path")
+    return FileResponse(str(file_path), media_type="image/png")
+
+
 @app.get("/images/models")
 async def get_image_models(refresh: bool = False):
     """Return available image generation models."""
@@ -1792,7 +1824,10 @@ async def generate_image(body: dict[str, Any]):
     if not model_id or not prompt:
         raise HTTPException(400, "model_id and prompt are required")
 
-    result = image_service.generate(
+    # Run the blocking generate() in a thread so the async event loop stays
+    # free for progress-polling and other requests.
+    result = await asyncio.to_thread(
+        image_service.generate,
         model_id=model_id,
         prompt=prompt,
         negative_prompt=body.get("negative_prompt"),
@@ -1853,7 +1888,8 @@ async def edit_image(body: dict[str, Any]):
     if not model_id or not prompt or not init_image_path:
         raise HTTPException(400, "model_id, prompt, and init_image_path are required")
 
-    result = image_service.generate(
+    result = await asyncio.to_thread(
+        image_service.generate,
         model_id=model_id,
         prompt=prompt,
         negative_prompt=body.get("negative_prompt"),
