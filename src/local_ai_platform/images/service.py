@@ -118,6 +118,233 @@ def _quality_profile_defaults(profile: str) -> dict[str, Any]:
     return {"width": 768, "height": 768, "steps": 20, "guidance_scale": 7.0, "refine": False, "upscale": False, "postprocess": False}
 
 
+def _detect_model_hints(model_path: str | Path) -> dict[str, Any]:
+    """Detect the model architecture and return optimal parameter hints.
+
+    Reads model_index.json and scheduler_config.json to identify the model
+    type (SD 1.5, SDXL, Turbo, Flux, DiT, etc.) and returns the best
+    default parameters for that specific architecture.
+    """
+    model_path = Path(model_path)
+    hints: dict[str, Any] = {
+        "model_family": "unknown",
+        "model_variant": None,
+        "recommended_guidance_scale": 7.0,
+        "recommended_steps": 20,
+        "recommended_width": 768,
+        "recommended_height": 768,
+        "recommended_negative_prompt": "blurry, low quality, distorted, deformed",
+        "preferred_dtype": None,  # None = use auto-detection
+        "notes": [],
+    }
+
+    # Read model_index.json for pipeline class detection
+    model_index = model_path / "model_index.json"
+    index_data: dict[str, Any] = {}
+    if model_index.exists():
+        try:
+            index_data = json.loads(model_index.read_text(encoding="utf-8"))
+        except Exception:
+            pass
+
+    # Read scheduler config for scheduler type detection
+    sched_config_path = model_path / "scheduler" / "scheduler_config.json"
+    sched_data: dict[str, Any] = {}
+    if sched_config_path.exists():
+        try:
+            sched_data = json.loads(sched_config_path.read_text(encoding="utf-8"))
+        except Exception:
+            pass
+
+    # Read text encoder config for architecture hints
+    te_config_path = model_path / "text_encoder" / "config.json"
+    te_data: dict[str, Any] = {}
+    if te_config_path.exists():
+        try:
+            te_data = json.loads(te_config_path.read_text(encoding="utf-8"))
+        except Exception:
+            pass
+
+    pipeline_class = str(index_data.get("_class_name") or "")
+    sched_class = str(sched_data.get("_class_name") or "")
+    te_arch = str(te_data.get("architectures", [""])[0] if te_data.get("architectures") else "")
+
+    # ── Detect model family from pipeline + scheduler + text encoder ──
+
+    # Z-Image / Tongyi DiT models
+    if "ZImage" in pipeline_class or "ZImage" in str(index_data):
+        hints.update({
+            "model_family": "z-image",
+            "model_variant": "turbo" if "turbo" in model_path.name.lower() else "base",
+            "recommended_guidance_scale": 0.0,
+            "recommended_steps": 9,
+            "recommended_width": 1024,
+            "recommended_height": 1024,
+            "preferred_dtype": "bfloat16",
+            "recommended_negative_prompt": "",
+            "notes": [
+                "Z-Image Turbo: use guidance_scale=0.0 (distilled model, CFG must be off)",
+                "9 steps produces 8 NFEs — optimal for this model",
+                "Requires bfloat16 — float16 will produce NaN/black images",
+                "Best at 1024x1024 resolution",
+            ],
+        })
+
+    # Flux models
+    elif "Flux" in pipeline_class or "flux" in model_path.name.lower():
+        is_schnell = "schnell" in model_path.name.lower()
+        hints.update({
+            "model_family": "flux",
+            "model_variant": "schnell" if is_schnell else "dev",
+            "recommended_guidance_scale": 0.0 if is_schnell else 3.5,
+            "recommended_steps": 4 if is_schnell else 28,
+            "recommended_width": 1024,
+            "recommended_height": 1024,
+            "preferred_dtype": "bfloat16",
+            "recommended_negative_prompt": "",
+            "notes": [
+                f"Flux {'Schnell' if is_schnell else 'Dev'}: {'no CFG needed (guidance=0)' if is_schnell else 'use low guidance (3.5)'}",
+                "Requires bfloat16 for stable inference",
+                "Best at 1024x1024 or 1024x768",
+            ] + (["Schnell: only 4 steps needed (distilled)"] if is_schnell else []),
+        })
+
+    # SDXL Turbo / Lightning / LCM (distilled SDXL)
+    elif ("SDXL" in pipeline_class or "stable-diffusion-xl" in model_path.name.lower() or "sdxl" in model_path.name.lower()):
+        is_turbo = any(k in model_path.name.lower() for k in ("turbo", "lightning", "lcm", "hyper"))
+        if is_turbo:
+            hints.update({
+                "model_family": "sdxl",
+                "model_variant": "turbo",
+                "recommended_guidance_scale": 0.0,
+                "recommended_steps": 4,
+                "recommended_width": 1024,
+                "recommended_height": 1024,
+                "recommended_negative_prompt": "",
+                "notes": [
+                    "SDXL Turbo/Lightning: use guidance_scale=0.0 and 1-4 steps",
+                    "Negative prompts have no effect (CFG disabled)",
+                    "Best at 1024x1024",
+                ],
+            })
+        else:
+            hints.update({
+                "model_family": "sdxl",
+                "model_variant": "base",
+                "recommended_guidance_scale": 5.0,
+                "recommended_steps": 25,
+                "recommended_width": 1024,
+                "recommended_height": 1024,
+                "recommended_negative_prompt": "blurry, low quality, distorted, deformed, ugly, bad anatomy",
+                "notes": [
+                    "SDXL: use guidance_scale 5.0-7.0",
+                    "Best at 1024x1024 (trained at this resolution)",
+                    "Needs ~6.5 GB VRAM in float16/bfloat16",
+                ],
+            })
+
+    # SD 1.5 Turbo / LCM variants
+    elif any(k in model_path.name.lower() for k in ("turbo", "lightning", "lcm", "hyper")) and \
+         "xl" not in model_path.name.lower():
+        hints.update({
+            "model_family": "sd15",
+            "model_variant": "turbo",
+            "recommended_guidance_scale": 1.0,
+            "recommended_steps": 4,
+            "recommended_width": 512,
+            "recommended_height": 512,
+            "recommended_negative_prompt": "",
+            "notes": [
+                "SD 1.5 Turbo/LCM: use guidance_scale=1.0 and 4-8 steps",
+                "Best at 512x512 (trained resolution)",
+            ],
+        })
+
+    # Standard SD 1.x / 2.x
+    elif "StableDiffusion" in pipeline_class or "stable-diffusion" in model_path.name.lower():
+        is_v2 = "2" in model_path.name.lower() or "v2" in model_path.name.lower()
+        hints.update({
+            "model_family": "sd2" if is_v2 else "sd15",
+            "model_variant": "base",
+            "recommended_guidance_scale": 7.5,
+            "recommended_steps": 25,
+            "recommended_width": 768 if is_v2 else 512,
+            "recommended_height": 768 if is_v2 else 512,
+            "recommended_negative_prompt": "blurry, low quality, distorted, deformed, ugly, bad anatomy, worst quality",
+            "notes": [
+                f"SD {'2.x' if is_v2 else '1.5'}: use guidance_scale 7.0-8.5",
+                f"Best at {'768x768' if is_v2 else '512x512'} (trained resolution)",
+                f"~{'5' if is_v2 else '4'} GB VRAM in float16",
+                "Higher resolution possible but may reduce quality without img2img upscaling",
+            ],
+        })
+
+    # Pixart / DiT-based models
+    elif "PixArt" in pipeline_class or "pixart" in model_path.name.lower():
+        hints.update({
+            "model_family": "pixart",
+            "model_variant": "alpha",
+            "recommended_guidance_scale": 4.5,
+            "recommended_steps": 20,
+            "recommended_width": 1024,
+            "recommended_height": 1024,
+            "preferred_dtype": "bfloat16",
+            "notes": [
+                "PixArt: use guidance_scale 4.0-5.0",
+                "Prefers bfloat16 for numerical stability",
+                "Best at 1024x1024",
+            ],
+        })
+
+    # Kandinsky
+    elif "Kandinsky" in pipeline_class or "kandinsky" in model_path.name.lower():
+        hints.update({
+            "model_family": "kandinsky",
+            "model_variant": "2.2" if "2.2" in model_path.name else "2.1",
+            "recommended_guidance_scale": 4.0,
+            "recommended_steps": 25,
+            "recommended_width": 768,
+            "recommended_height": 768,
+            "notes": [
+                "Kandinsky: use guidance_scale 3.0-5.0",
+                "Best at 768x768",
+            ],
+        })
+
+    # Flow-matching schedulers hint at modern DiT architectures
+    elif "FlowMatch" in sched_class:
+        hints.update({
+            "model_family": "dit",
+            "preferred_dtype": "bfloat16",
+            "recommended_guidance_scale": 3.5,
+            "recommended_steps": 20,
+            "recommended_width": 1024,
+            "recommended_height": 1024,
+            "notes": [
+                "Flow-matching model detected: likely needs bfloat16",
+                "Try guidance_scale 0.0-3.5 depending on distillation",
+            ],
+        })
+
+    # Qwen text encoder → likely a modern Chinese/DiT model
+    elif "Qwen" in te_arch:
+        hints.update({
+            "model_family": "dit",
+            "preferred_dtype": "bfloat16",
+            "recommended_guidance_scale": 0.0,
+            "recommended_steps": 9,
+            "recommended_width": 1024,
+            "recommended_height": 1024,
+            "notes": [
+                "Qwen-based text encoder detected — likely a DiT turbo model",
+                "Requires bfloat16 — float16 causes NaN",
+                "Try guidance_scale=0.0 (distilled models)",
+            ],
+        })
+
+    return hints
+
+
 
 def _write_stage_marker(stage_file: str | None, stage: str) -> None:
     if not stage_file:
@@ -229,12 +456,23 @@ def _controlnet_worker(payload: dict[str, Any], out_q: Any) -> None:
         control_image = detector(source_img)
 
         # 2. Load ControlNet model
+        # ControlNet auxiliary models (e.g. lllyasviel/control_v11p_sd15_openpose)
+        # are separate from the base model.  Try local-first; if not cached,
+        # allow downloading (they're small, ~1-2 GB).
         stage = "load_controlnet"
-        controlnet = ControlNetModel.from_pretrained(
-            cn_model_id,
-            torch_dtype=torch.float16 if device == "cuda" else torch.float32,
-            local_files_only=bool(payload.get("local_files_only", False)),
-        )
+        try:
+            controlnet = ControlNetModel.from_pretrained(
+                cn_model_id,
+                torch_dtype=torch.float16 if device == "cuda" else torch.float32,
+                local_files_only=True,
+            )
+        except (OSError, EnvironmentError):
+            # Not cached locally — download it
+            controlnet = ControlNetModel.from_pretrained(
+                cn_model_id,
+                torch_dtype=torch.float16 if device == "cuda" else torch.float32,
+                local_files_only=False,
+            )
 
         # 3. Build pipeline
         stage = "load_pipeline"
@@ -319,6 +557,15 @@ def _diffusers_worker(payload: dict[str, Any], out_q: Any) -> None:
     stage = "bootstrap"
     stage_file = str(payload.get("stage_file") or "") or None
     _write_stage_marker(stage_file, stage)
+
+    def _log(msg: str) -> None:
+        elapsed = round(time.time() - started, 1)
+        print(f"[IMG-WORKER {elapsed:>7.1f}s] {msg}", flush=True)
+
+    _log(f"Starting worker: model={payload.get('model_id_or_path')}, "
+         f"dtype={payload.get('torch_dtype')}, device={payload.get('device')}, "
+         f"size={payload.get('width')}x{payload.get('height')}, "
+         f"steps={payload.get('steps')}, guidance={payload.get('guidance_scale')}")
     try:
         import os
 
@@ -357,22 +604,40 @@ def _diffusers_worker(payload: dict[str, Any], out_q: Any) -> None:
         dtype_name = str(payload.get("torch_dtype") or "")
         if dtype_name:
             resolved_dtype = getattr(torch, dtype_name, None)
-            # Verify the dtype works on this device; fall back to float32.
+            # Verify the dtype works on this device.
+            # Fallback chain: requested → bfloat16 → float32.
             if resolved_dtype is not None and resolved_dtype != torch.float32:
                 try:
                     torch.zeros(1, dtype=resolved_dtype, device="cpu")
+                    if device == "cuda" and torch.cuda.is_available():
+                        torch.zeros(1, dtype=resolved_dtype, device="cuda")
                 except Exception:
-                    resolved_dtype = torch.float32
+                    if resolved_dtype != torch.bfloat16:
+                        try:
+                            torch.zeros(1, dtype=torch.bfloat16, device="cpu")
+                            if device == "cuda" and torch.cuda.is_available():
+                                torch.zeros(1, dtype=torch.bfloat16, device="cuda")
+                            resolved_dtype = torch.bfloat16
+                            dtype_name = "bfloat16"
+                        except Exception:
+                            resolved_dtype = torch.float32
+                            dtype_name = "float32"
+                    else:
+                        resolved_dtype = torch.float32
+                        dtype_name = "float32"
             load_kwargs["torch_dtype"] = resolved_dtype
+        _log(f"Resolved dtype: {dtype_name} → {load_kwargs.get('torch_dtype')}")
         if payload.get("use_safetensors") is not None:
             load_kwargs["use_safetensors"] = bool(payload.get("use_safetensors"))
 
         stage = "pipeline_load"
         _write_stage_marker(stage_file, stage)
+        _log(f"Loading pipeline: mode={mode}, local_files_only={local_files_only}")
         if mode == "img2img":
             pipe = AutoPipelineForImage2Image.from_pretrained(model_id_or_path, **load_kwargs)
         else:
             pipe = AutoPipelineForText2Image.from_pretrained(model_id_or_path, **load_kwargs)
+        _log(f"Pipeline loaded: {type(pipe).__name__}")
         pipe.set_progress_bar_config(disable=True)
         # Disable the NSFW safety checker — it produces frequent false positives
         # (especially on low-res images and simple prompts like "a sky"), returning
@@ -413,24 +678,29 @@ def _diffusers_worker(payload: dict[str, Any], out_q: Any) -> None:
                 pass
         if device == "cuda":
             if bool(payload.get("use_sequential_cpu_offload", False)):
+                _log("Applying sequential CPU offload")
                 try:
                     pipe.enable_sequential_cpu_offload()
-                except Exception:
-                    pass
+                except Exception as e:
+                    _log(f"Sequential CPU offload failed: {e}")
             elif bool(payload.get("use_model_cpu_offload", payload.get("enable_cpu_offload", False))):
+                _log("Applying model CPU offload")
                 try:
                     pipe.enable_model_cpu_offload()
-                except Exception:
+                except Exception as e:
+                    _log(f"Model CPU offload failed ({e}), moving pipe to CUDA directly")
                     pipe = pipe.to("cuda")
             else:
+                _log("Moving pipe directly to CUDA")
                 pipe = pipe.to("cuda")
-        # Force VAE to float32 to avoid black images and dtype mismatches
-        # on GPUs with poor fp16 support (e.g. MX150, GTX 1050).
+        else:
+            _log("Running on CPU")
+        # Force VAE to float32 to avoid black images and dtype mismatches.
+        # Applied unconditionally (not just for fp16) because some models
+        # produce NaN in the VAE even in float32 pipelines when the VAE
+        # weights were originally stored as fp16 or bfloat16.
         # MUST be after enable_model_cpu_offload() which re-wraps modules.
-        # We also monkey-patch VAE.decode to cast inputs to float32, because
-        # accelerate hooks can cause the latents (fp16 from UNet) to arrive
-        # at the VAE whose weights are fp32, triggering a conv2d dtype error.
-        if dtype_name == "float16" and hasattr(pipe, "vae"):
+        if hasattr(pipe, "vae"):
             try:
                 pipe.vae = pipe.vae.to(dtype=torch.float32)
             except Exception:
@@ -440,21 +710,41 @@ def _diffusers_worker(payload: dict[str, Any], out_q: Any) -> None:
                     pipe.vae.config.force_upcast = True
                 except Exception:
                     pass
-            # Patch decode to auto-cast fp16 latents → fp32
+            # Patch decode to (a) auto-cast non-fp32 latents → fp32 and
+            # (b) clamp the decoded output to replace any NaN/inf values
+            # that would otherwise become black pixels after uint8 cast.
             _orig_decode = pipe.vae.decode
             def _safe_decode(*args: Any, **kwargs: Any) -> Any:
                 if args:
                     z = args[0]
-                    if hasattr(z, "dtype") and z.dtype == torch.float16:
+                    if hasattr(z, "dtype") and z.dtype != torch.float32:
                         args = (z.to(torch.float32),) + args[1:]
-                if "z" in kwargs and hasattr(kwargs["z"], "dtype") and kwargs["z"].dtype == torch.float16:
+                if "z" in kwargs and hasattr(kwargs["z"], "dtype") and kwargs["z"].dtype != torch.float32:
                     kwargs["z"] = kwargs["z"].to(torch.float32)
-                return _orig_decode(*args, **kwargs)
+                out = _orig_decode(*args, **kwargs)
+                # Sanitize: replace NaN/inf in decoded sample to prevent
+                # black images from the (images * 255).astype("uint8") cast.
+                if hasattr(out, "sample"):
+                    out.sample = torch.nan_to_num(out.sample, nan=0.0, posinf=1.0, neginf=0.0)
+                return out
             pipe.vae.decode = _safe_decode
+
+        # Patch the image processor's postprocess to sanitize NaN/inf in the
+        # image tensor *before* the (images * 255).astype("uint8") cast
+        # that produces all-black output when NaN values are present.
+        if hasattr(pipe, "image_processor") and hasattr(pipe.image_processor, "postprocess"):
+            _orig_postprocess = pipe.image_processor.postprocess
+            def _safe_postprocess(image: Any, *args: Any, **kwargs: Any) -> Any:
+                if hasattr(image, "isnan"):  # torch tensor
+                    image = torch.nan_to_num(image, nan=0.0, posinf=1.0, neginf=0.0)
+                return _orig_postprocess(image, *args, **kwargs)
+            pipe.image_processor.postprocess = _safe_postprocess
 
         generator = torch.Generator(device=device if device == "cuda" else "cpu")
         seed = payload.get("seed")
-        generator.manual_seed(int(seed) if seed is not None else random.randint(1, 2**31 - 1))
+        actual_seed = int(seed) if seed is not None else random.randint(1, 2**31 - 1)
+        generator.manual_seed(actual_seed)
+        _log(f"Seed: {actual_seed}")
 
         stage = "inference"
         total_steps = int(payload["steps"])
@@ -463,11 +753,15 @@ def _diffusers_worker(payload: dict[str, Any], out_q: Any) -> None:
         def _step_callback(pipe_obj: Any, step: int, timestep: Any, callback_kwargs: dict[str, Any]) -> dict[str, Any]:
             clamped = min(step + 1, total_steps)
             _write_stage_marker(stage_file, f"inference:{clamped}/{total_steps}")
+            _log(f"Step {clamped}/{total_steps} (timestep={timestep})")
             return callback_kwargs
 
+        _log(f"Starting inference: {total_steps} steps, guidance={payload['guidance_scale']}")
+        inference_start = time.time()
         if init_image_path:
             Image, _ = _require_pillow()
             init_img = Image.open(str(init_image_path)).convert("RGB")
+            _log(f"Loaded init image: {init_img.size}")
             result = pipe(
                 prompt=payload["prompt"],
                 image=init_img,
@@ -489,10 +783,56 @@ def _diffusers_worker(payload: dict[str, Any], out_q: Any) -> None:
                 generator=generator,
                 callback_on_step_end=_step_callback,
             )
+        inference_elapsed = round(time.time() - inference_start, 1)
+        _log(f"Inference completed in {inference_elapsed}s")
+
         _write_stage_marker(stage_file, "saving")
         image = result.images[0]
+
+        # Detect NaN/corrupt output: if the image is essentially uniform
+        # (all-black or all one colour), the model likely produced NaN
+        # latents.  Report as failure so refinement/upscale don't run on
+        # garbage and waste 10+ more minutes.
+        import numpy as _np
+        _img_arr = _np.array(image)
+        _is_nan_corrupted = False
+        _pixel_min = int(_img_arr.min()) if _img_arr.size > 0 else 0
+        _pixel_max = int(_img_arr.max()) if _img_arr.size > 0 else 0
+        _pixel_range = _pixel_max - _pixel_min
+        _log(f"Output image: size={image.size}, pixel_range=[{_pixel_min}..{_pixel_max}] (range={_pixel_range})")
+        if _img_arr.size > 0:
+            # A valid image should have at least *some* contrast.
+            # Solid colour (range 0-2) means NaN→0 corruption or total failure.
+            if _pixel_range <= 2:
+                _is_nan_corrupted = True
+
+        if _is_nan_corrupted:
+            _log(f"!!! NaN/CORRUPT OUTPUT DETECTED (pixel_range={_pixel_range}, dtype={dtype_name}) !!!")
+            out_q.put({
+                "ok": False,
+                "error_code": "nan_output",
+                "error_message": (
+                    f"Model produced a blank/corrupted image (pixel range={_pixel_range}). "
+                    f"This usually means the model is incompatible with {dtype_name} precision. "
+                    f"Try using bfloat16 or float32, or check that the model supports "
+                    f"the requested guidance_scale ({payload.get('guidance_scale')}) "
+                    f"and num_inference_steps ({payload.get('steps')})."
+                ),
+                "metadata": {
+                    "stage": "nan_detection",
+                    "dtype_used": dtype_name,
+                    "device_used": device,
+                    "pixel_range": _pixel_range,
+                    "inference_elapsed_sec": inference_elapsed,
+                    "worker_elapsed_sec": round(time.time() - started, 3),
+                },
+            })
+            return
+
+        _log("Saving image to PNG buffer")
         buf = io.BytesIO()
         image.save(buf, format="PNG")
+        _log(f"Image saved ({len(buf.getvalue())} bytes). Worker done.")
         out_q.put({
             "ok": True,
             "image_bytes": buf.getvalue(),
@@ -501,6 +841,7 @@ def _diffusers_worker(payload: dict[str, Any], out_q: Any) -> None:
                 "mode": mode,
                 "model_source": payload.get("model_source"),
                 "device_used": device,
+                "dtype_used": dtype_name,
                 "runtime_strategy": payload.get("runtime_strategy") or ("cuda_fp16" if device == "cuda" else "cpu_only"),
                 "execution_plan": payload.get("execution_plan") or {},
                 "stage": "completed",
@@ -509,6 +850,7 @@ def _diffusers_worker(payload: dict[str, Any], out_q: Any) -> None:
             },
         })
     except RuntimeError as exc:
+        _log(f"!!! RuntimeError at stage '{stage}': {exc}")
         txt = str(exc).lower()
         mem_err, mem_code = _is_memory_error(exc)
         out_q.put({
@@ -518,6 +860,7 @@ def _diffusers_worker(payload: dict[str, Any], out_q: Any) -> None:
             "metadata": {"worker_traceback": traceback.format_exc(), "stage": stage},
         })
     except Exception as exc:  # noqa: BLE001
+        _log(f"!!! Exception at stage '{stage}': {exc}")
         mem_err, mem_code = _is_memory_error(exc)
         out_q.put({
             "ok": False,
@@ -529,7 +872,7 @@ def _diffusers_worker(payload: dict[str, Any], out_q: Any) -> None:
 class ImageGenerationService:
     def __init__(self, config: AppConfig) -> None:
         self.config = config
-        self._pipelines: dict[tuple[str, str, str], Any] = {}
+        self._pipelines: dict[tuple[str, str, str, str], Any] = {}
         self._models_cache: dict[str, Any] = {"ts": 0.0, "items": []}
         # Progress tracking for the current generation job
         self._current_stage_file: str | None = None
@@ -570,6 +913,9 @@ class ImageGenerationService:
             "preprocess": "Preprocessing control image…",
             "load_controlnet": "Loading ControlNet model…",
             "load_pipeline": "Loading pipeline…",
+            "refinement": "Running refinement pass…",
+            "postprocess": "Post-processing (upscale)…",
+            "nan_retry": "Retrying with safer precision…",
         }
         label = stage_labels.get(stage, stage or "Working…")
         return {
@@ -807,21 +1153,38 @@ class ImageGenerationService:
         self._current_job_started = time.time()
         self._current_job_model = model_id
         proc = ctx.Process(target=_controlnet_worker, args=(payload, q), daemon=True)
+        logger.info("[IMG-CN] Spawning ControlNet worker (timeout=%ds, device=%s)", timeout_s, device)
         proc.start()
-        proc.join(timeout=timeout_s)
+
+        # Read result from queue FIRST — don't wait for proc.join().
+        # The worker process can hang during shutdown (CUDA cleanup)
+        # even though it already put the result on the queue.
+        data = None
+        try:
+            data = q.get(timeout=timeout_s)
+            logger.info("[IMG-CN] Got result from worker queue (ok=%s)", data.get("ok") if data else None)
+        except Exception:
+            logger.warning("[IMG-CN] Queue read timed out after %ds", timeout_s)
+
+        # Give process a short grace period, then kill it
+        proc.join(timeout=15)
+        if proc.is_alive():
+            logger.info("[IMG-CN] Worker still alive after result — terminating")
+            proc.terminate()
+            proc.join(timeout=5)
+            if proc.is_alive():
+                try:
+                    proc.kill()
+                except Exception:
+                    pass
+        logger.info("[IMG-CN] Worker finished: exitcode=%s", proc.exitcode)
 
         self._current_job_started = 0.0
-        if proc.is_alive():
-            proc.terminate()
-            proc.join(timeout=3)
+
+        if data is None:
             return ImageRuntimeResult(ok=False, error_code="runtime_timeout",
                                        error_message=f"ControlNet generation timed out after {timeout_s}s")
 
-        if q.empty():
-            return ImageRuntimeResult(ok=False, error_code="generation_failed",
-                                       error_message="ControlNet worker returned no result")
-
-        data = q.get()
         return ImageRuntimeResult(
             ok=bool(data.get("ok")),
             image_bytes=data.get("image_bytes"),
@@ -966,6 +1329,9 @@ class ImageGenerationService:
         avail_ram = int(mem.get("available_ram_bytes") or 0)
         gpu_vram = int(status.get("gpu_total_vram_bytes") or 0)
 
+        # Get model-specific parameter hints (architecture, guidance, steps, dtype)
+        model_hints = validation.get("hints") or {}
+
         plan: dict[str, Any] = {
             "device_plan": "cpu_low_memory",
             "torch_dtype": "float32",
@@ -974,9 +1340,10 @@ class ImageGenerationService:
             "use_vae_tiling": True,
             "use_model_cpu_offload": False,
             "use_sequential_cpu_offload": False,
-            "recommended_width": int(requested.get("width") or 768),
-            "recommended_height": int(requested.get("height") or 768),
-            "recommended_steps": int(requested.get("steps") or 20),
+            "recommended_width": int(requested.get("width") or model_hints.get("recommended_width") or 768),
+            "recommended_height": int(requested.get("height") or model_hints.get("recommended_height") or 768),
+            "recommended_steps": int(requested.get("steps") or model_hints.get("recommended_steps") or 20),
+            "model_hints": model_hints,
             "reason": "CPU fallback plan selected.",
             "warnings": [],
             "expected_timeout_sec": 420,
@@ -991,6 +1358,28 @@ class ImageGenerationService:
 
         strategy_mode = str(getattr(self.config, "image_runtime_strategy", "auto") or "auto").strip().lower()
 
+        # Determine the best half-precision dtype for this GPU.
+        # If the model specifies a preferred dtype (e.g. bfloat16 for DiT/Flux),
+        # use that.  Otherwise, prefer bfloat16 on GPUs that support it.
+        model_preferred_dtype = model_hints.get("preferred_dtype")
+        cuda_half_dtype = "float16"  # safe default
+        if cuda_available:
+            try:
+                import torch as _torch
+                if model_preferred_dtype and model_preferred_dtype != "float32":
+                    # Model explicitly requires a specific dtype (e.g. bfloat16)
+                    test_dtype = getattr(_torch, model_preferred_dtype, None)
+                    if test_dtype and _torch.cuda.is_available():
+                        try:
+                            _torch.zeros(1, dtype=test_dtype, device="cuda")
+                            cuda_half_dtype = model_preferred_dtype
+                        except Exception:
+                            pass
+                if cuda_half_dtype == "float16" and _torch.cuda.is_available() and _torch.cuda.is_bf16_supported():
+                    cuda_half_dtype = "bfloat16"
+            except Exception:
+                pass
+
         # Threshold: GPUs with <3GB VRAM (e.g. MX150, GT 1030) cannot fit
         # even a single SD 1.5 component reliably.  Model-level CPU offload
         # causes constant GPU↔CPU thrashing that is *slower* than pure CPU.
@@ -1001,23 +1390,23 @@ class ImageGenerationService:
             if strategy_mode == "safest":
                 plan.update({
                     "device_plan": "cuda_with_cpu_offload",
-                    "torch_dtype": "float16",
+                    "torch_dtype": cuda_half_dtype,
                     "use_model_cpu_offload": True,
                     "use_sequential_cpu_offload": False,
                     "use_attention_slicing": True,
                     "use_vae_tiling": True,
-                    "reason": "Safest strategy selected: CUDA with model-level CPU offload.",
+                    "reason": f"Safest strategy selected: CUDA with model-level CPU offload ({cuda_half_dtype}).",
                     "expected_timeout_sec": 320,
                 })
             elif strategy_mode == "performance":
                 plan.update({
                     "device_plan": "cuda",
-                    "torch_dtype": "float16",
+                    "torch_dtype": cuda_half_dtype,
                     "use_model_cpu_offload": False,
                     "use_sequential_cpu_offload": False,
                     "use_attention_slicing": False,
                     "use_vae_tiling": False,
-                    "reason": "Performance strategy selected: direct CUDA execution.",
+                    "reason": f"Performance strategy selected: direct CUDA execution ({cuda_half_dtype}).",
                     "expected_timeout_sec": 200,
                 })
             elif gpu_vram and gpu_vram < _VERY_LOW_VRAM_THRESHOLD:
@@ -1046,23 +1435,23 @@ class ImageGenerationService:
             elif gpu_vram and est_vram and gpu_vram < int(est_vram * 0.7):
                 plan.update({
                     "device_plan": "cuda_with_cpu_offload",
-                    "torch_dtype": "float16",
+                    "torch_dtype": cuda_half_dtype,
                     "use_model_cpu_offload": True,
                     "use_sequential_cpu_offload": False,
                     "use_attention_slicing": True,
                     "use_vae_tiling": True,
-                    "reason": "CUDA available but VRAM is tight; using model-level CPU offload (component by component).",
+                    "reason": f"CUDA available but VRAM is tight; using model-level CPU offload ({cuda_half_dtype}).",
                     "expected_timeout_sec": 300,
                 })
             else:
                 plan.update({
                     "device_plan": "cuda",
-                    "torch_dtype": "float16",
+                    "torch_dtype": cuda_half_dtype,
                     "use_model_cpu_offload": False,
                     "use_sequential_cpu_offload": False,
                     "use_attention_slicing": low_memory_mode,
                     "use_vae_tiling": low_memory_mode,
-                    "reason": "CUDA available and VRAM appears sufficient.",
+                    "reason": f"CUDA available and VRAM appears sufficient ({cuda_half_dtype}).",
                     "expected_timeout_sec": 220,
                 })
         else:
@@ -1350,6 +1739,8 @@ class ImageGenerationService:
                 result.update(est)
                 result["estimated_ram_required_human"] = format_bytes_human(est.get("estimated_ram_required_bytes"))
                 result["estimated_vram_required_human"] = format_bytes_human(est.get("estimated_vram_required_bytes"))
+                # Detect model-specific parameter hints
+                result["hints"] = _detect_model_hints(cache)
             else:
                 result["model_type"] = "diffusers_remote"
                 result["runtime_candidate"] = "diffusers_local"
@@ -1395,6 +1786,10 @@ class ImageGenerationService:
                 result["fit"] = "poor"
                 result["warnings"].append("likely_insufficient_memory")
 
+        # Detect model-specific parameter hints (architecture, guidance, steps, etc.)
+        hints = _detect_model_hints(path)
+        result["hints"] = hints
+
         if result["loadable_for_images"]:
             ok, issues = _validate_diffusers_dir(path)
             if not ok:
@@ -1417,10 +1812,18 @@ class ImageGenerationService:
     def recommended_settings(self, model_id: str) -> dict[str, Any]:
         plan = self.build_image_execution_plan(model_id)
         precision = "fp16" if str(plan.get("torch_dtype")) in {"float16", "bfloat16"} else "fp32"
+
+        # Get model-specific hints for optimal parameters
+        hints = plan.get("model_hints") or {}
         return {
-            "recommended_width": int(plan.get("recommended_width") or 768),
-            "recommended_height": int(plan.get("recommended_height") or 768),
-            "recommended_steps": int(plan.get("recommended_steps") or 20),
+            "recommended_width": int(hints.get("recommended_width") or plan.get("recommended_width") or 768),
+            "recommended_height": int(hints.get("recommended_height") or plan.get("recommended_height") or 768),
+            "recommended_steps": int(hints.get("recommended_steps") or plan.get("recommended_steps") or 20),
+            "recommended_guidance_scale": float(hints.get("recommended_guidance_scale") or 7.0),
+            "recommended_negative_prompt": hints.get("recommended_negative_prompt") or "",
+            "model_family": hints.get("model_family") or "unknown",
+            "model_variant": hints.get("model_variant"),
+            "notes": hints.get("notes") or [],
             "reason": plan.get("reason") or "Hardware-aware defaults selected.",
             "recommended_runtime_strategy": plan.get("device_plan"),
             "recommended_precision": precision,
@@ -1576,76 +1979,224 @@ class ImageGenerationService:
                     pass
         return "remote", model_id
 
-    def _load_pipeline(self, model_id_or_path: str, mode: str, local_files_only: bool, device: str) -> Any:
-        key = (model_id_or_path, mode, device)
-        if key in self._pipelines:
-            return self._pipelines[key]
+    def _load_pipeline(
+        self,
+        model_id_or_path: str,
+        mode: str,
+        local_files_only: bool,
+        device: str,
+        execution_plan: dict[str, Any] | None = None,
+    ) -> Any:
+        """Load (or return cached) diffusers pipeline with full GPU optimizations.
+
+        The pipeline is kept in memory so subsequent generations skip the
+        190+ second model-loading phase entirely.
+        """
+        import torch
         from diffusers import AutoPipelineForImage2Image, AutoPipelineForText2Image
+
+        ep = execution_plan or {}
+        low_mem = bool(ep.get("low_memory_mode", getattr(self.config, "hf_image_low_memory_mode", True)))
+
+        # Determine best dtype: bfloat16 > float16 > float32
+        dtype_name = str(ep.get("torch_dtype") or "")
+        if not dtype_name:
+            if device == "cuda" and torch.cuda.is_available():
+                dtype_name = "bfloat16" if torch.cuda.is_bf16_supported() else "float16"
+            else:
+                dtype_name = "float32"
+        resolved_dtype = getattr(torch, dtype_name, torch.float32)
+        # Verify the dtype works on the target device
+        try:
+            torch.zeros(1, dtype=resolved_dtype, device=device if device == "cuda" and torch.cuda.is_available() else "cpu")
+        except Exception:
+            resolved_dtype = torch.float32
+            dtype_name = "float32"
+
+        key = (model_id_or_path, mode, device, dtype_name)
+        if key in self._pipelines:
+            logger.info("[IMG] Reusing cached pipeline: %s (mode=%s, device=%s, dtype=%s)", model_id_or_path, mode, device, dtype_name)
+            return self._pipelines[key]
+
+        # FREE memory from previously cached pipelines BEFORE loading the new
+        # model.  Loading a new model with from_pretrained() allocates RAM for
+        # weights first; if old pipelines still hold 10-30 GB of RAM, the new
+        # allocation will OOM and silently fall back to CPU.
+        if self._pipelines:
+            logger.info("[IMG] Clearing %d previously cached pipeline(s) BEFORE loading new model", len(self._pipelines))
+            self._pipelines.clear()
+            import gc
+            gc.collect()
+            if device == "cuda":
+                try:
+                    torch.cuda.empty_cache()
+                except Exception:
+                    pass
+
+        logger.info("[IMG] Loading pipeline: %s (mode=%s, device=%s, dtype=%s)", model_id_or_path, mode, device, dtype_name)
+        load_start = time.time()
 
         load_kwargs: dict[str, Any] = {
             "local_files_only": local_files_only,
-            "low_cpu_mem_usage": bool(payload.get("low_memory_mode", True)),
+            "low_cpu_mem_usage": True,
+            "torch_dtype": resolved_dtype,
+            "use_safetensors": True,
         }
-        dtype_name = str(payload.get("torch_dtype") or "")
-        if dtype_name:
-            resolved_dtype = getattr(torch, dtype_name, None)
-            # Verify the dtype works on this device; fall back to float32.
-            if resolved_dtype is not None and resolved_dtype != torch.float32:
-                try:
-                    torch.zeros(1, dtype=resolved_dtype, device="cpu")
-                except Exception:
-                    resolved_dtype = torch.float32
-            load_kwargs["torch_dtype"] = resolved_dtype
-        if payload.get("use_safetensors") is not None:
-            load_kwargs["use_safetensors"] = bool(payload.get("use_safetensors"))
 
         if mode == "img2img":
             pipe = AutoPipelineForImage2Image.from_pretrained(model_id_or_path, **load_kwargs)
         else:
             pipe = AutoPipelineForText2Image.from_pretrained(model_id_or_path, **load_kwargs)
         pipe.set_progress_bar_config(disable=True)
-        if bool(payload.get("enable_memory_efficient_attention", False)):
-            try:
-                pipe.enable_xformers_memory_efficient_attention()
-            except Exception:
-                pass
-        if bool(payload.get("use_attention_slicing", payload.get("low_memory_mode", True))):
+
+        # Disable safety checker (causes false-positive black images)
+        if hasattr(pipe, "safety_checker") and pipe.safety_checker is not None:
+            pipe.safety_checker = None
+        if hasattr(pipe, "feature_extractor") and pipe.feature_extractor is not None:
+            pipe.feature_extractor = None
+
+        # ── Memory optimizations ──
+        if low_mem:
             try:
                 pipe.enable_attention_slicing()
             except Exception:
                 pass
-        # VAE slicing: processes batch elements one at a time (saves memory for batch>1)
         try:
-            if hasattr(pipe.vae, 'enable_slicing'):
+            if hasattr(pipe.vae, "enable_slicing"):
                 pipe.vae.enable_slicing()
-            elif hasattr(pipe, 'enable_vae_slicing'):
+            elif hasattr(pipe, "enable_vae_slicing"):
                 pipe.enable_vae_slicing()
         except Exception:
             pass
-        # VAE tiling: processes spatial regions in tiles during encode/decode.
-        # This is the critical memory-saving feature — without it, VAE decode
-        # allocates the full image tensor at once and can OOM on tight RAM.
-        if bool(payload.get("use_vae_tiling", payload.get("low_memory_mode", True))):
+        if low_mem:
             try:
-                if hasattr(pipe.vae, 'enable_tiling'):
+                if hasattr(pipe.vae, "enable_tiling"):
                     pipe.vae.enable_tiling()
-                elif hasattr(pipe, 'enable_vae_tiling'):
+                elif hasattr(pipe, "enable_vae_tiling"):
                     pipe.enable_vae_tiling()
             except Exception:
                 pass
+
+        # ── Device placement ──
+        # enable_model_cpu_offload: keeps model in RAM, moves each component
+        # to GPU one at a time during forward pass.  This is the best strategy
+        # when the model doesn't fit entirely in VRAM — it maximises GPU
+        # utilisation while spilling to CPU RAM automatically.
         if device == "cuda":
-            if bool(payload.get("use_sequential_cpu_offload", False)):
-                try:
-                    pipe.enable_sequential_cpu_offload()
-                except Exception:
-                    pass
-            elif bool(payload.get("use_model_cpu_offload", payload.get("enable_cpu_offload", False))):
+            use_cpu_offload = bool(ep.get("use_model_cpu_offload", False))
+            logger.info("[IMG] Device placement: device=%s, use_cpu_offload=%s (plan=%s)",
+                        device, use_cpu_offload, ep.get("device_plan"))
+            if use_cpu_offload:
                 try:
                     pipe.enable_model_cpu_offload()
+                    logger.info("[IMG] Model CPU offload enabled (GPU + CPU RAM)")
                 except Exception:
+                    logger.info("[IMG] CPU offload failed, falling back to pipe.to('cuda')")
                     pipe = pipe.to("cuda")
             else:
                 pipe = pipe.to("cuda")
+                logger.info("[IMG] Model moved entirely to CUDA (full GPU execution)")
+
+            # Verify model is actually on CUDA
+            try:
+                unet_or_transformer = getattr(pipe, "unet", None) or getattr(pipe, "transformer", None)
+                if unet_or_transformer is not None:
+                    param = next(unet_or_transformer.parameters(), None)
+                    if param is not None:
+                        actual_device = str(param.device)
+                        logger.info("[IMG] ✓ Model verified on device: %s (dtype=%s)", actual_device, param.dtype)
+                        if "cuda" not in actual_device:
+                            logger.warning("[IMG] ⚠️  Model is NOT on CUDA despite device='cuda'! Actual: %s", actual_device)
+                if torch.cuda.is_available():
+                    vram_used = torch.cuda.memory_allocated() / (1024**3)
+                    vram_total = torch.cuda.get_device_properties(0).total_memory / (1024**3)
+                    logger.info("[IMG] GPU VRAM: %.1f / %.1f GB used", vram_used, vram_total)
+            except Exception as e:
+                logger.warning("[IMG] Could not verify device placement: %s", e)
+
+        # ── Force VAE to float32 for numerical stability ──
+        if hasattr(pipe, "vae"):
+            try:
+                pipe.vae = pipe.vae.to(dtype=torch.float32)
+            except Exception:
+                pass
+            if hasattr(pipe.vae, "config"):
+                try:
+                    pipe.vae.config.force_upcast = True
+                except Exception:
+                    pass
+            # Monkey-patch VAE decode to sanitise NaN/inf
+            _orig_vae_decode = pipe.vae.decode
+            def _safe_vae_decode(*args: Any, **kwargs: Any) -> Any:
+                if args:
+                    z = args[0]
+                    if hasattr(z, "dtype") and z.dtype != torch.float32:
+                        args = (z.to(torch.float32),) + args[1:]
+                if "z" in kwargs and hasattr(kwargs["z"], "dtype") and kwargs["z"].dtype != torch.float32:
+                    kwargs["z"] = kwargs["z"].to(torch.float32)
+                out = _orig_vae_decode(*args, **kwargs)
+                if hasattr(out, "sample"):
+                    out.sample = torch.nan_to_num(out.sample, nan=0.0, posinf=1.0, neginf=0.0)
+                return out
+            pipe.vae.decode = _safe_vae_decode
+
+        # Sanitise image processor postprocess
+        if hasattr(pipe, "image_processor") and hasattr(pipe.image_processor, "postprocess"):
+            _orig_pp = pipe.image_processor.postprocess
+            def _safe_pp(image: Any, *a: Any, **kw: Any) -> Any:
+                if hasattr(image, "isnan"):
+                    image = torch.nan_to_num(image, nan=0.0, posinf=1.0, neginf=0.0)
+                return _orig_pp(image, *a, **kw)
+            pipe.image_processor.postprocess = _safe_pp
+
+        # ── GPU performance optimizations ──
+        # Flash Attention: faster attention on Ampere+ GPUs
+        if device == "cuda" and hasattr(pipe, "transformer"):
+            # Z-Image-Turbo and similar DiT models support set_attention_backend
+            if hasattr(pipe.transformer, "set_attention_backend"):
+                for backend in ("flash", "flash_2", "_flash_3"):
+                    try:
+                        pipe.transformer.set_attention_backend(backend)
+                        logger.info("[IMG] Flash attention enabled: %s", backend)
+                        break
+                    except Exception:
+                        continue
+
+        # torch.compile: JIT compile the transformer/UNet for ~20-40%% speedup.
+        # DISABLED on Windows — Triton (required backend) is not available.
+        # INCOMPATIBLE with enable_model_cpu_offload() — accelerate hooks
+        # cannot be traced by dynamo.
+        # torch.compile wraps successfully but FAILS at first inference when
+        # it tries to invoke Triton, causing the entire generation to fail.
+        import sys as _sys
+        _can_compile = (
+            device == "cuda"
+            and not bool(ep.get("use_model_cpu_offload", False))
+            and _sys.platform != "win32"  # Triton not available on Windows
+        )
+        if _can_compile:
+            # Extra check: verify triton is actually importable
+            try:
+                import triton  # noqa: F401
+            except ImportError:
+                _can_compile = False
+                logger.info("[IMG] torch.compile skipped (triton not installed)")
+        if _can_compile:
+            compile_target = getattr(pipe, "transformer", None) or getattr(pipe, "unet", None)
+            if compile_target is not None:
+                try:
+                    pipe_attr = "transformer" if hasattr(pipe, "transformer") else "unet"
+                    setattr(pipe, pipe_attr, torch.compile(compile_target, mode="reduce-overhead", fullgraph=True))
+                    logger.info("[IMG] torch.compile enabled for %s (first run will be slower)", pipe_attr)
+                except Exception as e:
+                    logger.info("[IMG] torch.compile failed: %s", e)
+        elif device == "cuda":
+            logger.info("[IMG] torch.compile skipped (windows=%s, cpu_offload=%s)",
+                        _sys.platform == "win32", bool(ep.get("use_model_cpu_offload", False)))
+
+        load_elapsed = time.time() - load_start
+        logger.info("[IMG] Pipeline loaded in %.1fs", load_elapsed)
+
         self._pipelines[key] = pipe
         return pipe
 
@@ -1721,7 +2272,7 @@ class ImageGenerationService:
             "mode": mode,
             "local_files_only": model_source == "local" or not self.config.hf_image_allow_auto_download,
             "low_memory_mode": bool(getattr(self.config, "hf_image_low_memory_mode", True)),
-            "torch_dtype": execution_plan.get("torch_dtype") or ("float16" if device == "cuda" else "float32"),
+            "torch_dtype": execution_plan.get("torch_dtype") or ("bfloat16" if device == "cuda" else "float32"),
             "use_safetensors": True,
             "enable_cpu_offload": bool(getattr(self.config, "hf_enable_cpu_offload", True)),
             "enable_memory_efficient_attention": bool(getattr(self.config, "hf_enable_memory_efficient_attention", False)),
@@ -1734,32 +2285,35 @@ class ImageGenerationService:
             "stage_file": stage_file_path,
         }
         proc = ctx.Process(target=_diffusers_worker, args=(payload, q), daemon=True)
+        logger.info("[IMG] Spawning worker subprocess (timeout=%ds, dtype=%s, device=%s)",
+                     timeout_s, payload.get("torch_dtype"), device)
         proc.start()
-        proc.join(timeout=timeout_s)
 
+        # Read result from queue FIRST instead of waiting for proc.join().
+        # The worker process can hang during shutdown (CUDA context cleanup,
+        # torch/diffusers teardown) even though it already put the result
+        # on the queue.  Waiting for proc.join(timeout) would block for the
+        # full timeout (e.g. 1800s) while the result is already available.
+        data = None
+        try:
+            data = q.get(timeout=timeout_s)
+            logger.info("[IMG] Got result from worker queue (ok=%s)", data.get("ok") if data else None)
+        except Exception:
+            logger.warning("[IMG] Queue read timed out after %ds", timeout_s)
+
+        # Give the process a short grace period to exit cleanly, then kill it.
+        proc.join(timeout=15)
         if proc.is_alive():
-            # Read the last stage BEFORE killing the process
-            last_stage = "unknown"
-            try:
-                last_stage = Path(stage_file_path).read_text(encoding="utf-8").strip() or "unknown"
-            except Exception:
-                pass
+            logger.info("[IMG] Worker process still alive after result — terminating")
             proc.terminate()
-            proc.join(timeout=3)
-            self._current_stage_file = None
-            self._current_job_started = 0.0
-            return ImageRuntimeResult(
-                ok=False,
-                error_code="runtime_timeout",
-                error_message=f"Image generation timed out after {timeout_s}s (stuck at: {last_stage})",
-                metadata={
-                    "timeout_sec": timeout_s,
-                    "device_requested": device,
-                    "last_stage": last_stage,
-                    "execution_plan": execution_plan or {},
-                    "suggestion": "Use recommended settings or smaller resolution/steps for CPU mode.",
-                },
-            )
+            proc.join(timeout=5)
+            if proc.is_alive():
+                logger.warning("[IMG] Worker process did not terminate — killing")
+                try:
+                    proc.kill()
+                except Exception:
+                    pass
+        logger.info("[IMG] Worker subprocess finished: exitcode=%s", proc.exitcode)
 
         last_stage = "unknown"
         try:
@@ -1767,19 +2321,25 @@ class ImageGenerationService:
         except Exception:
             pass
 
-        if proc.exitcode is None:
+        if data is None:
+            # No result from queue — process likely crashed or timed out
             self._current_stage_file = None
             self._current_job_started = 0.0
-            return ImageRuntimeResult(ok=False, error_code="runtime_crash", error_message="Image worker ended with unknown state", metadata={"exit_code": None, "stage": last_stage, "model_id": model_id_or_path, "device_attempted": device, "strategy": execution_plan.get("device_plan"), "selected_args": {"width": width, "height": height, "steps": steps, "guidance_scale": guidance_scale}})
-        if proc.exitcode != 0 and q.empty():
-            self._current_stage_file = None
-            self._current_job_started = 0.0
-            return ImageRuntimeResult(ok=False, error_code="runtime_crash", error_message="Image worker crashed unexpectedly.", metadata={"exit_code": proc.exitcode, "stage": last_stage, "model_id": model_id_or_path, "device_attempted": device, "strategy": execution_plan.get("device_plan"), "selected_args": {"width": width, "height": height, "steps": steps, "guidance_scale": guidance_scale}})
-
-        if q.empty():
+            if proc.exitcode is None or proc.exitcode != 0:
+                return ImageRuntimeResult(
+                    ok=False,
+                    error_code="runtime_timeout" if proc.exitcode is None else "runtime_crash",
+                    error_message=f"Image generation failed (exit={proc.exitcode}, stuck at: {last_stage})",
+                    metadata={
+                        "timeout_sec": timeout_s,
+                        "exit_code": proc.exitcode,
+                        "device_requested": device,
+                        "last_stage": last_stage,
+                        "execution_plan": execution_plan or {},
+                        "suggestion": "Use recommended settings or smaller resolution/steps.",
+                    },
+                )
             return ImageRuntimeResult(ok=False, error_code="generation_failed", error_message="Image worker returned no result")
-
-        data = q.get()
         self._current_stage_file = None
         self._current_job_started = 0.0
         try:
@@ -1818,54 +2378,167 @@ class ImageGenerationService:
         strength: float,
         device: str,
         execution_plan: dict[str, Any] | None = None,
+        timeout_s: int | None = None,
     ) -> ImageRuntimeResult:
+        """In-process diffusers generation with persistent pipeline caching.
+
+        Unlike _run_diffusers_isolated(), this keeps the pipeline loaded in
+        memory between requests, eliminating the 190s model-loading overhead
+        on subsequent generations.
+        """
         try:
             import torch
+            import numpy as np
         except Exception:
             return ImageRuntimeResult(ok=False, error_code="missing_dependency", error_message="Install torch/diffusers/transformers/accelerate/safetensors")
 
         if model_source == "remote" and not self._cache_dir(model_id_or_path) and not self.config.hf_image_allow_auto_download:
             return ImageRuntimeResult(ok=False, error_code="model_not_found", error_message="Remote model is not cached locally. Download the model via HuggingFace or set HF_IMAGE_ALLOW_AUTO_DOWNLOAD=true.")
 
-        try:
-            mode = "img2img" if init_image_path else "text2img"
-            local_only = model_source == "local" or not self.config.hf_image_allow_auto_download
-            pipe = self._load_pipeline(model_id_or_path, mode, local_files_only=local_only, device=device)
-            generator = torch.Generator(device=device if device == "cuda" else "cpu")
-            generator.manual_seed(seed if seed is not None else random.randint(1, 2**31 - 1))
+        execution_plan = execution_plan or {}
+        mode = "img2img" if init_image_path else "text2img"
+        local_only = model_source == "local" or not self.config.hf_image_allow_auto_download
+        started = time.time()
 
+        try:
+            # Set up progress tracking
+            stage_file = tempfile.NamedTemporaryFile(prefix="img_stage_", suffix=".txt", delete=False)
+            stage_file_path = stage_file.name
+            stage_file.close()
+            self._current_stage_file = stage_file_path
+            self._current_job_started = time.time()
+            self._current_job_model = model_id_or_path
+            _write_stage_marker(stage_file_path, "pipeline_load")
+
+            pipe = self._load_pipeline(
+                model_id_or_path, mode,
+                local_files_only=local_only,
+                device=device,
+                execution_plan=execution_plan,
+            )
+
+            # Generator for reproducible seeds.
+            # Use CUDA generator when model is fully on GPU (faster RNG),
+            # CPU generator when model uses CPU offload (required for compatibility).
+            use_offload = bool((execution_plan or {}).get("use_model_cpu_offload", False))
+            gen_device = "cpu" if use_offload or device != "cuda" else "cuda"
+            generator = torch.Generator(device=gen_device)
+            logger.info("[IMG] Generator device: %s (offload=%s)", gen_device, use_offload)
+            actual_seed = seed if seed is not None else random.randint(1, 2**31 - 1)
+            generator.manual_seed(actual_seed)
+
+            total_steps = steps
+            _write_stage_marker(stage_file_path, f"inference:0/{total_steps}")
+            logger.info("[IMG] Starting inference: %d steps, guidance=%.1f, size=%dx%d, seed=%d",
+                        total_steps, guidance_scale, width, height, actual_seed)
+
+            def _step_cb(pipe_obj: Any, step: int, timestep: Any, cb_kwargs: dict[str, Any]) -> dict[str, Any]:
+                clamped = min(step + 1, total_steps)
+                _write_stage_marker(stage_file_path, f"inference:{clamped}/{total_steps}")
+                elapsed = time.time() - started
+                logger.info("[IMG] Step %d/%d (timestep=%.1f, elapsed=%.1fs)", clamped, total_steps,
+                            float(timestep) if timestep is not None else 0.0, elapsed)
+                return cb_kwargs
+
+            inf_start = time.time()
             if init_image_path:
-                Image, _ = _require_pillow()
-                init_img = Image.open(init_image_path).convert("RGB")
+                Image_mod, _ = _require_pillow()
+                init_img = Image_mod.open(init_image_path).convert("RGB")
                 result = pipe(
                     prompt=prompt,
                     image=init_img,
                     negative_prompt=negative_prompt,
                     strength=strength,
-                    num_inference_steps=steps,
+                    num_inference_steps=total_steps,
                     guidance_scale=guidance_scale,
                     generator=generator,
+                    callback_on_step_end=_step_cb,
                 )
             else:
                 result = pipe(
                     prompt=prompt,
                     negative_prompt=negative_prompt,
-                    num_inference_steps=steps,
+                    num_inference_steps=total_steps,
                     guidance_scale=guidance_scale,
                     width=width,
                     height=height,
                     generator=generator,
+                    callback_on_step_end=_step_cb,
                 )
+            inf_elapsed = time.time() - inf_start
+            logger.info("[IMG] Inference completed in %.1fs (%.1fs/step)", inf_elapsed, inf_elapsed / max(total_steps, 1))
+
+            _write_stage_marker(stage_file_path, "saving")
             image = result.images[0]
+
+            # NaN / corrupt output detection
+            img_arr = np.array(image)
+            pixel_range = int(img_arr.max()) - int(img_arr.min()) if img_arr.size > 0 else 0
+            logger.info("[IMG] Output image: size=%s, pixel_range=[%d..%d] (range=%d)",
+                        image.size, int(img_arr.min()), int(img_arr.max()), pixel_range)
+
+            if pixel_range <= 2:
+                dtype_used = str(execution_plan.get("torch_dtype") or "unknown")
+                self._current_stage_file = None
+                self._current_job_started = 0.0
+                return ImageRuntimeResult(
+                    ok=False,
+                    error_code="nan_output",
+                    error_message=(
+                        f"Model produced a blank/corrupted image (pixel range={pixel_range}). "
+                        f"Dtype={dtype_used} may be incompatible with this model."
+                    ),
+                    metadata={"dtype_used": dtype_used, "device_used": device, "pixel_range": pixel_range},
+                )
+
             buf = io.BytesIO()
             image.save(buf, format="PNG")
-            return ImageRuntimeResult(ok=True, image_bytes=buf.getvalue(), metadata={"runtime": "diffusers_local", "mode": mode, "model_source": model_source, "device_used": device})
+            total_elapsed = time.time() - started
+            logger.info("[IMG] Image saved (%d bytes, total=%.1fs)", len(buf.getvalue()), total_elapsed)
+
+            self._current_stage_file = None
+            self._current_job_started = 0.0
+            try:
+                Path(stage_file_path).unlink(missing_ok=True)
+            except Exception:
+                pass
+
+            return ImageRuntimeResult(
+                ok=True,
+                image_bytes=buf.getvalue(),
+                metadata={
+                    "runtime": "diffusers_local_cached",
+                    "mode": mode,
+                    "model_source": model_source,
+                    "device_used": device,
+                    "dtype_used": str(execution_plan.get("torch_dtype") or ""),
+                    "inference_sec": round(inf_elapsed, 1),
+                    "total_sec": round(total_elapsed, 1),
+                    "seed": actual_seed,
+                    "execution_plan": execution_plan,
+                    "stage": "completed",
+                    "selected_args": {"width": width, "height": height, "steps": steps, "guidance_scale": guidance_scale},
+                },
+            )
         except RuntimeError as exc:
+            self._current_stage_file = None
+            self._current_job_started = 0.0
             txt = str(exc).lower()
-            if "out of memory" in txt:
-                return ImageRuntimeResult(ok=False, error_code="out_of_memory", error_message=str(exc), metadata={"device_used": device})
+            mem_err, mem_code = _is_memory_error(exc)
+            logger.error("[IMG] RuntimeError during generation: %s", exc)
+            if mem_err or "out of memory" in txt:
+                # Clear the cached pipeline to free memory
+                self._pipelines.clear()
+                try:
+                    torch.cuda.empty_cache()
+                except Exception:
+                    pass
+                return ImageRuntimeResult(ok=False, error_code=mem_code or "out_of_memory", error_message=str(exc), metadata={"device_used": device})
             return ImageRuntimeResult(ok=False, error_code="provider_unavailable", error_message=str(exc), metadata={"device_used": device})
         except Exception as exc:  # noqa: BLE001
+            self._current_stage_file = None
+            self._current_job_started = 0.0
+            logger.error("[IMG] Exception during generation: %s", exc, exc_info=True)
             return ImageRuntimeResult(ok=False, error_code="provider_unavailable", error_message=str(exc), metadata={"device_used": device})
 
     def generate(
@@ -1888,6 +2561,8 @@ class ImageGenerationService:
         control_image_path: str | None = None,
         controlnet_model_id: str | None = None,
         controlnet_conditioning_scale: float = 1.0,
+        # Device override: "auto" (default), "cuda", or "cpu"
+        device_preference: str | None = None,
     ) -> ImageRuntimeResult:
         # Route 1: GGUF model → sd.cpp backend
         if self._is_gguf_model(model_id):
@@ -1947,10 +2622,25 @@ class ImageGenerationService:
             "steps": int(params.get("steps") or steps or qd["steps"]),
         }
         execution_plan = self.build_image_execution_plan(model_id, requested=requested)
-        width = int(params.get("width") or execution_plan.get("recommended_width") or qd["width"])
-        height = int(params.get("height") or execution_plan.get("recommended_height") or qd["height"])
-        steps = int(params.get("steps") or execution_plan.get("recommended_steps") or qd["steps"])
-        guidance_scale = float(params.get("guidance_scale") or guidance_scale or qd["guidance_scale"])
+        model_hints = execution_plan.get("model_hints") or {}
+
+        # Parameter resolution order: user params → execution plan → model hints → quality profile
+        width = int(params.get("width") or execution_plan.get("recommended_width") or model_hints.get("recommended_width") or qd["width"])
+        height = int(params.get("height") or execution_plan.get("recommended_height") or model_hints.get("recommended_height") or qd["height"])
+        steps = int(params.get("steps") or execution_plan.get("recommended_steps") or model_hints.get("recommended_steps") or qd["steps"])
+        # For guidance_scale, prefer model hints over quality profile defaults
+        # since wrong guidance can break turbo/distilled models entirely
+        guidance_scale = float(
+            params.get("guidance_scale")
+            or guidance_scale
+            or model_hints.get("recommended_guidance_scale")
+            or qd["guidance_scale"]
+        )
+        if model_hints.get("model_family") and model_hints["model_family"] != "unknown":
+            logger.info("[IMG] Model hints: family=%s, variant=%s, recommended: guidance=%.1f, steps=%d, size=%dx%d",
+                        model_hints.get("model_family"), model_hints.get("model_variant"),
+                        model_hints.get("recommended_guidance_scale", 0), model_hints.get("recommended_steps", 0),
+                        model_hints.get("recommended_width", 0), model_hints.get("recommended_height", 0))
 
         enable_refine = bool(params.get("enable_refine", qd["refine"]))
         enable_upscale = bool(params.get("enable_upscale", qd["upscale"]))
@@ -2009,6 +2699,21 @@ class ImageGenerationService:
         if plan_device == "cpu_multithreaded":
             preferred = "cpu"
 
+        # Client-side device override: "cuda" or "cpu"
+        _dev_pref = str(device_preference or params.get("device_preference") or "auto").strip().lower()
+        if _dev_pref == "cpu":
+            preferred = "cpu"
+            execution_plan["device_plan"] = "cpu_low_memory"
+            execution_plan["torch_dtype"] = "float32"
+            execution_plan["use_model_cpu_offload"] = False
+            execution_plan["use_sequential_cpu_offload"] = False
+            logger.info("[IMG] Device override: forced CPU by user preference")
+        elif _dev_pref == "cuda" and device_status.get("cuda_available"):
+            preferred = "cuda"
+            if plan_device not in {"cuda", "cuda_with_cpu_offload"}:
+                execution_plan["device_plan"] = "cuda"
+            logger.info("[IMG] Device override: forced CUDA by user preference")
+
         cpu_override_warning: str | None = None
         if self.config.hf_image_require_gpu and not device_status.get("cuda_available"):
             if self.config.hf_image_allow_cpu_fallback:
@@ -2038,7 +2743,9 @@ class ImageGenerationService:
             )
 
         stages_run: list[str] = ["base_generation"]
-        result = self._run_diffusers_isolated(
+        logger.info("[IMG] === BASE GENERATION (in-process, cached) === device=%s, dtype=%s, size=%dx%d, steps=%d, guidance=%.1f, model=%s",
+                     preferred, execution_plan.get("torch_dtype"), width, height, steps, guidance_scale, resolved_model)
+        result = self._run_diffusers(
             model_id_or_path=resolved_model,
             model_source=model_source,
             prompt=prompt,
@@ -2054,10 +2761,62 @@ class ImageGenerationService:
             execution_plan=execution_plan,
             timeout_s=timeout_s,
         )
+        logger.info("[IMG] Base generation result: ok=%s, error_code=%s, error=%s",
+                     result.ok, result.error_code, result.error_message[:200] if result.error_message else None)
+
+        # NaN output fallback: retry with a safer dtype.
+        if not result.ok and result.error_code == "nan_output" and preferred == "cuda":
+            used_dtype = str((result.metadata or {}).get("dtype_used") or execution_plan.get("torch_dtype") or "")
+            fallback_dtypes = []
+            if used_dtype != "bfloat16":
+                fallback_dtypes.append("bfloat16")
+            if used_dtype != "float32":
+                fallback_dtypes.append("float32")
+            logger.info("[IMG] NaN detected with %s. Will retry with: %s", used_dtype, fallback_dtypes)
+            # Clear cached pipeline so it reloads with new dtype
+            self._pipelines.clear()
+            for fb_dtype in fallback_dtypes:
+                execution_plan["warnings"] = list(execution_plan.get("warnings") or []) + [
+                    f"NaN output with {used_dtype}; retrying with {fb_dtype}."
+                ]
+                retry = self._run_diffusers(
+                    model_id_or_path=resolved_model,
+                    model_source=model_source,
+                    prompt=prompt,
+                    negative_prompt=negative_prompt,
+                    seed=seed,
+                    steps=steps,
+                    guidance_scale=guidance_scale,
+                    width=width,
+                    height=height,
+                    init_image_path=init_image_path,
+                    strength=strength,
+                    device="cuda",
+                    execution_plan={**execution_plan, "torch_dtype": fb_dtype, "use_model_cpu_offload": True},
+                    timeout_s=timeout_s,
+                )
+                if retry.ok:
+                    result = retry
+                    result.metadata = {
+                        **(result.metadata or {}),
+                        "fallback_used": True,
+                        "fallback_dtype": fb_dtype,
+                        "original_dtype": used_dtype,
+                    }
+                    break
+                # Clear again for next dtype attempt
+                self._pipelines.clear()
 
         if not result.ok and preferred == "cuda" and bool(self.config.hf_image_allow_cpu_fallback) and result.error_code in {"out_of_memory", "provider_unavailable", "runtime_crash"}:
-            execution_plan["warnings"] = list(execution_plan.get("warnings") or []) + ["Base generation on CUDA failed; fell back to CPU."]
-            retry = self._run_diffusers_isolated(
+            logger.warning("[IMG] ⚠️  CUDA generation FAILED (code=%s: %s) — FALLING BACK TO CPU. "
+                          "This will be much slower! Check RAM/VRAM availability.",
+                          result.error_code, (result.error_message or "")[:200])
+            execution_plan["warnings"] = list(execution_plan.get("warnings") or []) + [
+                f"CUDA generation failed ({result.error_code}); fell back to CPU. "
+                f"Reason: {(result.error_message or '')[:100]}"
+            ]
+            self._pipelines.clear()
+            retry = self._run_diffusers(
                 model_id_or_path=resolved_model,
                 model_source=model_source,
                 prompt=prompt,
@@ -2083,6 +2842,7 @@ class ImageGenerationService:
                 }
 
         if not result.ok:
+            logger.warning("[IMG] Generation FAILED: %s — %s", result.error_code, result.error_message)
             if self.config.hf_image_allow_placeholder:
                 return ImageRuntimeResult(
                     ok=True,
@@ -2092,10 +2852,12 @@ class ImageGenerationService:
             return result
 
         image_bytes = result.image_bytes or b""
+        logger.info("[IMG] Base generation OK (%d bytes)", len(image_bytes))
 
         if enable_refine:
+            logger.info("[IMG] === REFINEMENT STAGE === (reusing cached pipeline)")
             stages_run.append("refinement")
-            refine = self._run_diffusers_isolated(
+            refine = self._run_diffusers(
                 model_id_or_path=resolved_model,
                 model_source=model_source,
                 prompt=prompt,
@@ -2109,6 +2871,7 @@ class ImageGenerationService:
                 strength=0.35,
                 device=preferred,
                 execution_plan=execution_plan,
+                timeout_s=timeout_s,
             )
             if refine.ok and refine.image_bytes:
                 image_bytes = refine.image_bytes
@@ -2116,10 +2879,18 @@ class ImageGenerationService:
                 execution_plan["warnings"] = list(execution_plan.get("warnings") or []) + ["Refinement stage skipped due to runtime error."]
 
         if enable_upscale or enable_postprocess:
+            logger.info("[IMG] === POSTPROCESS STAGE === upscale=%s, postprocess=%s", enable_upscale, enable_postprocess)
+            if self._current_stage_file:
+                try:
+                    Path(self._current_stage_file).write_text("postprocess", encoding="utf-8")
+                except Exception:
+                    pass
             stages_run.append("upscale" if enable_upscale else "postprocess")
             try:
                 image_bytes = self._apply_postprocess(image_bytes, upscale=enable_upscale, postprocess=enable_postprocess)
+                logger.info("[IMG] Postprocess done (%d bytes)", len(image_bytes))
             except Exception as exc:
+                logger.warning("[IMG] Postprocess FAILED: %s", exc)
                 execution_plan["warnings"] = list(execution_plan.get("warnings") or []) + [f"Postprocess stage failed: {exc}"]
 
         metadata = {

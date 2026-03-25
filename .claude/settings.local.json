@@ -77,7 +77,9 @@
       "Bash(python -c \"import sys,json;d=json.load\\(sys.stdin\\);items=d[''items''];print\\(f''vLLM library: {len\\(items\\)} models''\\);[print\\(f''  {m[\"\"model_id\"\"]:50s} p={str\\(m.get\\(\"\"param_count_human\"\",\"\"-\"\"\\)\\):>8s} s={str\\(m.get\\(\"\"size_human\"\",\"\"-\"\"\\)\\):>10s} dl={m.get\\(\"\"downloads\"\",0\\)}''\\) for m in items[:8]];print\\(f''{sum\\(1 for m in items if m.get\\(\"\"param_count\"\"\\)\\)}/{len\\(items\\)} with size''\\)\")",
       "Bash(python -c \"import ast; ast.parse\\(open\\(''api_server.py''\\).read\\(\\)\\); print\\(''api_server.py OK''\\)\")",
       "WebSearch",
-      "WebFetch(domain:ollama.com)"
+      "WebFetch(domain:ollama.com)",
+      "Bash(xargs grep:*)",
+      "Bash(python -m py_compile src/local_ai_platform/images/service.py)"
     ]
   }
 }

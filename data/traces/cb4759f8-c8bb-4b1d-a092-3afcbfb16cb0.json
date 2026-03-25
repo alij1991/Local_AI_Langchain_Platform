@@ -1,0 +1,13 @@
+{
+  "run_id": "cb4759f8-c8bb-4b1d-a092-3afcbfb16cb0",
+  "conversation_id": "a310438a-6f58-4032-bca3-52b1d9e15b3b",
+  "agent_name": "image:Tongyi-MAI/Z-Image-Turbo",
+  "model_provider": "unknown",
+  "model_id": "",
+  "start_timestamp": "2026-03-25T02:11:31.351523+00:00",
+  "end_timestamp": "2026-03-25T02:13:46.118223+00:00",
+  "duration_ms": 134766,
+  "success": false,
+  "error": "Image worker crashed unexpectedly.",
+  "events": []
+}

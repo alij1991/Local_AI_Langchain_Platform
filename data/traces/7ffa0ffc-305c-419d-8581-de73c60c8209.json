@@ -1,0 +1,13 @@
+{
+  "run_id": "7ffa0ffc-305c-419d-8581-de73c60c8209",
+  "conversation_id": "a310438a-6f58-4032-bca3-52b1d9e15b3b",
+  "agent_name": "image:Tongyi-MAI/Z-Image-Turbo",
+  "model_provider": "unknown",
+  "model_id": "",
+  "start_timestamp": "2026-03-08T07:33:12.155795+00:00",
+  "end_timestamp": "2026-03-08T07:33:12.158522+00:00",
+  "duration_ms": 2,
+  "success": false,
+  "error": "Tongyi-MAI/Z-Image-Turbo does not appear to have a file named model_index.json.",
+  "events": []
+}

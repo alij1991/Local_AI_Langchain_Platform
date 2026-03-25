@@ -46,6 +46,11 @@ class _ImagesPageState extends State<ImagesPage> {
   Timer? _progressPoller;
   double _progressPercent = 0.0;
 
+  // Device preference: "auto", "cuda", "cpu"
+  String _devicePreference = 'auto';
+  // Model hints from server
+  Map<String, dynamic> _modelHints = {};
+
   // ControlNet state
   bool _enableControlNet = false;
   String? _controlNetType;
@@ -241,6 +246,17 @@ class _ImagesPageState extends State<ImagesPage> {
       if (!mounted) return;
       setState(() => _modelFit = body);
     } catch (_) {}
+    // Also fetch model hints for parameter suggestions
+    _loadModelHints();
+  }
+
+  Future<void> _loadModelHints() async {
+    if (_selectedModel == null) return;
+    try {
+      final body = await widget.api.get('/images/model-hints?model_id=${Uri.encodeComponent(_selectedModel!)}') as Map<String, dynamic>;
+      if (!mounted) return;
+      setState(() => _modelHints = (body['hints'] as Map<String, dynamic>?) ?? {});
+    } catch (_) {}
   }
 
   Future<void> _useRecommendedSettings() async {
@@ -252,7 +268,14 @@ class _ImagesPageState extends State<ImagesPage> {
         _width = (rec['recommended_width'] as num?)?.toInt() ?? _width;
         _height = (rec['recommended_height'] as num?)?.toInt() ?? _height;
         _steps = (rec['recommended_steps'] as num?)?.toInt() ?? _steps;
-        _status = 'Applied recommended settings: ${rec['recommended_width']}x${rec['recommended_height']} steps ${rec['recommended_steps']}';
+        _guidance = (rec['recommended_guidance_scale'] as num?)?.toDouble() ?? _guidance;
+        final family = rec['model_family'] as String? ?? '';
+        final variant = rec['model_variant'] as String? ?? '';
+        final notes = (rec['notes'] as List<dynamic>?)?.cast<String>() ?? [];
+        _status = 'Applied recommended settings for $family${variant.isNotEmpty ? ' ($variant)' : ''}: '
+            '${rec['recommended_width']}x${rec['recommended_height']}, '
+            '${rec['recommended_steps']} steps, guidance ${(rec['recommended_guidance_scale'] as num?)?.toStringAsFixed(1) ?? '7.0'}'
+            '${notes.isNotEmpty ? '\n${notes.first}' : ''}';
       });
     } catch (e) {
       _captureError(e);
@@ -296,11 +319,13 @@ class _ImagesPageState extends State<ImagesPage> {
         'steps': _lowMemoryMode ? 16 : _steps,
         'guidance_scale': _guidance,
         'timeout_sec': _timeoutSec,
+        'device_preference': _devicePreference,
         'params_json': {
           'quality_profile': _qualityProfile,
           'enable_refine': _enableRefine,
           'enable_upscale': _enableUpscale,
           'enable_postprocess': _enablePostprocess,
+          'device_preference': _devicePreference,
           'width': _lowMemoryMode ? 512 : _width,
           'height': _lowMemoryMode ? 512 : _height,
           'steps': _lowMemoryMode ? 16 : _steps,
@@ -694,6 +719,21 @@ class _ImagesPageState extends State<ImagesPage> {
                           title: const Text('Low memory mode'),
                           subtitle: const Text('Uses conservative resolution/steps to improve reliability on limited RAM/VRAM.'),
                         ),
+                        ListTile(
+                          title: const Text('Device'),
+                          subtitle: Text(_devicePreference == 'auto'
+                              ? 'Auto (${_runtime['effective_device'] ?? 'unknown'})'
+                              : _devicePreference.toUpperCase()),
+                          trailing: DropdownButton<String>(
+                            value: _devicePreference,
+                            onChanged: _busy ? null : (v) => setState(() => _devicePreference = v ?? 'auto'),
+                            items: const [
+                              DropdownMenuItem(value: 'auto', child: Text('Auto')),
+                              DropdownMenuItem(value: 'cuda', child: Text('GPU (CUDA)')),
+                              DropdownMenuItem(value: 'cpu', child: Text('CPU')),
+                            ],
+                          ),
+                        ),
                         if (_modelFit.isNotEmpty)
                           Card(
                             child: Padding(
@@ -706,6 +746,18 @@ class _ImagesPageState extends State<ImagesPage> {
                                 Text('Estimated VRAM: ${_modelFit['estimated_vram_required_human'] ?? _modelFit['estimated_vram_required_bytes'] ?? 'unknown'}'),
                                 if ((_modelFit['warnings'] as List<dynamic>?)?.isNotEmpty == true)
                                   Text('Warnings: ${(_modelFit['warnings'] as List<dynamic>).join(', ')}'),
+                                if (_modelFit['hints'] != null) ...[
+                                  const Divider(),
+                                  Text('Recommended Parameters', style: Theme.of(context).textTheme.titleSmall?.copyWith(color: Colors.lightBlueAccent)),
+                                  if ((_modelFit['hints'] as Map<String, dynamic>?)?['model_family'] != null && (_modelFit['hints'] as Map<String, dynamic>)['model_family'] != 'unknown')
+                                    Text('Model: ${(_modelFit['hints'] as Map<String, dynamic>)['model_family']}${(_modelFit['hints'] as Map<String, dynamic>)['model_variant'] != null ? ' (${(_modelFit['hints'] as Map<String, dynamic>)['model_variant']})' : ''}'),
+                                  Text('Guidance: ${(_modelFit['hints'] as Map<String, dynamic>?)?['recommended_guidance_scale'] ?? '7.0'} • Steps: ${(_modelFit['hints'] as Map<String, dynamic>?)?['recommended_steps'] ?? '20'} • Size: ${(_modelFit['hints'] as Map<String, dynamic>?)?['recommended_width'] ?? '768'}x${(_modelFit['hints'] as Map<String, dynamic>?)?['recommended_height'] ?? '768'}'),
+                                  if (((_modelFit['hints'] as Map<String, dynamic>?)?['notes'] as List<dynamic>?)?.isNotEmpty == true)
+                                    ...(((_modelFit['hints'] as Map<String, dynamic>)['notes'] as List<dynamic>).map((n) => Padding(
+                                      padding: const EdgeInsets.only(top: 2),
+                                      child: Text('• $n', style: const TextStyle(fontSize: 11, color: Colors.white70)),
+                                    ))),
+                                ],
                               ]),
                             ),
                           ),

@@ -1814,6 +1814,28 @@ async def get_generation_progress():
     return image_service.get_generation_progress()
 
 
+@app.get("/images/model-hints")
+async def get_model_hints(model_id: str):
+    """Return recommended parameters for a specific model.
+
+    The Flutter client uses these to pre-fill the UI with optimal settings
+    (guidance scale, steps, resolution, notes) when a model is selected.
+    """
+    if not image_service:
+        return {"hints": {}, "available": False}
+    try:
+        validation = image_service.validate_model(model_id)
+        hints = validation.get("model_hints") or {}
+        return {
+            "hints": hints,
+            "available": True,
+            "model_family": hints.get("model_family", "unknown"),
+            "notes": hints.get("notes", []),
+        }
+    except Exception as exc:
+        return {"hints": {}, "available": False, "error": str(exc)}
+
+
 @app.post("/images/generate")
 async def generate_image(body: dict[str, Any]):
     if not image_service:
@@ -1844,6 +1866,7 @@ async def generate_image(body: dict[str, Any]):
         control_image_path=body.get("control_image_path"),
         controlnet_model_id=body.get("controlnet_model_id"),
         controlnet_conditioning_scale=float(body.get("controlnet_conditioning_scale", 1.0)),
+        device_preference=body.get("device_preference"),
     )
 
     if not result.ok:
@@ -1883,10 +1906,22 @@ async def edit_image(body: dict[str, Any]):
         raise HTTPException(503, "Image service not initialized")
 
     model_id = body.get("model_id", "")
-    prompt = body.get("prompt", "")
+    # Accept both "prompt" and "instruction" (Flutter sends "instruction")
+    prompt = body.get("prompt") or body.get("instruction", "")
     init_image_path = body.get("init_image_path", "")
+
+    # If Flutter sent base_image_id instead of init_image_path,
+    # resolve the image ID to its file path on disk.
+    if not init_image_path and body.get("base_image_id"):
+        from local_ai_platform.repositories.images_repo import get_image
+        base_img = get_image(body["base_image_id"])
+        if base_img and base_img.get("file_path"):
+            init_image_path = base_img["file_path"]
+        else:
+            raise HTTPException(404, "Base image not found or file missing")
+
     if not model_id or not prompt or not init_image_path:
-        raise HTTPException(400, "model_id, prompt, and init_image_path are required")
+        raise HTTPException(400, "model_id, prompt (or instruction), and init_image_path (or base_image_id) are required")
 
     result = await asyncio.to_thread(
         image_service.generate,
@@ -1913,7 +1948,34 @@ async def edit_image(body: dict[str, Any]):
             }
         })
 
-    return {"status": "ok", "metadata": result.metadata}
+    # Save the edited image to the session with parent linkage
+    session_id = body.get("session_id")
+    image_record = None
+    if session_id and result.image_bytes:
+        try:
+            from local_ai_platform.repositories.images_repo import add_image, image_output_path
+            import uuid as _uuid
+            img_id = str(_uuid.uuid4())
+            out_path = image_output_path(session_id, img_id)
+            out_path.write_bytes(result.image_bytes)
+            image_record = add_image(
+                session_id=session_id,
+                model_id=model_id,
+                prompt=prompt,
+                file_path=str(out_path),
+                parent_image_id=body.get("base_image_id"),
+                negative_prompt=body.get("negative_prompt"),
+                params=body.get("params_json"),
+                operation="edit",
+            )
+        except Exception as exc:
+            logger.warning("Failed to save edited image to session: %s", exc)
+
+    return {
+        "status": "ok",
+        "metadata": result.metadata,
+        "image": image_record,
+    }
 
 
 @app.post("/images/preprocess")

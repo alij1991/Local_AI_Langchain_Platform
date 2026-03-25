@@ -48,7 +48,16 @@ def get_image_session(session_id: str) -> dict | None:
             return None
         base = dict(row)
         images = conn.execute("SELECT * FROM images WHERE session_id = ? ORDER BY created_at ASC", (session_id,)).fetchall()
-        base["images"] = [dict(r) for r in images]
+        # Only include images whose file actually exists on disk.
+        # This avoids showing broken thumbnails for images that were
+        # deleted, moved, or never saved due to a crash.
+        filtered = []
+        for r in images:
+            img = dict(r)
+            fp = img.get("file_path")
+            if fp and Path(fp).exists():
+                filtered.append(img)
+        base["images"] = filtered
         return base
     finally:
         conn.close()
