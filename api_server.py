@@ -1086,6 +1086,157 @@ async def get_model_details(provider: str, model_id: str, refresh: bool = False)
     return {"model_id": model_id, "provider": provider}
 
 
+@app.get("/models/hf/{model_id:path}/readme")
+async def get_hf_model_readme(model_id: str):
+    """Fetch model card README + rich metadata from HuggingFace.
+
+    Uses model_info() for structured data (gated status, files, storage,
+    security, config) and ModelCard for the README text + card metadata.
+    """
+    cache_key = f"hf_readme:{model_id}"
+    cached = _cached(cache_key)
+    if cached is not None:
+        return cached
+
+    token = (config.hf_api_token or "").strip() or None
+    readme = ""
+    card_meta: dict[str, Any] = {}
+    hub_info: dict[str, Any] = {}
+
+    # 1. Fetch model_info() for rich structured data
+    try:
+        from huggingface_hub import model_info as _model_info
+        info = _model_info(model_id, token=token, securityStatus=True)
+        siblings = info.siblings or []
+        file_list = [{"filename": s.rfilename, "size": getattr(s, "size", None)} for s in siblings[:200]]
+        sf = info.safetensors
+        hub_info = {
+            "author": getattr(info, "author", "") or "",
+            "gated": getattr(info, "gated", False) or False,
+            "private": getattr(info, "private", False) or False,
+            "disabled": getattr(info, "disabled", False) or False,
+            "downloads": getattr(info, "downloads", None),
+            "likes": getattr(info, "likes", None),
+            "library_name": getattr(info, "library_name", "") or "",
+            "pipeline_tag": getattr(info, "pipeline_tag", "") or "",
+            "created_at": str(getattr(info, "created_at", "") or ""),
+            "last_modified": str(getattr(info, "last_modified", "") or ""),
+            "used_storage_bytes": getattr(info, "usedStorage", None),
+            "used_storage_human": format_bytes_human(info.usedStorage) if getattr(info, "usedStorage", None) else None,
+            "tags": list(getattr(info, "tags", None) or []),
+            "files": file_list,
+            "file_count": len(siblings),
+            "safetensors_total_params": sf.total if sf else None,
+            "security_status": getattr(info, "security_repo_status", None),
+            "source_url": f"https://huggingface.co/{model_id}",
+            "inference": getattr(info, "inference", None),
+        }
+        # Extract config fields (context_length, architectures)
+        cfg = getattr(info, "config", None) or {}
+        if cfg:
+            hub_info["architectures"] = cfg.get("architectures", [])
+            hub_info["model_type"] = cfg.get("model_type", "")
+            for ctx_key in ("max_position_embeddings", "n_positions", "max_seq_len", "seq_length"):
+                if ctx_key in cfg:
+                    hub_info["context_length"] = cfg[ctx_key]
+                    break
+    except Exception as exc:
+        logger.debug("model_info() failed for %s: %s", model_id, exc)
+        if "gated" in str(exc).lower() or "401" in str(exc) or "403" in str(exc):
+            hub_info["gated"] = True
+            hub_info["access_error"] = str(exc)
+
+    # 2. Fetch ModelCard for README text + card metadata
+    try:
+        from huggingface_hub import ModelCard
+        card = ModelCard.load(model_id, token=token)
+        readme = (card.text or "")[:20000]
+        card_meta = card.data.to_dict() if card.data else {}
+    except Exception as exc:
+        logger.debug("ModelCard.load() failed for %s: %s", model_id, exc)
+        # Fallback: try raw README download
+        try:
+            from huggingface_hub import hf_hub_download
+            path = hf_hub_download(repo_id=model_id, filename="README.md", token=token, force_download=False)
+            raw = Path(path).read_text(encoding="utf-8", errors="replace")
+            if raw.startswith("---"):
+                end = raw.find("---", 3)
+                if end != -1:
+                    raw = raw[end + 3:].lstrip("\n")
+            readme = raw[:20000]
+        except Exception:
+            pass
+
+    result = {
+        "model_id": model_id,
+        "readme": readme,
+        "card_metadata": card_meta,
+        **hub_info,
+    }
+    _set_cache(cache_key, result)
+    return result
+
+
+# ── HuggingFace Token Management ─────────────────────────────────
+
+@app.get("/settings/hf-token")
+async def get_hf_token_status():
+    """Check if a HuggingFace token is configured (never exposes the token)."""
+    token = (config.hf_api_token or "").strip()
+    if not token:
+        return {"configured": False, "username": None}
+    try:
+        from huggingface_hub import whoami
+        info = whoami(token=token)
+        return {"configured": True, "username": info.get("name") or info.get("fullname", "unknown")}
+    except Exception:
+        return {"configured": True, "username": None}
+
+
+@app.post("/settings/hf-token")
+async def set_hf_token(body: dict[str, Any]):
+    """Validate and save a HuggingFace token."""
+    token = (body.get("token") or "").strip()
+    if not token:
+        raise HTTPException(400, "Token is required")
+
+    # Validate by calling whoami
+    username = None
+    try:
+        from huggingface_hub import whoami
+        info = whoami(token=token)
+        username = info.get("name") or info.get("fullname")
+    except Exception as exc:
+        raise HTTPException(401, f"Invalid token: {exc}")
+
+    # Save to .env file
+    env_path = Path(".env")
+    if env_path.exists():
+        lines = env_path.read_text(encoding="utf-8").splitlines()
+        new_lines = [ln for ln in lines if not ln.strip().startswith("HF_API_TOKEN")]
+        new_lines.append(f"HF_API_TOKEN={token}")
+        env_path.write_text("\n".join(new_lines) + "\n", encoding="utf-8")
+    else:
+        env_path.write_text(f"HF_API_TOKEN={token}\n", encoding="utf-8")
+
+    # Update in-memory config
+    config.hf_api_token = token
+    return {"configured": True, "username": username}
+
+
+@app.delete("/settings/hf-token")
+async def delete_hf_token():
+    """Remove the HuggingFace token."""
+    env_path = Path(".env")
+    if env_path.exists():
+        lines = env_path.read_text(encoding="utf-8").splitlines()
+        new_lines = [ln for ln in lines if not ln.strip().startswith("HF_API_TOKEN")]
+        env_path.write_text("\n".join(new_lines) + "\n", encoding="utf-8")
+
+    config.hf_api_token = ""
+    return {"configured": False}
+
+
 # ── Direct Chat (no agent) ───────────────────────────────────────
 
 @app.post("/chat/direct")
@@ -1836,8 +1987,19 @@ async def get_model_hints(model_id: str):
         return {"hints": {}, "available": False, "error": str(exc)}
 
 
+@app.post("/images/generate/cancel")
+async def cancel_image_generation():
+    """Cancel the current image generation by killing the worker process."""
+    if not image_service:
+        return {"cancelled": False, "reason": "Image service not initialized"}
+    cancelled = image_service.cancel_generation()
+    return {"cancelled": cancelled}
+
+
 @app.post("/images/generate")
-async def generate_image(body: dict[str, Any]):
+def generate_image(body: dict[str, Any]):
+    """Generate an image. Runs in a threadpool worker (sync def) so the event loop
+    stays free for progress polling, cancel requests, and other endpoints."""
     if not image_service:
         raise HTTPException(503, "Image service not initialized")
 
@@ -1846,10 +2008,9 @@ async def generate_image(body: dict[str, Any]):
     if not model_id or not prompt:
         raise HTTPException(400, "model_id and prompt are required")
 
-    # Run the blocking generate() in a thread so the async event loop stays
-    # free for progress-polling and other requests.
-    result = await asyncio.to_thread(
-        image_service.generate,
+    # This is a sync def, so FastAPI runs it in a threadpool worker
+    # automatically, keeping the event loop free for progress/cancel requests.
+    result = image_service.generate(
         model_id=model_id,
         prompt=prompt,
         negative_prompt=body.get("negative_prompt"),
@@ -1901,7 +2062,8 @@ async def generate_image(body: dict[str, Any]):
 
 
 @app.post("/images/edit")
-async def edit_image(body: dict[str, Any]):
+def edit_image(body: dict[str, Any]):
+    """Edit an image. Runs in threadpool (sync def) to avoid blocking the event loop."""
     if not image_service:
         raise HTTPException(503, "Image service not initialized")
 
@@ -1923,8 +2085,7 @@ async def edit_image(body: dict[str, Any]):
     if not model_id or not prompt or not init_image_path:
         raise HTTPException(400, "model_id, prompt (or instruction), and init_image_path (or base_image_id) are required")
 
-    result = await asyncio.to_thread(
-        image_service.generate,
+    result = image_service.generate(
         model_id=model_id,
         prompt=prompt,
         negative_prompt=body.get("negative_prompt"),

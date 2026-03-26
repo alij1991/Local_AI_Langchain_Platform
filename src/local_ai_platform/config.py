@@ -62,6 +62,10 @@ class AppConfig:
     hf_image_low_memory_mode: bool = True
     image_runtime_strategy: str = "auto"
     image_models_dir: str = "./models/image"
+    image_backend_override: str = "auto"       # "auto", "openvino", "diffusers", "sdcpp"
+    image_enable_tiny_vae: bool = True         # Use TAESD when beneficial (CPU/low-VRAM)
+    image_enable_deepcache: bool = True        # Use DeepCache on 20+ step models
+    image_enable_tome: bool = True             # Use Token Merging on diffusers backends
 
     # ── Memory / vector store ─────────────────────────────────────
     vector_store_dir: str = "./data/vectorstore"
@@ -119,6 +123,10 @@ def load_config() -> AppConfig:
         hf_image_low_memory_mode=_as_bool(os.getenv("HF_IMAGE_LOW_MEMORY_MODE"), default=True),
         image_runtime_strategy=os.getenv("IMAGE_RUNTIME_STRATEGY", "auto"),
         image_models_dir=os.getenv("IMAGE_MODELS_DIR", "./models/image"),
+        image_backend_override=os.getenv("IMAGE_BACKEND_OVERRIDE", "auto"),
+        image_enable_tiny_vae=_as_bool(os.getenv("IMAGE_ENABLE_TINY_VAE"), default=True),
+        image_enable_deepcache=_as_bool(os.getenv("IMAGE_ENABLE_DEEPCACHE"), default=True),
+        image_enable_tome=_as_bool(os.getenv("IMAGE_ENABLE_TOME"), default=True),
 
         # Memory
         vector_store_dir=os.getenv("VECTOR_STORE_DIR", "./data/vectorstore"),

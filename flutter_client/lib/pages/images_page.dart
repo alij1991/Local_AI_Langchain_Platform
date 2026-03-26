@@ -112,6 +112,18 @@ class _ImagesPageState extends State<ImagesPage> {
     } catch (_) {}
   }
 
+  Future<void> _cancelGeneration() async {
+    try {
+      await widget.api.post('/images/generate/cancel', {});
+    } catch (_) {}
+    _stopProgressPolling();
+    _safeSetState(() {
+      _busy = false;
+      _progressPercent = 0.0;
+      _status = 'Cancelled';
+    });
+  }
+
   Future<void> _load({bool refreshModels = false}) async {
     final int requestId = ++_loadVersion;
     final sessions = await widget.api.get('/images/sessions') as Map<String, dynamic>;
@@ -720,20 +732,46 @@ class _ImagesPageState extends State<ImagesPage> {
                           subtitle: const Text('Uses conservative resolution/steps to improve reliability on limited RAM/VRAM.'),
                         ),
                         ListTile(
-                          title: const Text('Device'),
+                          title: const Text('Backend'),
                           subtitle: Text(_devicePreference == 'auto'
-                              ? 'Auto (${_runtime['effective_device'] ?? 'unknown'})'
-                              : _devicePreference.toUpperCase()),
+                              ? 'Auto (${_runtime['recommended_backend'] ?? _runtime['effective_device'] ?? 'unknown'})'
+                              : _devicePreference),
                           trailing: DropdownButton<String>(
                             value: _devicePreference,
                             onChanged: _busy ? null : (v) => setState(() => _devicePreference = v ?? 'auto'),
-                            items: const [
-                              DropdownMenuItem(value: 'auto', child: Text('Auto')),
-                              DropdownMenuItem(value: 'cuda', child: Text('GPU (CUDA)')),
-                              DropdownMenuItem(value: 'cpu', child: Text('CPU')),
+                            items: [
+                              DropdownMenuItem(value: 'auto', child: Text('Auto${_runtime['recommended_backend'] != null ? ' (${_runtime['recommended_backend']})' : ''}')),
+                              if ((_runtime['available_backends'] as List?)?.contains('openvino_int8') == true)
+                                const DropdownMenuItem(value: 'openvino', child: Text('OpenVINO (Intel)')),
+                              const DropdownMenuItem(value: 'cuda', child: Text('GPU (CUDA)')),
+                              const DropdownMenuItem(value: 'cpu', child: Text('CPU (PyTorch)')),
+                              if (_runtime['sdcpp_available'] == true)
+                                const DropdownMenuItem(value: 'sdcpp', child: Text('SD.cpp (GGUF)')),
                             ],
                           ),
                         ),
+                        // Hardware profile & optimization info
+                        if (_runtime['hardware_profile'] != null) ...[
+                          Padding(
+                            padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 4),
+                            child: Wrap(
+                              spacing: 6,
+                              runSpacing: 4,
+                              children: [
+                                if ((_runtime['hardware_profile'] as Map?)?['cpu_vendor'] != null)
+                                  Chip(label: Text('${(_runtime['hardware_profile'] as Map)['cpu_vendor']} CPU', style: const TextStyle(fontSize: 11)), visualDensity: VisualDensity.compact),
+                                if ((_runtime['hardware_profile'] as Map?)?['has_avx2'] == true)
+                                  const Chip(label: Text('AVX2', style: TextStyle(fontSize: 11)), visualDensity: VisualDensity.compact),
+                                if ((_runtime['hardware_profile'] as Map?)?['openvino_available'] == true)
+                                  Chip(label: const Text('OpenVINO', style: TextStyle(fontSize: 11)), visualDensity: VisualDensity.compact, backgroundColor: Colors.green.withValues(alpha: 0.2)),
+                                if ((_runtime['hardware_profile'] as Map?)?['tomesd_available'] == true)
+                                  const Chip(label: Text('ToMe', style: TextStyle(fontSize: 11)), visualDensity: VisualDensity.compact),
+                                if ((_runtime['hardware_profile'] as Map?)?['deepcache_available'] == true)
+                                  const Chip(label: Text('DeepCache', style: TextStyle(fontSize: 11)), visualDensity: VisualDensity.compact),
+                              ],
+                            ),
+                          ),
+                        ],
                         if (_modelFit.isNotEmpty)
                           Card(
                             child: Padding(
@@ -861,11 +899,19 @@ class _ImagesPageState extends State<ImagesPage> {
                           ],
                         ),
                         const SizedBox(height: 8),
-                        FilledButton.icon(
-                          onPressed: (_busy || _isSelectedModelComponent) ? null : _generate,
-                          icon: _busy ? const SizedBox(width: 14, height: 14, child: CircularProgressIndicator(strokeWidth: 2)) : const Icon(Icons.auto_awesome),
-                          label: Text(_isSelectedModelComponent ? 'Cannot generate (component model)' : 'Generate'),
-                        ),
+                        if (_busy)
+                          OutlinedButton.icon(
+                            onPressed: _cancelGeneration,
+                            icon: const Icon(Icons.stop_circle, color: Colors.red),
+                            label: const Text('Cancel Generation', style: TextStyle(color: Colors.red)),
+                            style: OutlinedButton.styleFrom(side: const BorderSide(color: Colors.red)),
+                          )
+                        else
+                          FilledButton.icon(
+                            onPressed: _isSelectedModelComponent ? null : _generate,
+                            icon: const Icon(Icons.auto_awesome),
+                            label: Text(_isSelectedModelComponent ? 'Cannot generate (component model)' : 'Generate'),
+                          ),
                         const Divider(height: 24),
                         Text('Edit conversation', style: Theme.of(context).textTheme.titleMedium),
                         const SizedBox(height: 8),

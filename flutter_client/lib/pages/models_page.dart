@@ -42,6 +42,14 @@ class _ModelsPageState extends State<ModelsPage> with SingleTickerProviderStateM
   // Provider status
   Map<String, dynamic> _providerStatus = {};
 
+  // Model card (README + rich detail from model_info)
+  final Map<String, Map<String, dynamic>> _hfDetailCache = {};
+  String? _loadingReadme;
+
+  // HF token
+  bool _hfTokenConfigured = false;
+  String? _hfUsername;
+
   // Shared
   Map<String, dynamic>? _selected;
   String _error = '';
@@ -54,6 +62,7 @@ class _ModelsPageState extends State<ModelsPage> with SingleTickerProviderStateM
     _tabCtrl = TabController(length: 2, vsync: this);
     _tabCtrl.addListener(_onTabChanged);
     _loadLocal();
+    _checkHfToken();
   }
 
   @override
@@ -74,6 +83,146 @@ class _ModelsPageState extends State<ModelsPage> with SingleTickerProviderStateM
   void _scheduleSearch(VoidCallback fn) {
     _searchDebounce?.cancel();
     _searchDebounce = Timer(const Duration(milliseconds: 400), fn);
+  }
+
+  void _selectModel(Map<String, dynamic> m) {
+    setState(() => _selected = m);
+    final provider = (m['provider'] ?? '').toString();
+    final modelId = (m['model_id'] ?? '').toString();
+    if (provider == 'huggingface' && modelId.isNotEmpty) {
+      _fetchReadme(modelId);
+    }
+  }
+
+  Future<void> _fetchReadme(String modelId) async {
+    if (_hfDetailCache.containsKey(modelId)) return;
+    setState(() => _loadingReadme = modelId);
+    try {
+      final data = await widget.api.get('/models/hf/$modelId/readme') as Map<String, dynamic>;
+      if (!mounted) return;
+      _hfDetailCache[modelId] = data;
+    } catch (_) {
+      _hfDetailCache[modelId] = {};
+    }
+    if (mounted) setState(() => _loadingReadme = null);
+  }
+
+  Future<void> _checkHfToken() async {
+    try {
+      final data = await widget.api.get('/settings/hf-token') as Map<String, dynamic>;
+      if (!mounted) return;
+      setState(() {
+        _hfTokenConfigured = data['configured'] == true;
+        _hfUsername = data['username']?.toString();
+      });
+    } catch (_) {}
+  }
+
+  Future<void> _showHfTokenDialog() async {
+    final tokenCtrl = TextEditingController();
+    String? errorText;
+    bool saving = false;
+
+    await showDialog<void>(
+      context: context,
+      builder: (ctx) => StatefulBuilder(
+        builder: (ctx, setDialogState) => AlertDialog(
+          title: const Text('HuggingFace Login'),
+          content: SizedBox(
+            width: 400,
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                if (_hfTokenConfigured) ...[
+                  Row(
+                    children: [
+                      const Icon(Icons.check_circle, color: Colors.green, size: 18),
+                      const SizedBox(width: 8),
+                      Text('Logged in${_hfUsername != null ? ' as $_hfUsername' : ''}',
+                          style: const TextStyle(fontWeight: FontWeight.w500)),
+                    ],
+                  ),
+                  const SizedBox(height: 16),
+                ] else ...[
+                  Row(
+                    children: [
+                      Icon(Icons.info_outline, color: Theme.of(ctx).colorScheme.onSurfaceVariant, size: 18),
+                      const SizedBox(width: 8),
+                      const Text('Not logged in — some models require authentication'),
+                    ],
+                  ),
+                  const SizedBox(height: 16),
+                ],
+                TextField(
+                  controller: tokenCtrl,
+                  obscureText: true,
+                  decoration: InputDecoration(
+                    labelText: 'Access Token',
+                    hintText: 'hf_...',
+                    errorText: errorText,
+                    border: const OutlineInputBorder(),
+                  ),
+                ),
+                const SizedBox(height: 8),
+                SelectableText(
+                  'Get your token at huggingface.co/settings/tokens',
+                  style: TextStyle(fontSize: 12, color: Theme.of(ctx).colorScheme.primary),
+                ),
+              ],
+            ),
+          ),
+          actions: [
+            if (_hfTokenConfigured)
+              TextButton(
+                onPressed: saving ? null : () async {
+                  setDialogState(() => saving = true);
+                  try {
+                    await widget.api.delete('/settings/hf-token');
+                    if (!mounted) return;
+                    setState(() { _hfTokenConfigured = false; _hfUsername = null; });
+                    if (ctx.mounted) Navigator.pop(ctx);
+                  } catch (e) {
+                    setDialogState(() { errorText = e.toString(); saving = false; });
+                  }
+                },
+                child: const Text('Remove Token'),
+              ),
+            TextButton(
+              onPressed: () => Navigator.pop(ctx),
+              child: const Text('Cancel'),
+            ),
+            FilledButton(
+              onPressed: saving ? null : () async {
+                if (tokenCtrl.text.trim().isEmpty) {
+                  setDialogState(() => errorText = 'Token is required');
+                  return;
+                }
+                setDialogState(() { saving = true; errorText = null; });
+                try {
+                  final data = await widget.api.post('/settings/hf-token', {'token': tokenCtrl.text.trim()}) as Map<String, dynamic>;
+                  if (!mounted) return;
+                  setState(() {
+                    _hfTokenConfigured = true;
+                    _hfUsername = data['username']?.toString();
+                  });
+                  if (ctx.mounted) Navigator.pop(ctx);
+                } catch (e) {
+                  setDialogState(() {
+                    errorText = e.toString().replaceFirst('Exception: ', '');
+                    saving = false;
+                  });
+                }
+              },
+              child: saving
+                  ? const SizedBox(width: 16, height: 16, child: CircularProgressIndicator(strokeWidth: 2))
+                  : const Text('Save'),
+            ),
+          ],
+        ),
+      ),
+    );
+    tokenCtrl.dispose();
   }
 
   // ── Data Loading ───────────────────────────────────────────────
@@ -529,6 +678,19 @@ class _ModelsPageState extends State<ModelsPage> with SingleTickerProviderStateM
                 },
               ),
               const Spacer(),
+              if (_discoverSource == 'huggingface')
+                IconButton(
+                  onPressed: _showHfTokenDialog,
+                  icon: Badge(
+                    isLabelVisible: _hfTokenConfigured,
+                    smallSize: 8,
+                    backgroundColor: Colors.green,
+                    child: const Icon(Icons.key),
+                  ),
+                  tooltip: _hfTokenConfigured
+                      ? 'HF: logged in${_hfUsername != null ? ' as $_hfUsername' : ''}'
+                      : 'HuggingFace Login',
+                ),
               IconButton(
                 onPressed: _loadDiscover,
                 icon: const Icon(Icons.refresh),
@@ -651,7 +813,7 @@ class _ModelsPageState extends State<ModelsPage> with SingleTickerProviderStateM
           margin: const EdgeInsets.only(bottom: 6),
           child: InkWell(
             borderRadius: BorderRadius.circular(12),
-            onTap: () => setState(() => _selected = m),
+            onTap: () => _selectModel(m),
             child: Padding(
               padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
               child: Row(
@@ -762,7 +924,7 @@ class _ModelsPageState extends State<ModelsPage> with SingleTickerProviderStateM
           margin: const EdgeInsets.only(bottom: 6),
           child: InkWell(
             borderRadius: BorderRadius.circular(12),
-            onTap: () => setState(() => _selected = m),
+            onTap: () => _selectModel(m),
             child: Padding(
               padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
               child: Row(
@@ -860,7 +1022,7 @@ class _ModelsPageState extends State<ModelsPage> with SingleTickerProviderStateM
           margin: const EdgeInsets.only(bottom: 6),
           child: InkWell(
             borderRadius: BorderRadius.circular(12),
-            onTap: () => setState(() => _selected = m),
+            onTap: () => _selectModel(m),
             child: Padding(
               padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
               child: Row(
@@ -1003,7 +1165,7 @@ class _ModelsPageState extends State<ModelsPage> with SingleTickerProviderStateM
       margin: const EdgeInsets.only(bottom: 6),
       child: InkWell(
         borderRadius: BorderRadius.circular(12),
-        onTap: () => setState(() => _selected = m),
+        onTap: () => _selectModel(m),
         child: Padding(
           padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
           child: Row(
@@ -1150,6 +1312,16 @@ class _ModelsPageState extends State<ModelsPage> with SingleTickerProviderStateM
               Text(desc, style: TextStyle(fontSize: 14, height: 1.4, color: colors.onSurfaceVariant)),
             ],
 
+            // HF rich detail (gated warning, hub info, model card)
+            if (isHfDiscover) ...[
+              if (_loadingReadme == modelId) ...[
+                const SizedBox(height: 12),
+                const Center(child: SizedBox(width: 20, height: 20, child: CircularProgressIndicator(strokeWidth: 2))),
+              ] else if (_hfDetailCache.containsKey(modelId)) ...[
+                _buildHfDetailSection(modelId, colors),
+              ],
+            ],
+
             // Tags
             if (tags.isNotEmpty) ...[
               const SizedBox(height: 12),
@@ -1268,6 +1440,103 @@ class _ModelsPageState extends State<ModelsPage> with SingleTickerProviderStateM
           ],
         ),
       ),
+    );
+  }
+
+  Widget _buildHfDetailSection(String modelId, ColorScheme colors) {
+    final d = _hfDetailCache[modelId] ?? {};
+    final readme = (d['readme'] ?? '').toString();
+    final gated = d['gated'] == true || d['gated'] == 'auto' || d['gated'] == 'manual';
+    final accessError = (d['access_error'] ?? '').toString();
+    final cardMeta = d['card_metadata'] as Map<String, dynamic>? ?? {};
+    final library = (d['library_name'] ?? '').toString();
+    final pipeline = (d['pipeline_tag'] ?? '').toString();
+    final modelType = (d['model_type'] ?? '').toString();
+    final archs = (d['architectures'] as List<dynamic>?)?.cast<String>() ?? [];
+    final ctxLen = d['context_length'];
+    final storageHuman = (d['used_storage_human'] ?? '').toString();
+    final fileCount = d['file_count'] as int? ?? 0;
+    final baseModel = (cardMeta['base_model'] ?? '').toString();
+    final language = cardMeta['language'];
+    final langStr = language is List ? language.join(', ') : (language ?? '').toString();
+    final license = (cardMeta['license'] ?? '').toString();
+
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        // Gated model warning
+        if (gated) ...[
+          const SizedBox(height: 12),
+          Container(
+            padding: const EdgeInsets.all(10),
+            decoration: BoxDecoration(
+              color: colors.errorContainer.withValues(alpha: 0.3),
+              borderRadius: BorderRadius.circular(8),
+              border: Border.all(color: colors.error.withValues(alpha: 0.3)),
+            ),
+            child: Row(
+              children: [
+                Icon(Icons.lock, size: 16, color: colors.error),
+                const SizedBox(width: 8),
+                Expanded(
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Text('Gated Model — requires access approval',
+                          style: TextStyle(fontSize: 13, fontWeight: FontWeight.w600, color: colors.error)),
+                      if (!_hfTokenConfigured)
+                        GestureDetector(
+                          onTap: _showHfTokenDialog,
+                          child: Text('Log in with your HF token to request access',
+                              style: TextStyle(fontSize: 12, color: colors.primary, decoration: TextDecoration.underline)),
+                        ),
+                      if (accessError.isNotEmpty)
+                        Text(accessError, style: TextStyle(fontSize: 11, color: colors.onSurfaceVariant), maxLines: 2, overflow: TextOverflow.ellipsis),
+                    ],
+                  ),
+                ),
+              ],
+            ),
+          ),
+        ],
+
+        // Hub info section
+        const SizedBox(height: 16),
+        Text('Hub Details', style: Theme.of(context).textTheme.titleSmall),
+        const SizedBox(height: 8),
+        if (library.isNotEmpty) _specRow('Library', library, colors),
+        if (pipeline.isNotEmpty) _specRow('Pipeline', pipeline, colors),
+        if (modelType.isNotEmpty) _specRow('Model Type', modelType, colors),
+        if (archs.isNotEmpty) _specRow('Architecture', archs.join(', '), colors),
+        if (ctxLen != null) _specRow('Context Length', _formatCount(ctxLen), colors),
+        if (baseModel.isNotEmpty) _specRow('Base Model', baseModel, colors),
+        if (langStr.isNotEmpty) _specRow('Language', langStr, colors),
+        if (license.isNotEmpty) _specRow('License', license, colors),
+        if (storageHuman.isNotEmpty) _specRow('Repo Size', storageHuman, colors),
+        if (fileCount > 0) _specRow('Files', '$fileCount', colors),
+
+        // Model Card
+        const SizedBox(height: 12),
+        ExpansionTile(
+          title: const Text('Model Card', style: TextStyle(fontSize: 14, fontWeight: FontWeight.w600)),
+          tilePadding: EdgeInsets.zero,
+          childrenPadding: const EdgeInsets.only(bottom: 8),
+          children: [
+            if (readme.isNotEmpty)
+              Container(
+                constraints: const BoxConstraints(maxHeight: 400),
+                child: SingleChildScrollView(
+                  child: SelectableText(
+                    readme,
+                    style: TextStyle(fontSize: 13, height: 1.5, color: colors.onSurfaceVariant),
+                  ),
+                ),
+              )
+            else
+              Text('No model card available', style: TextStyle(fontSize: 13, color: colors.onSurfaceVariant.withValues(alpha: 0.5))),
+          ],
+        ),
+      ],
     );
   }
 

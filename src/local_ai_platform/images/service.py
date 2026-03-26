@@ -29,6 +29,144 @@ class ImageRuntimeResult:
     metadata: dict[str, Any] | None = None
 
 
+@dataclass
+class HardwareProfile:
+    """Hardware fingerprint detected once at startup for backend selection."""
+    # CPU
+    cpu_vendor: str = "unknown"       # "Intel", "AMD", "Apple", "unknown"
+    cpu_model: str = ""               # Full model string
+    cpu_cores: int = 1
+    cpu_threads: int = 1
+    has_avx2: bool = False
+    has_avx512: bool = False
+    has_vnni: bool = False            # Intel VNNI for INT8 acceleration
+    # GPU
+    gpu_name: str | None = None
+    gpu_vram_bytes: int = 0
+    cuda_available: bool = False
+    gpu_compute_cap: tuple[int, int] | None = None
+    # RAM
+    ram_total_bytes: int = 0
+    ram_available_bytes: int = 0
+    # Installed optional backends
+    openvino_available: bool = False
+    sdcpp_available: bool = False
+    tomesd_available: bool = False
+    deepcache_available: bool = False
+    diffusers_available: bool = False
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "cpu_vendor": self.cpu_vendor,
+            "cpu_model": self.cpu_model,
+            "cpu_cores": self.cpu_cores,
+            "cpu_threads": self.cpu_threads,
+            "has_avx2": self.has_avx2,
+            "has_avx512": self.has_avx512,
+            "has_vnni": self.has_vnni,
+            "gpu_name": self.gpu_name,
+            "gpu_vram_bytes": self.gpu_vram_bytes,
+            "gpu_vram_human": format_bytes_human(self.gpu_vram_bytes) if self.gpu_vram_bytes else None,
+            "cuda_available": self.cuda_available,
+            "gpu_compute_cap": list(self.gpu_compute_cap) if self.gpu_compute_cap else None,
+            "ram_total_bytes": self.ram_total_bytes,
+            "ram_total_human": format_bytes_human(self.ram_total_bytes) if self.ram_total_bytes else None,
+            "ram_available_bytes": self.ram_available_bytes,
+            "openvino_available": self.openvino_available,
+            "sdcpp_available": self.sdcpp_available,
+            "tomesd_available": self.tomesd_available,
+            "deepcache_available": self.deepcache_available,
+            "diffusers_available": self.diffusers_available,
+        }
+
+
+def _detect_hardware_profile() -> HardwareProfile:
+    """Detect hardware capabilities once. Called lazily on first access."""
+    import platform
+    hw = HardwareProfile()
+
+    # ── CPU ──
+    hw.cpu_model = platform.processor() or platform.machine() or "unknown"
+    hw.cpu_cores = os.cpu_count() or 1
+    hw.cpu_threads = hw.cpu_cores  # Python can't distinguish; assume HT
+
+    # Detect vendor
+    proc_lower = hw.cpu_model.lower()
+    if "intel" in proc_lower or "genuineintel" in proc_lower:
+        hw.cpu_vendor = "Intel"
+    elif "amd" in proc_lower or "authenticamd" in proc_lower:
+        hw.cpu_vendor = "AMD"
+    elif "apple" in proc_lower or "arm" in platform.machine().lower():
+        hw.cpu_vendor = "Apple"
+
+    # CPU flags (AVX2, AVX-512, VNNI) — try cpuinfo, fallback to platform heuristic
+    try:
+        import cpuinfo  # type: ignore[import-untyped]
+        info = cpuinfo.get_cpu_info()
+        flags = set(info.get("flags", []))
+        hw.has_avx2 = "avx2" in flags
+        hw.has_avx512 = any(f.startswith("avx512") for f in flags)
+        hw.has_vnni = "avx512_vnni" in flags or "avx_vnni" in flags
+        if info.get("brand_raw"):
+            hw.cpu_model = info["brand_raw"]
+    except Exception:
+        # Heuristic: most x86_64 CPUs since 2014 have AVX2
+        if platform.machine() in ("x86_64", "AMD64"):
+            hw.has_avx2 = True
+
+    # ── GPU ──
+    try:
+        import torch
+        if torch.cuda.is_available():
+            hw.cuda_available = True
+            hw.gpu_name = torch.cuda.get_device_name(0)
+            hw.gpu_vram_bytes = torch.cuda.get_device_properties(0).total_memory
+            cap = torch.cuda.get_device_capability(0)
+            hw.gpu_compute_cap = (cap[0], cap[1])
+    except Exception:
+        pass
+
+    # ── RAM ──
+    try:
+        import psutil
+        vm = psutil.virtual_memory()
+        hw.ram_total_bytes = vm.total
+        hw.ram_available_bytes = vm.available
+    except Exception:
+        pass
+
+    # ── Backend availability ──
+    for attr, module in [
+        ("openvino_available", "openvino"),
+        ("sdcpp_available", "stable_diffusion_cpp"),
+        ("tomesd_available", "tomesd"),
+        ("diffusers_available", "diffusers"),
+    ]:
+        try:
+            __import__(module)
+            setattr(hw, attr, True)
+        except ImportError:
+            pass
+    # DeepCache: check for the helper class
+    try:
+        from DeepCache import DeepCacheSDHelper  # noqa: F401
+        hw.deepcache_available = True
+    except Exception:
+        pass
+
+    logger.info(
+        "hardware_profile: cpu=%s vendor=%s cores=%d avx2=%s avx512=%s vnni=%s | "
+        "gpu=%s vram=%s cuda=%s | ram=%s | backends: ov=%s sdcpp=%s tome=%s dc=%s diffusers=%s",
+        hw.cpu_model, hw.cpu_vendor, hw.cpu_cores, hw.has_avx2, hw.has_avx512, hw.has_vnni,
+        hw.gpu_name, format_bytes_human(hw.gpu_vram_bytes) if hw.gpu_vram_bytes else "none",
+        hw.cuda_available,
+        format_bytes_human(hw.ram_total_bytes) if hw.ram_total_bytes else "?",
+        hw.openvino_available, hw.sdcpp_available, hw.tomesd_available,
+        hw.deepcache_available, hw.diffusers_available,
+    )
+    return hw
+
+
 def _require_pillow():
     try:
         from PIL import Image, ImageOps  # type: ignore
@@ -41,9 +179,27 @@ def _require_pillow():
 
 
 def _hf_cache_dir(model_id: str) -> Path | None:
+    """Return the latest snapshot directory for a cached HuggingFace model.
+
+    HF cache layout: hub/models--org--name/snapshots/<hash>/model_index.json
+    We resolve to the most recent snapshot so callers get the actual model
+    files (model_index.json, scheduler/, unet/, etc.), not the repo root.
+    """
     root = Path(os.getenv("HF_HOME") or (Path.home() / ".cache" / "huggingface"))
-    candidate = root / "hub" / f"models--{model_id.replace('/', '--')}"
-    return candidate if candidate.exists() else None
+    repo_dir = root / "hub" / f"models--{model_id.replace('/', '--')}"
+    if not repo_dir.exists():
+        return None
+    snapshots = repo_dir / "snapshots"
+    if snapshots.exists():
+        # Pick the most recently modified snapshot
+        snaps = sorted(snapshots.iterdir(), key=lambda p: p.stat().st_mtime, reverse=True)
+        for snap in snaps:
+            if snap.is_dir() and (snap / "model_index.json").exists():
+                return snap
+        # Fallback: return first snapshot even without model_index.json
+        if snaps:
+            return snaps[0]
+    return repo_dir
 
 
 def _validate_diffusers_dir(path: Path) -> tuple[bool, list[str]]:
@@ -126,6 +282,8 @@ def _detect_model_hints(model_path: str | Path) -> dict[str, Any]:
     default parameters for that specific architecture.
     """
     model_path = Path(model_path)
+    # Use the full path string for name-based matching (the .name might be a hash)
+    path_str_lower = str(model_path).lower()
     hints: dict[str, Any] = {
         "model_family": "unknown",
         "model_variant": None,
@@ -175,7 +333,7 @@ def _detect_model_hints(model_path: str | Path) -> dict[str, Any]:
     if "ZImage" in pipeline_class or "ZImage" in str(index_data):
         hints.update({
             "model_family": "z-image",
-            "model_variant": "turbo" if "turbo" in model_path.name.lower() else "base",
+            "model_variant": "turbo" if "turbo" in path_str_lower else "base",
             "recommended_guidance_scale": 0.0,
             "recommended_steps": 9,
             "recommended_width": 1024,
@@ -191,8 +349,8 @@ def _detect_model_hints(model_path: str | Path) -> dict[str, Any]:
         })
 
     # Flux models
-    elif "Flux" in pipeline_class or "flux" in model_path.name.lower():
-        is_schnell = "schnell" in model_path.name.lower()
+    elif "Flux" in pipeline_class or "flux" in path_str_lower:
+        is_schnell = "schnell" in path_str_lower
         hints.update({
             "model_family": "flux",
             "model_variant": "schnell" if is_schnell else "dev",
@@ -210,8 +368,8 @@ def _detect_model_hints(model_path: str | Path) -> dict[str, Any]:
         })
 
     # SDXL Turbo / Lightning / LCM (distilled SDXL)
-    elif ("SDXL" in pipeline_class or "stable-diffusion-xl" in model_path.name.lower() or "sdxl" in model_path.name.lower()):
-        is_turbo = any(k in model_path.name.lower() for k in ("turbo", "lightning", "lcm", "hyper"))
+    elif ("SDXL" in pipeline_class or "stable-diffusion-xl" in path_str_lower or "sdxl" in path_str_lower):
+        is_turbo = any(k in path_str_lower for k in ("turbo", "lightning", "lcm", "hyper"))
         if is_turbo:
             hints.update({
                 "model_family": "sdxl",
@@ -244,8 +402,8 @@ def _detect_model_hints(model_path: str | Path) -> dict[str, Any]:
             })
 
     # SD 1.5 Turbo / LCM variants
-    elif any(k in model_path.name.lower() for k in ("turbo", "lightning", "lcm", "hyper")) and \
-         "xl" not in model_path.name.lower():
+    elif any(k in path_str_lower for k in ("turbo", "lightning", "lcm", "hyper")) and \
+         "xl" not in path_str_lower:
         hints.update({
             "model_family": "sd15",
             "model_variant": "turbo",
@@ -261,8 +419,8 @@ def _detect_model_hints(model_path: str | Path) -> dict[str, Any]:
         })
 
     # Standard SD 1.x / 2.x
-    elif "StableDiffusion" in pipeline_class or "stable-diffusion" in model_path.name.lower():
-        is_v2 = "2" in model_path.name.lower() or "v2" in model_path.name.lower()
+    elif "StableDiffusion" in pipeline_class or "stable-diffusion" in path_str_lower:
+        is_v2 = "2" in path_str_lower or "v2" in path_str_lower
         hints.update({
             "model_family": "sd2" if is_v2 else "sd15",
             "model_variant": "base",
@@ -280,7 +438,7 @@ def _detect_model_hints(model_path: str | Path) -> dict[str, Any]:
         })
 
     # Pixart / DiT-based models
-    elif "PixArt" in pipeline_class or "pixart" in model_path.name.lower():
+    elif "PixArt" in pipeline_class or "pixart" in path_str_lower:
         hints.update({
             "model_family": "pixart",
             "model_variant": "alpha",
@@ -297,7 +455,7 @@ def _detect_model_hints(model_path: str | Path) -> dict[str, Any]:
         })
 
     # Kandinsky
-    elif "Kandinsky" in pipeline_class or "kandinsky" in model_path.name.lower():
+    elif "Kandinsky" in pipeline_class or "kandinsky" in path_str_lower:
         hints.update({
             "model_family": "kandinsky",
             "model_variant": "2.2" if "2.2" in model_path.name else "2.1",
@@ -420,6 +578,95 @@ def _sdcpp_worker(payload: dict[str, Any], out_q: Any) -> None:
             "error_code": "sdcpp_failed",
             "error_message": str(exc),
             "metadata": {"worker_traceback": traceback.format_exc()},
+        })
+
+
+# ── OpenVINO subprocess worker ────────────────────────────────────
+
+def _openvino_worker(payload: dict[str, Any], out_q: Any) -> None:
+    """Subprocess worker for OpenVINO inference (Intel-optimized CPU)."""
+    started = time.time()
+    stage_file = str(payload.get("stage_file") or "") or None
+    _write_stage_marker(stage_file, "bootstrap")
+    try:
+        import numpy as np
+
+        model_path = str(payload["model_id_or_path"])
+        model_family = str(payload.get("model_family", "sd1.5")).lower()
+        local_only = bool(payload.get("local_files_only", True))
+        total_steps = int(payload["steps"])
+
+        _write_stage_marker(stage_file, "pipeline_load")
+
+        # Select correct OV pipeline class based on model family
+        if model_family == "sdxl":
+            from optimum.intel import OVStableDiffusionXLPipeline as OVPipe
+        elif model_family in ("sd3",):
+            # SD3 may require specific OV pipeline in future optimum-intel versions
+            from optimum.intel import OVStableDiffusionXLPipeline as OVPipe
+        else:
+            from optimum.intel import OVStableDiffusionPipeline as OVPipe
+
+        pipe = OVPipe.from_pretrained(model_path, local_files_only=local_only)
+
+        # Apply Tiny VAE if requested
+        if payload.get("use_tiny_vae") and payload.get("tiny_vae_model"):
+            try:
+                from diffusers import AutoencoderTiny
+                tiny_vae = AutoencoderTiny.from_pretrained(str(payload["tiny_vae_model"]))
+                pipe.vae = tiny_vae
+            except Exception:
+                pass  # Fall back to original VAE
+
+        # Seed
+        seed = payload.get("seed")
+        actual_seed = int(seed) if seed is not None else np.random.randint(1, 2**31 - 1)
+        np.random.seed(actual_seed)
+
+        _write_stage_marker(stage_file, f"inference:0/{total_steps}")
+
+        # Step callback for progress tracking
+        def _ov_step_callback(pipe_obj: Any, step: int, timestep: Any, callback_kwargs: dict[str, Any]) -> dict[str, Any]:
+            clamped = min(step + 1, total_steps)
+            _write_stage_marker(stage_file, f"inference:{clamped}/{total_steps}")
+            return callback_kwargs
+
+        result = pipe(
+            prompt=payload["prompt"],
+            negative_prompt=payload.get("negative_prompt"),
+            num_inference_steps=total_steps,
+            guidance_scale=float(payload["guidance_scale"]),
+            width=int(payload["width"]),
+            height=int(payload["height"]),
+            callback_on_step_end=_ov_step_callback,
+        )
+
+        _write_stage_marker(stage_file, "saving")
+        buf = io.BytesIO()
+        result.images[0].save(buf, format="PNG")
+
+        out_q.put({
+            "ok": True,
+            "image_bytes": buf.getvalue(),
+            "metadata": {
+                "runtime": "openvino",
+                "device_used": "cpu_openvino",
+                "model_family": model_family,
+                "worker_elapsed_sec": round(time.time() - started, 3),
+                "seed": actual_seed,
+                "inference_backend": "openvino_int8",
+            },
+        })
+    except Exception as exc:
+        mem_err, mem_code = _is_memory_error(exc)
+        out_q.put({
+            "ok": False,
+            "error_code": mem_code if mem_err else "openvino_failed",
+            "error_message": str(exc),
+            "metadata": {
+                "worker_traceback": traceback.format_exc(),
+                "stage": "openvino_inference",
+            },
         })
 
 
@@ -676,6 +923,34 @@ def _diffusers_worker(payload: dict[str, Any], out_q: Any) -> None:
                     pipe.enable_vae_tiling()
             except Exception:
                 pass
+        # ── Tiny VAE (TAESD) — replaces 160MB VAE decoder with 5MB distilled one ──
+        # Dramatically faster decode (minutes → <1s on CPU), saves ~2GB RAM.
+        if payload.get("use_tiny_vae") and payload.get("tiny_vae_model"):
+            try:
+                from diffusers import AutoencoderTiny
+                tiny_vae_id = str(payload["tiny_vae_model"])
+                _log(f"Loading Tiny VAE: {tiny_vae_id}")
+                tiny_vae = AutoencoderTiny.from_pretrained(tiny_vae_id)
+                pipe.vae = tiny_vae
+                _log("Tiny VAE loaded successfully")
+            except ImportError:
+                _log("AutoencoderTiny not available in this diffusers version")
+            except Exception as e:
+                _log(f"Tiny VAE failed to load: {e} (using default VAE)")
+
+        # ── Token Merging (ToMe) — merges redundant attention tokens ──
+        # 1.3-1.8x speedup on CPU, minimal quality loss. Only for diffusers pipelines.
+        if payload.get("use_tome"):
+            try:
+                import tomesd
+                ratio = float(payload.get("tome_ratio", 0.5))
+                tomesd.apply_patch(pipe, ratio=ratio)
+                _log(f"ToMe applied (ratio={ratio:.2f})")
+            except ImportError:
+                _log("tomesd not installed, skipping")
+            except Exception as e:
+                _log(f"ToMe failed to apply: {e}")
+
         if device == "cuda":
             if bool(payload.get("use_sequential_cpu_offload", False)):
                 _log("Applying sequential CPU offload")
@@ -756,6 +1031,21 @@ def _diffusers_worker(payload: dict[str, Any], out_q: Any) -> None:
             _log(f"Step {clamped}/{total_steps} (timestep={timestep})")
             return callback_kwargs
 
+        # ── DeepCache — caches UNet features for ~2.3x speedup on 20+ steps ──
+        _deepcache_helper = None
+        if payload.get("use_deepcache") and total_steps >= 20:
+            try:
+                from DeepCache import DeepCacheSDHelper
+                interval = int(payload.get("deepcache_interval", 2))
+                _deepcache_helper = DeepCacheSDHelper(pipe=pipe)
+                _deepcache_helper.set_params(cache_interval=interval)
+                _deepcache_helper.enable()
+                _log(f"DeepCache enabled (interval={interval})")
+            except ImportError:
+                _log("DeepCache not installed, skipping")
+            except Exception as e:
+                _log(f"DeepCache failed: {e}")
+
         _log(f"Starting inference: {total_steps} steps, guidance={payload['guidance_scale']}")
         inference_start = time.time()
         if init_image_path:
@@ -785,6 +1075,13 @@ def _diffusers_worker(payload: dict[str, Any], out_q: Any) -> None:
             )
         inference_elapsed = round(time.time() - inference_start, 1)
         _log(f"Inference completed in {inference_elapsed}s")
+
+        # Disable DeepCache if it was enabled
+        if _deepcache_helper:
+            try:
+                _deepcache_helper.disable()
+            except Exception:
+                pass
 
         _write_stage_marker(stage_file, "saving")
         image = result.images[0]
@@ -878,6 +1175,138 @@ class ImageGenerationService:
         self._current_stage_file: str | None = None
         self._current_job_started: float = 0.0
         self._current_job_model: str = ""
+        self._current_worker_proc: Any = None  # multiprocessing.Process
+        # Hardware profile (lazy-detected on first access)
+        self._hw_profile: HardwareProfile | None = None
+
+    def _get_hardware_profile(self) -> HardwareProfile:
+        """Lazy hardware detection — runs once, cached for session lifetime."""
+        if self._hw_profile is None:
+            self._hw_profile = _detect_hardware_profile()
+        return self._hw_profile
+
+    # TAESD model IDs per model family
+    _TAESD_MAP: dict[str, str] = {
+        "sd1.5": "madebyollin/taesd",
+        "sd1.x": "madebyollin/taesd",
+        "sd2.x": "madebyollin/taesd",
+        "sdxl": "madebyollin/taesdxl",
+        "sd3": "madebyollin/taesd3",
+        "flux": "madebyollin/taef1",
+        "dit": "madebyollin/taesd3",
+        "pixart": "madebyollin/taesd",
+        "kandinsky": "madebyollin/taesd",
+    }
+
+    # OpenVINO-compatible model families
+    _OPENVINO_FAMILIES: set[str] = {"sd1.5", "sd1.x", "sd2.x", "sdxl", "sd3"}
+
+    def _score_backends(
+        self,
+        hw: HardwareProfile,
+        model_hints: dict[str, Any],
+        folder_size_bytes: int = 0,
+        is_gguf: bool = False,
+    ) -> list[dict[str, Any]]:
+        """Score available backends and return sorted list (best first).
+
+        Each entry: {"backend": str, "score": int, "reason": str}
+        """
+        family = str(model_hints.get("model_family", "")).lower()
+        variant = str(model_hints.get("model_variant", "")).lower()
+        is_few_step = variant in ("turbo", "lightning", "lcm", "hyper", "schnell")
+        gpu_usable = hw.cuda_available and hw.gpu_vram_bytes >= 3 * 1024**3  # ≥3GB
+        candidates: list[dict[str, Any]] = []
+
+        # 1. GGUF model → sd.cpp is unconditional winner
+        if is_gguf and hw.sdcpp_available:
+            candidates.append({"backend": "sdcpp_gguf", "score": 95,
+                               "reason": "GGUF model detected — using sd.cpp native engine"})
+
+        # 2. OpenVINO INT8 (Intel CPU, no usable GPU)
+        if hw.openvino_available and hw.cpu_vendor == "Intel" and family in self._OPENVINO_FAMILIES:
+            score = 90
+            if hw.has_avx512:
+                score += 10
+            if hw.has_vnni:
+                score += 5
+            if gpu_usable:
+                score -= 15  # GPU available, OpenVINO less attractive
+            candidates.append({"backend": "openvino_int8", "score": score,
+                               "reason": f"Intel {hw.cpu_model} with OpenVINO INT8 — optimized for this CPU"})
+
+        # 3. CUDA (GPU with enough VRAM)
+        if hw.cuda_available and hw.diffusers_available:
+            score = 85
+            est_vram = int(folder_size_bytes * 1.3) if folder_size_bytes else 0
+            if est_vram and hw.gpu_vram_bytes > est_vram * 2:
+                score += 10
+            elif est_vram and hw.gpu_vram_bytes < est_vram * 1.3:
+                score -= 20
+            if hw.gpu_vram_bytes < 3 * 1024**3:
+                score -= 30  # < 3GB VRAM, very tight
+            candidates.append({"backend": "diffusers_cuda", "score": score,
+                               "reason": f"CUDA on {hw.gpu_name or 'GPU'} ({format_bytes_human(hw.gpu_vram_bytes)} VRAM)"})
+
+        # 4. OpenVINO FP32 fallback
+        if hw.openvino_available and family in self._OPENVINO_FAMILIES:
+            score = 70
+            if hw.cpu_vendor != "Intel":
+                score -= 20  # OpenVINO less optimized for AMD
+            if gpu_usable:
+                score -= 15
+            candidates.append({"backend": "openvino_fp32", "score": score,
+                               "reason": f"OpenVINO FP32 on {hw.cpu_vendor} CPU"})
+
+        # 5. Diffusers CPU (always available)
+        if hw.diffusers_available:
+            score = 40
+            if hw.cpu_vendor == "Intel" and hw.has_avx2:
+                score += 10
+            if hw.cpu_cores >= 8:
+                score += 5
+            candidates.append({"backend": "diffusers_cpu", "score": score,
+                               "reason": f"PyTorch CPU with {hw.cpu_cores} threads"})
+
+        # Sort by score descending
+        candidates.sort(key=lambda c: c["score"], reverse=True)
+        return candidates if candidates else [{"backend": "diffusers_cpu", "score": 0, "reason": "fallback"}]
+
+    def _plan_optimizations(
+        self,
+        backend: str,
+        model_hints: dict[str, Any],
+        hw: HardwareProfile,
+        steps: int = 20,
+    ) -> dict[str, Any]:
+        """Decide which optimizations to enable for the selected backend."""
+        family = str(model_hints.get("model_family", "")).lower()
+        variant = str(model_hints.get("model_variant", "")).lower()
+        is_few_step = variant in ("turbo", "lightning", "lcm", "hyper", "schnell")
+        is_cpu = backend in ("diffusers_cpu", "openvino_int8", "openvino_fp32")
+        low_vram = hw.gpu_vram_bytes < 4 * 1024**3
+
+        opts: dict[str, Any] = {}
+
+        # TAESD: use on CPU or low-VRAM GPU (not for sdcpp)
+        if backend != "sdcpp_gguf" and (is_cpu or low_vram):
+            taesd_model = self._TAESD_MAP.get(family)
+            if taesd_model:
+                opts["use_tiny_vae"] = True
+                opts["tiny_vae_model"] = taesd_model
+
+        # DeepCache: only for 20+ steps, not few-step models, not openvino/sdcpp
+        if (backend.startswith("diffusers") and steps >= 20
+                and not is_few_step and hw.deepcache_available):
+            opts["use_deepcache"] = True
+            opts["deepcache_interval"] = 2
+
+        # ToMe: only for diffusers backends (not openvino, not sdcpp)
+        if backend.startswith("diffusers") and hw.tomesd_available:
+            opts["use_tome"] = True
+            opts["tome_ratio"] = 0.5
+
+        return opts
 
     def get_generation_progress(self) -> dict[str, Any]:
         """Read current generation progress from the stage file."""
@@ -928,6 +1357,32 @@ class ImageGenerationService:
             "elapsed_sec": elapsed,
             "model": self._current_job_model,
         }
+
+    def cancel_generation(self) -> bool:
+        """Kill the current worker process if one is running."""
+        proc = self._current_worker_proc
+        if proc is None:
+            return False
+        try:
+            if proc.is_alive():
+                proc.terminate()
+                proc.join(timeout=5)
+                if proc.is_alive():
+                    proc.kill()
+                    proc.join(timeout=3)
+        except Exception:
+            pass
+        # Clean up state
+        if self._current_stage_file:
+            try:
+                Path(self._current_stage_file).unlink(missing_ok=True)
+            except Exception:
+                pass
+        self._current_stage_file = None
+        self._current_job_started = 0.0
+        self._current_worker_proc = None
+        self._current_worker_proc = None
+        return True
 
     def configured_models(self) -> list[str]:
         raw = self.config.hf_image_model_catalog or ""
@@ -1213,6 +1668,103 @@ class ImageGenerationService:
         result.save(buf, format="PNG")
         return buf.getvalue()
 
+    def _generate_openvino(
+        self,
+        *,
+        model_id: str,
+        prompt: str,
+        negative_prompt: str | None,
+        seed: int | None,
+        steps: int,
+        guidance_scale: float,
+        width: int,
+        height: int,
+        execution_plan: dict[str, Any] | None = None,
+        timeout_sec: int | None = None,
+    ) -> ImageRuntimeResult:
+        """Generate via OpenVINO in an isolated subprocess (Intel-optimized CPU)."""
+        try:
+            import openvino  # noqa: F401
+            from optimum.intel import OVStableDiffusionPipeline  # noqa: F401
+        except ImportError:
+            return ImageRuntimeResult(
+                ok=False, error_code="openvino_not_installed",
+                error_message="OpenVINO not installed. Run: pip install optimum-intel openvino",
+            )
+
+        execution_plan = execution_plan or {}
+        model_hints = execution_plan.get("model_hints") or {}
+        model_family = str(model_hints.get("model_family", "sd1.5")).lower()
+        timeout_s = int(timeout_sec or execution_plan.get("expected_timeout_sec") or 600)
+        timeout_s = max(120, min(timeout_s, 3600))
+
+        # Resolve local model path
+        model_source, model_path = self._resolve_model_source(model_id)
+
+        ctx = mp.get_context("spawn")
+        q: Any = ctx.Queue(maxsize=1)
+        stage_file = tempfile.NamedTemporaryFile(prefix="img_ov_stage_", suffix=".txt", delete=False)
+        stage_file_path = stage_file.name
+        stage_file.close()
+        self._current_stage_file = stage_file_path
+        self._current_job_started = time.time()
+        self._current_job_model = model_id
+
+        payload = {
+            "model_id_or_path": model_path,
+            "model_family": model_family,
+            "prompt": prompt,
+            "negative_prompt": negative_prompt,
+            "seed": seed,
+            "steps": steps,
+            "guidance_scale": guidance_scale,
+            "width": width,
+            "height": height,
+            "local_files_only": model_source == "local" or not self.config.hf_image_allow_auto_download,
+            "stage_file": stage_file_path,
+            "use_tiny_vae": bool(execution_plan.get("use_tiny_vae")),
+            "tiny_vae_model": execution_plan.get("tiny_vae_model"),
+        }
+
+        proc = ctx.Process(target=_openvino_worker, args=(payload, q), daemon=True)
+        logger.info("[IMG] Spawning OpenVINO worker (timeout=%ds, family=%s)", timeout_s, model_family)
+        proc.start()
+        proc.join(timeout=timeout_s)
+
+        self._current_stage_file = None
+        self._current_job_started = 0.0
+        self._current_worker_proc = None
+        if proc.is_alive():
+            proc.terminate()
+            proc.join(timeout=3)
+            last_stage = "unknown"
+            try:
+                last_stage = Path(stage_file_path).read_text(encoding="utf-8").strip() or "unknown"
+            except Exception:
+                pass
+            return ImageRuntimeResult(
+                ok=False, error_code="runtime_timeout",
+                error_message=f"OpenVINO generation timed out after {timeout_s}s (stuck at: {last_stage})",
+                metadata={"timeout_sec": timeout_s, "last_stage": last_stage, "execution_plan": execution_plan},
+            )
+
+        try:
+            Path(stage_file_path).unlink(missing_ok=True)
+        except Exception:
+            pass
+
+        if q.empty():
+            return ImageRuntimeResult(ok=False, error_code="generation_failed", error_message="OpenVINO worker returned no result")
+
+        data = q.get()
+        return ImageRuntimeResult(
+            ok=bool(data.get("ok")),
+            image_bytes=data.get("image_bytes"),
+            error_code=data.get("error_code"),
+            error_message=data.get("error_message"),
+            metadata=data.get("metadata"),
+        )
+
     def get_device_status(self) -> dict[str, Any]:
         pref = (self.config.hf_image_device or "auto").strip().lower()
         if pref not in {"auto", "cuda", "cpu"}:
@@ -1310,6 +1862,22 @@ class ImageGenerationService:
             status["available_controlnet_types"] = list(CONTROLNET_DEFAULTS.keys())
         except (ImportError, AttributeError, Exception):
             pass
+
+        # Hardware profile and available backends
+        hw = self._get_hardware_profile()
+        status["hardware_profile"] = hw.to_dict()
+        backends = []
+        if hw.openvino_available and hw.cpu_vendor == "Intel":
+            backends.append("openvino_int8")
+        if hw.cuda_available and hw.gpu_vram_bytes > 0:
+            backends.append("diffusers_cuda")
+        if hw.openvino_available:
+            backends.append("openvino_fp32")
+        backends.append("diffusers_cpu")  # always available
+        if hw.sdcpp_available:
+            backends.append("sdcpp_gguf")
+        status["available_backends"] = backends
+        status["recommended_backend"] = backends[0] if backends else "diffusers_cpu"
 
         return status
 
@@ -1459,9 +2027,15 @@ class ImageGenerationService:
                 plan["warnings"].append("Available RAM looks tight for this model; using conservative CPU settings.")
 
         fit = str(validation.get("fit") or "maybe")
+        # Determine minimum resolution for model family — SDXL/Flux/SD3 need
+        # at least 768 to produce coherent images; SD 1.5 can go down to 256.
+        family = str(model_hints.get("model_family", "")).lower()
+        needs_high_res = family in ("sdxl", "flux", "sd3", "dit", "pixart")
+        min_res = 768 if needs_high_res else 256
         if fit == "poor" or low_memory_mode:
-            plan["recommended_width"] = min(plan["recommended_width"], 512)
-            plan["recommended_height"] = min(plan["recommended_height"], 512)
+            clamp_res = max(512, min_res)
+            plan["recommended_width"] = max(min(plan["recommended_width"], clamp_res), min_res)
+            plan["recommended_height"] = max(min(plan["recommended_height"], clamp_res), min_res)
             plan["recommended_steps"] = min(plan["recommended_steps"], 16)
             if plan["device_plan"] == "cuda":
                 plan["use_attention_slicing"] = True
@@ -1470,9 +2044,12 @@ class ImageGenerationService:
                 plan["practical_on_cpu"] = False
                 plan["warnings"].append("Model fit is poor for CPU mode; generation may timeout or fail.")
                 plan["expected_timeout_sec"] = max(int(plan.get("expected_timeout_sec") or 420), 480)
+            if needs_high_res:
+                plan["warnings"].append(f"This {family.upper()} model requires at least {min_res}x{min_res} resolution for coherent results.")
         elif fit == "maybe":
-            plan["recommended_width"] = min(plan["recommended_width"], 768)
-            plan["recommended_height"] = min(plan["recommended_height"], 768)
+            clamp_res = max(768, min_res)
+            plan["recommended_width"] = max(min(plan["recommended_width"], clamp_res), min_res)
+            plan["recommended_height"] = max(min(plan["recommended_height"], clamp_res), min_res)
             plan["recommended_steps"] = min(plan["recommended_steps"], 20)
 
         plan["model_size_bytes"] = folder_size or None
@@ -1484,6 +2061,21 @@ class ImageGenerationService:
             plan["practical_on_cpu"] = False
             plan["warnings"].append("Available RAM is significantly below estimate for this model.")
             plan["expected_timeout_sec"] = max(int(plan.get("expected_timeout_sec") or 420), 540)
+
+        # ── Backend scoring and optimization flags ──
+        hw = self._get_hardware_profile()
+        is_gguf = bool(validation.get("model_type") == "gguf")
+        ranked = self._score_backends(hw, model_hints, folder_size, is_gguf=is_gguf)
+        best = ranked[0]
+        plan["inference_backend"] = best["backend"]
+        plan["backend_reason"] = best["reason"]
+        plan["available_backends"] = [r["backend"] for r in ranked]
+
+        # Determine optimization flags
+        steps = plan.get("recommended_steps", 20)
+        opts = self._plan_optimizations(best["backend"], model_hints, hw, steps=steps)
+        plan.update(opts)
+
         return plan
 
     def _apply_postprocess(self, image_bytes: bytes, *, upscale: bool, postprocess: bool) -> bytes:
@@ -2272,7 +2864,7 @@ class ImageGenerationService:
             "mode": mode,
             "local_files_only": model_source == "local" or not self.config.hf_image_allow_auto_download,
             "low_memory_mode": bool(getattr(self.config, "hf_image_low_memory_mode", True)),
-            "torch_dtype": execution_plan.get("torch_dtype") or ("bfloat16" if device == "cuda" else "float32"),
+            "torch_dtype": "float32" if device == "cpu" else (execution_plan.get("torch_dtype") or "float16"),
             "use_safetensors": True,
             "enable_cpu_offload": bool(getattr(self.config, "hf_enable_cpu_offload", True)),
             "enable_memory_efficient_attention": bool(getattr(self.config, "hf_enable_memory_efficient_attention", False)),
@@ -2283,8 +2875,16 @@ class ImageGenerationService:
             "runtime_strategy": execution_plan.get("device_plan") or ("cuda_fp16" if device == "cuda" else "cpu_only"),
             "execution_plan": execution_plan,
             "stage_file": stage_file_path,
+            # Optimization flags from adaptive backend scoring
+            "use_tiny_vae": bool(execution_plan.get("use_tiny_vae")),
+            "tiny_vae_model": execution_plan.get("tiny_vae_model"),
+            "use_deepcache": bool(execution_plan.get("use_deepcache")),
+            "deepcache_interval": int(execution_plan.get("deepcache_interval", 2)),
+            "use_tome": bool(execution_plan.get("use_tome")),
+            "tome_ratio": float(execution_plan.get("tome_ratio", 0.5)),
         }
         proc = ctx.Process(target=_diffusers_worker, args=(payload, q), daemon=True)
+        self._current_worker_proc = proc
         logger.info("[IMG] Spawning worker subprocess (timeout=%ds, dtype=%s, device=%s)",
                      timeout_s, payload.get("torch_dtype"), device)
         proc.start()
@@ -2342,6 +2942,7 @@ class ImageGenerationService:
             return ImageRuntimeResult(ok=False, error_code="generation_failed", error_message="Image worker returned no result")
         self._current_stage_file = None
         self._current_job_started = 0.0
+        self._current_worker_proc = None
         try:
             Path(stage_file_path).unlink(missing_ok=True)
         except Exception:
@@ -2584,6 +3185,29 @@ class ImageGenerationService:
                 controlnet_conditioning_scale=controlnet_conditioning_scale,
                 timeout_sec=timeout_sec,
             )
+
+        # Route 2.5: OpenVINO backend (if selected by adaptive scoring)
+        # Build an early execution plan to check the recommended backend.
+        try:
+            _early_plan = self.build_image_execution_plan(model_id, requested={"width": width, "height": height, "steps": steps})
+        except Exception:
+            _early_plan = {}
+        _backend = str(_early_plan.get("inference_backend", ""))
+        _model_family = str((_early_plan.get("model_hints") or {}).get("model_family", "")).lower()
+        # Skip OpenVINO for SDXL/SD3/Flux — OVStableDiffusionXLPipeline has known bugs
+        _ov_unsupported = _model_family in ("sdxl", "sd3", "flux", "pixart", "dit")
+        if _backend.startswith("openvino") and not init_image_path and not _ov_unsupported:
+            ov_result = self._generate_openvino(
+                model_id=model_id, prompt=prompt, negative_prompt=negative_prompt,
+                seed=seed, steps=steps, guidance_scale=guidance_scale,
+                width=width, height=height,
+                execution_plan=_early_plan, timeout_sec=timeout_sec,
+            )
+            if ov_result.ok:
+                return ov_result
+            # OpenVINO failed — fall back to regular diffusers pipeline
+            logger.warning("OpenVINO backend failed (%s: %s), falling back to diffusers",
+                           ov_result.error_code, ov_result.error_message)
 
         # Route 3 (existing): diffusers text2img/img2img
         if self.config.hf_image_runtime not in {"diffusers_local", "hf_inference_api"}:
