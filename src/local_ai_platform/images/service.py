@@ -19,6 +19,45 @@ from local_ai_platform.formatting import format_bytes_human
 
 logger = logging.getLogger("local_ai_platform.images")
 
+# ── Scheduler / Sampler Map ──────────────────────────────────────
+# Maps user-facing names to (diffusers_class_name, extra_kwargs).
+# All classes are built into diffusers — no extra install needed.
+SCHEDULER_MAP: dict[str, tuple[str, dict[str, Any]]] = {
+    "dpmpp_2m_sde_karras": ("DPMSolverMultistepScheduler", {"use_karras_sigmas": True, "algorithm_type": "sde-dpmsolver++"}),
+    "euler": ("EulerDiscreteScheduler", {}),
+    "euler_a": ("EulerAncestralDiscreteScheduler", {}),
+    "ddim": ("DDIMScheduler", {}),
+    "lcm": ("LCMScheduler", {}),
+    "unipc": ("UniPCMultistepScheduler", {}),
+    "heun": ("HeunDiscreteScheduler", {}),
+    "pndm": ("PNDMScheduler", {}),
+}
+
+
+def _apply_scheduler(pipe: Any, scheduler_name: str | None, _log: Any = None) -> None:
+    """Swap the pipeline's scheduler/sampler at runtime."""
+    if not scheduler_name or scheduler_name == "auto":
+        return
+    entry = SCHEDULER_MAP.get(scheduler_name)
+    if not entry:
+        if _log:
+            _log(f"Unknown scheduler '{scheduler_name}', keeping default")
+        return
+    cls_name, kwargs = entry
+    try:
+        import diffusers
+        cls = getattr(diffusers, cls_name, None)
+        if cls is None:
+            if _log:
+                _log(f"Scheduler class {cls_name} not found in diffusers")
+            return
+        pipe.scheduler = cls.from_config(pipe.scheduler.config, **kwargs)
+        if _log:
+            _log(f"Scheduler set to {cls_name}" + (f" ({kwargs})" if kwargs else ""))
+    except Exception as e:
+        if _log:
+            _log(f"Failed to set scheduler {cls_name}: {e}")
+
 
 @dataclass
 class ImageRuntimeResult:
@@ -514,7 +553,8 @@ def _write_stage_marker(stage_file: str | None, stage: str) -> None:
 
 # ── ControlNet constants ──────────────────────────────────────────
 
-CONTROLNET_DEFAULTS: dict[str, str] = {
+# SD 1.5 ControlNet models
+CONTROLNET_SD15: dict[str, str] = {
     "canny": "lllyasviel/control_v11p_sd15_canny",
     "openpose": "lllyasviel/control_v11p_sd15_openpose",
     "depth": "lllyasviel/control_v11f1p_sd15_depth",
@@ -524,13 +564,34 @@ CONTROLNET_DEFAULTS: dict[str, str] = {
     "normal": "lllyasviel/control_v11p_sd15_normalbae",
 }
 
+# SDXL ControlNet — xinsir/controlnet-union-sdxl-1.0 supports ALL types in a single model
+CONTROLNET_SDXL_UNION = "xinsir/controlnet-union-sdxl-1.0"
+
+# Maps ControlNet type → probing_class index for the union model
+# See: https://huggingface.co/xinsir/controlnet-union-sdxl-1.0#probing-classes
+CONTROLNET_SDXL_UNION_MODES: dict[str, int] = {
+    "openpose": 0,
+    "depth": 1,
+    "canny": 3,
+    "scribble": 2,
+    "lineart": 3,  # Same as canny in union model
+    "normal": 4,
+    "segmentation": 5,
+}
+
+# Combined defaults — resolved at generation time based on model family
+CONTROLNET_DEFAULTS: dict[str, str] = CONTROLNET_SD15
+
 CONTROLNET_PREPROCESSORS: dict[str, tuple[str, str, str | None]] = {
-    "canny": ("controlnet_aux", "CannyDetector", None),
-    "openpose": ("controlnet_aux", "OpenposeDetector", "lllyasviel/ControlNet"),
-    "depth": ("controlnet_aux", "MidasDetector", "lllyasviel/ControlNet"),
-    "scribble": ("controlnet_aux", "HEDdetector", "lllyasviel/ControlNet"),
-    "lineart": ("controlnet_aux", "LineartDetector", "lllyasviel/ControlNet"),
-    "normal": ("controlnet_aux", "NormalBaeDetector", "lllyasviel/ControlNet"),
+    # (package, class_name, pretrained_repo_or_None)
+    # Use per-detector repos — the old monolithic "lllyasviel/ControlNet" repo
+    # is missing files for some detectors (scannet.pt removed → NormalBae 404).
+    "canny": ("controlnet_aux", "CannyDetector", None),  # no model needed, pure CV
+    "openpose": ("controlnet_aux", "OpenposeDetector", "lllyasviel/Annotators"),
+    "depth": ("controlnet_aux", "MidasDetector", "lllyasviel/Annotators"),
+    "scribble": ("controlnet_aux", "HEDdetector", "lllyasviel/Annotators"),
+    "lineart": ("controlnet_aux", "LineartDetector", "lllyasviel/Annotators"),
+    "normal": ("controlnet_aux", "NormalBaeDetector", "lllyasviel/Annotators"),
 }
 
 
@@ -672,66 +733,133 @@ def _openvino_worker(payload: dict[str, Any], out_q: Any) -> None:
 
 # ── ControlNet subprocess worker ──────────────────────────────────
 
+def _preprocess_control_image(cn_type: str, source_img: Any, _log: Any = None) -> Any:
+    """Preprocess a control image.  Tries controlnet_aux first, falls back to OpenCV."""
+    log = _log or (lambda msg: None)
+
+    # Try controlnet_aux first (full quality)
+    pkg, cls_name, pretrained = CONTROLNET_PREPROCESSORS.get(cn_type, (None, None, None))
+    if pkg:
+        try:
+            mod = __import__(pkg, fromlist=[cls_name])
+            detector_cls = getattr(mod, cls_name)
+            detector = detector_cls.from_pretrained(pretrained) if pretrained else detector_cls()
+            return detector(source_img)
+        except (ImportError, AttributeError, Exception) as e:
+            log(f"controlnet_aux failed for {cn_type}: {e}")
+
+    # Fallback: OpenCV-based preprocessing
+    import numpy as np
+    img_array = np.array(source_img)
+
+    if cn_type == "canny":
+        try:
+            import cv2
+            gray = cv2.cvtColor(img_array, cv2.COLOR_RGB2GRAY)
+            edges = cv2.Canny(gray, 100, 200)
+            control = np.stack([edges] * 3, axis=-1)  # 3-channel
+            from PIL import Image as _PILImage
+            return _PILImage.fromarray(control)
+        except ImportError:
+            # Even without cv2, use a simple Sobel-like edge detection via PIL
+            from PIL import Image as _PILImage, ImageFilter
+            return source_img.convert("L").filter(ImageFilter.FIND_EDGES).convert("RGB")
+
+    if cn_type == "depth":
+        try:
+            # MiDaS depth from torch hub
+            import torch
+            midas = torch.hub.load("intel-isl/MiDaS", "MiDaS_small", trust_repo=True)
+            midas.eval()
+            transform = torch.hub.load("intel-isl/MiDaS", "transforms", trust_repo=True).small_transform
+            input_batch = transform(img_array)
+            with torch.no_grad():
+                prediction = midas(input_batch).squeeze().cpu().numpy()
+            # Normalize to 0-255
+            prediction = (prediction - prediction.min()) / (prediction.max() - prediction.min() + 1e-8) * 255
+            from PIL import Image as _PILImage
+            return _PILImage.fromarray(prediction.astype(np.uint8)).convert("RGB").resize(source_img.size)
+        except Exception as e:
+            log(f"MiDaS depth fallback failed: {e}")
+            # Last resort: use grayscale as pseudo-depth
+            return source_img.convert("L").convert("RGB")
+
+    # For unsupported types without controlnet_aux, return the source as-is
+    log(f"No fallback preprocessor for {cn_type}, using source image directly")
+    return source_img
+
+
 def _controlnet_worker(payload: dict[str, Any], out_q: Any) -> None:
-    """Subprocess worker for ControlNet generation."""
+    """Subprocess worker for ControlNet generation (SD 1.5 + SDXL)."""
     started = time.time()
     stage = "bootstrap"
+    stage_file = payload.get("stage_file")
+    _write_stage_marker(stage_file, stage)
+
+    def _log(msg: str) -> None:
+        print(f"[ControlNet] {msg}", flush=True)
+
     try:
         import torch
         from PIL import Image
-        from diffusers import StableDiffusionControlNetPipeline, ControlNetModel
+        from diffusers import ControlNetModel
 
         cn_type = str(payload["controlnet_type"])
-        cn_model_id = str(payload.get("controlnet_model_id") or CONTROLNET_DEFAULTS.get(cn_type, ""))
         base_model = str(payload["base_model"])
         device = str(payload.get("device", "cpu"))
+        is_sdxl = bool(payload.get("is_sdxl", False))
 
         # 1. Load and preprocess control image
         stage = "preprocess"
+        _write_stage_marker(stage_file, stage)
         source_img = Image.open(payload["control_image_path"]).convert("RGB")
         source_img = source_img.resize((int(payload["width"]), int(payload["height"])))
-
-        # Get preprocessor
-        pkg, cls_name, pretrained = CONTROLNET_PREPROCESSORS.get(cn_type, (None, None, None))
-        if not pkg:
-            out_q.put({"ok": False, "error_code": "unknown_controlnet_type", "error_message": f"Unknown type: {cn_type}"})
-            return
-
-        mod = __import__(pkg, fromlist=[cls_name])
-        detector_cls = getattr(mod, cls_name)
-        detector = detector_cls.from_pretrained(pretrained) if pretrained else detector_cls()
-        control_image = detector(source_img)
+        control_image = _preprocess_control_image(cn_type, source_img, _log)
+        _log(f"Control image preprocessed ({cn_type})")
 
         # 2. Load ControlNet model
-        # ControlNet auxiliary models (e.g. lllyasviel/control_v11p_sd15_openpose)
-        # are separate from the base model.  Try local-first; if not cached,
-        # allow downloading (they're small, ~1-2 GB).
         stage = "load_controlnet"
+        _write_stage_marker(stage_file, stage)
+        cn_dtype = torch.float16 if device == "cuda" else torch.float32
+
+        if is_sdxl:
+            # SDXL: use union model (single model supports all types)
+            cn_model_id = str(payload.get("controlnet_model_id") or CONTROLNET_SDXL_UNION)
+            _log(f"Loading SDXL ControlNet union: {cn_model_id}")
+        else:
+            # SD 1.5: use type-specific model
+            cn_model_id = str(payload.get("controlnet_model_id") or CONTROLNET_SD15.get(cn_type, ""))
+            _log(f"Loading SD1.5 ControlNet: {cn_model_id}")
+
         try:
-            controlnet = ControlNetModel.from_pretrained(
-                cn_model_id,
-                torch_dtype=torch.float16 if device == "cuda" else torch.float32,
-                local_files_only=True,
-            )
+            controlnet = ControlNetModel.from_pretrained(cn_model_id, torch_dtype=cn_dtype, local_files_only=True)
         except (OSError, EnvironmentError):
-            # Not cached locally — download it
-            controlnet = ControlNetModel.from_pretrained(
-                cn_model_id,
-                torch_dtype=torch.float16 if device == "cuda" else torch.float32,
-                local_files_only=False,
-            )
+            controlnet = ControlNetModel.from_pretrained(cn_model_id, torch_dtype=cn_dtype, local_files_only=False)
 
         # 3. Build pipeline
         stage = "load_pipeline"
+        _write_stage_marker(stage_file, stage)
         load_kwargs: dict[str, Any] = {
             "controlnet": controlnet,
-            "torch_dtype": torch.float16 if device == "cuda" else torch.float32,
+            "torch_dtype": cn_dtype,
             "safety_checker": None,
             "local_files_only": bool(payload.get("local_files_only", False)),
             "low_cpu_mem_usage": True,
         }
-        pipe = StableDiffusionControlNetPipeline.from_pretrained(base_model, **load_kwargs)
+        if is_sdxl:
+            from diffusers import StableDiffusionXLControlNetPipeline
+            pipe = StableDiffusionXLControlNetPipeline.from_pretrained(base_model, **load_kwargs)
+        else:
+            from diffusers import StableDiffusionControlNetPipeline
+            pipe = StableDiffusionControlNetPipeline.from_pretrained(base_model, **load_kwargs)
+
         pipe.set_progress_bar_config(disable=True)
+
+        # Disable NSFW safety checker
+        if hasattr(pipe, "safety_checker") and pipe.safety_checker is not None:
+            pipe.safety_checker = None
+        if hasattr(pipe, "feature_extractor") and pipe.feature_extractor is not None:
+            pipe.feature_extractor = None
 
         # Memory optimizations
         try:
@@ -744,10 +872,7 @@ def _controlnet_worker(payload: dict[str, Any], out_q: Any) -> None:
             except Exception:
                 pass
             try:
-                if hasattr(pipe.vae, 'enable_slicing'):
-                    pipe.vae.enable_slicing()
-                else:
-                    pipe.enable_vae_slicing()
+                pipe.vae.enable_tiling()
             except Exception:
                 pass
 
@@ -760,21 +885,55 @@ def _controlnet_worker(payload: dict[str, Any], out_q: Any) -> None:
             else:
                 pipe = pipe.to("cuda")
 
+        # 3b. Apply user-selected scheduler (skip if Lightning LoRA set its own)
+        if not payload.get("use_lightning_lora"):
+            _apply_scheduler(pipe, payload.get("scheduler"), _log=_log)
+
+        # 3c. Apply user LoRAs
+        loras = payload.get("loras") or []
+        if loras:
+            _log(f"Loading {len(loras)} LoRA(s)")
+            for i, lora in enumerate(loras):
+                try:
+                    lora_id = lora.get("id", "")
+                    weight_name = lora.get("weight_name")
+                    adapter_name = lora.get("adapter_name", f"lora_{i}")
+                    pipe.load_lora_weights(lora_id, weight_name=weight_name, adapter_name=adapter_name)
+                    _log(f"  Loaded LoRA: {lora_id} (weight={lora.get('weight', 1.0)})")
+                except Exception as e:
+                    _log(f"  Failed to load LoRA {lora_id}: {e}")
+            try:
+                names = [l.get("adapter_name", f"lora_{i}") for i, l in enumerate(loras)]
+                weights = [float(l.get("weight", 1.0)) for l in loras]
+                pipe.set_adapters(names, weights)
+            except Exception as e:
+                _log(f"  Failed to set adapter weights: {e}")
+
         # 4. Generate
         stage = "inference"
+        total_steps = int(payload["steps"])
+        _write_stage_marker(stage_file, f"inference:0/{total_steps}")
         generator = torch.Generator(device=device if device == "cuda" else "cpu")
         seed = payload.get("seed")
-        generator.manual_seed(int(seed) if seed is not None else random.randint(1, 2**31 - 1))
+        actual_seed = int(seed) if seed is not None else random.randint(1, 2**31 - 1)
+        generator.manual_seed(actual_seed)
 
-        result = pipe(
-            prompt=payload["prompt"],
-            negative_prompt=payload.get("negative_prompt"),
-            image=control_image,
-            num_inference_steps=int(payload["steps"]),
-            guidance_scale=float(payload["guidance_scale"]),
-            controlnet_conditioning_scale=float(payload.get("controlnet_conditioning_scale", 1.0)),
-            generator=generator,
-        )
+        def _step_cb(pipe_obj: Any, step: int, timestep: Any, cb_kwargs: dict[str, Any]) -> dict[str, Any]:
+            _write_stage_marker(stage_file, f"inference:{step + 1}/{total_steps}")
+            return cb_kwargs
+
+        pipe_kwargs: dict[str, Any] = {
+            "prompt": payload["prompt"],
+            "negative_prompt": payload.get("negative_prompt"),
+            "image": control_image,
+            "num_inference_steps": total_steps,
+            "guidance_scale": float(payload["guidance_scale"]),
+            "controlnet_conditioning_scale": float(payload.get("controlnet_conditioning_scale", 1.0)),
+            "generator": generator,
+            "callback_on_step_end": _step_cb,
+        }
+
+        result = pipe(**pipe_kwargs)
 
         buf = io.BytesIO()
         result.images[0].save(buf, format="PNG")
@@ -805,9 +964,26 @@ def _diffusers_worker(payload: dict[str, Any], out_q: Any) -> None:
     stage_file = str(payload.get("stage_file") or "") or None
     _write_stage_marker(stage_file, stage)
 
+    # Generation log — tracks every stage with timing for post-analysis
+    _gen_log: list[dict[str, Any]] = []
+    _stage_start = started
+
     def _log(msg: str) -> None:
         elapsed = round(time.time() - started, 1)
         print(f"[IMG-WORKER {elapsed:>7.1f}s] {msg}", flush=True)
+
+    def _log_stage(name: str, **extra: Any) -> None:
+        """Record a completed stage with its duration."""
+        nonlocal _stage_start
+        now = time.time()
+        entry: dict[str, Any] = {
+            "stage": name,
+            "elapsed_sec": round(now - _stage_start, 2),
+            "wall_time_sec": round(now - started, 2),
+        }
+        entry.update(extra)
+        _gen_log.append(entry)
+        _stage_start = now
 
     _log(f"Starting worker: model={payload.get('model_id_or_path')}, "
          f"dtype={payload.get('torch_dtype')}, device={payload.get('device')}, "
@@ -829,7 +1005,7 @@ def _diffusers_worker(payload: dict[str, Any], out_q: Any) -> None:
         os.environ["NUMEXPR_NUM_THREADS"] = cpu_threads
 
         import torch
-        from diffusers import AutoPipelineForImage2Image, AutoPipelineForText2Image
+        from diffusers import AutoPipelineForImage2Image, AutoPipelineForText2Image, AutoPipelineForInpainting
 
         # Also set via the torch API (belt + suspenders).
         torch.set_num_threads(max(cpu_count, 1))
@@ -880,11 +1056,14 @@ def _diffusers_worker(payload: dict[str, Any], out_q: Any) -> None:
         stage = "pipeline_load"
         _write_stage_marker(stage_file, stage)
         _log(f"Loading pipeline: mode={mode}, local_files_only={local_files_only}")
-        if mode == "img2img":
+        if mode == "inpaint":
+            pipe = AutoPipelineForInpainting.from_pretrained(model_id_or_path, **load_kwargs)
+        elif mode == "img2img":
             pipe = AutoPipelineForImage2Image.from_pretrained(model_id_or_path, **load_kwargs)
         else:
             pipe = AutoPipelineForText2Image.from_pretrained(model_id_or_path, **load_kwargs)
         _log(f"Pipeline loaded: {type(pipe).__name__}")
+        _log_stage("pipeline_load", pipeline_class=type(pipe).__name__, dtype=dtype_name)
         pipe.set_progress_bar_config(disable=True)
         # Disable the NSFW safety checker — it produces frequent false positives
         # (especially on low-res images and simple prompts like "a sky"), returning
@@ -933,6 +1112,7 @@ def _diffusers_worker(payload: dict[str, Any], out_q: Any) -> None:
                 tiny_vae = AutoencoderTiny.from_pretrained(tiny_vae_id)
                 pipe.vae = tiny_vae
                 _log("Tiny VAE loaded successfully")
+                _log_stage("tiny_vae_load", model=tiny_vae_id)
             except ImportError:
                 _log("AutoencoderTiny not available in this diffusers version")
             except Exception as e:
@@ -946,10 +1126,39 @@ def _diffusers_worker(payload: dict[str, Any], out_q: Any) -> None:
                 ratio = float(payload.get("tome_ratio", 0.5))
                 tomesd.apply_patch(pipe, ratio=ratio)
                 _log(f"ToMe applied (ratio={ratio:.2f})")
+                _log_stage("tome_applied", ratio=ratio)
             except ImportError:
                 _log("tomesd not installed, skipping")
             except Exception as e:
                 _log(f"ToMe failed to apply: {e}")
+
+        # ── Lightning LoRA — auto-apply 4-step distillation for SDXL on weak hw ──
+        if payload.get("use_lightning_lora") and payload.get("lightning_lora_repo"):
+            try:
+                from huggingface_hub import hf_hub_download as _hf_dl
+                from diffusers import EulerDiscreteScheduler as _EulerSched
+                lora_repo = payload["lightning_lora_repo"]
+                lora_file = payload["lightning_lora_file"]
+                _log(f"Downloading Lightning LoRA from {lora_repo}/{lora_file}")
+                _write_stage_marker(stage_file, "lightning_lora_download")
+                lora_path = _hf_dl(lora_repo, lora_file)
+                _log("Applying Lightning LoRA weights + fusing")
+                _write_stage_marker(stage_file, "lightning_lora_apply")
+                pipe.load_lora_weights(lora_path)
+                pipe.fuse_lora()
+                # Lightning requires Euler scheduler with trailing timestep spacing
+                pipe.scheduler = _EulerSched.from_config(
+                    pipe.scheduler.config, timestep_spacing="trailing"
+                )
+                # Override steps and guidance for Lightning
+                payload["steps"] = payload.get("lightning_steps", 4)
+                payload["guidance_scale"] = payload.get("lightning_guidance", 0.0)
+                _log(f"Lightning LoRA applied: {payload['steps']} steps, guidance={payload['guidance_scale']}")
+                _log_stage("lightning_lora", steps=payload["steps"], guidance=payload["guidance_scale"])
+            except ImportError:
+                _log("huggingface_hub or diffusers scheduler not available for Lightning LoRA")
+            except Exception as e:
+                _log(f"Lightning LoRA failed: {e} (continuing without it)")
 
         if device == "cuda":
             if bool(payload.get("use_sequential_cpu_offload", False)):
@@ -1041,14 +1250,37 @@ def _diffusers_worker(payload: dict[str, Any], out_q: Any) -> None:
                 _deepcache_helper.set_params(cache_interval=interval)
                 _deepcache_helper.enable()
                 _log(f"DeepCache enabled (interval={interval})")
+                _log_stage("deepcache_enabled", interval=interval)
             except ImportError:
                 _log("DeepCache not installed, skipping")
             except Exception as e:
                 _log(f"DeepCache failed: {e}")
 
-        _log(f"Starting inference: {total_steps} steps, guidance={payload['guidance_scale']}")
+        _log(f"Starting inference: {total_steps} steps, guidance={payload['guidance_scale']}, mode={mode}")
         inference_start = time.time()
-        if init_image_path:
+        mask_image_path = payload.get("mask_image_path")
+        if mode == "inpaint" and init_image_path and mask_image_path:
+            Image, _ = _require_pillow()
+            init_img = Image.open(str(init_image_path)).convert("RGB")
+            mask_img = Image.open(str(mask_image_path)).convert("L")  # grayscale mask
+            # Resize mask to match init image if needed
+            if mask_img.size != init_img.size:
+                mask_img = mask_img.resize(init_img.size, Image.Resampling.LANCZOS)
+            _log(f"Inpainting: init={init_img.size}, mask={mask_img.size}")
+            result = pipe(
+                prompt=payload["prompt"],
+                image=init_img,
+                mask_image=mask_img,
+                negative_prompt=payload.get("negative_prompt"),
+                strength=float(payload.get("strength", 0.75)),
+                num_inference_steps=total_steps,
+                guidance_scale=float(payload["guidance_scale"]),
+                width=init_img.width,
+                height=init_img.height,
+                generator=generator,
+                callback_on_step_end=_step_callback,
+            )
+        elif init_image_path:
             Image, _ = _require_pillow()
             init_img = Image.open(str(init_image_path)).convert("RGB")
             _log(f"Loaded init image: {init_img.size}")
@@ -1075,6 +1307,8 @@ def _diffusers_worker(payload: dict[str, Any], out_q: Any) -> None:
             )
         inference_elapsed = round(time.time() - inference_start, 1)
         _log(f"Inference completed in {inference_elapsed}s")
+        _log_stage("inference", steps=total_steps, elapsed_sec=inference_elapsed,
+                   sec_per_step=round(inference_elapsed / max(total_steps, 1), 2))
 
         # Disable DeepCache if it was enabled
         if _deepcache_helper:
@@ -1127,9 +1361,22 @@ def _diffusers_worker(payload: dict[str, Any], out_q: Any) -> None:
             return
 
         _log("Saving image to PNG buffer")
+        _log_stage("vae_decode")
         buf = io.BytesIO()
         image.save(buf, format="PNG")
-        _log(f"Image saved ({len(buf.getvalue())} bytes). Worker done.")
+        total_elapsed = round(time.time() - started, 2)
+        _log_stage("save_png", bytes=len(buf.getvalue()))
+        _log(f"Image saved ({len(buf.getvalue())} bytes). Worker done in {total_elapsed}s.")
+
+        # Build optimization summary for the log
+        optimizations_used = []
+        if payload.get("use_tiny_vae"): optimizations_used.append(f"TAESD ({payload.get('tiny_vae_model', '?')})")
+        if payload.get("use_deepcache"): optimizations_used.append(f"DeepCache (interval={payload.get('deepcache_interval', 2)})")
+        if payload.get("use_tome"): optimizations_used.append(f"ToMe (ratio={payload.get('tome_ratio', 0.5)})")
+        if payload.get("use_lightning_lora"): optimizations_used.append("Lightning LoRA (4-step)")
+        if payload.get("use_attention_slicing"): optimizations_used.append("Attention Slicing")
+        if payload.get("use_vae_tiling"): optimizations_used.append("VAE Tiling")
+
         out_q.put({
             "ok": True,
             "image_bytes": buf.getvalue(),
@@ -1143,7 +1390,22 @@ def _diffusers_worker(payload: dict[str, Any], out_q: Any) -> None:
                 "execution_plan": payload.get("execution_plan") or {},
                 "stage": "completed",
                 "selected_args": {"width": int(payload["width"]), "height": int(payload["height"]), "steps": int(payload["steps"]), "guidance_scale": float(payload["guidance_scale"])},
-                "worker_elapsed_sec": round(time.time() - started, 3),
+                "worker_elapsed_sec": total_elapsed,
+                # Structured generation log
+                "generation_log": {
+                    "total_elapsed_sec": total_elapsed,
+                    "stages": _gen_log,
+                    "optimizations_used": optimizations_used,
+                    "model": payload.get("model_id_or_path", ""),
+                    "device": device,
+                    "dtype": dtype_name,
+                    "resolution": f"{payload.get('width')}x{payload.get('height')}",
+                    "steps": int(payload.get("steps", 0)),
+                    "guidance_scale": float(payload.get("guidance_scale", 0)),
+                    "seed": actual_seed,
+                    "scheduler": payload.get("scheduler"),
+                    "cpu_threads": cpu_count,
+                },
             },
         })
     except RuntimeError as exc:
@@ -1285,26 +1547,39 @@ class ImageGenerationService:
         is_few_step = variant in ("turbo", "lightning", "lcm", "hyper", "schnell")
         is_cpu = backend in ("diffusers_cpu", "openvino_int8", "openvino_fp32")
         low_vram = hw.gpu_vram_bytes < 4 * 1024**3
+        is_sdxl_class = family in ("sdxl", "sd3", "flux", "dit", "pixart")
+        weak_hw = is_cpu or (low_vram and hw.gpu_vram_bytes < 6 * 1024**3)
 
         opts: dict[str, Any] = {}
 
-        # TAESD: use on CPU or low-VRAM GPU (not for sdcpp)
+        # TAESD: always for CPU or low-VRAM GPU (critical — fixes VAE decode timeout)
         if backend != "sdcpp_gguf" and (is_cpu or low_vram):
             taesd_model = self._TAESD_MAP.get(family)
             if taesd_model:
                 opts["use_tiny_vae"] = True
                 opts["tiny_vae_model"] = taesd_model
 
-        # DeepCache: only for 20+ steps, not few-step models, not openvino/sdcpp
-        if (backend.startswith("diffusers") and steps >= 20
+        # DeepCache: enable for 8+ steps (not just 20+), not few-step, diffusers only
+        if (backend.startswith("diffusers") and steps >= 8
                 and not is_few_step and hw.deepcache_available):
             opts["use_deepcache"] = True
-            opts["deepcache_interval"] = 2
+            # More aggressive caching on CPU (slower per-step, so cache more)
+            opts["deepcache_interval"] = 3 if (is_cpu and steps >= 20) else 2
 
-        # ToMe: only for diffusers backends (not openvino, not sdcpp)
+        # ToMe: for diffusers backends; use moderate ratio on CPU
         if backend.startswith("diffusers") and hw.tomesd_available:
             opts["use_tome"] = True
-            opts["tome_ratio"] = 0.5
+            # Conservative ratio for SDXL (overhead can negate gains at high ratios)
+            opts["tome_ratio"] = 0.4 if is_sdxl_class else 0.5
+
+        # Lightning LoRA: auto-apply for SDXL on weak hardware when not already distilled
+        if (family == "sdxl" and not is_few_step and weak_hw
+                and backend.startswith("diffusers") and steps > 8):
+            opts["use_lightning_lora"] = True
+            opts["lightning_lora_repo"] = "ByteDance/SDXL-Lightning"
+            opts["lightning_lora_file"] = "sdxl_lightning_4step_lora.safetensors"
+            opts["lightning_steps"] = 4
+            opts["lightning_guidance"] = 0.0
 
         return opts
 
@@ -1345,6 +1620,8 @@ class ImageGenerationService:
             "refinement": "Running refinement pass…",
             "postprocess": "Post-processing (upscale)…",
             "nan_retry": "Retrying with safer precision…",
+            "lightning_lora_download": "Downloading Lightning LoRA (one-time)…",
+            "lightning_lora_apply": "Applying Lightning LoRA for fast generation…",
         }
         label = stage_labels.get(stage, stage or "Working…")
         return {
@@ -1429,6 +1706,82 @@ class ImageGenerationService:
                 if clean.lower() in gguf.stem.lower():
                     return gguf
         return None
+
+    def list_available_loras(self) -> list[dict[str, Any]]:
+        """Scan for available LoRA files in data/loras/ and HF cache."""
+        loras: list[dict[str, Any]] = []
+        seen: set[str] = set()
+
+        # 1. Scan local data/loras/ directory
+        lora_dir = Path("data/loras")
+        if lora_dir.exists():
+            for f in lora_dir.rglob("*.safetensors"):
+                lora_id = f.stem
+                if lora_id in seen:
+                    continue
+                seen.add(lora_id)
+                loras.append({
+                    "id": str(f),
+                    "name": lora_id,
+                    "source": "local",
+                    "path": str(f),
+                    "size_bytes": f.stat().st_size,
+                    "size_human": format_bytes_human(f.stat().st_size),
+                })
+
+        # 2. Scan HF cache for LoRA repos (they typically have adapter_config.json)
+        try:
+            hf_root = Path(os.getenv("HF_HOME") or (Path.home() / ".cache" / "huggingface"))
+            hub_dir = hf_root / "hub"
+            if hub_dir.exists():
+                for d in hub_dir.iterdir():
+                    if not d.is_dir() or not d.name.startswith("models--"):
+                        continue
+                    model_id = d.name.replace("models--", "").replace("--", "/", 1)
+                    if model_id in seen:
+                        continue
+                    # Check latest snapshot for adapter_config.json (LoRA marker)
+                    snapshots = d / "snapshots"
+                    if not snapshots.exists():
+                        continue
+                    try:
+                        snap_dirs = sorted([s for s in snapshots.iterdir() if s.is_dir()],
+                                           key=lambda p: p.stat().st_mtime, reverse=True)
+                    except Exception:
+                        continue
+                    if not snap_dirs:
+                        continue
+                    snap = snap_dirs[0]
+                    if (snap / "adapter_config.json").exists():
+                        seen.add(model_id)
+                        size = self._dir_size(d)
+                        loras.append({
+                            "id": model_id,
+                            "name": model_id.split("/")[-1] if "/" in model_id else model_id,
+                            "source": "huggingface_cache",
+                            "path": str(snap),
+                            "size_bytes": size,
+                            "size_human": format_bytes_human(size),
+                        })
+                    else:
+                        # Also check for standalone .safetensors LoRA files (no adapter_config)
+                        st_files = list(snap.glob("*lora*.safetensors")) + list(snap.glob("*LoRA*.safetensors"))
+                        if st_files:
+                            seen.add(model_id)
+                            size = self._dir_size(d)
+                            loras.append({
+                                "id": model_id,
+                                "name": model_id.split("/")[-1] if "/" in model_id else model_id,
+                                "source": "huggingface_cache",
+                                "path": str(snap),
+                                "size_bytes": size,
+                                "size_human": format_bytes_human(size),
+                                "weight_files": [f.name for f in st_files],
+                            })
+        except Exception:
+            pass
+
+        return loras
 
     def _scan_gguf_image_models(self) -> list[dict[str, Any]]:
         """Scan image_models_dir for GGUF SD model files."""
@@ -1561,11 +1914,10 @@ class ImageGenerationService:
         """Generate via ControlNet pipeline in an isolated subprocess."""
         try:
             from diffusers import ControlNetModel  # noqa: F401
-            import controlnet_aux  # noqa: F401
-        except ImportError as exc:
+        except ImportError:
             return ImageRuntimeResult(
                 ok=False, error_code="missing_dependency",
-                error_message=f"ControlNet requires diffusers + controlnet-aux. Missing: {exc}",
+                error_message="ControlNet requires diffusers. Run: pip install diffusers",
             )
 
         if not control_image_path or not Path(control_image_path).exists():
@@ -1577,19 +1929,37 @@ class ImageGenerationService:
         except FileNotFoundError as exc:
             return ImageRuntimeResult(ok=False, error_code="model_not_found", error_message=str(exc))
 
+        # Detect if model is SDXL
+        hints = _detect_model_hints(resolved_model) if model_source == "local" else {}
+        is_sdxl = str(hints.get("model_family", "")).lower() in ("sdxl",)
+        # Also check model_id for SDXL hints
+        if not is_sdxl and any(x in model_id.lower() for x in ("sdxl", "sd-xl", "stable-diffusion-xl")):
+            is_sdxl = True
+
         device_status = self.get_device_status()
         device = "cuda" if device_status.get("cuda_available") else "cpu"
-        # ControlNet + SD 1.5 needs ~3.5GB VRAM in fp16; use CPU offload if tight
         gpu_vram = int(device_status.get("gpu_total_vram_bytes") or 0)
         use_cpu_offload = device == "cuda" and gpu_vram > 0 and gpu_vram < 6 * 1024**3
+        # SDXL ControlNet needs more VRAM
+        if is_sdxl and device == "cuda" and gpu_vram < 8 * 1024**3:
+            use_cpu_offload = True
+
+        # SDXL uses 1024x1024, SD1.5 uses 768 max
+        max_dim = 1024 if is_sdxl else 768
 
         timeout_s = int(timeout_sec or getattr(self.config, "hf_image_job_timeout_sec", 180) or 180)
+        timeout_s = max(180, timeout_s)  # At least 3 min for ControlNet
+
+        stage_file_obj = tempfile.NamedTemporaryFile(prefix="img_cn_stage_", suffix=".txt", delete=False)
+        stage_file_path = stage_file_obj.name
+        stage_file_obj.close()
+
         ctx = mp.get_context("spawn")
         q: Any = ctx.Queue(maxsize=1)
         payload = {
             "base_model": resolved_model,
             "controlnet_type": controlnet_type,
-            "controlnet_model_id": controlnet_model_id or CONTROLNET_DEFAULTS.get(controlnet_type, ""),
+            "controlnet_model_id": controlnet_model_id,
             "control_image_path": control_image_path,
             "controlnet_conditioning_scale": controlnet_conditioning_scale,
             "prompt": prompt,
@@ -1597,14 +1967,16 @@ class ImageGenerationService:
             "seed": seed,
             "steps": steps,
             "guidance_scale": guidance_scale,
-            "width": min(width, 768),
-            "height": min(height, 768),
+            "width": min(width, max_dim),
+            "height": min(height, max_dim),
             "device": device,
             "local_files_only": model_source == "local" or not self.config.hf_image_allow_auto_download,
             "low_memory_mode": bool(self.config.hf_image_low_memory_mode),
             "use_model_cpu_offload": use_cpu_offload,
+            "is_sdxl": is_sdxl,
+            "stage_file": stage_file_path,
         }
-        self._current_stage_file = None
+        self._current_stage_file = stage_file_path
         self._current_job_started = time.time()
         self._current_job_model = model_id
         proc = ctx.Process(target=_controlnet_worker, args=(payload, q), daemon=True)
@@ -1634,7 +2006,12 @@ class ImageGenerationService:
                     pass
         logger.info("[IMG-CN] Worker finished: exitcode=%s", proc.exitcode)
 
+        self._current_stage_file = None
         self._current_job_started = 0.0
+        try:
+            Path(stage_file_path).unlink(missing_ok=True)
+        except Exception:
+            pass
 
         if data is None:
             return ImageRuntimeResult(ok=False, error_code="runtime_timeout",
@@ -1857,10 +2234,18 @@ class ImageGenerationService:
         status["available_controlnet_types"] = []
         try:
             from diffusers import ControlNetModel  # noqa: F401
-            import controlnet_aux  # noqa: F401
             status["controlnet_available"] = True
-            status["available_controlnet_types"] = list(CONTROLNET_DEFAULTS.keys())
-        except (ImportError, AttributeError, Exception):
+            # List types — canny always works (OpenCV fallback), others need controlnet_aux
+            available_types = ["canny"]  # Always available via OpenCV
+            try:
+                import controlnet_aux  # noqa: F401
+                # controlnet_aux available — all types supported
+                available_types = list(CONTROLNET_DEFAULTS.keys())
+            except (ImportError, AttributeError, Exception):
+                # controlnet_aux broken (mediapipe crash) — only canny + depth via MiDaS
+                available_types = ["canny", "depth"]
+            status["available_controlnet_types"] = available_types
+        except ImportError:
             pass
 
         # Hardware profile and available backends
@@ -2076,6 +2461,17 @@ class ImageGenerationService:
         opts = self._plan_optimizations(best["backend"], model_hints, hw, steps=steps)
         plan.update(opts)
 
+        # Model recommendation: suggest lighter alternatives for weak hardware
+        family = str(model_hints.get("model_family", "")).lower()
+        is_cpu = best["backend"] in ("diffusers_cpu", "openvino_int8", "openvino_fp32")
+        low_vram = hw.gpu_vram_bytes < 6 * 1024**3
+        if family == "sdxl" and (is_cpu or low_vram):
+            plan["model_recommendation"] = {
+                "suggested_model": "segmind/SSD-1B",
+                "reason": "50% smaller UNet (1.3B vs 3.5B params), SDXL-compatible, same LoRAs work",
+                "estimated_speedup": "1.6x faster + 50% less RAM",
+            }
+
         return plan
 
     def _apply_postprocess(self, image_bytes: bytes, *, upscale: bool, postprocess: bool) -> bytes:
@@ -2090,6 +2486,61 @@ class ImageGenerationService:
         out = io.BytesIO()
         img.save(out, format="PNG")
         return out.getvalue()
+
+    def upscale_image(
+        self,
+        *,
+        image_path: str,
+        prompt: str = "",
+        scale: int = 4,
+        timeout_sec: int | None = None,
+    ) -> ImageRuntimeResult:
+        """Upscale an image using ML super-resolution.
+
+        Tries (in order): RealESRGAN (fast, lightweight) → LANCZOS (fallback).
+        The diffusers SD x4 upscaler is skipped for now — it requires ~6GB
+        VRAM and is slow on CPU, making it impractical for weak hardware.
+        """
+        Image, _ = _require_pillow()
+        try:
+            img = Image.open(image_path).convert("RGB")
+        except Exception as exc:
+            return ImageRuntimeResult(ok=False, error_code="invalid_image", error_message=str(exc))
+
+        # Try RealESRGAN (fast, ~200MB model, GPU or CPU)
+        try:
+            from realesrgan import RealESRGANer
+            from basicsr.archs.rrdbnet_arch import RRDBNet
+            import numpy as np
+
+            model = RRDBNet(num_in_ch=3, num_out_ch=3, num_feat=64, num_block=23, num_grow_ch=32, scale=4)
+            upsampler = RealESRGANer(
+                scale=4, model_path=None, dni_weight=None, model=model, tile=0, tile_pad=10, pre_pad=0, half=False,
+            )
+            img_np = np.array(img)[:, :, ::-1]  # RGB→BGR for opencv
+            output, _ = upsampler.enhance(img_np, outscale=scale)
+            output_rgb = output[:, :, ::-1]  # BGR→RGB
+            result_img = Image.fromarray(output_rgb)
+            buf = io.BytesIO()
+            result_img.save(buf, format="PNG")
+            return ImageRuntimeResult(
+                ok=True, image_bytes=buf.getvalue(),
+                metadata={"method": "realesrgan", "scale": scale, "original_size": f"{img.width}x{img.height}", "upscaled_size": f"{result_img.width}x{result_img.height}"},
+            )
+        except ImportError:
+            logger.debug("realesrgan not installed, falling back to LANCZOS")
+        except Exception as exc:
+            logger.warning("RealESRGAN failed: %s, falling back to LANCZOS", exc)
+
+        # Fallback: LANCZOS (always available, no ML)
+        new_w, new_h = img.width * scale, img.height * scale
+        result_img = img.resize((new_w, new_h), Image.Resampling.LANCZOS)
+        buf = io.BytesIO()
+        result_img.save(buf, format="PNG")
+        return ImageRuntimeResult(
+            ok=True, image_bytes=buf.getvalue(),
+            metadata={"method": "lanczos", "scale": scale, "original_size": f"{img.width}x{img.height}", "upscaled_size": f"{new_w}x{new_h}"},
+        )
 
     def doctor(self) -> dict[str, Any]:
         status = self.get_device_status()
@@ -2452,6 +2903,12 @@ class ImageGenerationService:
                 continue
             snapshot = snapshot_dirs[0]
 
+            # Filter out metadata-only entries (model cards, config files
+            # cached when browsing — typically a few KB, not real models)
+            size = self._dir_size(d)
+            if size is not None and size < 50 * 1024 * 1024:  # < 50 MB = metadata only
+                continue
+
             # Check if this is a diffusers image model or component
             det = self._detect_local_model_type(snapshot)
             is_standalone = bool(det.get("loadable_for_images"))
@@ -2459,8 +2916,6 @@ class ImageGenerationService:
 
             if not is_standalone and not is_component:
                 continue
-
-            size = self._dir_size(d)
             entry: dict[str, Any] = {
                 "provider": "huggingface",
                 "task": det.get("supported_tasks") or (["text-to-image"] if is_standalone else ["image-conditioning"]),
@@ -2839,7 +3294,7 @@ class ImageGenerationService:
         timeout_s = int(timeout_s or getattr(self.config, "hf_image_job_timeout_sec", 180) or 180)
         ctx = mp.get_context("spawn")
         q = ctx.Queue(maxsize=1)
-        mode = "img2img" if init_image_path else "text2img"
+        mode = "inpaint" if (init_image_path and mask_image_path) else ("img2img" if init_image_path else "text2img")
         execution_plan = execution_plan or {}
         stage_file = tempfile.NamedTemporaryFile(prefix="img_stage_", suffix=".txt", delete=False)
         stage_file_path = stage_file.name
@@ -2859,6 +3314,7 @@ class ImageGenerationService:
             "width": width,
             "height": height,
             "init_image_path": init_image_path,
+            "mask_image_path": mask_image_path,
             "strength": strength,
             "device": device,
             "mode": mode,
@@ -2882,6 +3338,15 @@ class ImageGenerationService:
             "deepcache_interval": int(execution_plan.get("deepcache_interval", 2)),
             "use_tome": bool(execution_plan.get("use_tome")),
             "tome_ratio": float(execution_plan.get("tome_ratio", 0.5)),
+            # Lightning LoRA auto-application for SDXL on weak hardware
+            "use_lightning_lora": bool(execution_plan.get("use_lightning_lora")),
+            "lightning_lora_repo": execution_plan.get("lightning_lora_repo", ""),
+            "lightning_lora_file": execution_plan.get("lightning_lora_file", ""),
+            "lightning_steps": int(execution_plan.get("lightning_steps", 0)),
+            "lightning_guidance": float(execution_plan.get("lightning_guidance", 0.0)),
+            # User-selected scheduler and LoRAs
+            "scheduler": execution_plan.get("scheduler"),
+            "loras": execution_plan.get("loras") or [],
         }
         proc = ctx.Process(target=_diffusers_worker, args=(payload, q), daemon=True)
         self._current_worker_proc = proc
@@ -3154,6 +3619,7 @@ class ImageGenerationService:
         width: int = 1024,
         height: int = 1024,
         init_image_path: str | None = None,
+        mask_image_path: str | None = None,
         strength: float = 0.65,
         params_json: dict[str, Any] | None = None,
         timeout_sec: int | None = None,
@@ -3164,6 +3630,10 @@ class ImageGenerationService:
         controlnet_conditioning_scale: float = 1.0,
         # Device override: "auto" (default), "cuda", or "cpu"
         device_preference: str | None = None,
+        # Scheduler/sampler override
+        scheduler: str | None = None,
+        # LoRA list: [{"id": "path_or_repo", "weight": 0.8, "weight_name": "file.safetensors"}]
+        loras: list[dict[str, Any]] | None = None,
     ) -> ImageRuntimeResult:
         # Route 1: GGUF model → sd.cpp backend
         if self._is_gguf_model(model_id):
@@ -3246,6 +3716,11 @@ class ImageGenerationService:
             "steps": int(params.get("steps") or steps or qd["steps"]),
         }
         execution_plan = self.build_image_execution_plan(model_id, requested=requested)
+        # Inject user-selected scheduler and LoRAs into the plan
+        if scheduler:
+            execution_plan["scheduler"] = scheduler
+        if loras:
+            execution_plan["loras"] = loras
         model_hints = execution_plan.get("model_hints") or {}
 
         # Parameter resolution order: user params → execution plan → model hints → quality profile

@@ -33,6 +33,8 @@ class _ModelsPageState extends State<ModelsPage> with SingleTickerProviderStateM
   String _discoverSource = 'ollama';
   String _discoverSort = 'downloads';
   String _discoverTask = '';
+  bool _hfHasMore = false;
+  bool _hfLoadingMore = false;
 
   // HF Downloads
   List<Map<String, dynamic>> _downloads = [];
@@ -300,6 +302,7 @@ class _ModelsPageState extends State<ModelsPage> with SingleTickerProviderStateM
         final items = ((body['items'] as List<dynamic>?) ?? []).cast<Map<String, dynamic>>();
         setState(() {
           _hfDiscover = items;
+          _hfHasMore = body['has_more'] == true;
           _error = '';
         });
         await _loadDownloads();
@@ -310,6 +313,28 @@ class _ModelsPageState extends State<ModelsPage> with SingleTickerProviderStateM
     } finally {
       if (mounted) setState(() => _discoverLoading = false);
     }
+  }
+
+  Future<void> _loadMoreHfModels() async {
+    if (_hfLoadingMore || !_hfHasMore) return;
+    setState(() => _hfLoadingMore = true);
+    try {
+      final params = [
+        if (_discoverSearch.isNotEmpty) 'q=${Uri.encodeComponent(_discoverSearch)}',
+        if (_discoverTask.isNotEmpty) 'task=${Uri.encodeComponent(_discoverTask)}',
+        'sort=${Uri.encodeComponent(_discoverSort)}',
+        'limit=40',
+        'offset=${_hfDiscover.length}',
+      ].join('&');
+      final body = await widget.api.get('/models/hf/discover?$params') as Map<String, dynamic>;
+      if (!mounted) return;
+      final items = ((body['items'] as List<dynamic>?) ?? []).cast<Map<String, dynamic>>();
+      setState(() {
+        _hfDiscover.addAll(items);
+        _hfHasMore = body['has_more'] == true;
+      });
+    } catch (_) {}
+    if (mounted) setState(() => _hfLoadingMore = false);
   }
 
   Future<void> _loadDownloads() async {
@@ -907,8 +932,23 @@ class _ModelsPageState extends State<ModelsPage> with SingleTickerProviderStateM
     }
 
     return ListView.builder(
-      itemCount: _hfDiscover.length,
+      itemCount: _hfDiscover.length + (_hfHasMore ? 1 : 0),
       itemBuilder: (_, i) {
+        // "Load More" button at the end
+        if (i >= _hfDiscover.length) {
+          return Padding(
+            padding: const EdgeInsets.symmetric(vertical: 12, horizontal: 16),
+            child: Center(
+              child: _hfLoadingMore
+                  ? const SizedBox(width: 24, height: 24, child: CircularProgressIndicator(strokeWidth: 2))
+                  : OutlinedButton.icon(
+                      onPressed: _loadMoreHfModels,
+                      icon: const Icon(Icons.expand_more),
+                      label: Text('Load more models (${_hfDiscover.length} loaded)'),
+                    ),
+            ),
+          );
+        }
         final m = _hfDiscover[i];
         final modelId = (m['model_id'] ?? '').toString();
         final task = (m['task'] ?? '').toString();
@@ -943,7 +983,11 @@ class _ModelsPageState extends State<ModelsPage> with SingleTickerProviderStateM
                     child: Column(
                       crossAxisAlignment: CrossAxisAlignment.start,
                       children: [
-                        Text(modelId, style: const TextStyle(fontWeight: FontWeight.w500), maxLines: 1, overflow: TextOverflow.ellipsis),
+                        Row(children: [
+                          Expanded(child: Text(modelId, style: const TextStyle(fontWeight: FontWeight.w500), maxLines: 1, overflow: TextOverflow.ellipsis)),
+                          if (m['gated'] == true || m['gated'] == 'auto' || m['gated'] == 'manual')
+                            Tooltip(message: 'Gated model — requires access approval', child: Icon(Icons.lock, size: 14, color: colors.error)),
+                        ]),
                         const SizedBox(height: 2),
                         Row(
                           children: [
@@ -956,7 +1000,7 @@ class _ModelsPageState extends State<ModelsPage> with SingleTickerProviderStateM
                               const SizedBox(width: 4),
                             ],
                             if (sizeHuman.isNotEmpty) ...[
-                              _infoChip('~$sizeHuman', colors),
+                              _infoChip(sizeHuman, colors),
                               const SizedBox(width: 6),
                             ],
                             if (downloads != null) ...[

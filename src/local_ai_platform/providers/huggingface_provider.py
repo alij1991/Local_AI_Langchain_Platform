@@ -255,18 +255,32 @@ class HuggingFaceProvider(BaseProvider):
             response = self.chat(model, messages, settings)
             yield response.content
 
+    # Minimum cache size to consider a model "installed" (not just metadata).
+    # Real models are 100+ MB; metadata-only entries are a few KB.
+    _MIN_INSTALLED_SIZE = 50 * 1024 * 1024  # 50 MB
+
     def _scan_installed_models(self) -> list[str]:
-        """Scan HuggingFace cache to discover all locally installed models."""
+        """Scan HuggingFace cache to discover all locally installed models.
+
+        Filters out metadata-only entries (model cards, config files) that
+        are cached when browsing models but don't contain actual weights.
+        """
         installed: list[str] = []
         try:
             from huggingface_hub import scan_cache_dir
             cache_info = scan_cache_dir(cache_dir=self._hf_hub_cache())
             repos = getattr(cache_info, "repos", None) or []
             for repo in repos:
-                if getattr(repo, "repo_type", "model") == "model":
-                    repo_id = getattr(repo, "repo_id", None)
-                    if repo_id:
-                        installed.append(str(repo_id))
+                if getattr(repo, "repo_type", "model") != "model":
+                    continue
+                repo_id = getattr(repo, "repo_id", None)
+                if not repo_id:
+                    continue
+                # Filter out metadata-only entries (a few KB of config/README)
+                size = getattr(repo, "size_on_disk", 0) or 0
+                if size < self._MIN_INSTALLED_SIZE:
+                    continue
+                installed.append(str(repo_id))
         except Exception:
             # Fallback: scan filesystem directly
             try:
@@ -275,7 +289,12 @@ class HuggingFaceProvider(BaseProvider):
                     for d in hub_dir.iterdir():
                         if d.is_dir() and d.name.startswith("models--"):
                             # Skip incomplete downloads (no snapshots)
-                            if not (d / "snapshots").exists():
+                            snapshots = d / "snapshots"
+                            if not snapshots.exists():
+                                continue
+                            # Check total size — skip metadata-only
+                            total = sum(f.stat().st_size for f in snapshots.rglob("*") if f.is_file())
+                            if total < self._MIN_INSTALLED_SIZE:
                                 continue
                             # Convert "models--org--name" back to "org/name"
                             model_id = d.name.replace("models--", "").replace("--", "/", 1)

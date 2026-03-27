@@ -826,9 +826,15 @@ async def discover_hf_models(
     task: str = "",
     sort: str = "downloads",
     limit: int = 40,
+    offset: int = 0,
+    author: str = "",
 ):
-    """Search HuggingFace Hub for models with size information."""
+    """Search HuggingFace Hub for models with size information.
+
+    Supports pagination via offset parameter.
+    """
     items: list[dict[str, Any]] = []
+    total_estimated: int | None = None
     try:
         import urllib.request as urllib_req
         from urllib.parse import urlencode, quote_plus
@@ -837,18 +843,25 @@ async def discover_hf_models(
         # Note: expand[] replaces default fields, so we must list everything
         params_list: list[tuple[str, str]] = [
             ("sort", sort),
-            ("limit", str(limit)),
+            ("limit", str(min(limit, 100))),
             ("expand[]", "safetensors"),
             ("expand[]", "tags"),
             ("expand[]", "pipeline_tag"),
             ("expand[]", "likes"),
+            ("expand[]", "downloads"),
             ("expand[]", "lastModified"),
             ("expand[]", "createdAt"),
+            ("expand[]", "gated"),
+            ("expand[]", "config"),
         ]
+        if offset > 0:
+            params_list.append(("skip", str(offset)))
         if q:
             params_list.append(("search", q))
         if task:
             params_list.append(("pipeline_tag", task))
+        if author:
+            params_list.append(("author", author))
 
         api_url = f"https://huggingface.co/api/models?{urlencode(params_list, quote_via=quote_plus)}"
         req = urllib_req.Request(api_url, headers={"Accept": "application/json"})
@@ -868,11 +881,54 @@ async def discover_hf_models(
                     param_count = _sum_safetensors_params(sf)
             if not param_count:
                 param_count = _estimate_hf_params(model_id, tags)
+            # Fallback: use config._class_name to estimate params from pipeline architecture
+            if not param_count:
+                cfg = model.get("config") or {}
+                # config can be nested: {"diffusers": {"_class_name": ...}} or flat
+                class_name = ""
+                if isinstance(cfg, dict):
+                    for sub in cfg.values():
+                        if isinstance(sub, dict) and "_class_name" in sub:
+                            class_name = sub["_class_name"]
+                            break
+                    if not class_name:
+                        class_name = cfg.get("_class_name", "")
+                _pipeline_size_hints: dict[str, int] = {
+                    "StableDiffusionXLPipeline": int(6.6e9),
+                    "StableDiffusionPipeline": int(1.1e9),
+                    "StableDiffusion3Pipeline": int(8e9),
+                    "FluxPipeline": int(12e9),
+                    "PixArtAlphaPipeline": int(0.6e9),
+                    "PixArtSigmaPipeline": int(0.6e9),
+                    "KandinskyPipeline": int(3.3e9),
+                    "LatentDiffusionPipeline": int(1.1e9),
+                    "AltDiffusionPipeline": int(1.1e9),
+                    "IFPipeline": int(4.3e9),
+                    "ZImagePipeline": int(6.6e9),
+                    "HunyuanDiTPipeline": int(1.5e9),
+                    "WuerstchenPipeline": int(1.0e9),
+                    "AnimateDiffPipeline": int(1.7e9),
+                }
+                if class_name:
+                    for pname, pcount in _pipeline_size_hints.items():
+                        if pname in class_name:
+                            param_count = pcount
+                            break
 
             pipeline_tag = model.get("pipeline_tag", "") or ""
-            size_bytes = _params_to_size_bytes(param_count, pipeline_tag, model_id) if param_count else _estimate_diffusion_download_bytes(model_id)
+            if param_count:
+                size_bytes = _params_to_size_bytes(param_count, pipeline_tag, model_id)
+            else:
+                size_bytes = _estimate_diffusion_download_bytes(model_id)
+            # Last resort: if text-to-image with no size, assume SD 1.5 (~5 GB)
+            if not size_bytes and pipeline_tag in ("text-to-image", "image-to-image"):
+                size_bytes = int(5.5e9)
+                if not param_count:
+                    param_count = int(1.1e9)
+
             description = _synthesize_hf_description(model_id, pipeline_tag, tags, param_count)
             capabilities = _extract_hf_capabilities(pipeline_tag, tags)
+            gated = model.get("gated", False)
 
             items.append({
                 "id": f"huggingface:{model_id}",
@@ -890,6 +946,7 @@ async def discover_hf_models(
                 "description": description,
                 "capabilities": capabilities,
                 "installed": False,
+                "gated": gated,
                 "param_count": param_count,
                 "param_count_human": _format_param_count(param_count) if param_count else None,
                 "size_bytes": size_bytes,
@@ -898,7 +955,7 @@ async def discover_hf_models(
     except Exception as exc:
         logger.warning("HF Hub discovery failed: %s", exc)
 
-    return {"items": items}
+    return {"items": items, "offset": offset, "limit": limit, "has_more": len(items) >= limit}
 
 
 @app.get("/models/vllm/library")
@@ -1987,6 +2044,135 @@ async def get_model_hints(model_id: str):
         return {"hints": {}, "available": False, "error": str(exc)}
 
 
+@app.get("/images/loras")
+async def list_image_loras():
+    """Return available LoRA files (local + HF cache)."""
+    if not image_service:
+        return {"items": []}
+    try:
+        return {"items": image_service.list_available_loras()}
+    except Exception as exc:
+        logger.warning("Failed to list LoRAs: %s", exc)
+        return {"items": []}
+
+
+@app.post("/images/loras/download")
+async def download_lora(body: dict[str, Any]):
+    """Download a LoRA from HuggingFace Hub to data/loras/."""
+    repo_id = (body.get("repo_id") or "").strip()
+    filename = (body.get("filename") or "").strip()
+    if not repo_id:
+        raise HTTPException(400, "repo_id is required")
+    try:
+        from huggingface_hub import hf_hub_download
+        token = (config.hf_api_token or "").strip() or None
+        # Download to data/loras/ directory
+        local_dir = Path("data/loras")
+        local_dir.mkdir(parents=True, exist_ok=True)
+        if filename:
+            path = hf_hub_download(repo_id, filename, token=token, local_dir=str(local_dir))
+        else:
+            # Download the whole repo (for adapter_config.json + weights)
+            from huggingface_hub import snapshot_download
+            path = snapshot_download(repo_id, token=token, local_dir=str(local_dir / repo_id.replace("/", "--")),
+                                    allow_patterns=["*.safetensors", "*.json", "*.txt"])
+        return {"status": "ok", "path": str(path)}
+    except Exception as exc:
+        raise HTTPException(500, f"Download failed: {exc}")
+
+
+@app.get("/images/schedulers")
+async def list_schedulers():
+    """Return available scheduler/sampler options for image generation."""
+    return {"items": [
+        {"id": "auto", "name": "Auto (model default)", "description": "Uses the model's bundled scheduler"},
+        {"id": "dpmpp_2m_sde_karras", "name": "DPM++ 2M SDE Karras", "description": "Best general-purpose, high quality"},
+        {"id": "euler", "name": "Euler", "description": "Fast and simple, good for most models"},
+        {"id": "euler_a", "name": "Euler Ancestral", "description": "More variation, good for creative outputs"},
+        {"id": "ddim", "name": "DDIM", "description": "Deterministic, good for reproducibility"},
+        {"id": "lcm", "name": "LCM", "description": "For distilled models, 4-8 steps"},
+        {"id": "unipc", "name": "UniPC", "description": "Fast convergence, good at low step counts"},
+        {"id": "heun", "name": "Heun", "description": "Higher quality but 2x slower per step"},
+        {"id": "pndm", "name": "PNDM", "description": "Classic scheduler, stable results"},
+    ]}
+
+
+@app.post("/images/enhance-prompt")
+async def enhance_image_prompt(body: dict[str, Any]):
+    """Use Ollama LLM to enhance a simple description into a detailed SD prompt + negative prompt."""
+    user_prompt = (body.get("prompt") or "").strip()
+    if not user_prompt:
+        raise HTTPException(400, "prompt is required")
+    model_family = (body.get("model_family") or "sdxl").lower()
+    ollama_model = (body.get("ollama_model") or "").strip()
+
+    # Find a working Ollama model
+    if not ollama_model:
+        try:
+            from local_ai_platform.providers.ollama_provider import OllamaProvider
+            prov = OllamaProvider()
+            models = prov.list_models()
+            if models:
+                ollama_model = models[0].name
+        except Exception:
+            pass
+    if not ollama_model:
+        raise HTTPException(503, "No Ollama model available. Install one with: ollama pull llama3.2")
+
+    system_prompt = f"""You are an expert Stable Diffusion prompt engineer. Your task is to enhance the user's simple description into a detailed, effective image generation prompt.
+
+Rules:
+1. Output ONLY valid JSON with exactly two fields: "prompt" and "negative_prompt"
+2. The "prompt" should be a detailed, comma-separated list of descriptive tags and phrases
+3. Include quality boosters appropriate for {model_family}: (masterpiece, best quality, highly detailed, sharp focus, professional)
+4. Include relevant style/lighting/composition tags
+5. Keep the user's core intent — don't change what they want to generate
+6. The "negative_prompt" should list things to avoid: (worst quality, low quality, blurry, deformed, ugly, bad anatomy, watermark, text, signature)
+7. Do NOT include any explanation, just the JSON object
+8. Keep prompts under 200 words each"""
+
+    user_msg = f'Enhance this into a Stable Diffusion prompt: "{user_prompt}"'
+
+    try:
+        import urllib.request
+        req_body = json.dumps({
+            "model": ollama_model,
+            "messages": [
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": user_msg},
+            ],
+            "stream": False,
+            "format": "json",
+            "options": {"temperature": 0.7, "num_predict": 512},
+        }).encode()
+        req = urllib.request.Request(
+            "http://localhost:11434/api/chat",
+            data=req_body,
+            headers={"Content-Type": "application/json"},
+        )
+        with urllib.request.urlopen(req, timeout=30) as resp:
+            data = json.loads(resp.read().decode())
+        content = data.get("message", {}).get("content", "")
+        # Parse the JSON response
+        result = json.loads(content)
+        return {
+            "prompt": result.get("prompt", user_prompt),
+            "negative_prompt": result.get("negative_prompt", ""),
+            "original_prompt": user_prompt,
+            "ollama_model": ollama_model,
+        }
+    except json.JSONDecodeError:
+        # LLM didn't return valid JSON — try to extract from text
+        return {
+            "prompt": user_prompt,
+            "negative_prompt": "worst quality, low quality, blurry, deformed, watermark, text",
+            "original_prompt": user_prompt,
+            "error": "LLM response was not valid JSON, using original prompt",
+        }
+    except Exception as exc:
+        raise HTTPException(500, f"Prompt enhancement failed: {exc}")
+
+
 @app.post("/images/generate/cancel")
 async def cancel_image_generation():
     """Cancel the current image generation by killing the worker process."""
@@ -2008,6 +2194,17 @@ def generate_image(body: dict[str, Any]):
     if not model_id or not prompt:
         raise HTTPException(400, "model_id and prompt are required")
 
+    # Decode mask_image_base64 if provided (for inpainting)
+    mask_image_path = body.get("mask_image_path")
+    if not mask_image_path and body.get("mask_image_base64"):
+        import base64
+        mask_bytes = base64.b64decode(body["mask_image_base64"])
+        mask_tmp = Path("data/images/masks")
+        mask_tmp.mkdir(parents=True, exist_ok=True)
+        mask_file = mask_tmp / f"{uuid.uuid4()}.png"
+        mask_file.write_bytes(mask_bytes)
+        mask_image_path = str(mask_file)
+
     # This is a sync def, so FastAPI runs it in a threadpool worker
     # automatically, keeping the event loop free for progress/cancel requests.
     result = image_service.generate(
@@ -2020,6 +2217,7 @@ def generate_image(body: dict[str, Any]):
         width=int(body.get("width", 1024)),
         height=int(body.get("height", 1024)),
         init_image_path=body.get("init_image_path"),
+        mask_image_path=mask_image_path,
         strength=float(body.get("strength", 0.65)),
         params_json=body.get("params_json"),
         timeout_sec=body.get("timeout_sec"),
@@ -2028,6 +2226,8 @@ def generate_image(body: dict[str, Any]):
         controlnet_model_id=body.get("controlnet_model_id"),
         controlnet_conditioning_scale=float(body.get("controlnet_conditioning_scale", 1.0)),
         device_preference=body.get("device_preference"),
+        scheduler=body.get("scheduler"),
+        loras=body.get("loras"),
     )
 
     if not result.ok:
@@ -2039,6 +2239,9 @@ def generate_image(body: dict[str, Any]):
             }
         })
 
+    # Extract seed from result metadata
+    seed_used = (result.metadata or {}).get("seed")
+
     # Save image to session if provided
     session_id = body.get("session_id")
     if session_id and result.image_bytes:
@@ -2047,18 +2250,26 @@ def generate_image(body: dict[str, Any]):
             out_path = image_output_path(session_id, str(uuid.uuid4()))
             out_path.parent.mkdir(parents=True, exist_ok=True)
             out_path.write_bytes(result.image_bytes)
+            # Persist seed, scheduler, and other metadata alongside the image
+            save_params = dict(body.get("params_json") or {})
+            save_params["seed_used"] = seed_used
+            if body.get("scheduler"):
+                save_params["scheduler"] = body["scheduler"]
+            gen_log = (result.metadata or {}).get("generation_log")
+            if gen_log:
+                save_params["generation_log"] = gen_log
             add_image(
                 session_id=session_id,
                 model_id=model_id,
                 prompt=prompt,
                 file_path=str(out_path),
                 negative_prompt=body.get("negative_prompt"),
-                params=body.get("params_json"),
+                params=save_params,
             )
         except Exception as exc:
             logger.warning("Failed to save generated image: %s", exc)
 
-    return {"status": "ok", "metadata": result.metadata}
+    return {"status": "ok", "metadata": result.metadata, "seed_used": seed_used}
 
 
 @app.post("/images/edit")
@@ -2098,6 +2309,7 @@ def edit_image(body: dict[str, Any]):
         strength=float(body.get("strength", 0.65)),
         params_json=body.get("params_json"),
         timeout_sec=body.get("timeout_sec"),
+        device_preference=body.get("device_preference"),
     )
 
     if not result.ok:
@@ -2139,6 +2351,58 @@ def edit_image(body: dict[str, Any]):
     }
 
 
+@app.post("/images/upscale")
+def upscale_image_endpoint(body: dict[str, Any]):
+    """Upscale an image using ML super-resolution (RealESRGAN) or LANCZOS fallback."""
+    if not image_service:
+        raise HTTPException(503, "Image service not initialized")
+
+    image_id = body.get("image_id", "")
+    session_id = body.get("session_id", "")
+    prompt = body.get("prompt", "high quality, detailed")
+    scale = int(body.get("scale", 4))
+
+    # Resolve image path from ID
+    image_path = ""
+    if image_id:
+        try:
+            from local_ai_platform.repositories.images_repo import get_image
+            record = get_image(image_id)
+            if record and record.get("file_path"):
+                image_path = record["file_path"]
+        except Exception:
+            pass
+    if not image_path:
+        image_path = body.get("image_path", "")
+    if not image_path:
+        raise HTTPException(400, "image_id or image_path required")
+
+    result = image_service.upscale_image(image_path=image_path, prompt=prompt, scale=scale)
+    if not result.ok:
+        raise HTTPException(500, {"error": {"code": result.error_code, "message": result.error_message}})
+
+    # Save upscaled image to session
+    if session_id and result.image_bytes:
+        try:
+            from local_ai_platform.repositories.images_repo import add_image, image_output_path
+            out_path = image_output_path(session_id, str(uuid.uuid4()))
+            out_path.parent.mkdir(parents=True, exist_ok=True)
+            out_path.write_bytes(result.image_bytes)
+            add_image(
+                session_id=session_id,
+                model_id="upscale",
+                prompt=f"Upscale {scale}x",
+                file_path=str(out_path),
+                parent_image_id=image_id or None,
+                operation="upscale",
+                params={"scale": scale, "method": (result.metadata or {}).get("method", "unknown")},
+            )
+        except Exception as exc:
+            logger.warning("Failed to save upscaled image: %s", exc)
+
+    return {"status": "ok", "metadata": result.metadata}
+
+
 @app.post("/images/preprocess")
 async def preprocess_control_image_endpoint(body: dict[str, Any]):
     """Preview a ControlNet preprocessor result."""
@@ -2164,19 +2428,28 @@ async def preprocess_control_image_endpoint(body: dict[str, Any]):
 @app.get("/images/controlnet/types")
 async def list_controlnet_types():
     """Available ControlNet types for the Flutter UI dropdown."""
-    types = [
-        {"type": "canny", "name": "Canny Edge Detection", "description": "Preserves edges and outlines."},
-        {"type": "openpose", "name": "OpenPose", "description": "Detects body poses and hand positions."},
-        {"type": "depth", "name": "Depth Map", "description": "Maintains 3D spatial layout."},
-        {"type": "scribble", "name": "Scribble", "description": "Interprets rough sketches."},
-        {"type": "lineart", "name": "Line Art", "description": "Renders clean line drawings."},
-        {"type": "segmentation", "name": "Segmentation", "description": "Object region composition."},
-        {"type": "normal", "name": "Normal Map", "description": "Surface lighting control."},
+    all_types = [
+        {"type": "canny", "name": "Canny Edge Detection", "description": "Preserves edges and outlines. Works without controlnet_aux."},
+        {"type": "depth", "name": "Depth Map", "description": "Maintains 3D spatial layout. Falls back to MiDaS if controlnet_aux unavailable."},
+        {"type": "openpose", "name": "OpenPose", "description": "Detects body poses and hand positions. Requires controlnet_aux."},
+        {"type": "scribble", "name": "Scribble", "description": "Interprets rough sketches. Requires controlnet_aux."},
+        {"type": "lineart", "name": "Line Art", "description": "Renders clean line drawings. Requires controlnet_aux."},
+        {"type": "segmentation", "name": "Segmentation", "description": "Object region composition. Requires controlnet_aux."},
+        {"type": "normal", "name": "Normal Map", "description": "Surface lighting control. Requires controlnet_aux."},
     ]
     available = False
+    available_type_names: list[str] = []
     if image_service:
         status = image_service.get_device_status()
         available = bool(status.get("controlnet_available"))
+        available_type_names = status.get("available_controlnet_types", [])
+
+    # Only return types that actually work on this system
+    if available_type_names:
+        types = [t for t in all_types if t["type"] in available_type_names]
+    else:
+        types = all_types if available else []
+
     return {"items": types, "available": available}
 
 
