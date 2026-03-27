@@ -62,7 +62,10 @@ class HuggingFaceProvider(BaseProvider):
         pipe = None
         last_error = None
 
-        model_kwargs: dict[str, Any] = {"torch_dtype": "auto"}
+        model_kwargs: dict[str, Any] = {
+            "torch_dtype": "auto",
+            "device_map": self.device,
+        }
         if self.low_memory:
             model_kwargs["low_cpu_mem_usage"] = True
 
@@ -72,7 +75,6 @@ class HuggingFaceProvider(BaseProvider):
                     task=task,
                     model=model,
                     tokenizer=tokenizer,
-                    device_map=self.device,
                     model_kwargs=model_kwargs,
                 )
                 break

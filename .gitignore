@@ -21,3 +21,8 @@ flutter_client/windows/flutter/generated_plugin_registrant.h
 /data/images/
 /data/uploads/
 /data/
+
+# Secrets / tokens
+.env
+*.env.local
+hf_token*

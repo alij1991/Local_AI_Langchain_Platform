@@ -66,6 +66,10 @@ class AppConfig:
     image_enable_tiny_vae: bool = True         # Use TAESD when beneficial (CPU/low-VRAM)
     image_enable_deepcache: bool = True        # Use DeepCache on 20+ step models
     image_enable_tome: bool = True             # Use Token Merging on diffusers backends
+    image_enable_quantization: bool = True     # Use bitsandbytes NF4 quantization for large models
+    image_quantization_threshold_gb: float = 8.0  # Quantize models estimated > this size when VRAM is tight
+    image_enable_channels_last: bool = True    # Use channels-last memory format (5-15% speedup on GPU)
+    image_enable_torch_compile: bool = True    # Enable torch.compile when available (incl. Windows w/ triton-windows)
 
     # ── Memory / vector store ─────────────────────────────────────
     vector_store_dir: str = "./data/vectorstore"
@@ -127,6 +131,10 @@ def load_config() -> AppConfig:
         image_enable_tiny_vae=_as_bool(os.getenv("IMAGE_ENABLE_TINY_VAE"), default=True),
         image_enable_deepcache=_as_bool(os.getenv("IMAGE_ENABLE_DEEPCACHE"), default=True),
         image_enable_tome=_as_bool(os.getenv("IMAGE_ENABLE_TOME"), default=True),
+        image_enable_quantization=_as_bool(os.getenv("IMAGE_ENABLE_QUANTIZATION"), default=True),
+        image_quantization_threshold_gb=float(os.getenv("IMAGE_QUANTIZATION_THRESHOLD_GB", "8.0")),
+        image_enable_channels_last=_as_bool(os.getenv("IMAGE_ENABLE_CHANNELS_LAST"), default=True),
+        image_enable_torch_compile=_as_bool(os.getenv("IMAGE_ENABLE_TORCH_COMPILE"), default=True),
 
         # Memory
         vector_store_dir=os.getenv("VECTOR_STORE_DIR", "./data/vectorstore"),

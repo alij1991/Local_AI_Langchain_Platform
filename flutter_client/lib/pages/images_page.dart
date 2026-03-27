@@ -16,7 +16,7 @@ class ImagesPage extends StatefulWidget {
   State<ImagesPage> createState() => _ImagesPageState();
 }
 
-class _ImagesPageState extends State<ImagesPage> {
+class _ImagesPageState extends State<ImagesPage> with TickerProviderStateMixin {
   List<Map<String, dynamic>> _sessions = [];
   List<Map<String, dynamic>> _models = [];
   Map<String, dynamic>? _activeSession;
@@ -31,7 +31,6 @@ class _ImagesPageState extends State<ImagesPage> {
   String _errorCode = '';
   String _errorMessage = '';
   String _errorDetails = '';
-  bool _showHelp = true;
   bool _lowMemoryMode = false;
   Map<String, dynamic> _modelFit = {};
   String _qualityProfile = 'balanced';
@@ -49,7 +48,9 @@ class _ImagesPageState extends State<ImagesPage> {
 
   // Device preference: "auto", "cuda", "cpu"
   String _devicePreference = 'auto';
-  // Model hints from server
+  // Step previews
+  bool _enableStepPreviews = false;
+  // Model hints
   Map<String, dynamic> _modelHints = {};
 
   // ControlNet state
@@ -69,12 +70,11 @@ class _ImagesPageState extends State<ImagesPage> {
   final TextEditingController _seedController = TextEditingController();
 
   // Scheduler/sampler
-  String? _scheduler; // null = auto/model default
+  String? _scheduler;
 
   // LoRA
   List<Map<String, dynamic>> _availableLoras = [];
   List<Map<String, dynamic>> _selectedLoras = [];
-  bool _showLoras = false;
   bool _loadingLoras = false;
   final TextEditingController _loraDownloadId = TextEditingController();
 
@@ -85,13 +85,20 @@ class _ImagesPageState extends State<ImagesPage> {
 
   // Prompt enhancer
   bool _enhancingPrompt = false;
+  String? _enhancerModel; // null = auto (server picks smallest)
+  int _enhancerTimeout = 120;
+  List<String> _ollamaModels = [];
 
   // Edit settings
   double _editStrength = 0.65;
 
+  // Tab controller for right panel
+  late TabController _rightTabController;
+
   @override
   void initState() {
     super.initState();
+    _rightTabController = TabController(length: 3, vsync: this);
     _load();
   }
 
@@ -103,6 +110,7 @@ class _ImagesPageState extends State<ImagesPage> {
     _negativePrompt.dispose();
     _seedController.dispose();
     _loraDownloadId.dispose();
+    _rightTabController.dispose();
     super.dispose();
   }
 
@@ -159,24 +167,40 @@ class _ImagesPageState extends State<ImagesPage> {
   }
 
   Future<void> _enhancePrompt() async {
+    debugPrint('[enhance] _enhancePrompt called, text="${_prompt.text.trim()}", enhancing=$_enhancingPrompt');
     if (_prompt.text.trim().isEmpty || _enhancingPrompt) return;
     final original = _prompt.text.trim();
     _safeSetState(() => _enhancingPrompt = true);
     try {
-      // Detect model family from execution plan hints
       final hints = (_runtime['execution_plan'] as Map<String, dynamic>?)?['model_hints'] as Map<String, dynamic>?;
       final family = (hints?['model_family'] ?? 'sdxl').toString();
 
+      debugPrint('[enhance] POSTing to /images/enhance-prompt with family=$family, model=$_enhancerModel, timeout=$_enhancerTimeout');
       final data = await widget.api.post('/images/enhance-prompt', {
         'prompt': original,
         'model_family': family,
+        if (_enhancerModel != null) 'ollama_model': _enhancerModel,
+        'timeout_sec': _enhancerTimeout,
       }) as Map<String, dynamic>;
 
+      debugPrint('[enhance] Response: ${data.keys.toList()}');
       if (!mounted) return;
       final enhanced = (data['prompt'] ?? original).toString();
       final negPrompt = (data['negative_prompt'] ?? '').toString();
+      debugPrint('[enhance] enhanced="${enhanced.substring(0, enhanced.length.clamp(0, 60))}...", negPrompt="${negPrompt.substring(0, negPrompt.length.clamp(0, 40))}..."');
 
-      // Show confirmation dialog with before/after
+      if (enhanced == original && (data['error'] != null)) {
+        if (mounted) {
+          ScaffoldMessenger.of(context).showSnackBar(
+            SnackBar(
+              content: Text('Enhancement returned original: ${data['error']}'),
+              duration: const Duration(seconds: 4),
+            ),
+          );
+        }
+        return;
+      }
+
       final accepted = await showDialog<bool>(
         context: context,
         builder: (ctx) => AlertDialog(
@@ -223,8 +247,21 @@ class _ImagesPageState extends State<ImagesPage> {
       }
     } catch (e) {
       if (mounted) {
+        final errMsg = e.toString();
+        String displayMsg = 'Prompt enhancement failed';
+        if (errMsg.contains('503') || errMsg.contains('No Ollama')) {
+          displayMsg = 'Ollama is not running. Start it with: ollama serve';
+        } else if (errMsg.contains('Connection refused') || errMsg.contains('URLError')) {
+          displayMsg = 'Cannot connect to Ollama at localhost:11434. Is it running?';
+        } else {
+          displayMsg = 'Enhancement failed: $errMsg';
+        }
         ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(content: Text('Prompt enhancement failed: $e'), duration: const Duration(seconds: 3)),
+          SnackBar(
+            content: Text(displayMsg),
+            duration: const Duration(seconds: 5),
+            action: SnackBarAction(label: 'Dismiss', onPressed: () {}),
+          ),
         );
       }
     } finally {
@@ -244,6 +281,17 @@ class _ImagesPageState extends State<ImagesPage> {
     _safeSetState(() => _loadingLoras = false);
   }
 
+  Future<void> _fetchOllamaModels() async {
+    try {
+      final data = await widget.api.get('/models/ollama') as Map<String, dynamic>;
+      if (!mounted) return;
+      final items = (data['models'] as List<dynamic>?) ?? [];
+      _safeSetState(() {
+        _ollamaModels = items.map((m) => (m['name'] ?? m['model'] ?? '').toString()).where((n) => n.isNotEmpty).toList();
+      });
+    } catch (_) {}
+  }
+
   Future<void> _downloadLora(String repoId, {String? filename}) async {
     _safeSetState(() => _loadingLoras = true);
     try {
@@ -255,7 +303,7 @@ class _ImagesPageState extends State<ImagesPage> {
       ScaffoldMessenger.of(context).showSnackBar(
         SnackBar(content: Text('LoRA downloaded: $repoId'), duration: const Duration(seconds: 2)),
       );
-      await _fetchLoras(); // Refresh list
+      await _fetchLoras();
     } catch (e) {
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
@@ -288,14 +336,12 @@ class _ImagesPageState extends State<ImagesPage> {
     final sessions = await widget.api.get('/images/sessions') as Map<String, dynamic>;
     if (!mounted || requestId != _loadVersion) return;
     final models = await widget.api.get('/images/models${refreshModels ? '?refresh=true' : ''}') as Map<String, dynamic>;
-    debugPrint("models : $models");
     if (!mounted || requestId != _loadVersion) return;
     final runtime = await widget.api.get('/images/runtime${_selectedModel != null ? '?model_id=${Uri.encodeComponent(_selectedModel!)}' : ''}') as Map<String, dynamic>;
     if (!mounted || requestId != _loadVersion) return;
     setState(() {
       _sessions = ((sessions['items'] as List<dynamic>?) ?? []).cast<Map<String, dynamic>>();
       _models = ((models['items'] as List<dynamic>?) ?? []).cast<Map<String, dynamic>>();
-      // Prefer standalone models for auto-selection
       final standaloneModels = _models.where((m) => m['loadable_for_images'] == true).toList();
       if (_selectedModel == null || !_models.any((m) => m['model_id'].toString() == _selectedModel)) {
         _selectedModel = standaloneModels.isNotEmpty
@@ -307,10 +353,9 @@ class _ImagesPageState extends State<ImagesPage> {
       if (_models.isEmpty) {
         _status = 'No image models detected. Download a diffusers model via HuggingFace and click Refresh.';
       } else if (standaloneModels.isEmpty) {
-        _status = 'Found ${_models.length} image component(s) but no standalone pipeline. Download a full diffusers pipeline (e.g. stabilityai/stable-diffusion-xl-base-1.0).';
+        _status = 'Found ${_models.length} image component(s) but no standalone pipeline.';
       }
     });
-    // Load ControlNet types
     try {
       final cnTypes = await widget.api.get('/images/controlnet/types') as Map<String, dynamic>;
       if (mounted && requestId == _loadVersion) {
@@ -323,13 +368,14 @@ class _ImagesPageState extends State<ImagesPage> {
       await _loadModelFit();
       if (!mounted || requestId != _loadVersion) return;
     }
+    _fetchOllamaModels();
     if (_activeSession == null && _sessions.isNotEmpty) {
       await _openSession(_sessions.first['id'].toString());
     }
   }
 
   Future<void> _refreshModels() async {
-    _safeSetState(() => _status = 'Refreshing models…');
+    _safeSetState(() => _status = 'Refreshing models...');
     await widget.api.post('/images/models/refresh', {});
     if (!mounted) return;
     await _load(refreshModels: true);
@@ -385,10 +431,9 @@ class _ImagesPageState extends State<ImagesPage> {
     });
   }
 
-
   Future<void> _validateModel() async {
     if (_selectedModel == null) return;
-    _safeSetState(() => _status = 'Validating model…');
+    _safeSetState(() => _status = 'Validating model...');
     try {
       final body = await widget.api.post('/images/validate-model', {'model_id': _selectedModel}) as Map<String, dynamic>;
       if (!mounted) return;
@@ -409,7 +454,6 @@ class _ImagesPageState extends State<ImagesPage> {
     }
   }
 
-
   Future<void> _loadModelFit() async {
     if (_selectedModel == null) return;
     try {
@@ -417,7 +461,6 @@ class _ImagesPageState extends State<ImagesPage> {
       if (!mounted) return;
       setState(() => _modelFit = body);
     } catch (_) {}
-    // Also fetch model hints for parameter suggestions
     _loadModelHints();
   }
 
@@ -442,11 +485,8 @@ class _ImagesPageState extends State<ImagesPage> {
         _guidance = (rec['recommended_guidance_scale'] as num?)?.toDouble() ?? _guidance;
         final family = rec['model_family'] as String? ?? '';
         final variant = rec['model_variant'] as String? ?? '';
-        final notes = (rec['notes'] as List<dynamic>?)?.cast<String>() ?? [];
-        _status = 'Applied recommended settings for $family${variant.isNotEmpty ? ' ($variant)' : ''}: '
-            '${rec['recommended_width']}x${rec['recommended_height']}, '
-            '${rec['recommended_steps']} steps, guidance ${(rec['recommended_guidance_scale'] as num?)?.toStringAsFixed(1) ?? '7.0'}'
-            '${notes.isNotEmpty ? '\n${notes.first}' : ''}';
+        _status = 'Applied: ${_width}x$_height, $_steps steps, guidance ${_guidance.toStringAsFixed(1)}'
+            '${family.isNotEmpty ? ' ($family${variant.isNotEmpty ? '/$variant' : ''})' : ''}';
       });
     } catch (e) {
       _captureError(e);
@@ -472,7 +512,7 @@ class _ImagesPageState extends State<ImagesPage> {
     if (_isSelectedModelComponent) return;
     _safeSetState(() {
       _busy = true;
-      _status = _runtime['effective_device'] == 'cuda' ? 'Loading model on GPU…' : 'Loading model on CPU…';
+      _status = _runtime['effective_device'] == 'cuda' ? 'Loading model on GPU...' : 'Loading model on CPU...';
       _errorCode = '';
       _errorMessage = '';
       _errorDetails = '';
@@ -480,7 +520,7 @@ class _ImagesPageState extends State<ImagesPage> {
     });
     _startProgressPolling();
     try {
-      _safeSetState(() => _status = 'Submitting generation request…');
+      _safeSetState(() => _status = 'Submitting generation request...');
       final payload = {
         'session_id': _activeSession!['id'],
         'model_id': _selectedModel,
@@ -499,6 +539,7 @@ class _ImagesPageState extends State<ImagesPage> {
           'enable_refine': _enableRefine,
           'enable_upscale': _enableUpscale,
           'enable_postprocess': _enablePostprocess,
+          'enable_step_previews': _enableStepPreviews,
           'device_preference': _devicePreference,
           'width': _lowMemoryMode ? 512 : _width,
           'height': _lowMemoryMode ? 512 : _height,
@@ -519,10 +560,7 @@ class _ImagesPageState extends State<ImagesPage> {
         if (seedUsed != null) _lastSeedUsed = seedUsed is int ? seedUsed : int.tryParse(seedUsed.toString());
       }
       if (!mounted) return;
-      if (_enableRefine) _safeSetState(() => _status = 'Refining image…');
-      if (_enableUpscale) _safeSetState(() => _status = 'Upscaling image…');
-      if (_enablePostprocess) _safeSetState(() => _status = 'Postprocessing image…');
-      _safeSetState(() => _status = 'Saving image…');
+      _safeSetState(() => _status = 'Saving image...');
       await _openSession(_activeSession!['id'].toString());
       if (!mounted) return;
       _prompt.clear();
@@ -543,7 +581,7 @@ class _ImagesPageState extends State<ImagesPage> {
     if (_isSelectedModelComponent) return;
     _safeSetState(() {
       _busy = true;
-      _status = 'Applying edit…';
+      _status = 'Applying edit...';
       _errorCode = '';
       _errorMessage = '';
       _errorDetails = '';
@@ -584,12 +622,11 @@ class _ImagesPageState extends State<ImagesPage> {
     }
   }
 
-
   Future<void> _upscaleImage() async {
     if (_activeSession == null || _selectedImageId == null || _busy) return;
     _safeSetState(() {
       _busy = true;
-      _status = 'Upscaling image (4x)…';
+      _status = 'Upscaling image (4x)...';
       _progressPercent = 0.0;
     });
     try {
@@ -614,12 +651,8 @@ class _ImagesPageState extends State<ImagesPage> {
 
   Future<void> _inpaint() async {
     if (_activeSession == null || _selectedModel == null || _selectedImageId == null || _prompt.text.trim().isEmpty || _busy) return;
-
-    // Render mask strokes to a PNG image
     final selectedUrl = _imageUrlFor(_selectedImageId);
     if (selectedUrl == null || _maskStrokes.isEmpty) return;
-
-    // Get the image we're inpainting on to match its dimensions
     final images = (_activeSession!['images'] as List<dynamic>?) ?? [];
     final selected = images.cast<Map<String, dynamic>>().firstWhere((i) => i['id'] == _selectedImageId, orElse: () => <String, dynamic>{});
     final filePath = (selected['file_path'] ?? '').toString();
@@ -627,18 +660,16 @@ class _ImagesPageState extends State<ImagesPage> {
 
     _safeSetState(() {
       _busy = true;
-      _status = 'Inpainting…';
+      _status = 'Inpainting...';
       _progressPercent = 0.0;
     });
     _startProgressPolling();
     try {
-      // Encode mask strokes as base64 PNG
       final maskBase64 = await _renderMaskToBase64();
       if (maskBase64 == null) {
         _safeSetState(() => _status = 'Failed to render mask');
         return;
       }
-
       await widget.api.post('/images/generate', {
         'session_id': _activeSession!['id'],
         'model_id': _selectedModel,
@@ -676,20 +707,14 @@ class _ImagesPageState extends State<ImagesPage> {
   }
 
   Future<String?> _renderMaskToBase64() async {
-    // Render mask strokes to a white-on-black PNG using dart:ui PictureRecorder
     final recorder = ui.PictureRecorder();
     final canvas = Canvas(recorder, Rect.fromLTWH(0, 0, _width.toDouble(), _height.toDouble()));
-
-    // Black background (keep area)
     canvas.drawRect(Rect.fromLTWH(0, 0, _width.toDouble(), _height.toDouble()), Paint()..color = const Color(0xFF000000));
-
-    // White strokes (inpaint area)
     final paint = Paint()
       ..color = const Color(0xFFFFFFFF)
       ..strokeWidth = _brushSize
       ..strokeCap = StrokeCap.round
       ..style = PaintingStyle.stroke;
-
     for (int i = 0; i < _maskStrokes.length - 1; i++) {
       final p1 = _maskStrokes[i];
       final p2 = _maskStrokes[i + 1];
@@ -697,13 +722,11 @@ class _ImagesPageState extends State<ImagesPage> {
         canvas.drawLine(p1, p2, paint);
       }
     }
-    // Draw dots for single taps
     for (final p in _maskStrokes) {
       if (p != null) {
         canvas.drawCircle(p, _brushSize / 2, Paint()..color = const Color(0xFFFFFFFF));
       }
     }
-
     final picture = recorder.endRecording();
     final image = await picture.toImage(_width, _height);
     final byteData = await image.toByteData(format: ui.ImageByteFormat.png);
@@ -725,1001 +748,1361 @@ class _ImagesPageState extends State<ImagesPage> {
 
   String _runtimeChipText() {
     final plan = (_runtime['runtime_strategy'] ?? '').toString();
-    if (plan == 'cuda') return 'GPU mode';
-    if (plan == 'cuda_with_cpu_offload') return 'GPU + CPU offload';
-    if (plan == 'cpu_low_memory') return 'CPU low-memory mode';
+    if (plan == 'cuda') return 'GPU';
+    if (plan == 'cuda_with_cpu_offload') return 'GPU+CPU';
+    if (plan == 'cpu_low_memory') return 'CPU';
     final cuda = _runtime['cuda_available'] == true;
     final gpuName = _runtime['gpu_name']?.toString();
     if (cuda) {
       final vram = _runtime['gpu_total_vram_human']?.toString();
-      if (gpuName == null || gpuName.isEmpty) return 'GPU available';
-      return vram == null || vram.isEmpty ? 'GPU: $gpuName' : 'GPU: $gpuName ($vram)';
+      if (gpuName == null || gpuName.isEmpty) return 'GPU';
+      return vram == null || vram.isEmpty ? gpuName : '$gpuName ($vram)';
     }
-    return 'CPU mode';
+    return 'CPU';
   }
+
+  // ─────────────────────────────────────────────
+  // BUILD
+  // ─────────────────────────────────────────────
 
   @override
   Widget build(BuildContext context) {
     final images = ((_activeSession?['images'] as List<dynamic>?) ?? []).cast<Map<String, dynamic>>();
     final selected = images.where((i) => i['id'].toString() == _selectedImageId).cast<Map<String, dynamic>?>().firstOrNull;
     final selectedUrl = _imageUrlFor(_selectedImageId);
-
-    final colors = Theme.of(context).colorScheme;
+    final cs = Theme.of(context).colorScheme;
 
     return Column(
       children: [
-        if (_busy) const LinearProgressIndicator(),
-        Padding(
-          padding: const EdgeInsets.only(bottom: 8),
-          child: Row(
-            children: [
-              Container(
-                padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
-                decoration: BoxDecoration(
-                  color: _runtime['cuda_available'] == true ? colors.primaryContainer : colors.surfaceContainerHighest,
-                  borderRadius: BorderRadius.circular(16),
-                ),
-                child: Row(
-                  mainAxisSize: MainAxisSize.min,
-                  children: [
-                    Icon(
-                      _runtime['cuda_available'] == true ? Icons.memory : Icons.computer,
-                      size: 14,
-                      color: _runtime['cuda_available'] == true ? colors.onPrimaryContainer : colors.onSurfaceVariant,
-                    ),
-                    const SizedBox(width: 4),
-                    Text(_runtimeChipText(), style: TextStyle(fontSize: 12, color: _runtime['cuda_available'] == true ? colors.onPrimaryContainer : colors.onSurfaceVariant)),
-                  ],
-                ),
-              ),
-              const SizedBox(width: 8),
-              if (_status.isNotEmpty)
-                Expanded(
-                  child: Column(
-                    mainAxisSize: MainAxisSize.min,
-                    crossAxisAlignment: CrossAxisAlignment.start,
-                    children: [
-                      Text(_status, style: TextStyle(fontSize: 13, color: colors.onSurfaceVariant), maxLines: 1, overflow: TextOverflow.ellipsis),
-                      if (_busy && _progressPercent > 0) ...[
-                        const SizedBox(height: 3),
-                        ClipRRect(
-                          borderRadius: BorderRadius.circular(2),
-                          child: LinearProgressIndicator(
-                            value: _progressPercent,
-                            minHeight: 4,
-                            backgroundColor: colors.surfaceContainerHighest,
-                          ),
-                        ),
-                      ] else if (_busy) ...[
-                        const SizedBox(height: 3),
-                        ClipRRect(
-                          borderRadius: BorderRadius.circular(2),
-                          child: const LinearProgressIndicator(minHeight: 4),
-                        ),
-                      ],
-                    ],
-                  ),
-                )
-              else
-                const Spacer(),
-              IconButton(onPressed: _load, icon: const Icon(Icons.refresh, size: 20), tooltip: 'Refresh runtime'),
-            ],
-          ),
-        ),
+        // ── Top status bar ──
+        _buildStatusBar(cs),
+        // ── Main content ──
         Expanded(
           child: Row(
             children: [
+              // ── Left: Sessions ──
+              _buildSessionsPanel(cs),
+              const SizedBox(width: 4),
+              // ── Center: Image viewer ──
+              Expanded(child: _buildImageViewer(cs, images, selectedUrl)),
+              const SizedBox(width: 4),
+              // ── Right: Controls ──
               SizedBox(
-                width: 270,
-                child: Card(
-                  child: Column(children: [
-                    ListTile(
-                      title: const Text('Image Sessions'),
-                      trailing: Row(mainAxisSize: MainAxisSize.min, children: [
-                        IconButton(onPressed: _refreshModels, icon: const Icon(Icons.refresh), tooltip: 'Refresh models'),
-                        IconButton(onPressed: _createSession, icon: const Icon(Icons.add), tooltip: 'New session'),
-                      ]),
-                    ),
-                    Expanded(
-                      child: ListView(
-                        children: _sessions
-                            .map((s) => ListTile(
-                                  title: Text((s['title'] ?? 'Untitled').toString()),
-                                  subtitle: Text((s['id'] ?? '').toString().substring(0, 8)),
-                                  selected: _activeSession?['id'] == s['id'],
-                                  onTap: () => _openSession(s['id'].toString()),
-                                ))
-                            .toList(),
-                      ),
-                    ),
-                  ]),
-                ),
-              ),
-              const SizedBox(width: 8),
-              Expanded(
-                child: Card(
-                  child: Column(
-                    children: [
-                      Expanded(
-                        child: selectedUrl == null
-                            ? const Center(child: Text('Generate an image to begin.'))
-                            : _inpaintMode
-                                // Inpaint mode: show image with mask drawing overlay
-                                ? LayoutBuilder(builder: (ctx, constraints) {
-                                    return GestureDetector(
-                                      onPanUpdate: (details) {
-                                        setState(() => _maskStrokes.add(details.localPosition));
-                                      },
-                                      onPanEnd: (_) => setState(() => _maskStrokes.add(null)), // null = stroke break
-                                      onTapDown: (details) => setState(() {
-                                        _maskStrokes.add(details.localPosition);
-                                        _maskStrokes.add(null);
-                                      }),
-                                      child: Stack(children: [
-                                        Center(child: Image.network(selectedUrl, fit: BoxFit.contain)),
-                                        Positioned.fill(
-                                          child: CustomPaint(
-                                            painter: _MaskPainter(_maskStrokes, _brushSize),
-                                          ),
-                                        ),
-                                        // Brush cursor indicator
-                                        Positioned(
-                                          top: 8, right: 8,
-                                          child: Container(
-                                            padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
-                                            decoration: BoxDecoration(
-                                              color: Colors.black54,
-                                              borderRadius: BorderRadius.circular(12),
-                                            ),
-                                            child: Row(mainAxisSize: MainAxisSize.min, children: [
-                                              const Icon(Icons.brush, size: 14, color: Colors.white70),
-                                              const SizedBox(width: 4),
-                                              Text('Painting mask', style: const TextStyle(fontSize: 11, color: Colors.white70)),
-                                            ]),
-                                          ),
-                                        ),
-                                      ]),
-                                    );
-                                  })
-                                // Normal mode: interactive viewer
-                                : InteractiveViewer(minScale: 0.5, maxScale: 4, child: Center(child: Image.network(selectedUrl))),
-                      ),
-                      const Divider(height: 1),
-                      SizedBox(
-                        height: 120,
-                        child: ListView(
-                          scrollDirection: Axis.horizontal,
-                          children: images
-                              .map((i) => GestureDetector(
-                                    onTap: () => setState(() => _selectedImageId = i['id'].toString()),
-                                    child: Container(
-                                      width: 110,
-                                      margin: const EdgeInsets.all(8),
-                                      decoration: BoxDecoration(
-                                        border: Border.all(color: _selectedImageId == i['id'].toString() ? Theme.of(context).colorScheme.primary : Colors.transparent, width: 2),
-                                        borderRadius: BorderRadius.circular(8),
-                                      ),
-                                      child: Image.network(_imageUrlFor(i['id'].toString())!, fit: BoxFit.cover),
-                                    ),
-                                  ))
-                              .toList(),
-                        ),
-                      )
-                    ],
-                  ),
-                ),
-              ),
-              const SizedBox(width: 8),
-              SizedBox(
-                width: 380,
-                child: Card(
-                  child: Padding(
-                    padding: const EdgeInsets.all(12),
-                    child: ListView(
-                      children: [
-                        ExpansionTile(
-                          initiallyExpanded: _showHelp,
-                          onExpansionChanged: (v) => setState(() => _showHelp = v),
-                          title: const Text('Help & troubleshooting'),
-                          children: const [
-                            Padding(
-                              padding: EdgeInsets.fromLTRB(12, 0, 12, 12),
-                              child: Column(
-                                crossAxisAlignment: CrossAxisAlignment.start,
-                                children: [
-                                  Text('1) Download a diffusers model from HuggingFace (it caches to ~/.cache/huggingface).'),
-                                  Text('2) Click Refresh models.'),
-                                  Text('3) Select model and enter prompt.'),
-                                  Text('4) Click Generate.'),
-                                  Text('5) Use Edit conversation to refine current image.'),
-                                  SizedBox(height: 8),
-                                  Text('If generation fails: check missing dependencies, missing model, GPU requirement, or out-of-memory.'),
-                                ],
-                              ),
-                            ),
-                          ],
-                        ),
-                        if (_models.isEmpty)
-                          const ListTile(
-                            leading: Icon(Icons.info_outline),
-                            title: Text('No image models detected. Download a diffusers model via HuggingFace and click Refresh.'),
-                          ),
-                        if (_errorMessage.isNotEmpty) ...[
-                          const SizedBox(height: 8),
-                          Card(
-                            color: Theme.of(context).colorScheme.errorContainer,
-                            child: Padding(
-                              padding: const EdgeInsets.all(10),
-                              child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
-                                Text(_errorMessage, style: TextStyle(color: Theme.of(context).colorScheme.onErrorContainer)),
-                                if (_errorCode.isNotEmpty) Text('Code: $_errorCode', style: TextStyle(color: Theme.of(context).colorScheme.onErrorContainer)),
-                                if (_errorCode == 'invalid_model_format') const Text('Hint: This local model folder does not look like a valid Diffusers pipeline.'),
-                                if (_errorCode == 'dependency_error') const Text('Hint: Install/update diffusers, transformers, accelerate, safetensors, and torch.'),
-                                if (_errorCode == 'runtime_crash') const Text('Hint: Run Validate model and check backend logs for native runtime issues.'),
-                                if (_errorCode == 'insufficient_memory') const Text('Hint: Model is likely too large for current RAM/page file. Try low memory mode, smaller model, or increase page file.'),
-                                if (_errorCode == 'pagefile_too_small') const Text('Hint: Increase Windows paging file size, or switch to a smaller model / CUDA path.'),
-                                if (_errorDetails.isNotEmpty)
-                                  ExpansionTile(
-                                    title: const Text('Show details'),
-                                    children: [
-                                      SelectableText(_errorDetails),
-                                      Align(
-                                        alignment: Alignment.centerRight,
-                                        child: TextButton.icon(
-                                          onPressed: () => Clipboard.setData(ClipboardData(text: _errorDetails)),
-                                          icon: const Icon(Icons.copy),
-                                          label: const Text('Copy details'),
-                                        ),
-                                      ),
-                                    ],
-                                  ),
-                              ]),
-                            ),
-                          ),
-                        ],
-                        const SizedBox(height: 8),
-                        Text('Generate', style: Theme.of(context).textTheme.titleMedium),
-                        const SizedBox(height: 8),
-                        DropdownButtonFormField<String>(
-                          initialValue: _selectedModel,
-                          isExpanded: true,
-                          items: _models.map((m) {
-                            final id = m['model_id'].toString();
-                            final isComponent = m['is_component'] == true;
-                            final modelType = (m['model_type'] ?? '').toString();
-                            final label = isComponent ? '$id ($modelType)' : id;
-                            return DropdownMenuItem(
-                              value: id,
-                              child: Text(label, overflow: TextOverflow.ellipsis, style: TextStyle(
-                                color: isComponent ? Theme.of(context).colorScheme.onSurfaceVariant : null,
-                                fontStyle: isComponent ? FontStyle.italic : FontStyle.normal,
-                              )),
-                            );
-                          }).toList(),
-                          onChanged: (v) { setState(() => _selectedModel = v); _loadModelFit(); },
-                          decoration: const InputDecoration(labelText: 'Model'),
-                        ),
-                        const SizedBox(height: 8),
-                        Wrap(
-                          spacing: 8,
-                          runSpacing: 8,
-                          children: [
-                            FilledButton.tonalIcon(
-                              onPressed: _busy ? null : _validateModel,
-                              icon: const Icon(Icons.verified_outlined),
-                              label: const Text('Validate model'),
-                            ),
-                            FilledButton.tonalIcon(
-                              onPressed: _busy ? null : _useRecommendedSettings,
-                              icon: const Icon(Icons.tune),
-                              label: const Text('Use recommended settings'),
-                            ),
-                            FilledButton.tonalIcon(
-                              onPressed: _busy ? null : _load,
-                              icon: const Icon(Icons.refresh),
-                              label: const Text('Refresh runtime'),
-                            ),
-                          ],
-                        ),
-                        const SizedBox(height: 8),
-                        ExpansionTile(
-                          title: const Text('Runtime details'),
-                          children: [
-                            ListTile(dense: true, title: Text('Torch: ${(_runtime['torch_version'] ?? 'n/a').toString()} • CUDA build: ${(_runtime['cuda_version'] ?? 'none').toString()}')),
-                            ListTile(dense: true, title: Text('CUDA available: ${(_runtime['cuda_available'] == true)} • Effective: ${(_runtime['effective_device'] ?? 'cpu')}')),
-                            ListTile(dense: true, title: Text('Execution plan: ${((_runtime['execution_plan'] as Map<String, dynamic>?)?['device_plan'] ?? _runtime['runtime_strategy'] ?? 'unknown')}')),
-                            ListTile(dense: true, title: Text('Expected timeout: ${((_runtime['execution_plan'] as Map<String, dynamic>?)?['expected_timeout_sec'] ?? 'n/a')}s')),
-                            Align(alignment: Alignment.centerRight, child: TextButton(onPressed: _busy ? null : () { final rec = (((_runtime['execution_plan'] as Map<String, dynamic>?)?['expected_timeout_sec'] as num?)?.toInt() ?? _timeoutSec); setState(() => _timeoutSec = rec); }, child: const Text('Use recommended timeout'))),
-                            if (((_runtime['warnings'] as List<dynamic>?) ?? const []).isNotEmpty)
-                              Padding(
-                                padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 4),
-                                child: Text('Warnings: ${(_runtime['warnings'] as List<dynamic>).join(', ')}'),
-                              ),
-                            if (_runtime['sdcpp_available'] == true)
-                              const ListTile(dense: true, title: Text('SD.cpp: available (fast GGUF inference)')),
-                            if (_runtime['controlnet_available'] == true)
-                              ListTile(dense: true, title: Text('ControlNet: available (${(_runtime['available_controlnet_types'] as List?)?.length ?? 0} types)')),
-                          ],
-                        ),
-                        DropdownButtonFormField<String>(
-                          initialValue: _qualityProfile,
-                          decoration: const InputDecoration(labelText: 'Quality profile'),
-                          items: const [
-                            DropdownMenuItem(value: 'fast', child: Text('Fast')),
-                            DropdownMenuItem(value: 'balanced', child: Text('Balanced')),
-                            DropdownMenuItem(value: 'quality', child: Text('Quality')),
-                            DropdownMenuItem(value: 'low_memory', child: Text('Low Memory')),
-                          ],
-                          onChanged: _busy ? null : (v) => setState(() => _qualityProfile = v ?? 'balanced'),
-                        ),
-                        const SizedBox(height: 8),
-                        ExpansionTile(
-                          title: const Text('Advanced'),
-                          children: [
-                            Wrap(
-                              spacing: 8,
-                              runSpacing: 8,
-                              children: [
-                                SizedBox(width: 110, child: TextFormField(initialValue: _width.toString(), decoration: const InputDecoration(labelText: 'Width'), keyboardType: TextInputType.number, onChanged: (v) => _width = int.tryParse(v) ?? _width)),
-                                SizedBox(width: 110, child: TextFormField(initialValue: _height.toString(), decoration: const InputDecoration(labelText: 'Height'), keyboardType: TextInputType.number, onChanged: (v) => _height = int.tryParse(v) ?? _height)),
-                                SizedBox(width: 110, child: TextFormField(initialValue: _steps.toString(), decoration: const InputDecoration(labelText: 'Steps'), keyboardType: TextInputType.number, onChanged: (v) => _steps = int.tryParse(v) ?? _steps)),
-                                SizedBox(width: 130, child: TextFormField(initialValue: _timeoutSec.toString(), decoration: const InputDecoration(labelText: 'Timeout (s)'), keyboardType: TextInputType.number, onChanged: (v) => _timeoutSec = int.tryParse(v) ?? _timeoutSec)),
-                              ],
-                            ),
-                            const SizedBox(height: 6),
-                            Slider(value: _guidance, min: 1.0, max: 12.0, divisions: 22, label: _guidance.toStringAsFixed(1), onChanged: _busy ? null : (v) => setState(() => _guidance = v)),
-                            Text('Guidance: ${_guidance.toStringAsFixed(1)}'),
-                            SwitchListTile.adaptive(value: _enableRefine, onChanged: _busy ? null : (v) => setState(() => _enableRefine = v), title: const Text('Enable refinement pass')),
-                            SwitchListTile.adaptive(value: _enableUpscale, onChanged: _busy ? null : (v) => setState(() => _enableUpscale = v), title: const Text('Enable upscale')),
-                            SwitchListTile.adaptive(value: _enablePostprocess, onChanged: _busy ? null : (v) => setState(() => _enablePostprocess = v), title: const Text('Enable postprocess cleanup')),
-                          ],
-                        ),
-                        SwitchListTile.adaptive(
-                          value: _lowMemoryMode,
-                          onChanged: _busy ? null : (v) => setState(() => _lowMemoryMode = v),
-                          title: const Text('Low memory mode'),
-                          subtitle: const Text('Uses conservative resolution/steps to improve reliability on limited RAM/VRAM.'),
-                        ),
-                        ListTile(
-                          title: const Text('Backend'),
-                          subtitle: Text(_devicePreference == 'auto'
-                              ? 'Auto (${_runtime['recommended_backend'] ?? _runtime['effective_device'] ?? 'unknown'})'
-                              : _devicePreference),
-                          trailing: DropdownButton<String>(
-                            value: _devicePreference,
-                            onChanged: _busy ? null : (v) => setState(() => _devicePreference = v ?? 'auto'),
-                            items: [
-                              DropdownMenuItem(value: 'auto', child: Text('Auto${_runtime['recommended_backend'] != null ? ' (${_runtime['recommended_backend']})' : ''}')),
-                              if ((_runtime['available_backends'] as List?)?.contains('openvino_int8') == true)
-                                const DropdownMenuItem(value: 'openvino', child: Text('OpenVINO (Intel)')),
-                              const DropdownMenuItem(value: 'cuda', child: Text('GPU (CUDA)')),
-                              const DropdownMenuItem(value: 'cpu', child: Text('CPU (PyTorch)')),
-                              if (_runtime['sdcpp_available'] == true)
-                                const DropdownMenuItem(value: 'sdcpp', child: Text('SD.cpp (GGUF)')),
-                            ],
-                          ),
-                        ),
-                        // Hardware profile & optimization info
-                        if (_runtime['hardware_profile'] != null) ...[
-                          Padding(
-                            padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 4),
-                            child: Wrap(
-                              spacing: 6,
-                              runSpacing: 4,
-                              children: [
-                                if ((_runtime['hardware_profile'] as Map?)?['cpu_vendor'] != null)
-                                  Chip(label: Text('${(_runtime['hardware_profile'] as Map)['cpu_vendor']} CPU', style: const TextStyle(fontSize: 11)), visualDensity: VisualDensity.compact),
-                                if ((_runtime['hardware_profile'] as Map?)?['has_avx2'] == true)
-                                  const Chip(label: Text('AVX2', style: TextStyle(fontSize: 11)), visualDensity: VisualDensity.compact),
-                                if ((_runtime['hardware_profile'] as Map?)?['openvino_available'] == true)
-                                  Chip(label: const Text('OpenVINO', style: TextStyle(fontSize: 11)), visualDensity: VisualDensity.compact, backgroundColor: Colors.green.withValues(alpha: 0.2)),
-                                if ((_runtime['hardware_profile'] as Map?)?['tomesd_available'] == true)
-                                  const Chip(label: Text('ToMe', style: TextStyle(fontSize: 11)), visualDensity: VisualDensity.compact),
-                                if ((_runtime['hardware_profile'] as Map?)?['deepcache_available'] == true)
-                                  const Chip(label: Text('DeepCache', style: TextStyle(fontSize: 11)), visualDensity: VisualDensity.compact),
-                              ],
-                            ),
-                          ),
-                        ],
-                        if (_modelFit.isNotEmpty)
-                          Card(
-                            child: Padding(
-                              padding: const EdgeInsets.all(10),
-                              child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
-                                Text('Model Fit / Requirements', style: Theme.of(context).textTheme.titleSmall),
-                                Text('Fit: ${_modelFit['fit'] ?? 'unknown'} • Device: ${_modelFit['device_candidate'] ?? 'unknown'}'),
-                                Text('Folder size: ${_modelFit['folder_size_human'] ?? _modelFit['folder_size_bytes'] ?? 'unknown'}'),
-                                Text('Estimated RAM: ${_modelFit['estimated_ram_required_human'] ?? _modelFit['estimated_ram_required_bytes'] ?? 'unknown'}'),
-                                Text('Estimated VRAM: ${_modelFit['estimated_vram_required_human'] ?? _modelFit['estimated_vram_required_bytes'] ?? 'unknown'}'),
-                                if ((_modelFit['warnings'] as List<dynamic>?)?.isNotEmpty == true)
-                                  Text('Warnings: ${(_modelFit['warnings'] as List<dynamic>).join(', ')}'),
-                                if (_modelFit['hints'] != null) ...[
-                                  const Divider(),
-                                  Text('Recommended Parameters', style: Theme.of(context).textTheme.titleSmall?.copyWith(color: Colors.lightBlueAccent)),
-                                  if ((_modelFit['hints'] as Map<String, dynamic>?)?['model_family'] != null && (_modelFit['hints'] as Map<String, dynamic>)['model_family'] != 'unknown')
-                                    Text('Model: ${(_modelFit['hints'] as Map<String, dynamic>)['model_family']}${(_modelFit['hints'] as Map<String, dynamic>)['model_variant'] != null ? ' (${(_modelFit['hints'] as Map<String, dynamic>)['model_variant']})' : ''}'),
-                                  Text('Guidance: ${(_modelFit['hints'] as Map<String, dynamic>?)?['recommended_guidance_scale'] ?? '7.0'} • Steps: ${(_modelFit['hints'] as Map<String, dynamic>?)?['recommended_steps'] ?? '20'} • Size: ${(_modelFit['hints'] as Map<String, dynamic>?)?['recommended_width'] ?? '768'}x${(_modelFit['hints'] as Map<String, dynamic>?)?['recommended_height'] ?? '768'}'),
-                                  if (((_modelFit['hints'] as Map<String, dynamic>?)?['notes'] as List<dynamic>?)?.isNotEmpty == true)
-                                    ...(((_modelFit['hints'] as Map<String, dynamic>)['notes'] as List<dynamic>).map((n) => Padding(
-                                      padding: const EdgeInsets.only(top: 2),
-                                      child: Text('• $n', style: const TextStyle(fontSize: 11, color: Colors.white70)),
-                                    ))),
-                                ],
-                              ]),
-                            ),
-                          ),
-                        // Model recommendation banner (e.g., suggest SSD-1B for weak hardware)
-                        if ((_runtime['execution_plan'] as Map<String, dynamic>?)?['model_recommendation'] != null) ...[
-                          const SizedBox(height: 8),
-                          Builder(builder: (ctx) {
-                            final rec = (_runtime['execution_plan'] as Map<String, dynamic>)['model_recommendation'] as Map<String, dynamic>;
-                            final suggested = rec['suggested_model']?.toString() ?? '';
-                            final reason = rec['reason']?.toString() ?? '';
-                            final speedup = rec['estimated_speedup']?.toString() ?? '';
-                            return Card(
-                              color: Colors.amber.withValues(alpha: 0.15),
-                              child: Padding(
-                                padding: const EdgeInsets.all(10),
-                                child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
-                                  Row(children: [
-                                    const Icon(Icons.tips_and_updates, size: 16, color: Colors.amber),
-                                    const SizedBox(width: 6),
-                                    Expanded(child: Text('Faster alternative: $suggested', style: const TextStyle(fontSize: 13, fontWeight: FontWeight.w600))),
-                                  ]),
-                                  const SizedBox(height: 4),
-                                  Text(reason, style: const TextStyle(fontSize: 11)),
-                                  if (speedup.isNotEmpty)
-                                    Text(speedup, style: const TextStyle(fontSize: 11, fontWeight: FontWeight.w600, color: Colors.amber)),
-                                  const SizedBox(height: 6),
-                                  SizedBox(
-                                    height: 28,
-                                    child: OutlinedButton.icon(
-                                      onPressed: () => setState(() => _selectedModel = 'huggingface:$suggested'),
-                                      icon: const Icon(Icons.swap_horiz, size: 14),
-                                      label: const Text('Use this model', style: TextStyle(fontSize: 11)),
-                                    ),
-                                  ),
-                                ]),
-                              ),
-                            );
-                          }),
-                        ],
-                        const SizedBox(height: 8),
-                        Card(
-                          child: Padding(
-                            padding: const EdgeInsets.all(10),
-                            child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
-                              Text('Effective settings preview', style: Theme.of(context).textTheme.titleSmall),
-                              Text('Profile: $_qualityProfile • ${_lowMemoryMode ? 'Low memory override active' : 'Manual settings active'}'),
-                              Text('Size: ${_lowMemoryMode ? 512 : _width}x${_lowMemoryMode ? 512 : _height} • Steps: ${_lowMemoryMode ? 16 : _steps} • Guidance: ${_guidance.toStringAsFixed(1)}'),
-                              Text('Timeout: ${_timeoutSec}s • Refine: $_enableRefine • Upscale: $_enableUpscale'),
-                            ]),
-                          ),
-                        ),
-                        if ((((_runtime['execution_plan'] as Map<String, dynamic>?)?['expected_timeout_sec'] as num?)?.toInt() ?? 0) > _timeoutSec)
-                          const Padding(
-                            padding: EdgeInsets.only(top: 4),
-                            child: Text('Configured timeout is below recommended for this runtime/model.', style: TextStyle(color: Colors.orange)),
-                          ),
-                        if (_isSelectedModelComponent) ...[
-                          const SizedBox(height: 8),
-                          Card(
-                            color: Theme.of(context).colorScheme.tertiaryContainer,
-                            child: Padding(
-                              padding: const EdgeInsets.all(12),
-                              child: Row(
-                                children: [
-                                  Icon(Icons.info_outline, color: Theme.of(context).colorScheme.onTertiaryContainer),
-                                  const SizedBox(width: 10),
-                                  Expanded(child: Text(
-                                    _selectedModelExplanation ?? 'This is an auxiliary component model, not a standalone image generator.',
-                                    style: TextStyle(color: Theme.of(context).colorScheme.onTertiaryContainer, fontSize: 13),
-                                  )),
-                                ],
-                              ),
-                            ),
-                          ),
-                        ],
-                        const SizedBox(height: 8),
-                        TextField(
-                          controller: _prompt,
-                          minLines: 2,
-                          maxLines: 4,
-                          enabled: !_isSelectedModelComponent,
-                          decoration: InputDecoration(
-                            labelText: 'Prompt',
-                            hintText: 'Describe what you want to generate…',
-                            suffixIcon: _enhancingPrompt
-                                ? const Padding(padding: EdgeInsets.all(12),
-                                    child: SizedBox(width: 20, height: 20, child: CircularProgressIndicator(strokeWidth: 2)))
-                                : IconButton(
-                                    onPressed: (_busy || _prompt.text.trim().isEmpty) ? null : _enhancePrompt,
-                                    icon: const Icon(Icons.auto_awesome, size: 20),
-                                    tooltip: 'Enhance prompt with AI (Ollama)',
-                                  ),
-                          ),
-                        ),
-
-                        // ── Negative prompt (expandable) ──
-                        GestureDetector(
-                          onTap: () => setState(() => _showNegativePrompt = !_showNegativePrompt),
-                          child: Padding(
-                            padding: const EdgeInsets.only(top: 4, bottom: 2),
-                            child: Row(children: [
-                              Icon(_showNegativePrompt ? Icons.expand_less : Icons.expand_more, size: 16, color: Colors.white54),
-                              const SizedBox(width: 4),
-                              Text('Negative prompt', style: TextStyle(fontSize: 12, color: Colors.white54)),
-                            ]),
-                          ),
-                        ),
-                        if (_showNegativePrompt)
-                          TextField(
-                            controller: _negativePrompt,
-                            minLines: 1,
-                            maxLines: 3,
-                            style: const TextStyle(fontSize: 13),
-                            decoration: const InputDecoration(
-                              hintText: 'blurry, low quality, distorted, ugly...',
-                              labelText: 'Negative prompt',
-                              isDense: true,
-                            ),
-                          ),
-
-                        // ── Seed control ──
-                        const SizedBox(height: 8),
-                        Row(children: [
-                          Expanded(
-                            child: TextField(
-                              controller: _seedController,
-                              keyboardType: TextInputType.number,
-                              style: const TextStyle(fontSize: 13),
-                              decoration: InputDecoration(
-                                labelText: 'Seed',
-                                hintText: 'Random',
-                                isDense: true,
-                                suffixIcon: Row(mainAxisSize: MainAxisSize.min, children: [
-                                  if (_lastSeedUsed != null)
-                                    IconButton(
-                                      icon: const Icon(Icons.content_copy, size: 16),
-                                      tooltip: 'Reuse last seed ($_lastSeedUsed)',
-                                      onPressed: () {
-                                        _seedController.text = _lastSeedUsed.toString();
-                                        _seed = _lastSeedUsed;
-                                      },
-                                    ),
-                                  IconButton(
-                                    icon: const Icon(Icons.casino, size: 16),
-                                    tooltip: 'Random seed',
-                                    onPressed: () {
-                                      _seedController.clear();
-                                      _seed = null;
-                                    },
-                                  ),
-                                ]),
-                              ),
-                              onChanged: (v) => _seed = int.tryParse(v),
-                            ),
-                          ),
-                          const SizedBox(width: 8),
-                          // Scheduler dropdown
-                          Expanded(
-                            child: DropdownButtonFormField<String>(
-                              value: _scheduler,
-                              decoration: const InputDecoration(labelText: 'Sampler', isDense: true),
-                              items: const [
-                                DropdownMenuItem(value: null, child: Text('Auto')),
-                                DropdownMenuItem(value: 'dpmpp_2m_sde_karras', child: Text('DPM++ 2M SDE K')),
-                                DropdownMenuItem(value: 'euler', child: Text('Euler')),
-                                DropdownMenuItem(value: 'euler_a', child: Text('Euler A')),
-                                DropdownMenuItem(value: 'ddim', child: Text('DDIM')),
-                                DropdownMenuItem(value: 'lcm', child: Text('LCM')),
-                                DropdownMenuItem(value: 'unipc', child: Text('UniPC')),
-                              ],
-                              onChanged: _busy ? null : (v) => setState(() => _scheduler = v),
-                            ),
-                          ),
-                        ]),
-                        const SizedBox(height: 4),
-
-                        ExpansionTile(
-                          title: const Text('ControlNet'),
-                          subtitle: Text(_enableControlNet ? 'Active: ${_controlNetType ?? "none"}' : 'Off'),
-                          initiallyExpanded: false,
-                          children: [
-                            SwitchListTile.adaptive(
-                              value: _enableControlNet,
-                              onChanged: _busy ? null : (v) => setState(() => _enableControlNet = v),
-                              title: const Text('Enable ControlNet'),
-                              subtitle: const Text('Guide generation with a reference image structure'),
-                            ),
-                            if (_enableControlNet) ...[
-                              Padding(
-                                padding: const EdgeInsets.symmetric(horizontal: 16),
-                                child: DropdownButtonFormField<String>(
-                                  initialValue: _controlNetType,
-                                  items: _controlNetTypes.map((t) => DropdownMenuItem(
-                                    value: t['type'] as String,
-                                    child: Text('${t["name"]} — ${t["description"]}'),
-                                  )).toList(),
-                                  onChanged: (v) => setState(() => _controlNetType = v),
-                                  decoration: const InputDecoration(labelText: 'Control type'),
-                                ),
-                              ),
-                              const SizedBox(height: 8),
-                              Padding(
-                                padding: const EdgeInsets.symmetric(horizontal: 16),
-                                child: Row(children: [
-                                  Expanded(child: Text(_controlImagePath ?? 'No control image selected', overflow: TextOverflow.ellipsis)),
-                                  const SizedBox(width: 8),
-                                  FilledButton.tonalIcon(
-                                    onPressed: _busy ? null : () async {
-                                      final result = await FilePicker.platform.pickFiles(type: FileType.image);
-                                      if (result != null && result.files.single.path != null) {
-                                        setState(() => _controlImagePath = result.files.single.path);
-                                      }
-                                    },
-                                    icon: const Icon(Icons.image, size: 16),
-                                    label: const Text('Pick image'),
-                                  ),
-                                ]),
-                              ),
-                              const SizedBox(height: 8),
-                              Padding(
-                                padding: const EdgeInsets.symmetric(horizontal: 16),
-                                child: Column(children: [
-                                  Slider(value: _controlNetScale, min: 0.0, max: 2.0, divisions: 20,
-                                    label: _controlNetScale.toStringAsFixed(1),
-                                    onChanged: _busy ? null : (v) => setState(() => _controlNetScale = v)),
-                                  Text('Control strength: ${_controlNetScale.toStringAsFixed(1)}'),
-                                ]),
-                              ),
-                            ],
-                          ],
-                        ),
-                        // ── LoRA section ──
-                        const SizedBox(height: 4),
-                        ExpansionTile(
-                          title: Row(children: [
-                            const Icon(Icons.layers, size: 18),
-                            const SizedBox(width: 8),
-                            const Text('LoRAs', style: TextStyle(fontSize: 14, fontWeight: FontWeight.w600)),
-                            if (_selectedLoras.isNotEmpty) ...[
-                              const SizedBox(width: 8),
-                              Container(
-                                padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 1),
-                                decoration: BoxDecoration(color: Theme.of(context).colorScheme.primary, borderRadius: BorderRadius.circular(10)),
-                                child: Text('${_selectedLoras.length}', style: const TextStyle(fontSize: 10, color: Colors.white)),
-                              ),
-                            ],
-                          ]),
-                          subtitle: Text(
-                            _selectedLoras.isEmpty ? 'Style adapters for your model' : _selectedLoras.map((l) => l['display_name']).join(', '),
-                            style: TextStyle(fontSize: 11, color: colors.onSurfaceVariant), maxLines: 1, overflow: TextOverflow.ellipsis,
-                          ),
-                          tilePadding: EdgeInsets.zero,
-                          childrenPadding: const EdgeInsets.only(bottom: 8),
-                          onExpansionChanged: (expanded) {
-                            if (expanded && _availableLoras.isEmpty) _fetchLoras();
-                          },
-                          children: [
-                            // Active LoRAs with weight sliders
-                            if (_selectedLoras.isNotEmpty) ...[
-                              for (int i = 0; i < _selectedLoras.length; i++)
-                                Card(
-                                  child: Padding(
-                                    padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
-                                    child: Column(children: [
-                                      Row(children: [
-                                        Expanded(child: Text(_selectedLoras[i]['display_name'] ?? _selectedLoras[i]['id'], style: const TextStyle(fontSize: 12), overflow: TextOverflow.ellipsis)),
-                                        IconButton(
-                                          onPressed: () => setState(() => _selectedLoras.removeAt(i)),
-                                          icon: const Icon(Icons.close, size: 16), iconSize: 16,
-                                          tooltip: 'Remove',
-                                          visualDensity: VisualDensity.compact,
-                                        ),
-                                      ]),
-                                      Row(children: [
-                                        const Text('Weight:', style: TextStyle(fontSize: 11)),
-                                        Expanded(child: Slider(
-                                          value: (_selectedLoras[i]['weight'] as num).toDouble(),
-                                          min: 0.0, max: 2.0, divisions: 20,
-                                          label: (_selectedLoras[i]['weight'] as num).toStringAsFixed(1),
-                                          onChanged: (v) => setState(() => _selectedLoras[i]['weight'] = v),
-                                        )),
-                                        Text((_selectedLoras[i]['weight'] as num).toStringAsFixed(1), style: const TextStyle(fontSize: 11, fontWeight: FontWeight.w600)),
-                                      ]),
-                                    ]),
-                                  ),
-                                ),
-                              const SizedBox(height: 8),
-                            ],
-                            // Available LoRAs list
-                            if (_loadingLoras)
-                              const Center(child: Padding(padding: EdgeInsets.all(12), child: SizedBox(width: 20, height: 20, child: CircularProgressIndicator(strokeWidth: 2))))
-                            else if (_availableLoras.isNotEmpty) ...[
-                              Text('Available', style: TextStyle(fontSize: 12, fontWeight: FontWeight.w600, color: colors.primary)),
-                              const SizedBox(height: 4),
-                              for (final lora in _availableLoras)
-                                ListTile(
-                                  dense: true,
-                                  contentPadding: const EdgeInsets.symmetric(horizontal: 4),
-                                  leading: Icon(
-                                    _selectedLoras.any((l) => l['id'] == lora['id']) ? Icons.check_circle : Icons.circle_outlined,
-                                    size: 20,
-                                    color: _selectedLoras.any((l) => l['id'] == lora['id']) ? colors.primary : colors.onSurfaceVariant,
-                                  ),
-                                  title: Text(lora['name'] ?? lora['id'], style: const TextStyle(fontSize: 12)),
-                                  subtitle: Text('${lora['source']} • ${lora['size_human'] ?? '?'}', style: TextStyle(fontSize: 10, color: colors.onSurfaceVariant)),
-                                  onTap: () => _toggleLora(lora),
-                                ),
-                            ] else
-                              Text('No LoRAs found. Download one or place .safetensors files in data/loras/', style: TextStyle(fontSize: 11, color: colors.onSurfaceVariant)),
-                            // Download from HF
-                            const SizedBox(height: 8),
-                            Row(children: [
-                              Expanded(
-                                child: TextField(
-                                  controller: _loraDownloadId,
-                                  style: const TextStyle(fontSize: 12),
-                                  decoration: const InputDecoration(
-                                    hintText: 'HuggingFace repo (e.g. owner/lora-name)',
-                                    isDense: true, contentPadding: EdgeInsets.symmetric(horizontal: 8, vertical: 8),
-                                  ),
-                                ),
-                              ),
-                              const SizedBox(width: 4),
-                              SizedBox(
-                                height: 36,
-                                child: FilledButton.tonalIcon(
-                                  onPressed: _loadingLoras ? null : () {
-                                    final id = _loraDownloadId.text.trim();
-                                    if (id.isNotEmpty) _downloadLora(id);
-                                  },
-                                  icon: const Icon(Icons.download, size: 16),
-                                  label: const Text('Get', style: TextStyle(fontSize: 12)),
-                                ),
-                              ),
-                            ]),
-                          ],
-                        ),
-                        const SizedBox(height: 8),
-                        if (_busy)
-                          OutlinedButton.icon(
-                            onPressed: _cancelGeneration,
-                            icon: const Icon(Icons.stop_circle, color: Colors.red),
-                            label: const Text('Cancel Generation', style: TextStyle(color: Colors.red)),
-                            style: OutlinedButton.styleFrom(side: const BorderSide(color: Colors.red)),
-                          )
-                        else
-                          FilledButton.icon(
-                            onPressed: _isSelectedModelComponent ? null : _generate,
-                            icon: const Icon(Icons.auto_awesome),
-                            label: Text(_isSelectedModelComponent ? 'Cannot generate (component model)' : 'Generate'),
-                          ),
-                        // ── Image Actions (Edit / Upscale / Inpaint) ──
-                        if (_selectedImageId != null) ...[
-                          const Divider(height: 24),
-
-                          // Quick action buttons row
-                          Row(children: [
-                            Expanded(
-                              child: FilledButton.tonalIcon(
-                                onPressed: _busy ? null : _upscaleImage,
-                                icon: const Icon(Icons.zoom_in, size: 18),
-                                label: const Text('Upscale 4x'),
-                              ),
-                            ),
-                            const SizedBox(width: 8),
-                            Expanded(
-                              child: _inpaintMode
-                                ? OutlinedButton.icon(
-                                    onPressed: () => setState(() { _inpaintMode = false; _maskStrokes.clear(); }),
-                                    icon: const Icon(Icons.close, size: 18),
-                                    label: const Text('Exit Inpaint'),
-                                    style: OutlinedButton.styleFrom(foregroundColor: Colors.orange),
-                                  )
-                                : FilledButton.tonalIcon(
-                                    onPressed: _busy ? null : () => setState(() => _inpaintMode = true),
-                                    icon: const Icon(Icons.brush, size: 18),
-                                    label: const Text('Inpaint'),
-                                  ),
-                            ),
-                          ]),
-
-                          // Inpaint controls
-                          if (_inpaintMode) ...[
-                            const SizedBox(height: 12),
-                            Card(
-                              color: colors.primaryContainer.withValues(alpha: 0.3),
-                              child: Padding(
-                                padding: const EdgeInsets.all(12),
-                                child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
-                                  Row(children: [
-                                    Icon(Icons.brush, size: 16, color: colors.primary),
-                                    const SizedBox(width: 6),
-                                    Text('Draw on the image to mark areas to regenerate', style: TextStyle(fontSize: 12, color: colors.primary, fontWeight: FontWeight.w600)),
-                                  ]),
-                                  const SizedBox(height: 8),
-                                  Row(children: [
-                                    const Text('Brush: ', style: TextStyle(fontSize: 12)),
-                                    Expanded(child: Slider(value: _brushSize, min: 5, max: 100, divisions: 19,
-                                      label: '${_brushSize.round()}px',
-                                      onChanged: (v) => setState(() => _brushSize = v))),
-                                    Text('${_brushSize.round()}px', style: const TextStyle(fontSize: 12)),
-                                  ]),
-                                  Row(children: [
-                                    Expanded(
-                                      child: OutlinedButton.icon(
-                                        onPressed: () => setState(() => _maskStrokes.clear()),
-                                        icon: const Icon(Icons.clear, size: 16),
-                                        label: const Text('Clear mask'),
-                                      ),
-                                    ),
-                                    const SizedBox(width: 8),
-                                    Expanded(
-                                      child: FilledButton.icon(
-                                        onPressed: (_busy || _maskStrokes.isEmpty || _prompt.text.trim().isEmpty) ? null : _inpaint,
-                                        icon: const Icon(Icons.auto_fix_high, size: 16),
-                                        label: const Text('Inpaint'),
-                                      ),
-                                    ),
-                                  ]),
-                                  if (_prompt.text.trim().isEmpty)
-                                    Padding(
-                                      padding: const EdgeInsets.only(top: 4),
-                                      child: Text('Enter a prompt above describing what to fill in the masked area', style: TextStyle(fontSize: 10, color: colors.error)),
-                                    ),
-                                ]),
-                              ),
-                            ),
-                          ],
-                        ],
-
-                        // ── Edit section ──
-                        const Divider(height: 24),
-                        ExpansionTile(
-                          title: Row(children: [
-                            const Icon(Icons.edit, size: 18),
-                            const SizedBox(width: 8),
-                            const Text('Edit Image', style: TextStyle(fontSize: 14, fontWeight: FontWeight.w600)),
-                          ]),
-                          subtitle: Text('Redraw with a text instruction (img2img)', style: TextStyle(fontSize: 11, color: colors.onSurfaceVariant)),
-                          tilePadding: EdgeInsets.zero,
-                          childrenPadding: const EdgeInsets.only(bottom: 8),
-                          children: [
-                            TextField(
-                              controller: _instruction,
-                              minLines: 2,
-                              maxLines: 4,
-                              enabled: !_isSelectedModelComponent,
-                              decoration: const InputDecoration(
-                                labelText: 'Instruction',
-                                hintText: 'e.g. make it cinematic, add a sunset, change to watercolor',
-                                isDense: true,
-                              ),
-                            ),
-                            const SizedBox(height: 8),
-                            Row(children: [
-                              Expanded(
-                                child: Slider(value: _editStrength, min: 0.1, max: 1.0, divisions: 18,
-                                  onChanged: (v) => setState(() => _editStrength = v)),
-                              ),
-                              Text('${(_editStrength * 100).round()}%', style: const TextStyle(fontSize: 12, fontWeight: FontWeight.w600)),
-                            ]),
-                            Text(
-                              _editStrength < 0.3 ? 'Subtle — preserves most of the original'
-                                : _editStrength < 0.6 ? 'Moderate — noticeable changes, keeps structure'
-                                : _editStrength < 0.8 ? 'Strong — significant changes'
-                                : 'Maximum — almost fully regenerated',
-                              style: TextStyle(fontSize: 10, color: colors.onSurfaceVariant),
-                            ),
-                            const SizedBox(height: 8),
-                            FilledButton.tonalIcon(
-                              onPressed: (_busy || _isSelectedModelComponent || _selectedImageId == null) ? null : _applyEdit,
-                              icon: const Icon(Icons.edit),
-                              label: const Text('Apply edit'),
-                            ),
-                          ],
-                        ),
-                        if (selected != null) ...[
-                          const Divider(height: 24),
-                          ExpansionTile(
-                            title: Row(children: [
-                              const Icon(Icons.analytics_outlined, size: 18),
-                              const SizedBox(width: 8),
-                              const Text('Generation Log', style: TextStyle(fontSize: 14, fontWeight: FontWeight.w600)),
-                            ]),
-                            subtitle: Text('${selected['operation'] ?? 'generate'} — ${(selected['prompt'] ?? '').toString().length > 40 ? '${(selected['prompt'] ?? '').toString().substring(0, 40)}…' : selected['prompt'] ?? ''}',
-                                style: TextStyle(fontSize: 11, color: colors.onSurfaceVariant)),
-                            tilePadding: EdgeInsets.zero,
-                            childrenPadding: const EdgeInsets.only(bottom: 8),
-                            children: [
-                              Builder(builder: (_) {
-                                final params = _paramsFor(selected);
-                                final genLog = params['generation_log'] as Map<String, dynamic>?;
-                                final deviceUsed = (params['device_used'] ?? genLog?['device'] ?? '').toString();
-                                final profile = (params['quality_profile'] ?? '').toString();
-                                final fallback = params['fallback_used'] == true;
-                                final fallbackReason = (params['fallback_reason'] ?? '').toString();
-
-                                return Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
-                                  // Summary row
-                                  if (genLog != null) ...[
-                                    Container(
-                                      padding: const EdgeInsets.all(8),
-                                      decoration: BoxDecoration(
-                                        color: colors.surfaceContainerHighest.withValues(alpha: 0.5),
-                                        borderRadius: BorderRadius.circular(8),
-                                      ),
-                                      child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
-                                        Text('${genLog['resolution']} • ${genLog['steps']} steps • ${genLog['total_elapsed_sec']}s total',
-                                            style: const TextStyle(fontSize: 13, fontWeight: FontWeight.w600)),
-                                        const SizedBox(height: 4),
-                                        Text('Device: ${genLog['device']} • Dtype: ${genLog['dtype']} • Threads: ${genLog['cpu_threads'] ?? 'n/a'}',
-                                            style: TextStyle(fontSize: 11, color: colors.onSurfaceVariant)),
-                                        if (genLog['seed'] != null)
-                                          Text('Seed: ${genLog['seed']}', style: TextStyle(fontSize: 11, color: colors.onSurfaceVariant)),
-                                        if (genLog['scheduler'] != null)
-                                          Text('Scheduler: ${genLog['scheduler']}', style: TextStyle(fontSize: 11, color: colors.onSurfaceVariant)),
-                                      ]),
-                                    ),
-                                    // Optimizations used
-                                    if ((genLog['optimizations_used'] as List<dynamic>?)?.isNotEmpty == true) ...[
-                                      const SizedBox(height: 8),
-                                      Text('Optimizations', style: TextStyle(fontSize: 12, fontWeight: FontWeight.w600, color: colors.primary)),
-                                      const SizedBox(height: 4),
-                                      Wrap(spacing: 4, runSpacing: 4, children: [
-                                        for (final opt in (genLog['optimizations_used'] as List<dynamic>))
-                                          Chip(
-                                            label: Text(opt.toString(), style: const TextStyle(fontSize: 10)),
-                                            visualDensity: VisualDensity.compact,
-                                            padding: EdgeInsets.zero,
-                                            materialTapTargetSize: MaterialTapTargetSize.shrinkWrap,
-                                          ),
-                                      ]),
-                                    ],
-                                    // Stage timeline
-                                    if ((genLog['stages'] as List<dynamic>?)?.isNotEmpty == true) ...[
-                                      const SizedBox(height: 8),
-                                      Text('Timeline', style: TextStyle(fontSize: 12, fontWeight: FontWeight.w600, color: colors.primary)),
-                                      const SizedBox(height: 4),
-                                      for (final stage in (genLog['stages'] as List<dynamic>))
-                                        Padding(
-                                          padding: const EdgeInsets.only(bottom: 2),
-                                          child: Row(children: [
-                                            SizedBox(width: 50, child: Text('${(stage as Map)['elapsed_sec']}s',
-                                                style: TextStyle(fontSize: 11, fontWeight: FontWeight.w600, color: colors.primary), textAlign: TextAlign.right)),
-                                            const SizedBox(width: 8),
-                                            Container(width: 8, height: 8, decoration: BoxDecoration(
-                                              color: colors.primary, shape: BoxShape.circle)),
-                                            const SizedBox(width: 8),
-                                            Expanded(child: Text('${stage['stage']}',
-                                                style: const TextStyle(fontSize: 11))),
-                                            Text('@ ${stage['wall_time_sec']}s',
-                                                style: TextStyle(fontSize: 10, color: colors.onSurfaceVariant)),
-                                          ]),
-                                        ),
-                                    ],
-                                  ] else ...[
-                                    // Fallback for old images without generation log
-                                    if (deviceUsed.isNotEmpty) Text('Generated on: $deviceUsed', style: const TextStyle(fontSize: 12)),
-                                    if (profile.isNotEmpty) Text('Profile: $profile', style: const TextStyle(fontSize: 12)),
-                                  ],
-                                  if (fallback) Text('Fallback to CPU: $fallbackReason', style: const TextStyle(color: Colors.orange, fontSize: 12)),
-                                ]);
-                              }),
-                            ],
-                          ),
-                        ],
-                      ],
-                    ),
-                  ),
-                ),
+                width: 400,
+                child: _buildControlsPanel(cs, selected),
               ),
             ],
           ),
         ),
       ],
+    );
+  }
+
+  // ── STATUS BAR ──
+  Widget _buildStatusBar(ColorScheme cs) {
+    final isCuda = _runtime['cuda_available'] == true;
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
+      decoration: BoxDecoration(
+        color: cs.surfaceContainerHighest.withValues(alpha: 0.3),
+        border: Border(bottom: BorderSide(color: cs.outlineVariant.withValues(alpha: 0.3))),
+      ),
+      child: Row(
+        children: [
+          // Runtime chip
+          Container(
+            padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 4),
+            decoration: BoxDecoration(
+              color: isCuda ? cs.primaryContainer : cs.surfaceContainerHighest,
+              borderRadius: BorderRadius.circular(20),
+            ),
+            child: Row(mainAxisSize: MainAxisSize.min, children: [
+              Icon(isCuda ? Icons.memory : Icons.computer, size: 13,
+                  color: isCuda ? cs.onPrimaryContainer : cs.onSurfaceVariant),
+              const SizedBox(width: 4),
+              Text(_runtimeChipText(), style: TextStyle(fontSize: 11, fontWeight: FontWeight.w600,
+                  color: isCuda ? cs.onPrimaryContainer : cs.onSurfaceVariant)),
+            ]),
+          ),
+          const SizedBox(width: 10),
+          // Status text + progress
+          if (_status.isNotEmpty)
+            Expanded(
+              child: Column(
+                mainAxisSize: MainAxisSize.min,
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Text(_status, style: TextStyle(fontSize: 12, color: cs.onSurfaceVariant), maxLines: 1, overflow: TextOverflow.ellipsis),
+                  if (_busy) ...[
+                    const SizedBox(height: 2),
+                    ClipRRect(
+                      borderRadius: BorderRadius.circular(2),
+                      child: _progressPercent > 0
+                          ? LinearProgressIndicator(value: _progressPercent, minHeight: 3, backgroundColor: cs.surfaceContainerHighest)
+                          : const LinearProgressIndicator(minHeight: 3),
+                    ),
+                  ],
+                ],
+              ),
+            )
+          else
+            const Spacer(),
+          if (_busy)
+            TextButton.icon(
+              onPressed: _cancelGeneration,
+              icon: const Icon(Icons.stop, size: 16, color: Colors.redAccent),
+              label: const Text('Cancel', style: TextStyle(fontSize: 12, color: Colors.redAccent)),
+              style: TextButton.styleFrom(
+                padding: const EdgeInsets.symmetric(horizontal: 8),
+                visualDensity: VisualDensity.compact,
+              ),
+            ),
+          IconButton(
+            onPressed: _load,
+            icon: const Icon(Icons.refresh, size: 18),
+            tooltip: 'Refresh',
+            visualDensity: VisualDensity.compact,
+          ),
+        ],
+      ),
+    );
+  }
+
+  // ── SESSIONS PANEL ──
+  Widget _buildSessionsPanel(ColorScheme cs) {
+    return SizedBox(
+      width: 240,
+      child: Column(
+        children: [
+          // Header
+          Padding(
+            padding: const EdgeInsets.fromLTRB(12, 8, 4, 4),
+            child: Row(children: [
+              Icon(Icons.collections, size: 16, color: cs.primary),
+              const SizedBox(width: 6),
+              Text('Sessions', style: TextStyle(fontSize: 13, fontWeight: FontWeight.w600, color: cs.onSurface)),
+              const Spacer(),
+              IconButton(
+                onPressed: _refreshModels,
+                icon: const Icon(Icons.sync, size: 16),
+                tooltip: 'Refresh models',
+                visualDensity: VisualDensity.compact,
+                iconSize: 16,
+              ),
+              IconButton(
+                onPressed: _createSession,
+                icon: Icon(Icons.add_circle_outline, size: 16, color: cs.primary),
+                tooltip: 'New session',
+                visualDensity: VisualDensity.compact,
+                iconSize: 16,
+              ),
+            ]),
+          ),
+          const Divider(height: 1),
+          // Session list
+          Expanded(
+            child: _sessions.isEmpty
+                ? Center(child: Text('No sessions yet', style: TextStyle(fontSize: 12, color: cs.onSurfaceVariant)))
+                : ListView.builder(
+                    padding: const EdgeInsets.symmetric(vertical: 4),
+                    itemCount: _sessions.length,
+                    itemBuilder: (ctx, i) {
+                      final s = _sessions[i];
+                      final isActive = _activeSession?['id'] == s['id'];
+                      return Container(
+                        margin: const EdgeInsets.symmetric(horizontal: 6, vertical: 1),
+                        decoration: BoxDecoration(
+                          color: isActive ? cs.primaryContainer.withValues(alpha: 0.5) : null,
+                          borderRadius: BorderRadius.circular(8),
+                        ),
+                        child: ListTile(
+                          dense: true,
+                          visualDensity: VisualDensity.compact,
+                          contentPadding: const EdgeInsets.symmetric(horizontal: 10),
+                          title: Text(
+                            (s['title'] ?? 'Untitled').toString(),
+                            style: TextStyle(
+                              fontSize: 12,
+                              fontWeight: isActive ? FontWeight.w600 : FontWeight.normal,
+                              color: isActive ? cs.onPrimaryContainer : cs.onSurface,
+                            ),
+                            maxLines: 1,
+                            overflow: TextOverflow.ellipsis,
+                          ),
+                          subtitle: Text(
+                            (s['id'] ?? '').toString().substring(0, 8),
+                            style: TextStyle(fontSize: 10, color: cs.onSurfaceVariant),
+                          ),
+                          onTap: () => _openSession(s['id'].toString()),
+                        ),
+                      );
+                    },
+                  ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  // ── IMAGE VIEWER ──
+  Widget _buildImageViewer(ColorScheme cs, List<Map<String, dynamic>> images, String? selectedUrl) {
+    return Column(
+      children: [
+        // Main image area
+        Expanded(
+          child: Container(
+            margin: const EdgeInsets.only(top: 4),
+            decoration: BoxDecoration(
+              color: cs.surfaceContainerLowest,
+              borderRadius: const BorderRadius.vertical(top: Radius.circular(12)),
+              border: Border.all(color: cs.outlineVariant.withValues(alpha: 0.2)),
+            ),
+            child: ClipRRect(
+              borderRadius: const BorderRadius.vertical(top: Radius.circular(12)),
+              child: selectedUrl == null
+                  ? Center(
+                      child: Column(mainAxisSize: MainAxisSize.min, children: [
+                        Icon(Icons.image_outlined, size: 64, color: cs.onSurfaceVariant.withValues(alpha: 0.3)),
+                        const SizedBox(height: 12),
+                        Text('Generate an image to begin', style: TextStyle(fontSize: 14, color: cs.onSurfaceVariant.withValues(alpha: 0.5))),
+                      ]),
+                    )
+                  : _inpaintMode
+                      ? _buildInpaintOverlay(selectedUrl)
+                      : InteractiveViewer(
+                          minScale: 0.5,
+                          maxScale: 6,
+                          child: Center(child: Image.network(selectedUrl, filterQuality: FilterQuality.medium)),
+                        ),
+            ),
+          ),
+        ),
+        // Thumbnail filmstrip
+        if (images.isNotEmpty)
+          Container(
+            height: 88,
+            decoration: BoxDecoration(
+              color: cs.surfaceContainerHigh,
+              borderRadius: const BorderRadius.vertical(bottom: Radius.circular(12)),
+              border: Border.all(color: cs.outlineVariant.withValues(alpha: 0.2)),
+            ),
+            child: ListView.builder(
+              scrollDirection: Axis.horizontal,
+              padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 6),
+              itemCount: images.length,
+              itemBuilder: (ctx, i) {
+                final img = images[i];
+                final id = img['id'].toString();
+                final isSelected = _selectedImageId == id;
+                final url = _imageUrlFor(id);
+                if (url == null) return const SizedBox.shrink();
+                return GestureDetector(
+                  onTap: () => setState(() => _selectedImageId = id),
+                  child: AnimatedContainer(
+                    duration: const Duration(milliseconds: 150),
+                    width: 76,
+                    margin: const EdgeInsets.only(right: 6),
+                    decoration: BoxDecoration(
+                      borderRadius: BorderRadius.circular(8),
+                      border: Border.all(
+                        color: isSelected ? cs.primary : Colors.transparent,
+                        width: isSelected ? 2 : 1,
+                      ),
+                      boxShadow: isSelected
+                          ? [BoxShadow(color: cs.primary.withValues(alpha: 0.3), blurRadius: 8)]
+                          : null,
+                    ),
+                    child: ClipRRect(
+                      borderRadius: BorderRadius.circular(6),
+                      child: Image.network(url, fit: BoxFit.cover),
+                    ),
+                  ),
+                );
+              },
+            ),
+          ),
+      ],
+    );
+  }
+
+  Widget _buildInpaintOverlay(String selectedUrl) {
+    return LayoutBuilder(builder: (ctx, constraints) {
+      return GestureDetector(
+        onPanUpdate: (details) => setState(() => _maskStrokes.add(details.localPosition)),
+        onPanEnd: (_) => setState(() => _maskStrokes.add(null)),
+        onTapDown: (details) => setState(() {
+          _maskStrokes.add(details.localPosition);
+          _maskStrokes.add(null);
+        }),
+        child: Stack(children: [
+          Center(child: Image.network(selectedUrl, fit: BoxFit.contain)),
+          Positioned.fill(child: CustomPaint(painter: _MaskPainter(_maskStrokes, _brushSize))),
+          Positioned(
+            top: 8, right: 8,
+            child: Container(
+              padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 5),
+              decoration: BoxDecoration(color: Colors.black87, borderRadius: BorderRadius.circular(20)),
+              child: const Row(mainAxisSize: MainAxisSize.min, children: [
+                Icon(Icons.brush, size: 14, color: Colors.white70),
+                SizedBox(width: 4),
+                Text('Painting mask', style: TextStyle(fontSize: 11, color: Colors.white70)),
+              ]),
+            ),
+          ),
+        ]),
+      );
+    });
+  }
+
+  // ── CONTROLS PANEL ──
+  Widget _buildControlsPanel(ColorScheme cs, Map<String, dynamic>? selected) {
+    return Column(
+      children: [
+        // Prompt area (always visible at top)
+        _buildPromptSection(cs),
+        // Tab bar
+        Container(
+          decoration: BoxDecoration(
+            border: Border(bottom: BorderSide(color: cs.outlineVariant.withValues(alpha: 0.3))),
+          ),
+          child: TabBar(
+            controller: _rightTabController,
+            labelStyle: const TextStyle(fontSize: 12, fontWeight: FontWeight.w600),
+            unselectedLabelStyle: const TextStyle(fontSize: 12),
+            indicatorSize: TabBarIndicatorSize.label,
+            tabs: const [
+              Tab(text: 'Parameters'),
+              Tab(text: 'Tools'),
+              Tab(text: 'Info'),
+            ],
+          ),
+        ),
+        // Tab content
+        Expanded(
+          child: TabBarView(
+            controller: _rightTabController,
+            children: [
+              _buildParametersTab(cs),
+              _buildToolsTab(cs),
+              _buildInfoTab(cs, selected),
+            ],
+          ),
+        ),
+      ],
+    );
+  }
+
+  // ── PROMPT SECTION (always visible) ──
+  Widget _buildPromptSection(ColorScheme cs) {
+    return Container(
+      padding: const EdgeInsets.fromLTRB(12, 8, 12, 8),
+      decoration: BoxDecoration(
+        color: cs.surfaceContainerHigh.withValues(alpha: 0.3),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        children: [
+          // Model selector row
+          Row(
+            children: [
+              Expanded(
+                child: DropdownButtonFormField<String>(
+                  initialValue: _models.any((m) => m['model_id'].toString() == _selectedModel) ? _selectedModel : null,
+                  isExpanded: true,
+                  isDense: true,
+                  items: _models.map((m) {
+                    final id = m['model_id'].toString();
+                    final isComponent = m['is_component'] == true;
+                    final modelType = (m['model_type'] ?? '').toString();
+                    final label = isComponent ? '$id ($modelType)' : id;
+                    return DropdownMenuItem(
+                      value: id,
+                      child: Text(label, overflow: TextOverflow.ellipsis, style: TextStyle(
+                        fontSize: 12,
+                        color: isComponent ? cs.onSurfaceVariant : null,
+                        fontStyle: isComponent ? FontStyle.italic : FontStyle.normal,
+                      )),
+                    );
+                  }).toList(),
+                  onChanged: (v) { setState(() => _selectedModel = v); _loadModelFit(); },
+                  decoration: const InputDecoration(
+                    labelText: 'Model',
+                    isDense: true,
+                    contentPadding: EdgeInsets.symmetric(horizontal: 10, vertical: 8),
+                  ),
+                ),
+              ),
+              const SizedBox(width: 4),
+              IconButton(
+                onPressed: _busy ? null : _useRecommendedSettings,
+                icon: const Icon(Icons.auto_fix_high, size: 18),
+                tooltip: 'Apply recommended settings',
+                visualDensity: VisualDensity.compact,
+              ),
+            ],
+          ),
+          if (_isSelectedModelComponent) ...[
+            const SizedBox(height: 4),
+            Container(
+              padding: const EdgeInsets.all(6),
+              decoration: BoxDecoration(
+                color: cs.tertiaryContainer.withValues(alpha: 0.5),
+                borderRadius: BorderRadius.circular(6),
+              ),
+              child: Text(
+                _selectedModelExplanation ?? 'Component model -- cannot generate directly.',
+                style: TextStyle(fontSize: 10, color: cs.onTertiaryContainer),
+              ),
+            ),
+          ],
+          const SizedBox(height: 8),
+          // Prompt field
+          TextField(
+            controller: _prompt,
+            minLines: 2,
+            maxLines: 4,
+            enabled: !_isSelectedModelComponent,
+            style: const TextStyle(fontSize: 13),
+            onChanged: (_) => setState(() {}),
+            decoration: const InputDecoration(
+              labelText: 'Prompt',
+              hintText: 'Describe what you want to generate...',
+              isDense: true,
+              contentPadding: EdgeInsets.symmetric(horizontal: 10, vertical: 10),
+            ),
+          ),
+          const SizedBox(height: 4),
+          // Enhance prompt row: button + model picker + timeout
+          Row(children: [
+            // Enhance button
+            _enhancingPrompt
+                ? const Row(mainAxisSize: MainAxisSize.min, children: [
+                    SizedBox(width: 16, height: 16, child: CircularProgressIndicator(strokeWidth: 2)),
+                    SizedBox(width: 6),
+                    Text('Enhancing...', style: TextStyle(fontSize: 11)),
+                  ])
+                : TextButton.icon(
+                    onPressed: _prompt.text.trim().isEmpty ? null : _enhancePrompt,
+                    icon: const Icon(Icons.auto_awesome, size: 14),
+                    label: const Text('Enhance', style: TextStyle(fontSize: 11)),
+                    style: TextButton.styleFrom(
+                      padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
+                      visualDensity: VisualDensity.compact,
+                    ),
+                  ),
+            const SizedBox(width: 4),
+            // Ollama model picker
+            Expanded(
+              child: DropdownButtonFormField<String>(
+                initialValue: _enhancerModel,
+                isExpanded: true,
+                isDense: true,
+                decoration: const InputDecoration(
+                  labelText: 'LLM',
+                  isDense: true,
+                  contentPadding: EdgeInsets.symmetric(horizontal: 6, vertical: 4),
+                ),
+                items: [
+                  const DropdownMenuItem<String>(value: null, child: Text('Auto (smallest)', style: TextStyle(fontSize: 11))),
+                  ..._ollamaModels.map((m) => DropdownMenuItem(value: m, child: Text(m, style: const TextStyle(fontSize: 11), overflow: TextOverflow.ellipsis))),
+                ],
+                onChanged: (v) => setState(() => _enhancerModel = v),
+              ),
+            ),
+            const SizedBox(width: 4),
+            // Timeout
+            SizedBox(
+              width: 58,
+              child: TextFormField(
+                initialValue: _enhancerTimeout.toString(),
+                style: const TextStyle(fontSize: 11),
+                keyboardType: TextInputType.number,
+                decoration: const InputDecoration(
+                  labelText: 'Timeout',
+                  suffixText: 's',
+                  isDense: true,
+                  contentPadding: EdgeInsets.symmetric(horizontal: 6, vertical: 4),
+                ),
+                onChanged: (v) => _enhancerTimeout = int.tryParse(v) ?? _enhancerTimeout,
+              ),
+            ),
+          ]),
+          // Negative prompt toggle
+          if (_showNegativePrompt) ...[
+            const SizedBox(height: 6),
+            TextField(
+              controller: _negativePrompt,
+              maxLines: 2,
+              style: const TextStyle(fontSize: 12),
+              decoration: InputDecoration(
+                labelText: 'Negative prompt',
+                isDense: true,
+                contentPadding: const EdgeInsets.symmetric(horizontal: 10, vertical: 8),
+                suffixIcon: IconButton(
+                  onPressed: () => setState(() { _showNegativePrompt = false; _negativePrompt.clear(); }),
+                  icon: const Icon(Icons.close, size: 16),
+                  visualDensity: VisualDensity.compact,
+                ),
+              ),
+            ),
+          ],
+          const SizedBox(height: 8),
+          // Quick settings row + Generate button
+          Row(
+            children: [
+              // Quality profile chip
+              _buildChipDropdown<String>(
+                value: _qualityProfile,
+                items: const {'fast': 'Fast', 'balanced': 'Balanced', 'quality': 'Quality', 'low_memory': 'Low Mem'},
+                onChanged: _busy ? null : (v) => setState(() => _qualityProfile = v ?? 'balanced'),
+                icon: Icons.speed,
+                cs: cs,
+              ),
+              const SizedBox(width: 4),
+              // Device chip
+              _buildChipDropdown<String>(
+                value: _devicePreference,
+                items: {
+                  'auto': 'Auto',
+                  'cuda': 'GPU',
+                  'cpu': 'CPU',
+                  if (_runtime['sdcpp_available'] == true) 'sdcpp': 'SD.cpp',
+                },
+                onChanged: _busy ? null : (v) => setState(() => _devicePreference = v ?? 'auto'),
+                icon: Icons.developer_board,
+                cs: cs,
+              ),
+              const SizedBox(width: 4),
+              // Negative prompt toggle
+              if (!_showNegativePrompt)
+                IconButton(
+                  onPressed: () => setState(() => _showNegativePrompt = true),
+                  icon: const Icon(Icons.remove_circle_outline, size: 18),
+                  tooltip: 'Add negative prompt',
+                  visualDensity: VisualDensity.compact,
+                  iconSize: 18,
+                ),
+              const Spacer(),
+              // Generate button
+              FilledButton.icon(
+                onPressed: (_busy || _isSelectedModelComponent || _prompt.text.trim().isEmpty) ? null : _generate,
+                icon: const Icon(Icons.auto_awesome, size: 16),
+                label: const Text('Generate', style: TextStyle(fontSize: 13)),
+                style: FilledButton.styleFrom(
+                  padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 10),
+                ),
+              ),
+            ],
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _buildChipDropdown<T>({
+    required T value,
+    required Map<T, String> items,
+    required ValueChanged<T?>? onChanged,
+    required IconData icon,
+    required ColorScheme cs,
+  }) {
+    return PopupMenuButton<T>(
+      onSelected: onChanged,
+      enabled: onChanged != null,
+      padding: EdgeInsets.zero,
+      position: PopupMenuPosition.under,
+      itemBuilder: (ctx) => items.entries.map((e) => PopupMenuItem(
+        value: e.key,
+        height: 36,
+        child: Text(e.value, style: TextStyle(fontSize: 12, fontWeight: e.key == value ? FontWeight.w600 : FontWeight.normal)),
+      )).toList(),
+      child: Container(
+        padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 5),
+        decoration: BoxDecoration(
+          color: cs.surfaceContainerHighest,
+          borderRadius: BorderRadius.circular(16),
+          border: Border.all(color: cs.outlineVariant.withValues(alpha: 0.5)),
+        ),
+        child: Row(mainAxisSize: MainAxisSize.min, children: [
+          Icon(icon, size: 13, color: cs.onSurfaceVariant),
+          const SizedBox(width: 4),
+          Text(items[value] ?? '?', style: TextStyle(fontSize: 11, color: cs.onSurfaceVariant)),
+          const SizedBox(width: 2),
+          Icon(Icons.expand_more, size: 14, color: cs.onSurfaceVariant),
+        ]),
+      ),
+    );
+  }
+
+  // ── PARAMETERS TAB ──
+  Widget _buildParametersTab(ColorScheme cs) {
+    return ListView(
+      padding: const EdgeInsets.all(12),
+      children: [
+        // Resolution row
+        _sectionLabel('Resolution', cs),
+        const SizedBox(height: 4),
+        Row(children: [
+          Expanded(child: _compactField('Width', _width.toString(), (v) => _width = int.tryParse(v) ?? _width)),
+          const SizedBox(width: 8),
+          Expanded(child: _compactField('Height', _height.toString(), (v) => _height = int.tryParse(v) ?? _height)),
+          const SizedBox(width: 8),
+          // Quick aspect ratio buttons
+          _aspectButton('1:1', 1024, 1024, cs),
+          const SizedBox(width: 2),
+          _aspectButton('3:4', 768, 1024, cs),
+          const SizedBox(width: 2),
+          _aspectButton('16:9', 1024, 576, cs),
+        ]),
+        const SizedBox(height: 12),
+
+        // Steps & Guidance
+        _sectionLabel('Generation', cs),
+        const SizedBox(height: 4),
+        Row(children: [
+          SizedBox(width: 80, child: _compactField('Steps', _steps.toString(), (v) => _steps = int.tryParse(v) ?? _steps)),
+          const SizedBox(width: 8),
+          SizedBox(width: 80, child: _compactField('Timeout', _timeoutSec.toString(), (v) => _timeoutSec = int.tryParse(v) ?? _timeoutSec)),
+          const SizedBox(width: 12),
+          Expanded(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Text('Guidance: ${_guidance.toStringAsFixed(1)}', style: TextStyle(fontSize: 11, color: cs.onSurfaceVariant)),
+                SliderTheme(
+                  data: SliderThemeData(overlayShape: const RoundSliderOverlayShape(overlayRadius: 14)),
+                  child: Slider(
+                    value: _guidance, min: 1.0, max: 12.0, divisions: 22,
+                    onChanged: _busy ? null : (v) => setState(() => _guidance = v),
+                  ),
+                ),
+              ],
+            ),
+          ),
+        ]),
+        const SizedBox(height: 8),
+
+        // Seed & Sampler
+        Row(children: [
+          // Seed
+          Expanded(
+            child: TextField(
+              controller: _seedController,
+              style: const TextStyle(fontSize: 12),
+              keyboardType: TextInputType.number,
+              decoration: InputDecoration(
+                labelText: 'Seed',
+                isDense: true,
+                contentPadding: const EdgeInsets.symmetric(horizontal: 8, vertical: 8),
+                hintText: 'Random',
+                hintStyle: TextStyle(fontSize: 11, color: cs.onSurfaceVariant.withValues(alpha: 0.5)),
+                suffixIcon: Row(mainAxisSize: MainAxisSize.min, children: [
+                  if (_lastSeedUsed != null)
+                    SizedBox(
+                      width: 28, height: 28,
+                      child: IconButton(
+                        onPressed: () {
+                          _seedController.text = _lastSeedUsed.toString();
+                          _seed = _lastSeedUsed;
+                        },
+                        icon: const Icon(Icons.history, size: 15),
+                        tooltip: 'Reuse last seed: $_lastSeedUsed',
+                        padding: EdgeInsets.zero,
+                      ),
+                    ),
+                  SizedBox(
+                    width: 28, height: 28,
+                    child: IconButton(
+                      onPressed: () { _seedController.clear(); _seed = null; },
+                      icon: const Icon(Icons.casino, size: 15),
+                      tooltip: 'Random seed',
+                      padding: EdgeInsets.zero,
+                    ),
+                  ),
+                ]),
+              ),
+              onChanged: (v) => _seed = int.tryParse(v),
+            ),
+          ),
+          const SizedBox(width: 8),
+          // Sampler
+          Expanded(
+            child: DropdownButtonFormField<String>(
+              initialValue: _scheduler,
+              isExpanded: true,
+              isDense: true,
+              decoration: const InputDecoration(
+                labelText: 'Sampler',
+                isDense: true,
+                contentPadding: EdgeInsets.symmetric(horizontal: 8, vertical: 8),
+              ),
+              items: const [
+                DropdownMenuItem(value: null, child: Text('Auto', style: TextStyle(fontSize: 12))),
+                DropdownMenuItem(value: 'dpmpp_2m_sde_karras', child: Text('DPM++ 2M SDE K', style: TextStyle(fontSize: 12))),
+                DropdownMenuItem(value: 'euler', child: Text('Euler', style: TextStyle(fontSize: 12))),
+                DropdownMenuItem(value: 'euler_a', child: Text('Euler A', style: TextStyle(fontSize: 12))),
+                DropdownMenuItem(value: 'ddim', child: Text('DDIM', style: TextStyle(fontSize: 12))),
+                DropdownMenuItem(value: 'lcm', child: Text('LCM', style: TextStyle(fontSize: 12))),
+                DropdownMenuItem(value: 'unipc', child: Text('UniPC', style: TextStyle(fontSize: 12))),
+              ],
+              onChanged: _busy ? null : (v) => setState(() => _scheduler = v),
+            ),
+          ),
+        ]),
+        const SizedBox(height: 12),
+
+        // Toggles
+        _sectionLabel('Processing', cs),
+        const SizedBox(height: 4),
+        Wrap(
+          spacing: 6,
+          runSpacing: 4,
+          children: [
+            _toggleChip('Refine', _enableRefine, (v) => setState(() => _enableRefine = v), cs),
+            _toggleChip('Upscale', _enableUpscale, (v) => setState(() => _enableUpscale = v), cs),
+            _toggleChip('Postprocess', _enablePostprocess, (v) => setState(() => _enablePostprocess = v), cs),
+            _toggleChip('Step Previews', _enableStepPreviews, (v) => setState(() => _enableStepPreviews = v), cs),
+            _toggleChip('Low Memory', _lowMemoryMode, (v) => setState(() => _lowMemoryMode = v), cs),
+          ],
+        ),
+        if (_lowMemoryMode) ...[
+          const SizedBox(height: 4),
+          Text('Forces 512x512, 16 steps for reliability on limited RAM/VRAM.',
+              style: TextStyle(fontSize: 10, color: cs.onSurfaceVariant)),
+        ],
+        const SizedBox(height: 12),
+
+        // Effective settings preview
+        Container(
+          padding: const EdgeInsets.all(10),
+          decoration: BoxDecoration(
+            color: cs.surfaceContainerHighest.withValues(alpha: 0.4),
+            borderRadius: BorderRadius.circular(8),
+          ),
+          child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+            Text('Preview', style: TextStyle(fontSize: 11, fontWeight: FontWeight.w600, color: cs.primary)),
+            const SizedBox(height: 2),
+            Text(
+              '${_lowMemoryMode ? 512 : _width}x${_lowMemoryMode ? 512 : _height} | '
+              '${_lowMemoryMode ? 16 : _steps} steps | '
+              'guidance ${_guidance.toStringAsFixed(1)} | '
+              '$_qualityProfile',
+              style: TextStyle(fontSize: 11, color: cs.onSurfaceVariant),
+            ),
+          ]),
+        ),
+
+        // Model recommendation
+        if ((_runtime['execution_plan'] as Map<String, dynamic>?)?['model_recommendation'] != null) ...[
+          const SizedBox(height: 8),
+          _buildModelRecommendation(cs),
+        ],
+      ],
+    );
+  }
+
+  Widget _buildModelRecommendation(ColorScheme cs) {
+    final rec = (_runtime['execution_plan'] as Map<String, dynamic>)['model_recommendation'] as Map<String, dynamic>;
+    final suggested = rec['suggested_model']?.toString() ?? '';
+    final reason = rec['reason']?.toString() ?? '';
+    return Container(
+      padding: const EdgeInsets.all(10),
+      decoration: BoxDecoration(
+        color: Colors.amber.withValues(alpha: 0.1),
+        borderRadius: BorderRadius.circular(8),
+        border: Border.all(color: Colors.amber.withValues(alpha: 0.3)),
+      ),
+      child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+        Row(children: [
+          const Icon(Icons.tips_and_updates, size: 14, color: Colors.amber),
+          const SizedBox(width: 6),
+          Expanded(child: Text('Try: $suggested', style: const TextStyle(fontSize: 12, fontWeight: FontWeight.w600))),
+        ]),
+        if (reason.isNotEmpty) ...[
+          const SizedBox(height: 2),
+          Text(reason, style: TextStyle(fontSize: 10, color: cs.onSurfaceVariant)),
+        ],
+        const SizedBox(height: 4),
+        SizedBox(
+          height: 26,
+          child: OutlinedButton(
+            onPressed: () => setState(() => _selectedModel = 'huggingface:$suggested'),
+            child: const Text('Use this model', style: TextStyle(fontSize: 10)),
+          ),
+        ),
+      ]),
+    );
+  }
+
+  // ── TOOLS TAB ──
+  Widget _buildToolsTab(ColorScheme cs) {
+    return ListView(
+      padding: const EdgeInsets.all(12),
+      children: [
+        // Image actions (when image selected)
+        if (_selectedImageId != null) ...[
+          _sectionLabel('Image Actions', cs),
+          const SizedBox(height: 6),
+          Row(children: [
+            Expanded(
+              child: _actionButton(
+                icon: Icons.zoom_in,
+                label: 'Upscale 4x',
+                onPressed: _busy ? null : _upscaleImage,
+                cs: cs,
+              ),
+            ),
+            const SizedBox(width: 6),
+            Expanded(
+              child: _inpaintMode
+                  ? _actionButton(
+                      icon: Icons.close,
+                      label: 'Exit Inpaint',
+                      onPressed: () => setState(() { _inpaintMode = false; _maskStrokes.clear(); }),
+                      cs: cs,
+                      color: Colors.orange,
+                    )
+                  : _actionButton(
+                      icon: Icons.brush,
+                      label: 'Inpaint',
+                      onPressed: _busy ? null : () => setState(() => _inpaintMode = true),
+                      cs: cs,
+                    ),
+            ),
+          ]),
+          // Inpaint controls
+          if (_inpaintMode) ...[
+            const SizedBox(height: 8),
+            Container(
+              padding: const EdgeInsets.all(10),
+              decoration: BoxDecoration(
+                color: cs.primaryContainer.withValues(alpha: 0.2),
+                borderRadius: BorderRadius.circular(8),
+              ),
+              child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+                Text('Draw on the image to mark areas', style: TextStyle(fontSize: 11, color: cs.primary, fontWeight: FontWeight.w600)),
+                const SizedBox(height: 6),
+                Row(children: [
+                  const Text('Brush:', style: TextStyle(fontSize: 11)),
+                  Expanded(child: Slider(
+                    value: _brushSize, min: 5, max: 100, divisions: 19,
+                    label: '${_brushSize.round()}px',
+                    onChanged: (v) => setState(() => _brushSize = v),
+                  )),
+                  Text('${_brushSize.round()}px', style: const TextStyle(fontSize: 11)),
+                ]),
+                Row(children: [
+                  Expanded(child: OutlinedButton(
+                    onPressed: () => setState(() => _maskStrokes.clear()),
+                    child: const Text('Clear', style: TextStyle(fontSize: 11)),
+                  )),
+                  const SizedBox(width: 6),
+                  Expanded(child: FilledButton(
+                    onPressed: (_busy || _maskStrokes.isEmpty || _prompt.text.trim().isEmpty) ? null : _inpaint,
+                    child: const Text('Inpaint', style: TextStyle(fontSize: 11)),
+                  )),
+                ]),
+                if (_prompt.text.trim().isEmpty)
+                  Padding(
+                    padding: const EdgeInsets.only(top: 4),
+                    child: Text('Enter a prompt above first', style: TextStyle(fontSize: 10, color: cs.error)),
+                  ),
+              ]),
+            ),
+          ],
+          const SizedBox(height: 12),
+          // Edit section
+          _sectionLabel('Edit Image (img2img)', cs),
+          const SizedBox(height: 6),
+          TextField(
+            controller: _instruction,
+            minLines: 2,
+            maxLines: 3,
+            enabled: !_isSelectedModelComponent,
+            style: const TextStyle(fontSize: 12),
+            decoration: const InputDecoration(
+              labelText: 'Instruction',
+              hintText: 'e.g. make it cinematic, add sunset',
+              isDense: true,
+              contentPadding: EdgeInsets.symmetric(horizontal: 10, vertical: 8),
+            ),
+          ),
+          const SizedBox(height: 6),
+          Row(children: [
+            Expanded(
+              child: SliderTheme(
+                data: SliderThemeData(overlayShape: const RoundSliderOverlayShape(overlayRadius: 14)),
+                child: Slider(
+                  value: _editStrength, min: 0.1, max: 1.0, divisions: 18,
+                  onChanged: (v) => setState(() => _editStrength = v),
+                ),
+              ),
+            ),
+            SizedBox(
+              width: 42,
+              child: Text('${(_editStrength * 100).round()}%', style: const TextStyle(fontSize: 11, fontWeight: FontWeight.w600)),
+            ),
+          ]),
+          Text(
+            _editStrength < 0.3 ? 'Subtle changes'
+              : _editStrength < 0.6 ? 'Moderate changes'
+              : _editStrength < 0.8 ? 'Strong changes'
+              : 'Near-complete regeneration',
+            style: TextStyle(fontSize: 10, color: cs.onSurfaceVariant),
+          ),
+          const SizedBox(height: 6),
+          FilledButton.tonalIcon(
+            onPressed: (_busy || _isSelectedModelComponent || _selectedImageId == null || _instruction.text.trim().isEmpty) ? null : _applyEdit,
+            icon: const Icon(Icons.edit, size: 16),
+            label: const Text('Apply Edit', style: TextStyle(fontSize: 12)),
+          ),
+          const SizedBox(height: 12),
+        ],
+
+        // ControlNet
+        _sectionLabel('ControlNet', cs),
+        const SizedBox(height: 4),
+        SwitchListTile.adaptive(
+          value: _enableControlNet,
+          onChanged: _busy ? null : (v) => setState(() => _enableControlNet = v),
+          title: const Text('Enable ControlNet', style: TextStyle(fontSize: 13)),
+          subtitle: const Text('Guide generation with reference structure', style: TextStyle(fontSize: 11)),
+          dense: true,
+          contentPadding: EdgeInsets.zero,
+        ),
+        if (_enableControlNet) ...[
+          DropdownButtonFormField<String>(
+            isExpanded: true,
+            isDense: true,
+            initialValue: _controlNetType,
+            items: _controlNetTypes.map((t) => DropdownMenuItem(
+              value: t['type'] as String,
+              child: Text('${t["name"]} -- ${t["description"]}', overflow: TextOverflow.ellipsis, style: const TextStyle(fontSize: 12)),
+            )).toList(),
+            onChanged: (v) => setState(() => _controlNetType = v),
+            decoration: const InputDecoration(labelText: 'Control type', isDense: true, contentPadding: EdgeInsets.symmetric(horizontal: 8, vertical: 8)),
+          ),
+          const SizedBox(height: 6),
+          Row(children: [
+            Expanded(child: Text(_controlImagePath ?? 'No image selected', style: TextStyle(fontSize: 11, color: cs.onSurfaceVariant), overflow: TextOverflow.ellipsis)),
+            const SizedBox(width: 4),
+            SizedBox(
+              height: 30,
+              child: FilledButton.tonalIcon(
+                onPressed: _busy ? null : () async {
+                  final result = await FilePicker.platform.pickFiles(type: FileType.image);
+                  if (result != null && result.files.single.path != null) {
+                    setState(() => _controlImagePath = result.files.single.path);
+                  }
+                },
+                icon: const Icon(Icons.image, size: 14),
+                label: const Text('Pick', style: TextStyle(fontSize: 11)),
+              ),
+            ),
+          ]),
+          const SizedBox(height: 4),
+          Row(children: [
+            Text('Strength: ${_controlNetScale.toStringAsFixed(1)}', style: TextStyle(fontSize: 11, color: cs.onSurfaceVariant)),
+            Expanded(child: Slider(
+              value: _controlNetScale, min: 0.0, max: 2.0, divisions: 20,
+              onChanged: _busy ? null : (v) => setState(() => _controlNetScale = v),
+            )),
+          ]),
+        ],
+        const SizedBox(height: 12),
+
+        // LoRA
+        _sectionLabel('LoRAs', cs),
+        const SizedBox(height: 4),
+        if (_selectedLoras.isNotEmpty) ...[
+          for (int i = 0; i < _selectedLoras.length; i++)
+            Container(
+              margin: const EdgeInsets.only(bottom: 4),
+              padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
+              decoration: BoxDecoration(
+                color: cs.surfaceContainerHighest.withValues(alpha: 0.5),
+                borderRadius: BorderRadius.circular(8),
+              ),
+              child: Column(children: [
+                Row(children: [
+                  Expanded(child: Text(_selectedLoras[i]['display_name'] ?? _selectedLoras[i]['id'], style: const TextStyle(fontSize: 11), overflow: TextOverflow.ellipsis)),
+                  SizedBox(width: 28, height: 28, child: IconButton(
+                    onPressed: () => setState(() => _selectedLoras.removeAt(i)),
+                    icon: const Icon(Icons.close, size: 14), padding: EdgeInsets.zero,
+                  )),
+                ]),
+                Row(children: [
+                  const Text('W:', style: TextStyle(fontSize: 10)),
+                  Expanded(child: Slider(
+                    value: (_selectedLoras[i]['weight'] as num).toDouble(),
+                    min: 0.0, max: 2.0, divisions: 20,
+                    onChanged: (v) => setState(() => _selectedLoras[i]['weight'] = v),
+                  )),
+                  Text((_selectedLoras[i]['weight'] as num).toStringAsFixed(1), style: const TextStyle(fontSize: 10, fontWeight: FontWeight.w600)),
+                ]),
+              ]),
+            ),
+        ],
+        // Available LoRAs
+        if (_loadingLoras)
+          const Center(child: Padding(padding: EdgeInsets.all(8), child: SizedBox(width: 18, height: 18, child: CircularProgressIndicator(strokeWidth: 2))))
+        else if (_availableLoras.isEmpty)
+          Row(children: [
+            Expanded(child: Text('No LoRAs found.', style: TextStyle(fontSize: 11, color: cs.onSurfaceVariant))),
+            TextButton(
+              onPressed: _fetchLoras,
+              child: const Text('Load', style: TextStyle(fontSize: 11)),
+            ),
+          ])
+        else
+          ...List.generate(_availableLoras.length, (i) {
+            final lora = _availableLoras[i];
+            final isSelected = _selectedLoras.any((l) => l['id'] == lora['id']);
+            return ListTile(
+              dense: true,
+              visualDensity: VisualDensity.compact,
+              contentPadding: EdgeInsets.zero,
+              leading: Icon(isSelected ? Icons.check_circle : Icons.circle_outlined, size: 18,
+                  color: isSelected ? cs.primary : cs.onSurfaceVariant),
+              title: Text(lora['name'] ?? lora['id'], style: const TextStyle(fontSize: 11)),
+              subtitle: Text('${lora['source']} | ${lora['size_human'] ?? '?'}', style: TextStyle(fontSize: 9, color: cs.onSurfaceVariant)),
+              onTap: () => _toggleLora(lora),
+            );
+          }),
+        // Download LoRA
+        const SizedBox(height: 4),
+        Row(children: [
+          Expanded(child: TextField(
+            controller: _loraDownloadId,
+            style: const TextStyle(fontSize: 11),
+            decoration: const InputDecoration(
+              hintText: 'HuggingFace repo (owner/lora)',
+              isDense: true,
+              contentPadding: EdgeInsets.symmetric(horizontal: 8, vertical: 6),
+            ),
+          )),
+          const SizedBox(width: 4),
+          SizedBox(height: 30, child: FilledButton.tonalIcon(
+            onPressed: _loadingLoras ? null : () {
+              final id = _loraDownloadId.text.trim();
+              if (id.isNotEmpty) _downloadLora(id);
+            },
+            icon: const Icon(Icons.download, size: 14),
+            label: const Text('Get', style: TextStyle(fontSize: 11)),
+          )),
+        ]),
+      ],
+    );
+  }
+
+  // ── INFO TAB ──
+  Widget _buildInfoTab(ColorScheme cs, Map<String, dynamic>? selected) {
+    return ListView(
+      padding: const EdgeInsets.all(12),
+      children: [
+        // Error display
+        if (_errorMessage.isNotEmpty) ...[
+          Container(
+            padding: const EdgeInsets.all(10),
+            decoration: BoxDecoration(
+              color: cs.errorContainer,
+              borderRadius: BorderRadius.circular(8),
+            ),
+            child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+              Text(_errorMessage, style: TextStyle(fontSize: 12, color: cs.onErrorContainer)),
+              if (_errorCode.isNotEmpty) Text('Code: $_errorCode', style: TextStyle(fontSize: 11, color: cs.onErrorContainer)),
+              if (_errorCode == 'invalid_model_format') Text('Hint: Not a valid Diffusers pipeline.', style: TextStyle(fontSize: 10, color: cs.onErrorContainer)),
+              if (_errorCode == 'dependency_error') Text('Hint: Install diffusers, transformers, accelerate, safetensors, torch.', style: TextStyle(fontSize: 10, color: cs.onErrorContainer)),
+              if (_errorCode == 'runtime_crash') Text('Hint: Check backend logs for native runtime issues.', style: TextStyle(fontSize: 10, color: cs.onErrorContainer)),
+              if (_errorCode == 'insufficient_memory') Text('Hint: Try low memory mode or smaller model.', style: TextStyle(fontSize: 10, color: cs.onErrorContainer)),
+              if (_errorCode == 'pagefile_too_small') Text('Hint: Increase Windows paging file or switch to smaller model.', style: TextStyle(fontSize: 10, color: cs.onErrorContainer)),
+              if (_errorDetails.isNotEmpty)
+                ExpansionTile(
+                  title: const Text('Details', style: TextStyle(fontSize: 11)),
+                  tilePadding: EdgeInsets.zero,
+                  children: [
+                    SelectableText(_errorDetails, style: const TextStyle(fontSize: 10)),
+                    Align(
+                      alignment: Alignment.centerRight,
+                      child: TextButton.icon(
+                        onPressed: () => Clipboard.setData(ClipboardData(text: _errorDetails)),
+                        icon: const Icon(Icons.copy, size: 14),
+                        label: const Text('Copy', style: TextStyle(fontSize: 11)),
+                      ),
+                    ),
+                  ],
+                ),
+            ]),
+          ),
+          const SizedBox(height: 12),
+        ],
+
+        // Model Fit
+        if (_modelFit.isNotEmpty) ...[
+          _sectionLabel('Model Fit', cs),
+          const SizedBox(height: 4),
+          Container(
+            padding: const EdgeInsets.all(10),
+            decoration: BoxDecoration(
+              color: cs.surfaceContainerHighest.withValues(alpha: 0.4),
+              borderRadius: BorderRadius.circular(8),
+            ),
+            child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+              _infoRow('Fit', '${_modelFit['fit'] ?? '?'} | Device: ${_modelFit['device_candidate'] ?? '?'}', cs),
+              _infoRow('Folder', '${_modelFit['folder_size_human'] ?? _modelFit['folder_size_bytes'] ?? '?'}', cs),
+              _infoRow('Est. RAM', '${_modelFit['estimated_ram_required_human'] ?? '?'}', cs),
+              _infoRow('Est. VRAM', '${_modelFit['estimated_vram_required_human'] ?? '?'}', cs),
+              if ((_modelFit['warnings'] as List?)?.isNotEmpty == true)
+                Text((_modelFit['warnings'] as List).join(', '), style: TextStyle(fontSize: 10, color: Colors.orange)),
+              if (_modelFit['hints'] != null) ...[
+                const Divider(height: 12),
+                Text('Recommended', style: TextStyle(fontSize: 11, fontWeight: FontWeight.w600, color: cs.primary)),
+                if ((_modelFit['hints'] as Map?)?['model_family'] != null)
+                  _infoRow('Model', '${(_modelFit['hints'] as Map)['model_family']}${(_modelFit['hints'] as Map)['model_variant'] != null ? ' (${(_modelFit['hints'] as Map)['model_variant']})' : ''}', cs),
+                _infoRow('Settings', 'Guidance: ${(_modelFit['hints'] as Map?)?['recommended_guidance_scale'] ?? '7.0'} | Steps: ${(_modelFit['hints'] as Map?)?['recommended_steps'] ?? '20'} | ${(_modelFit['hints'] as Map?)?['recommended_width'] ?? '768'}x${(_modelFit['hints'] as Map?)?['recommended_height'] ?? '768'}', cs),
+                if (((_modelFit['hints'] as Map?)?['notes'] as List?)?.isNotEmpty == true)
+                  ...((_modelFit['hints'] as Map)['notes'] as List).map((n) => Padding(
+                    padding: const EdgeInsets.only(top: 2),
+                    child: Text('$n', style: TextStyle(fontSize: 10, color: cs.onSurfaceVariant)),
+                  )),
+              ],
+            ]),
+          ),
+          const SizedBox(height: 12),
+        ],
+
+        // Runtime details
+        _sectionLabel('Runtime', cs),
+        const SizedBox(height: 4),
+        Container(
+          padding: const EdgeInsets.all(10),
+          decoration: BoxDecoration(
+            color: cs.surfaceContainerHighest.withValues(alpha: 0.4),
+            borderRadius: BorderRadius.circular(8),
+          ),
+          child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+            _infoRow('Torch', '${_runtime['torch_version'] ?? 'n/a'} | CUDA: ${_runtime['cuda_version'] ?? 'none'}', cs),
+            _infoRow('CUDA', '${_runtime['cuda_available'] == true ? 'Yes' : 'No'} | Effective: ${_runtime['effective_device'] ?? 'cpu'}', cs),
+            _infoRow('Plan', '${(_runtime['execution_plan'] as Map?)?['device_plan'] ?? _runtime['runtime_strategy'] ?? '?'}', cs),
+            _infoRow('Timeout', '${(_runtime['execution_plan'] as Map?)?['expected_timeout_sec'] ?? 'n/a'}s recommended', cs),
+            if (((_runtime['warnings'] as List?) ?? const []).isNotEmpty)
+              Text((_runtime['warnings'] as List).join(', '), style: TextStyle(fontSize: 10, color: Colors.orange)),
+          ]),
+        ),
+        // Hardware profile chips
+        if (_runtime['hardware_profile'] != null) ...[
+          const SizedBox(height: 6),
+          Wrap(spacing: 4, runSpacing: 4, children: [
+            if ((_runtime['hardware_profile'] as Map?)?['cpu_vendor'] != null)
+              _infoChip('${(_runtime['hardware_profile'] as Map)['cpu_vendor']} CPU', cs),
+            if ((_runtime['hardware_profile'] as Map?)?['has_avx2'] == true)
+              _infoChip('AVX2', cs),
+            if ((_runtime['hardware_profile'] as Map?)?['openvino_available'] == true)
+              _infoChip('OpenVINO', cs),
+            if ((_runtime['hardware_profile'] as Map?)?['tomesd_available'] == true)
+              _infoChip('ToMe', cs),
+            if ((_runtime['hardware_profile'] as Map?)?['deepcache_available'] == true)
+              _infoChip('DeepCache', cs),
+            if (_runtime['sdcpp_available'] == true)
+              _infoChip('SD.cpp', cs),
+            if (_runtime['controlnet_available'] == true)
+              _infoChip('ControlNet', cs),
+          ]),
+        ],
+        const SizedBox(height: 6),
+        Row(children: [
+          TextButton(
+            onPressed: _busy ? null : _validateModel,
+            child: const Text('Validate Model', style: TextStyle(fontSize: 11)),
+          ),
+          TextButton(
+            onPressed: _busy ? null : () {
+              final rec = ((_runtime['execution_plan'] as Map?)?['expected_timeout_sec'] as num?)?.toInt() ?? _timeoutSec;
+              setState(() => _timeoutSec = rec);
+            },
+            child: const Text('Use Rec. Timeout', style: TextStyle(fontSize: 11)),
+          ),
+          TextButton(
+            onPressed: _busy ? null : _load,
+            child: const Text('Refresh', style: TextStyle(fontSize: 11)),
+          ),
+        ]),
+        const SizedBox(height: 12),
+
+        // Generation Log
+        if (selected != null) ...[
+          _sectionLabel('Generation Log', cs),
+          const SizedBox(height: 4),
+          _buildGenerationLog(cs, selected),
+        ],
+
+        // Help
+        const SizedBox(height: 12),
+        ExpansionTile(
+          title: const Text('Help', style: TextStyle(fontSize: 13)),
+          tilePadding: EdgeInsets.zero,
+          childrenPadding: const EdgeInsets.only(bottom: 8),
+          children: const [
+            Padding(
+              padding: EdgeInsets.symmetric(horizontal: 4),
+              child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+                Text('1. Download a diffusers model from HuggingFace.', style: TextStyle(fontSize: 11)),
+                Text('2. Click Refresh models (sync icon).', style: TextStyle(fontSize: 11)),
+                Text('3. Select model, enter prompt, click Generate.', style: TextStyle(fontSize: 11)),
+                Text('4. Use Edit to refine, Inpaint to modify regions.', style: TextStyle(fontSize: 11)),
+                SizedBox(height: 6),
+                Text('If generation fails: check missing deps, model format, GPU/memory limits.', style: TextStyle(fontSize: 11)),
+              ]),
+            ),
+          ],
+        ),
+      ],
+    );
+  }
+
+  Widget _buildGenerationLog(ColorScheme cs, Map<String, dynamic> selected) {
+    final params = _paramsFor(selected);
+    final genLog = params['generation_log'] as Map<String, dynamic>?;
+    final deviceUsed = (params['device_used'] ?? genLog?['device'] ?? '').toString();
+    final profile = (params['quality_profile'] ?? '').toString();
+    final fallback = params['fallback_used'] == true;
+    final fallbackReason = (params['fallback_reason'] ?? '').toString();
+
+    return Container(
+      padding: const EdgeInsets.all(10),
+      decoration: BoxDecoration(
+        color: cs.surfaceContainerHighest.withValues(alpha: 0.4),
+        borderRadius: BorderRadius.circular(8),
+      ),
+      child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+        Text('${selected['operation'] ?? 'generate'}', style: TextStyle(fontSize: 11, fontWeight: FontWeight.w600, color: cs.primary)),
+        Text((selected['prompt'] ?? '').toString(), style: TextStyle(fontSize: 10, color: cs.onSurfaceVariant), maxLines: 2, overflow: TextOverflow.ellipsis),
+        const SizedBox(height: 6),
+        if (genLog != null) ...[
+          Text('${genLog['resolution']} | ${genLog['steps']} steps | ${genLog['total_elapsed_sec']}s',
+              style: const TextStyle(fontSize: 12, fontWeight: FontWeight.w600)),
+          Text('Device: ${genLog['device']} | Dtype: ${genLog['dtype']} | Threads: ${genLog['cpu_threads'] ?? 'n/a'}',
+              style: TextStyle(fontSize: 10, color: cs.onSurfaceVariant)),
+          if (genLog['seed'] != null)
+            Text('Seed: ${genLog['seed']}', style: TextStyle(fontSize: 10, color: cs.onSurfaceVariant)),
+          if (genLog['scheduler'] != null)
+            Text('Scheduler: ${genLog['scheduler']}', style: TextStyle(fontSize: 10, color: cs.onSurfaceVariant)),
+          if ((genLog['optimizations_used'] as List?)?.isNotEmpty == true) ...[
+            const SizedBox(height: 4),
+            Wrap(spacing: 4, runSpacing: 2, children: [
+              for (final opt in (genLog['optimizations_used'] as List))
+                _infoChip(opt.toString(), cs),
+            ]),
+          ],
+          if ((genLog['stages'] as List?)?.isNotEmpty == true) ...[
+            const SizedBox(height: 6),
+            Text('Timeline', style: TextStyle(fontSize: 10, fontWeight: FontWeight.w600, color: cs.primary)),
+            for (final stage in (genLog['stages'] as List))
+              Padding(
+                padding: const EdgeInsets.only(bottom: 1),
+                child: Row(children: [
+                  SizedBox(width: 40, child: Text('${(stage as Map)['elapsed_sec']}s',
+                      style: TextStyle(fontSize: 10, fontWeight: FontWeight.w600, color: cs.primary), textAlign: TextAlign.right)),
+                  const SizedBox(width: 6),
+                  Container(width: 6, height: 6, decoration: BoxDecoration(color: cs.primary, shape: BoxShape.circle)),
+                  const SizedBox(width: 6),
+                  Expanded(child: Text('${stage['stage']}', style: const TextStyle(fontSize: 10))),
+                ]),
+              ),
+          ],
+        ] else ...[
+          if (deviceUsed.isNotEmpty) Text('Device: $deviceUsed', style: const TextStyle(fontSize: 11)),
+          if (profile.isNotEmpty) Text('Profile: $profile', style: const TextStyle(fontSize: 11)),
+        ],
+        if (fallback) Text('Fallback to CPU: $fallbackReason', style: const TextStyle(color: Colors.orange, fontSize: 10)),
+      ]),
+    );
+  }
+
+  // ── Helper widgets ──
+
+  Widget _sectionLabel(String text, ColorScheme cs) {
+    return Text(text, style: TextStyle(fontSize: 12, fontWeight: FontWeight.w700, color: cs.primary, letterSpacing: 0.5));
+  }
+
+  Widget _compactField(String label, String initialValue, ValueChanged<String> onChanged) {
+    return TextFormField(
+      initialValue: initialValue,
+      style: const TextStyle(fontSize: 12),
+      keyboardType: TextInputType.number,
+      decoration: InputDecoration(
+        labelText: label,
+        isDense: true,
+        contentPadding: const EdgeInsets.symmetric(horizontal: 8, vertical: 8),
+      ),
+      onChanged: onChanged,
+    );
+  }
+
+  Widget _aspectButton(String label, int w, int h, ColorScheme cs) {
+    final isActive = _width == w && _height == h;
+    return InkWell(
+      onTap: _busy ? null : () => setState(() { _width = w; _height = h; }),
+      borderRadius: BorderRadius.circular(4),
+      child: Container(
+        padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 4),
+        decoration: BoxDecoration(
+          color: isActive ? cs.primaryContainer : null,
+          borderRadius: BorderRadius.circular(4),
+          border: Border.all(color: isActive ? cs.primary : cs.outlineVariant.withValues(alpha: 0.5)),
+        ),
+        child: Text(label, style: TextStyle(fontSize: 9, fontWeight: isActive ? FontWeight.w600 : FontWeight.normal,
+            color: isActive ? cs.onPrimaryContainer : cs.onSurfaceVariant)),
+      ),
+    );
+  }
+
+  Widget _toggleChip(String label, bool value, ValueChanged<bool> onChanged, ColorScheme cs) {
+    return FilterChip(
+      label: Text(label, style: TextStyle(fontSize: 11, color: value ? cs.onPrimaryContainer : cs.onSurfaceVariant)),
+      selected: value,
+      onSelected: _busy ? null : onChanged,
+      visualDensity: VisualDensity.compact,
+      padding: const EdgeInsets.symmetric(horizontal: 2),
+      materialTapTargetSize: MaterialTapTargetSize.shrinkWrap,
+    );
+  }
+
+  Widget _actionButton({
+    required IconData icon,
+    required String label,
+    required VoidCallback? onPressed,
+    required ColorScheme cs,
+    Color? color,
+  }) {
+    return SizedBox(
+      height: 36,
+      child: FilledButton.tonalIcon(
+        onPressed: onPressed,
+        icon: Icon(icon, size: 16, color: color),
+        label: Text(label, style: TextStyle(fontSize: 12, color: color)),
+      ),
+    );
+  }
+
+  Widget _infoRow(String label, String value, ColorScheme cs) {
+    return Padding(
+      padding: const EdgeInsets.only(bottom: 2),
+      child: Row(crossAxisAlignment: CrossAxisAlignment.start, children: [
+        SizedBox(width: 60, child: Text(label, style: TextStyle(fontSize: 10, fontWeight: FontWeight.w600, color: cs.onSurfaceVariant))),
+        Expanded(child: Text(value, style: const TextStyle(fontSize: 10))),
+      ]),
+    );
+  }
+
+  Widget _infoChip(String text, ColorScheme cs) {
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 3),
+      decoration: BoxDecoration(
+        color: cs.surfaceContainerHighest,
+        borderRadius: BorderRadius.circular(12),
+      ),
+      child: Text(text, style: TextStyle(fontSize: 10, color: cs.onSurfaceVariant)),
     );
   }
 }
@@ -1728,7 +2111,6 @@ extension _FirstOrNullExt<T> on Iterable<T> {
   T? get firstOrNull => isEmpty ? null : first;
 }
 
-/// Paints inpainting mask strokes as semi-transparent white on the image.
 class _MaskPainter extends CustomPainter {
   final List<Offset?> strokes;
   final double brushSize;
@@ -1750,11 +2132,7 @@ class _MaskPainter extends CustomPainter {
     for (int i = 0; i < strokes.length; i++) {
       final p = strokes[i];
       if (p == null) continue;
-
-      // Draw dot for every point
       canvas.drawCircle(p, brushSize / 2, dotPaint);
-
-      // Connect to next point if it's not a stroke break
       if (i + 1 < strokes.length && strokes[i + 1] != null) {
         canvas.drawLine(p, strokes[i + 1]!, paint);
       }

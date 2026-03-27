@@ -843,15 +843,39 @@ def _controlnet_worker(payload: dict[str, Any], out_q: Any) -> None:
             "controlnet": controlnet,
             "torch_dtype": cn_dtype,
             "safety_checker": None,
+            "feature_extractor": None,
+            "image_encoder": None,
             "local_files_only": bool(payload.get("local_files_only", False)),
             "low_cpu_mem_usage": True,
         }
+        # The base model may be a local path (HF cache snapshot) or a HF model ID.
+        # If local path is incomplete (partial download — missing unet/etc.),
+        # fall back to loading from the HF hub ID to auto-download missing parts.
+        _pipeline_cls_name = "StableDiffusionXLControlNetPipeline" if is_sdxl else "StableDiffusionControlNetPipeline"
         if is_sdxl:
-            from diffusers import StableDiffusionXLControlNetPipeline
-            pipe = StableDiffusionXLControlNetPipeline.from_pretrained(base_model, **load_kwargs)
+            from diffusers import StableDiffusionXLControlNetPipeline as _PipeCls
         else:
-            from diffusers import StableDiffusionControlNetPipeline
-            pipe = StableDiffusionControlNetPipeline.from_pretrained(base_model, **load_kwargs)
+            from diffusers import StableDiffusionControlNetPipeline as _PipeCls
+        try:
+            pipe = _PipeCls.from_pretrained(base_model, **load_kwargs)
+        except (ValueError, OSError, EnvironmentError) as e:
+            _err_msg = str(e)
+            if "were passed" in _err_msg or "unet" in _err_msg.lower() or "does not appear" in _err_msg:
+                # Model path is incomplete — missing components like unet.
+                # Try using the original HF model ID to download missing parts.
+                _hub_id = str(payload.get("model_id") or "")
+                if _hub_id and _hub_id != base_model:
+                    _log(f"Local model incomplete ({e}), retrying from HF hub: {_hub_id}")
+                    load_kwargs["local_files_only"] = False
+                    pipe = _PipeCls.from_pretrained(_hub_id, **load_kwargs)
+                else:
+                    # No hub ID available — try with local_files_only=False
+                    # in case the path is a valid model ID string
+                    _log(f"Local model incomplete ({e}), retrying with remote download enabled")
+                    load_kwargs["local_files_only"] = False
+                    pipe = _PipeCls.from_pretrained(base_model, **load_kwargs)
+            else:
+                raise
 
         pipe.set_progress_bar_config(disable=True)
 
@@ -1053,6 +1077,39 @@ def _diffusers_worker(payload: dict[str, Any], out_q: Any) -> None:
         if payload.get("use_safetensors") is not None:
             load_kwargs["use_safetensors"] = bool(payload.get("use_safetensors"))
 
+        # ── BitsAndBytes NF4 Quantization (isolated worker path) ──
+        # Diffusers requires PipelineQuantizationConfig at the pipeline level,
+        # wrapping per-component BitsAndBytesConfig instances in a quant_mapping.
+        _use_quantization = bool(payload.get("use_quantization", False))
+        if _use_quantization:
+            _quant_type = str(payload.get("quantization_type", "nf4"))
+            try:
+                from diffusers import BitsAndBytesConfig as _DiffBnBConfig
+                from diffusers import PipelineQuantizationConfig as _PipelineQC
+                _compute_dtype = load_kwargs.get("torch_dtype", torch.float32)
+                _quant_mapping: dict[str, _DiffBnBConfig] = {
+                    "transformer": _DiffBnBConfig(
+                        load_in_4bit=True,
+                        bnb_4bit_quant_type=_quant_type,
+                        bnb_4bit_compute_dtype=_compute_dtype,
+                    ),
+                }
+                if bool(payload.get("quantize_text_encoder", False)):
+                    _quant_mapping["text_encoder"] = _DiffBnBConfig(
+                        load_in_4bit=True,
+                        bnb_4bit_quant_type=_quant_type,
+                        bnb_4bit_compute_dtype=_compute_dtype,
+                    )
+                    _log(f"BitsAndBytes {_quant_type.upper()} quantization enabled for text encoder")
+                load_kwargs["quantization_config"] = _PipelineQC(quant_mapping=_quant_mapping)
+                _log(f"BitsAndBytes {_quant_type.upper()} quantization enabled (components: {list(_quant_mapping.keys())})")
+            except ImportError as e:
+                _log(f"Quantization not available ({e}) — install: pip install bitsandbytes")
+                _use_quantization = False
+            except Exception as e:
+                _log(f"Quantization setup failed: {e}")
+                _use_quantization = False
+
         stage = "pipeline_load"
         _write_stage_marker(stage_file, stage)
         _log(f"Loading pipeline: mode={mode}, local_files_only={local_files_only}")
@@ -1161,7 +1218,16 @@ def _diffusers_worker(payload: dict[str, Any], out_q: Any) -> None:
                 _log(f"Lightning LoRA failed: {e} (continuing without it)")
 
         if device == "cuda":
-            if bool(payload.get("use_sequential_cpu_offload", False)):
+            if _use_quantization:
+                # Quantized models MUST use model CPU offload — .to("cuda")
+                # is a no-op or breaks quantized layers.  BitsAndBytes manages
+                # device placement internally during each component's forward pass.
+                _log("Applying model CPU offload (required for quantized model)")
+                try:
+                    pipe.enable_model_cpu_offload()
+                except Exception as e:
+                    _log(f"CPU offload failed for quantized model: {e}")
+            elif bool(payload.get("use_sequential_cpu_offload", False)):
                 _log("Applying sequential CPU offload")
                 try:
                     pipe.enable_sequential_cpu_offload()
@@ -1179,32 +1245,45 @@ def _diffusers_worker(payload: dict[str, Any], out_q: Any) -> None:
                 pipe = pipe.to("cuda")
         else:
             _log("Running on CPU")
-        # Force VAE to float32 to avoid black images and dtype mismatches.
-        # Applied unconditionally (not just for fp16) because some models
-        # produce NaN in the VAE even in float32 pipelines when the VAE
-        # weights were originally stored as fp16 or bfloat16.
-        # MUST be after enable_model_cpu_offload() which re-wraps modules.
-        if hasattr(pipe, "vae"):
+
+        # ── Channels-last memory format (isolated worker path) ──
+        if device == "cuda" and bool(payload.get("use_channels_last", False)):
             try:
-                pipe.vae = pipe.vae.to(dtype=torch.float32)
-            except Exception:
-                pass
+                for _attr_name in ("transformer", "unet", "vae"):
+                    _component = getattr(pipe, _attr_name, None)
+                    if _component is not None and hasattr(_component, "to"):
+                        _component.to(memory_format=torch.channels_last)
+                _log("Channels-last memory format applied")
+            except Exception as e:
+                _log(f"Channels-last failed (non-critical): {e}")
+
+        # ── VAE numerical stability (isolated worker path) ──
+        # For most models: force VAE to float32 to prevent NaN/black images.
+        # For bfloat16-required models (Z-Image, Flux, DiT): do NOT force
+        # float32 on the whole VAE — causes dtype mismatch errors.  Only
+        # set force_upcast and let the pipeline handle it.
+        _worker_requires_bf16 = dtype_name == "bfloat16"
+        if hasattr(pipe, "vae"):
+            if not _worker_requires_bf16 and not _use_quantization:
+                try:
+                    pipe.vae = pipe.vae.to(dtype=torch.float32)
+                except Exception:
+                    pass
             if hasattr(pipe.vae, "config"):
                 try:
                     pipe.vae.config.force_upcast = True
                 except Exception:
                     pass
-            # Patch decode to (a) auto-cast non-fp32 latents → fp32 and
-            # (b) clamp the decoded output to replace any NaN/inf values
-            # that would otherwise become black pixels after uint8 cast.
+            # Patch decode to sanitize NaN/inf and handle dtype casting.
             _orig_decode = pipe.vae.decode
+            _worker_vae_dtype = torch.float32 if not _worker_requires_bf16 else (load_kwargs.get("torch_dtype") or torch.bfloat16)
             def _safe_decode(*args: Any, **kwargs: Any) -> Any:
                 if args:
                     z = args[0]
-                    if hasattr(z, "dtype") and z.dtype != torch.float32:
-                        args = (z.to(torch.float32),) + args[1:]
-                if "z" in kwargs and hasattr(kwargs["z"], "dtype") and kwargs["z"].dtype != torch.float32:
-                    kwargs["z"] = kwargs["z"].to(torch.float32)
+                    if hasattr(z, "dtype") and z.dtype != _worker_vae_dtype:
+                        args = (z.to(_worker_vae_dtype),) + args[1:]
+                if "z" in kwargs and hasattr(kwargs["z"], "dtype") and kwargs["z"].dtype != _worker_vae_dtype:
+                    kwargs["z"] = kwargs["z"].to(_worker_vae_dtype)
                 out = _orig_decode(*args, **kwargs)
                 # Sanitize: replace NaN/inf in decoded sample to prevent
                 # black images from the (images * 255).astype("uint8") cast.
@@ -1234,10 +1313,36 @@ def _diffusers_worker(payload: dict[str, Any], out_q: Any) -> None:
         total_steps = int(payload["steps"])
         _write_stage_marker(stage_file, f"inference:0/{total_steps}")
 
+        # Step preview: optionally decode latents at each step to save
+        # intermediate images for model comparison and debugging.
+        _step_previews_dir = payload.get("step_previews_dir")
+        if _step_previews_dir:
+            Path(_step_previews_dir).mkdir(parents=True, exist_ok=True)
+
         def _step_callback(pipe_obj: Any, step: int, timestep: Any, callback_kwargs: dict[str, Any]) -> dict[str, Any]:
             clamped = min(step + 1, total_steps)
             _write_stage_marker(stage_file, f"inference:{clamped}/{total_steps}")
             _log(f"Step {clamped}/{total_steps} (timestep={timestep})")
+
+            # Decode latents to a preview image if step previews are enabled
+            if _step_previews_dir and "latents" in callback_kwargs:
+                try:
+                    latents = callback_kwargs["latents"]
+                    with torch.no_grad():
+                        # Scale latents by VAE scaling factor
+                        scaling = getattr(pipe.vae.config, "scaling_factor", 0.18215)
+                        decoded = pipe.vae.decode(latents / scaling, return_dict=False)[0]
+                        decoded = (decoded / 2 + 0.5).clamp(0, 1)
+                        decoded = decoded.cpu().permute(0, 2, 3, 1).float().numpy()
+                        decoded = (decoded[0] * 255).round().astype("uint8")
+                    Image_prev, _ = _require_pillow()
+                    preview = Image_prev.fromarray(decoded)
+                    preview_path = Path(_step_previews_dir) / f"step_{clamped:03d}.png"
+                    preview.save(str(preview_path), format="PNG")
+                    _log(f"Step {clamped} preview saved: {preview_path}")
+                except Exception as e:
+                    _log(f"Step {clamped} preview failed: {e}")
+
             return callback_kwargs
 
         # ── DeepCache — caches UNet features for ~2.3x speedup on 20+ steps ──
@@ -1370,6 +1475,9 @@ def _diffusers_worker(payload: dict[str, Any], out_q: Any) -> None:
 
         # Build optimization summary for the log
         optimizations_used = []
+        if _use_quantization: optimizations_used.append(f"BnB {payload.get('quantization_type', 'nf4').upper()} Quantization")
+        if payload.get("quantize_text_encoder") and _use_quantization: optimizations_used.append("Text Encoder INT4")
+        if payload.get("use_channels_last"): optimizations_used.append("Channels-Last Memory Format")
         if payload.get("use_tiny_vae"): optimizations_used.append(f"TAESD ({payload.get('tiny_vae_model', '?')})")
         if payload.get("use_deepcache"): optimizations_used.append(f"DeepCache (interval={payload.get('deepcache_interval', 2)})")
         if payload.get("use_tome"): optimizations_used.append(f"ToMe (ratio={payload.get('tome_ratio', 0.5)})")
@@ -1458,6 +1566,7 @@ class ImageGenerationService:
         "dit": "madebyollin/taesd3",
         "pixart": "madebyollin/taesd",
         "kandinsky": "madebyollin/taesd",
+        "z-image": "madebyollin/taesd3",  # Z-Image uses Flux VAE → use taesd3
     }
 
     # OpenVINO-compatible model families
@@ -1547,7 +1656,7 @@ class ImageGenerationService:
         is_few_step = variant in ("turbo", "lightning", "lcm", "hyper", "schnell")
         is_cpu = backend in ("diffusers_cpu", "openvino_int8", "openvino_fp32")
         low_vram = hw.gpu_vram_bytes < 4 * 1024**3
-        is_sdxl_class = family in ("sdxl", "sd3", "flux", "dit", "pixart")
+        is_sdxl_class = family in ("sdxl", "sd3", "flux", "dit", "pixart", "z-image")
         weak_hw = is_cpu or (low_vram and hw.gpu_vram_bytes < 6 * 1024**3)
 
         opts: dict[str, Any] = {}
@@ -1580,6 +1689,32 @@ class ImageGenerationService:
             opts["lightning_lora_file"] = "sdxl_lightning_4step_lora.safetensors"
             opts["lightning_steps"] = 4
             opts["lightning_guidance"] = 0.0
+
+        # ── BitsAndBytes NF4 Quantization ──
+        # Enable for large models (DiT, Flux, Z-Image) on GPUs with ≤ threshold VRAM.
+        # These 6B+ param models cannot fit in 8GB VRAM at bf16 (~12-16GB) without
+        # quantization.  NF4 reduces VRAM to ~4-5GB with acceptable quality.
+        needs_quantization = (
+            backend == "diffusers_cuda"
+            and family in ("z-image", "flux", "dit")
+            and hw.gpu_vram_bytes > 0
+        )
+        if needs_quantization:
+            threshold_bytes = int(getattr(self.config, "image_quantization_threshold_gb", 8.0) * 1024**3)
+            if hw.gpu_vram_bytes <= threshold_bytes:
+                opts["use_quantization"] = True
+                opts["quantization_type"] = "nf4"
+                opts["quantize_transformer"] = True
+                opts["quantize_text_encoder"] = True
+            else:
+                # Even on larger GPUs, quantize if model is truly huge (>10GB weights)
+                opts["use_quantization"] = False
+
+        # ── Channels-last memory format ──
+        # ~5-15% speedup on NVIDIA GPUs by optimizing memory layout for convolutions.
+        # Safe to enable unconditionally on CUDA; no effect on CPU.
+        if backend == "diffusers_cuda":
+            opts["use_channels_last"] = True
 
         return opts
 
@@ -1958,6 +2093,7 @@ class ImageGenerationService:
         q: Any = ctx.Queue(maxsize=1)
         payload = {
             "base_model": resolved_model,
+            "model_id": model_id,  # Original HF model ID for fallback download
             "controlnet_type": controlnet_type,
             "controlnet_model_id": controlnet_model_id,
             "control_image_path": control_image_path,
@@ -2235,15 +2371,22 @@ class ImageGenerationService:
         try:
             from diffusers import ControlNetModel  # noqa: F401
             status["controlnet_available"] = True
-            # List types — canny always works (OpenCV fallback), others need controlnet_aux
-            available_types = ["canny"]  # Always available via OpenCV
-            try:
-                import controlnet_aux  # noqa: F401
-                # controlnet_aux available — all types supported
-                available_types = list(CONTROLNET_DEFAULTS.keys())
-            except (ImportError, AttributeError, Exception):
-                # controlnet_aux broken (mediapipe crash) — only canny + depth via MiDaS
-                available_types = ["canny", "depth"]
+            # canny always works (OpenCV), depth works via MiDaS fallback
+            # Other types need controlnet_aux preprocessors, but the ControlNet
+            # *models* themselves work fine without preprocessors if the user
+            # provides a pre-processed control image. So list all types whose
+            # HF model repo is locally cached.
+            available_types = []
+            from huggingface_hub import try_to_load_from_cache
+            for cn_type, repo_id in CONTROLNET_DEFAULTS.items():
+                # Check if the model config is cached locally
+                cached = try_to_load_from_cache(repo_id, "config.json")
+                if cached is not None and isinstance(cached, str):
+                    available_types.append(cn_type)
+            # Always include canny (OpenCV fallback) and depth (MiDaS fallback)
+            for t in ["canny", "depth"]:
+                if t not in available_types:
+                    available_types.append(t)
             status["available_controlnet_types"] = available_types
         except ImportError:
             pass
@@ -2415,7 +2558,7 @@ class ImageGenerationService:
         # Determine minimum resolution for model family — SDXL/Flux/SD3 need
         # at least 768 to produce coherent images; SD 1.5 can go down to 256.
         family = str(model_hints.get("model_family", "")).lower()
-        needs_high_res = family in ("sdxl", "flux", "sd3", "dit", "pixart")
+        needs_high_res = family in ("sdxl", "flux", "sd3", "dit", "pixart", "z-image")
         min_res = 768 if needs_high_res else 256
         if fit == "poor" or low_memory_mode:
             clamp_res = max(512, min_res)
@@ -2471,6 +2614,15 @@ class ImageGenerationService:
                 "reason": "50% smaller UNet (1.3B vs 3.5B params), SDXL-compatible, same LoRAs work",
                 "estimated_speedup": "1.6x faster + 50% less RAM",
             }
+
+        # Z-Image / Flux / DiT: warn about quantization requirement on low VRAM
+        if family in ("z-image", "flux", "dit") and not plan.get("use_quantization"):
+            if hw.gpu_vram_bytes > 0 and hw.gpu_vram_bytes < 12 * 1024**3:
+                plan["warnings"].append(
+                    f"This {family.upper()} model (~6-12B params) may not fit in "
+                    f"{hw.gpu_vram_bytes / (1024**3):.1f}GB VRAM without quantization. "
+                    f"Install bitsandbytes for automatic NF4 quantization: pip install bitsandbytes"
+                )
 
         return plan
 
@@ -3090,6 +3242,42 @@ class ImageGenerationService:
             "use_safetensors": True,
         }
 
+        # ── BitsAndBytes NF4 Quantization ──
+        # For large models (Z-Image 6B, Flux 12B, etc.) that exceed GPU VRAM at bf16.
+        # NF4 quantization reduces VRAM from ~12-16GB to ~4-5GB with acceptable quality.
+        # Diffusers requires PipelineQuantizationConfig at the pipeline level,
+        # wrapping per-component BitsAndBytesConfig instances in a quant_mapping.
+        use_quantization = bool(ep.get("use_quantization", False))
+        if use_quantization:
+            quant_type = str(ep.get("quantization_type", "nf4"))
+            try:
+                from diffusers import BitsAndBytesConfig as DiffusersBnBConfig
+                from diffusers import PipelineQuantizationConfig
+                quant_mapping: dict[str, DiffusersBnBConfig] = {
+                    "transformer": DiffusersBnBConfig(
+                        load_in_4bit=True,
+                        bnb_4bit_quant_type=quant_type,
+                        bnb_4bit_compute_dtype=resolved_dtype,
+                    ),
+                }
+                if bool(ep.get("quantize_text_encoder", False)):
+                    quant_mapping["text_encoder"] = DiffusersBnBConfig(
+                        load_in_4bit=True,
+                        bnb_4bit_quant_type=quant_type,
+                        bnb_4bit_compute_dtype=resolved_dtype,
+                    )
+                    logger.info("[IMG] BitsAndBytes %s quantization enabled for text encoder", quant_type.upper())
+                load_kwargs["quantization_config"] = PipelineQuantizationConfig(quant_mapping=quant_mapping)
+                logger.info("[IMG] BitsAndBytes %s quantization enabled (components: %s)",
+                           quant_type.upper(), list(quant_mapping.keys()))
+            except ImportError:
+                logger.warning("[IMG] bitsandbytes / diffusers quantization not available — skipping. "
+                              "Install with: pip install bitsandbytes")
+                use_quantization = False
+            except Exception as e:
+                logger.warning("[IMG] Quantization setup failed: %s — loading without quantization", e)
+                use_quantization = False
+
         if mode == "img2img":
             pipe = AutoPipelineForImage2Image.from_pretrained(model_id_or_path, **load_kwargs)
         else:
@@ -3125,15 +3313,25 @@ class ImageGenerationService:
                 pass
 
         # ── Device placement ──
-        # enable_model_cpu_offload: keeps model in RAM, moves each component
-        # to GPU one at a time during forward pass.  This is the best strategy
-        # when the model doesn't fit entirely in VRAM — it maximises GPU
-        # utilisation while spilling to CPU RAM automatically.
+        # BitsAndBytes quantized models: .to("cuda") is a no-op / breaks them.
+        # They MUST use enable_model_cpu_offload() which moves components to GPU
+        # one-at-a-time during forward pass, respecting the quantized format.
+        # Non-quantized models: use .to("cuda") for direct placement when VRAM
+        # is sufficient, or enable_model_cpu_offload() for tight VRAM.
         if device == "cuda":
             use_cpu_offload = bool(ep.get("use_model_cpu_offload", False))
-            logger.info("[IMG] Device placement: device=%s, use_cpu_offload=%s (plan=%s)",
-                        device, use_cpu_offload, ep.get("device_plan"))
-            if use_cpu_offload:
+            logger.info("[IMG] Device placement: device=%s, use_cpu_offload=%s, quantized=%s (plan=%s)",
+                        device, use_cpu_offload, use_quantization, ep.get("device_plan"))
+            if use_quantization:
+                # Quantized models MUST use model CPU offload — .to("cuda") will
+                # fail or silently leave them on CPU.  BitsAndBytes manages device
+                # placement internally during each component's forward pass.
+                try:
+                    pipe.enable_model_cpu_offload()
+                    logger.info("[IMG] Model CPU offload enabled (required for quantized model)")
+                except Exception as e:
+                    logger.warning("[IMG] CPU offload failed for quantized model: %s", e)
+            elif use_cpu_offload:
                 try:
                     pipe.enable_model_cpu_offload()
                     logger.info("[IMG] Model CPU offload enabled (GPU + CPU RAM)")
@@ -3144,29 +3342,66 @@ class ImageGenerationService:
                 pipe = pipe.to("cuda")
                 logger.info("[IMG] Model moved entirely to CUDA (full GPU execution)")
 
-            # Verify model is actually on CUDA
-            try:
-                unet_or_transformer = getattr(pipe, "unet", None) or getattr(pipe, "transformer", None)
-                if unet_or_transformer is not None:
-                    param = next(unet_or_transformer.parameters(), None)
-                    if param is not None:
-                        actual_device = str(param.device)
-                        logger.info("[IMG] ✓ Model verified on device: %s (dtype=%s)", actual_device, param.dtype)
-                        if "cuda" not in actual_device:
-                            logger.warning("[IMG] ⚠️  Model is NOT on CUDA despite device='cuda'! Actual: %s", actual_device)
-                if torch.cuda.is_available():
+            # Verify model is actually on CUDA.
+            # Skip for quantized models AND cpu_offload — both use lazy GPU
+            # placement where params stay on CPU and move to CUDA one component
+            # at a time during each forward pass.  Checking param.device would
+            # always show "cpu" and produce a misleading warning.
+            _uses_lazy_placement = use_quantization or use_cpu_offload
+            if not _uses_lazy_placement:
+                try:
+                    unet_or_transformer = getattr(pipe, "unet", None) or getattr(pipe, "transformer", None)
+                    if unet_or_transformer is not None:
+                        param = next(unet_or_transformer.parameters(), None)
+                        if param is not None:
+                            actual_device = str(param.device)
+                            logger.info("[IMG] ✓ Model verified on device: %s (dtype=%s)", actual_device, param.dtype)
+                            if "cuda" not in actual_device:
+                                logger.warning("[IMG] ⚠️  Model is NOT on CUDA despite device='cuda'! Actual: %s", actual_device)
+                except Exception as e:
+                    logger.warning("[IMG] Could not verify device placement: %s", e)
+            else:
+                logger.info("[IMG] Using lazy GPU placement (quantized=%s, cpu_offload=%s) — "
+                           "components move to CUDA during forward pass", use_quantization, use_cpu_offload)
+            if torch.cuda.is_available():
+                try:
                     vram_used = torch.cuda.memory_allocated() / (1024**3)
                     vram_total = torch.cuda.get_device_properties(0).total_memory / (1024**3)
                     logger.info("[IMG] GPU VRAM: %.1f / %.1f GB used", vram_used, vram_total)
-            except Exception as e:
-                logger.warning("[IMG] Could not verify device placement: %s", e)
+                except Exception:
+                    pass
 
-        # ── Force VAE to float32 for numerical stability ──
-        if hasattr(pipe, "vae"):
+        # ── Channels-last memory format ──
+        # Optimizes tensor memory layout for NVIDIA GPU convolutions.
+        # ~5-15% speedup on Ada Lovelace (RTX 40xx) and Ampere (RTX 30xx).
+        # Applied to the main compute module (transformer or UNet) and VAE.
+        if device == "cuda" and bool(ep.get("use_channels_last", False)):
             try:
-                pipe.vae = pipe.vae.to(dtype=torch.float32)
-            except Exception:
-                pass
+                for attr_name in ("transformer", "unet", "vae"):
+                    component = getattr(pipe, attr_name, None)
+                    if component is not None and hasattr(component, "to"):
+                        component.to(memory_format=torch.channels_last)
+                logger.info("[IMG] Channels-last memory format applied (GPU tensor layout optimization)")
+            except Exception as e:
+                logger.info("[IMG] Channels-last failed (non-critical): %s", e)
+
+        # ── VAE numerical stability ──
+        # For most models (SD 1.5, SDXL, etc.): force VAE to float32 to prevent
+        # NaN/black images from fp16 precision loss in the VAE decoder.
+        # For bfloat16-required models (Z-Image, Flux, DiT): do NOT force float32
+        # on the whole VAE — it causes "Input type (BFloat16) and bias type (float)
+        # should be the same" errors.  Instead, only set force_upcast=True and let
+        # the pipeline's internal VAE upcast handle it properly.
+        _model_requires_bf16 = dtype_name == "bfloat16"
+        if hasattr(pipe, "vae"):
+            if not _model_requires_bf16 and not use_quantization:
+                # Safe to force the entire VAE to float32
+                try:
+                    pipe.vae = pipe.vae.to(dtype=torch.float32)
+                except Exception:
+                    pass
+            # force_upcast tells the pipeline to upcast VAE inputs/outputs
+            # automatically — works with both float32 and bfloat16 VAEs.
             if hasattr(pipe.vae, "config"):
                 try:
                     pipe.vae.config.force_upcast = True
@@ -3174,13 +3409,14 @@ class ImageGenerationService:
                     pass
             # Monkey-patch VAE decode to sanitise NaN/inf
             _orig_vae_decode = pipe.vae.decode
+            _vae_upcast_dtype = torch.float32 if not _model_requires_bf16 else resolved_dtype
             def _safe_vae_decode(*args: Any, **kwargs: Any) -> Any:
                 if args:
                     z = args[0]
-                    if hasattr(z, "dtype") and z.dtype != torch.float32:
-                        args = (z.to(torch.float32),) + args[1:]
-                if "z" in kwargs and hasattr(kwargs["z"], "dtype") and kwargs["z"].dtype != torch.float32:
-                    kwargs["z"] = kwargs["z"].to(torch.float32)
+                    if hasattr(z, "dtype") and z.dtype != _vae_upcast_dtype:
+                        args = (z.to(_vae_upcast_dtype),) + args[1:]
+                if "z" in kwargs and hasattr(kwargs["z"], "dtype") and kwargs["z"].dtype != _vae_upcast_dtype:
+                    kwargs["z"] = kwargs["z"].to(_vae_upcast_dtype)
                 out = _orig_vae_decode(*args, **kwargs)
                 if hasattr(out, "sample"):
                     out.sample = torch.nan_to_num(out.sample, nan=0.0, posinf=1.0, neginf=0.0)
@@ -3209,37 +3445,54 @@ class ImageGenerationService:
                     except Exception:
                         continue
 
-        # torch.compile: JIT compile the transformer/UNet for ~20-40%% speedup.
-        # DISABLED on Windows — Triton (required backend) is not available.
+        # torch.compile: JIT compile the transformer/UNet for ~20-50% speedup.
         # INCOMPATIBLE with enable_model_cpu_offload() — accelerate hooks
         # cannot be traced by dynamo.
-        # torch.compile wraps successfully but FAILS at first inference when
-        # it tries to invoke Triton, causing the entire generation to fail.
+        # On Windows, Triton is now available via `pip install triton-windows`.
+        # We attempt to import triton regardless of platform; if it's available,
+        # we enable compilation.  Use max-autotune-no-cudagraphs on ≤8GB VRAM
+        # to avoid CUDA graph memory overhead.
         import sys as _sys
         _can_compile = (
             device == "cuda"
             and not bool(ep.get("use_model_cpu_offload", False))
-            and _sys.platform != "win32"  # Triton not available on Windows
+            and not use_quantization  # BnB quantized models cannot be compiled
         )
         if _can_compile:
-            # Extra check: verify triton is actually importable
+            # Verify triton is importable (works on Linux natively, Windows via triton-windows)
             try:
                 import triton  # noqa: F401
             except ImportError:
                 _can_compile = False
-                logger.info("[IMG] torch.compile skipped (triton not installed)")
+                if _sys.platform == "win32":
+                    logger.info("[IMG] torch.compile skipped (triton not installed — try: pip install triton-windows)")
+                else:
+                    logger.info("[IMG] torch.compile skipped (triton not installed)")
         if _can_compile:
             compile_target = getattr(pipe, "transformer", None) or getattr(pipe, "unet", None)
             if compile_target is not None:
                 try:
                     pipe_attr = "transformer" if hasattr(pipe, "transformer") else "unet"
-                    setattr(pipe, pipe_attr, torch.compile(compile_target, mode="reduce-overhead", fullgraph=True))
-                    logger.info("[IMG] torch.compile enabled for %s (first run will be slower)", pipe_attr)
+                    # Use max-autotune-no-cudagraphs on tight VRAM (≤8GB) to avoid
+                    # CUDA graph memory overhead.  On larger GPUs, reduce-overhead
+                    # with CUDA graphs gives best throughput.
+                    gpu_vram = 0
+                    try:
+                        gpu_vram = torch.cuda.get_device_properties(0).total_memory
+                    except Exception:
+                        pass
+                    if gpu_vram and gpu_vram <= 9 * 1024**3:  # ≤9GB (~8GB cards)
+                        compile_mode = "max-autotune-no-cudagraphs"
+                    else:
+                        compile_mode = "reduce-overhead"
+                    setattr(pipe, pipe_attr, torch.compile(compile_target, mode=compile_mode, fullgraph=True))
+                    logger.info("[IMG] torch.compile enabled for %s (mode=%s, first run will be slower)", pipe_attr, compile_mode)
                 except Exception as e:
                     logger.info("[IMG] torch.compile failed: %s", e)
         elif device == "cuda":
-            logger.info("[IMG] torch.compile skipped (windows=%s, cpu_offload=%s)",
-                        _sys.platform == "win32", bool(ep.get("use_model_cpu_offload", False)))
+            logger.info("[IMG] torch.compile skipped (cpu_offload=%s, quantized=%s, triton=%s)",
+                        bool(ep.get("use_model_cpu_offload", False)), use_quantization,
+                        "not checked" if not device == "cuda" else "see above")
 
         load_elapsed = time.time() - load_start
         logger.info("[IMG] Pipeline loaded in %.1fs", load_elapsed)
@@ -3260,6 +3513,7 @@ class ImageGenerationService:
         width: int,
         height: int,
         init_image_path: str | None,
+        mask_image_path: str | None = None,
         strength: float,
         device: str,
         execution_plan: dict[str, Any] | None = None,
@@ -3299,8 +3553,13 @@ class ImageGenerationService:
         stage_file = tempfile.NamedTemporaryFile(prefix="img_stage_", suffix=".txt", delete=False)
         stage_file_path = stage_file.name
         stage_file.close()
+        # Create step previews directory if enabled
+        step_previews_dir: str | None = None
+        if (execution_plan or {}).get("enable_step_previews"):
+            step_previews_dir = tempfile.mkdtemp(prefix="img_steps_")
         # Expose for progress polling
         self._current_stage_file = stage_file_path
+        self._current_step_previews_dir = step_previews_dir
         self._current_job_started = time.time()
         self._current_job_model = model_id_or_path
         payload = {
@@ -3331,6 +3590,7 @@ class ImageGenerationService:
             "runtime_strategy": execution_plan.get("device_plan") or ("cuda_fp16" if device == "cuda" else "cpu_only"),
             "execution_plan": execution_plan,
             "stage_file": stage_file_path,
+            "step_previews_dir": step_previews_dir,
             # Optimization flags from adaptive backend scoring
             "use_tiny_vae": bool(execution_plan.get("use_tiny_vae")),
             "tiny_vae_model": execution_plan.get("tiny_vae_model"),
@@ -3347,6 +3607,13 @@ class ImageGenerationService:
             # User-selected scheduler and LoRAs
             "scheduler": execution_plan.get("scheduler"),
             "loras": execution_plan.get("loras") or [],
+            # BitsAndBytes quantization (NF4/INT4) for large models
+            "use_quantization": bool(execution_plan.get("use_quantization")),
+            "quantization_type": execution_plan.get("quantization_type", "nf4"),
+            "quantize_transformer": bool(execution_plan.get("quantize_transformer")),
+            "quantize_text_encoder": bool(execution_plan.get("quantize_text_encoder")),
+            # Channels-last memory format (GPU perf optimization)
+            "use_channels_last": bool(execution_plan.get("use_channels_last")),
         }
         proc = ctx.Process(target=_diffusers_worker, args=(payload, q), daemon=True)
         self._current_worker_proc = proc
@@ -3420,12 +3687,19 @@ class ImageGenerationService:
                 device,
                 (execution_plan or {}).get("device_plan"),
             )
+        meta = data.get("metadata") or {}
+        # Include step previews directory in metadata if previews were generated
+        if step_previews_dir and Path(step_previews_dir).exists():
+            previews = sorted(Path(step_previews_dir).glob("step_*.png"))
+            if previews:
+                meta["step_previews_dir"] = step_previews_dir
+                meta["step_preview_count"] = len(previews)
         return ImageRuntimeResult(
             ok=bool(data.get("ok")),
             image_bytes=data.get("image_bytes"),
             error_code=data.get("error_code"),
             error_message=data.get("error_message"),
-            metadata=data.get("metadata") or {},
+            metadata=meta,
         )
 
     def _run_diffusers(
@@ -3498,12 +3772,35 @@ class ImageGenerationService:
             logger.info("[IMG] Starting inference: %d steps, guidance=%.1f, size=%dx%d, seed=%d",
                         total_steps, guidance_scale, width, height, actual_seed)
 
+            # Step preview: decode latents at each step if enabled
+            _step_previews_dir = (execution_plan or {}).get("step_previews_dir")
+            if _step_previews_dir:
+                Path(_step_previews_dir).mkdir(parents=True, exist_ok=True)
+
             def _step_cb(pipe_obj: Any, step: int, timestep: Any, cb_kwargs: dict[str, Any]) -> dict[str, Any]:
                 clamped = min(step + 1, total_steps)
                 _write_stage_marker(stage_file_path, f"inference:{clamped}/{total_steps}")
                 elapsed = time.time() - started
                 logger.info("[IMG] Step %d/%d (timestep=%.1f, elapsed=%.1fs)", clamped, total_steps,
                             float(timestep) if timestep is not None else 0.0, elapsed)
+
+                if _step_previews_dir and "latents" in cb_kwargs:
+                    try:
+                        latents = cb_kwargs["latents"]
+                        with torch.no_grad():
+                            scaling = getattr(pipe.vae.config, "scaling_factor", 0.18215)
+                            decoded = pipe.vae.decode(latents / scaling, return_dict=False)[0]
+                            decoded = (decoded / 2 + 0.5).clamp(0, 1)
+                            decoded = decoded.cpu().permute(0, 2, 3, 1).float().numpy()
+                            decoded = (decoded[0] * 255).round().astype("uint8")
+                        Image_mod, _ = _require_pillow()
+                        preview = Image_mod.fromarray(decoded)
+                        preview_path = Path(_step_previews_dir) / f"step_{clamped:03d}.png"
+                        preview.save(str(preview_path), format="PNG")
+                        logger.info("[IMG] Step %d preview saved", clamped)
+                    except Exception as e:
+                        logger.warning("[IMG] Step %d preview failed: %s", clamped, e)
+
                 return cb_kwargs
 
             inf_start = time.time()
@@ -3721,6 +4018,9 @@ class ImageGenerationService:
             execution_plan["scheduler"] = scheduler
         if loras:
             execution_plan["loras"] = loras
+        # Step previews: decode and save intermediate latents at each step
+        if params.get("enable_step_previews"):
+            execution_plan["enable_step_previews"] = True
         model_hints = execution_plan.get("model_hints") or {}
 
         # Parameter resolution order: user params → execution plan → model hints → quality profile

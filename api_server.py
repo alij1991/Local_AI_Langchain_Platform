@@ -1048,34 +1048,26 @@ def _hf_download_worker(model_id: str, token: str | None) -> None:
     try:
         from huggingface_hub import snapshot_download
 
-        # Whitelist only files that diffusers pipelines actually load.
-        # Subdirectory safetensors (unet/, vae/, text_encoder/) are matched
-        # by "*/*.safetensors".  Root-level pruned checkpoints like
-        # "v1-5-pruned.safetensors" do NOT match because they have no "/".
+        # Download all model files needed for inference.
+        # For transformers models: weights are at root level (model.safetensors
+        # or model-00001-of-*.safetensors). For diffusers pipelines: weights
+        # are in subdirs (unet/*.safetensors, vae/*.safetensors, etc.).
         snapshot_download(
             repo_id=model_id,
             token=token or None,
             resume_download=True,
-            allow_patterns=[
-                "model_index.json",         # Pipeline manifest
-                "*.json",                   # Top-level configs
-                "*/*.json",                 # Subdir configs (scheduler, tokenizer, etc.)
-                "*/*.safetensors",          # Subdir weights (unet, vae, text_encoder)
-                "*/*.txt",                  # merges.txt, vocab.txt
-                "*/*.model",               # spiece.model (sentencepiece tokenizers)
-                "*/tokenizer.json",         # Fast tokenizer
-                "*.md",                     # README
-            ],
             ignore_patterns=[
                 "*non_ema*",                # Training artifacts
-                "*.bin",                    # Legacy pytorch format
-                "*.ckpt",                   # Legacy checkpoint format
+                "*.ckpt",                   # Legacy full checkpoint
                 "*.msgpack",               # Flax weights
                 "*.h5",                    # TF weights
-                "*fp16*",                  # FP16 duplicates (diffusers can cast at load)
                 "flax_model*",             # Flax
                 "tf_model*",               # TensorFlow
                 "openvino_*",              # OpenVINO
+                "*.ot",                    # ONNX training
+                "training_args*",          # Training artifacts
+                "optimizer*",              # Training artifacts
+                "runs/*",                  # TensorBoard logs
             ],
         )
         _hf_downloads[model_id]["status"] = "completed"
@@ -1951,6 +1943,40 @@ async def serve_image_file(session_id: str, filename: str):
     return FileResponse(str(file_path), media_type="image/png")
 
 
+@app.get("/images/files/{session_id}/{image_id}/steps")
+async def list_step_previews(session_id: str, image_id: str):
+    """List step preview images for a generation run."""
+    steps_dir = Path("data/images") / session_id / f"{image_id}_steps"
+    if not steps_dir.is_dir():
+        return {"steps": [], "count": 0}
+    previews = sorted(steps_dir.glob("step_*.png"))
+    return {
+        "steps": [
+            {
+                "step": int(p.stem.split("_")[1]),
+                "filename": p.name,
+                "url": f"/images/files/{session_id}/{image_id}/steps/{p.name}",
+            }
+            for p in previews
+        ],
+        "count": len(previews),
+    }
+
+
+@app.get("/images/files/{session_id}/{image_id}/steps/{filename}")
+async def serve_step_preview(session_id: str, image_id: str, filename: str):
+    """Serve a single step preview image."""
+    file_path = Path("data/images") / session_id / f"{image_id}_steps" / filename
+    if not file_path.exists():
+        raise HTTPException(404, "Step preview not found")
+    try:
+        file_path.resolve().relative_to(Path("data/images").resolve())
+    except ValueError:
+        raise HTTPException(403, "Invalid path")
+    return FileResponse(str(file_path), media_type="image/png")
+
+
+
 @app.get("/images/models")
 async def get_image_models(refresh: bool = False):
     """Return available image generation models."""
@@ -2097,6 +2123,43 @@ async def list_schedulers():
     ]}
 
 
+import re as _re
+
+def _extract_json_from_llm(text: str) -> dict | None:
+    """Try hard to extract a JSON object from messy LLM output."""
+    if not text:
+        return None
+    # 1. Direct parse
+    try:
+        obj = json.loads(text)
+        if isinstance(obj, dict):
+            return obj
+    except json.JSONDecodeError:
+        pass
+    # 2. Find JSON block inside markdown fences
+    fence_match = _re.search(r"```(?:json)?\s*(\{.*?\})\s*```", text, _re.DOTALL)
+    if fence_match:
+        try:
+            return json.loads(fence_match.group(1))
+        except json.JSONDecodeError:
+            pass
+    # 3. Find first { ... } substring
+    brace_match = _re.search(r"\{[^{}]*\}", text, _re.DOTALL)
+    if brace_match:
+        try:
+            return json.loads(brace_match.group(0))
+        except json.JSONDecodeError:
+            pass
+    # 4. Find outermost { ... } (greedy)
+    brace_match2 = _re.search(r"\{.*\}", text, _re.DOTALL)
+    if brace_match2:
+        try:
+            return json.loads(brace_match2.group(0))
+        except json.JSONDecodeError:
+            pass
+    return None
+
+
 @app.post("/images/enhance-prompt")
 async def enhance_image_prompt(body: dict[str, Any]):
     """Use Ollama LLM to enhance a simple description into a detailed SD prompt + negative prompt."""
@@ -2105,70 +2168,144 @@ async def enhance_image_prompt(body: dict[str, Any]):
         raise HTTPException(400, "prompt is required")
     model_family = (body.get("model_family") or "sdxl").lower()
     ollama_model = (body.get("ollama_model") or "").strip()
+    timeout_sec = int(body.get("timeout_sec") or 120)
 
-    # Find a working Ollama model
+    # Find a working Ollama model — prefer small/fast models for prompt enhancement
     if not ollama_model:
         try:
             from local_ai_platform.providers.ollama_provider import OllamaProvider
             prov = OllamaProvider()
             models = prov.list_models()
             if models:
-                ollama_model = models[0].name
+                # Prefer smallest model for speed (sort by parameter count hint in name)
+                small_keywords = ["1b", "2b", "3b", "tiny", "mini", "small", "phi", "qwen2"]
+                names = [m.name for m in models]
+                picked = None
+                for kw in small_keywords:
+                    for n in names:
+                        if kw in n.lower():
+                            picked = n
+                            break
+                    if picked:
+                        break
+                ollama_model = picked or names[0]
         except Exception:
             pass
     if not ollama_model:
-        raise HTTPException(503, "No Ollama model available. Install one with: ollama pull llama3.2")
+        raise HTTPException(503, "No Ollama model available. Install one with: ollama pull gemma3:1b")
 
-    system_prompt = f"""You are an expert Stable Diffusion prompt engineer. Your task is to enhance the user's simple description into a detailed, effective image generation prompt.
-
-Rules:
-1. Output ONLY valid JSON with exactly two fields: "prompt" and "negative_prompt"
-2. The "prompt" should be a detailed, comma-separated list of descriptive tags and phrases
-3. Include quality boosters appropriate for {model_family}: (masterpiece, best quality, highly detailed, sharp focus, professional)
-4. Include relevant style/lighting/composition tags
-5. Keep the user's core intent — don't change what they want to generate
-6. The "negative_prompt" should list things to avoid: (worst quality, low quality, blurry, deformed, ugly, bad anatomy, watermark, text, signature)
-7. Do NOT include any explanation, just the JSON object
-8. Keep prompts under 200 words each"""
-
-    user_msg = f'Enhance this into a Stable Diffusion prompt: "{user_prompt}"'
+    # Use /api/generate (simpler, works better with thinking models via /no_think)
+    generate_prompt = f"""/no_think
+Output ONLY this JSON object, nothing else:
+{{"prompt": "[detailed Stable Diffusion {model_family} prompt for: {user_prompt}. Include quality tags like masterpiece, best quality, highly detailed, sharp focus. Add style, lighting, composition details. Comma-separated tags.]", "negative_prompt": "[things to avoid: worst quality, low quality, blurry, deformed, ugly, bad anatomy, watermark, text, plus scene-specific negatives]"}}"""
 
     try:
         import urllib.request
+        import urllib.error
         req_body = json.dumps({
             "model": ollama_model,
-            "messages": [
-                {"role": "system", "content": system_prompt},
-                {"role": "user", "content": user_msg},
-            ],
+            "prompt": generate_prompt,
             "stream": False,
-            "format": "json",
             "options": {"temperature": 0.7, "num_predict": 512},
         }).encode()
         req = urllib.request.Request(
-            "http://localhost:11434/api/chat",
+            "http://localhost:11434/api/generate",
             data=req_body,
             headers={"Content-Type": "application/json"},
         )
-        with urllib.request.urlopen(req, timeout=30) as resp:
+        with urllib.request.urlopen(req, timeout=timeout_sec) as resp:
             data = json.loads(resp.read().decode())
-        content = data.get("message", {}).get("content", "")
-        # Parse the JSON response
-        result = json.loads(content)
-        return {
-            "prompt": result.get("prompt", user_prompt),
-            "negative_prompt": result.get("negative_prompt", ""),
-            "original_prompt": user_prompt,
-            "ollama_model": ollama_model,
-        }
-    except json.JSONDecodeError:
-        # LLM didn't return valid JSON — try to extract from text
+        content = (data.get("response", "") or "").strip()
+        logger.info("enhance-prompt response (%d chars): %s", len(content), content[:500])
+
+        # Try to extract JSON
+        result = _extract_json_from_llm(content)
+        if result and isinstance(result.get("prompt"), str) and result["prompt"].strip():
+            return {
+                "prompt": result["prompt"].strip(),
+                "negative_prompt": (result.get("negative_prompt") or "").strip(),
+                "original_prompt": user_prompt,
+                "ollama_model": ollama_model,
+            }
+
+        # If /api/generate didn't work (some models still think), try /api/chat as fallback
+        logger.info("enhance-prompt: /api/generate didn't yield JSON, trying /api/chat fallback")
+        chat_body = json.dumps({
+            "model": ollama_model,
+            "messages": [
+                {"role": "user", "content": f'/no_think\n{generate_prompt}'},
+            ],
+            "stream": False,
+            "options": {"temperature": 0.7, "num_predict": 1024},
+        }).encode()
+        chat_req = urllib.request.Request(
+            "http://localhost:11434/api/chat",
+            data=chat_body,
+            headers={"Content-Type": "application/json"},
+        )
+        with urllib.request.urlopen(chat_req, timeout=timeout_sec) as resp2:
+            data2 = json.loads(resp2.read().decode())
+        msg = data2.get("message", {})
+        chat_content = (msg.get("content", "") or "").strip()
+        chat_thinking = (msg.get("thinking", "") or "").strip()
+        logger.info("enhance-prompt chat content (%d chars), thinking (%d chars)", len(chat_content), len(chat_thinking))
+
+        for text_source in [chat_content, chat_thinking]:
+            if not text_source:
+                continue
+            result = _extract_json_from_llm(text_source)
+            if result and isinstance(result.get("prompt"), str) and result["prompt"].strip():
+                return {
+                    "prompt": result["prompt"].strip(),
+                    "negative_prompt": (result.get("negative_prompt") or "").strip(),
+                    "original_prompt": user_prompt,
+                    "ollama_model": ollama_model,
+                }
+
+        # Fallback for thinking models: extract quoted prompt strings from thinking text
+        if chat_thinking and not chat_content:
+            prompt_quotes = _re.findall(r'["\u201c]([^"\u201d]{20,})["\u201d]', chat_thinking)
+            if prompt_quotes:
+                best = max(prompt_quotes, key=len)
+                neg = ""
+                neg_section = chat_thinking.lower().find("negative")
+                if neg_section >= 0:
+                    neg_quotes = _re.findall(r'["\u201c]([^"\u201d]{10,})["\u201d]', chat_thinking[neg_section:])
+                    if neg_quotes:
+                        neg = neg_quotes[0]
+                return {
+                    "prompt": best.strip().rstrip(","),
+                    "negative_prompt": neg.strip() if neg else "worst quality, low quality, blurry, deformed, ugly, bad anatomy, watermark, text",
+                    "original_prompt": user_prompt,
+                    "ollama_model": ollama_model,
+                    "source": "extracted from model reasoning",
+                }
+
+        # Fallback: use any available text
+        combined = content or chat_content or chat_thinking or ""
+        if combined and combined != user_prompt:
+            cleaned = combined
+            for fence in ("```json", "```", "`"):
+                cleaned = cleaned.replace(fence, "")
+            cleaned = cleaned.strip()
+            if cleaned and len(cleaned) < 2000:
+                return {
+                    "prompt": cleaned,
+                    "negative_prompt": "worst quality, low quality, blurry, deformed, ugly, bad anatomy, watermark, text",
+                    "original_prompt": user_prompt,
+                    "ollama_model": ollama_model,
+                    "warning": "LLM did not return structured JSON; using raw text as prompt",
+                }
+
+        # Nothing usable
         return {
             "prompt": user_prompt,
             "negative_prompt": "worst quality, low quality, blurry, deformed, watermark, text",
             "original_prompt": user_prompt,
-            "error": "LLM response was not valid JSON, using original prompt",
+            "error": "LLM response was empty or unusable",
         }
+    except urllib.error.URLError as exc:
+        raise HTTPException(503, f"Cannot connect to Ollama at localhost:11434. Is it running? Start with: ollama serve  (Error: {exc})")
     except Exception as exc:
         raise HTTPException(500, f"Prompt enhancement failed: {exc}")
 
@@ -2244,10 +2381,12 @@ def generate_image(body: dict[str, Any]):
 
     # Save image to session if provided
     session_id = body.get("session_id")
+    image_id_saved: str | None = None
     if session_id and result.image_bytes:
         try:
             from local_ai_platform.repositories.images_repo import add_image, image_output_path
-            out_path = image_output_path(session_id, str(uuid.uuid4()))
+            image_id_saved = str(uuid.uuid4())
+            out_path = image_output_path(session_id, image_id_saved)
             out_path.parent.mkdir(parents=True, exist_ok=True)
             out_path.write_bytes(result.image_bytes)
             # Persist seed, scheduler, and other metadata alongside the image
@@ -2266,6 +2405,17 @@ def generate_image(body: dict[str, Any]):
                 negative_prompt=body.get("negative_prompt"),
                 params=save_params,
             )
+            # Copy step preview images to session folder if they were generated
+            step_previews_dir = (result.metadata or {}).get("step_previews_dir")
+            if step_previews_dir and Path(step_previews_dir).is_dir():
+                steps_dest = out_path.parent / f"{image_id_saved}_steps"
+                steps_dest.mkdir(parents=True, exist_ok=True)
+                import shutil
+                for preview in sorted(Path(step_previews_dir).glob("step_*.png")):
+                    shutil.copy2(str(preview), str(steps_dest / preview.name))
+                # Clean up temp directory
+                shutil.rmtree(step_previews_dir, ignore_errors=True)
+                logger.info("Saved %d step previews to %s", len(list(steps_dest.glob("*.png"))), steps_dest)
         except Exception as exc:
             logger.warning("Failed to save generated image: %s", exc)
 
