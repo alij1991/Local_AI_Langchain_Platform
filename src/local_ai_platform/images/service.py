@@ -69,6 +69,42 @@ class ImageRuntimeResult:
 
 
 @dataclass
+class GPUInfo:
+    """Describes a single GPU device (NVIDIA, AMD, Intel, Apple)."""
+    index: int = 0
+    name: str = "unknown"
+    vendor: str = "unknown"           # "nvidia", "amd", "intel", "apple", "unknown"
+    vram_bytes: int = 0
+    vram_free_bytes: int = 0          # Current free VRAM (updated at detection time)
+    device_string: str = "cpu"        # "cuda:0", "mps", "xpu:0", "privateuseone:0"
+    compute_capability: tuple[int, int] | None = None  # NVIDIA only
+    supports_fp16: bool = False
+    supports_bf16: bool = False
+    architecture: str = ""            # "ampere", "rdna3", "alchemist", etc.
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "index": self.index,
+            "name": self.name,
+            "vendor": self.vendor,
+            "vram_bytes": self.vram_bytes,
+            "vram_human": format_bytes_human(self.vram_bytes) if self.vram_bytes else None,
+            "vram_free_bytes": self.vram_free_bytes,
+            "device_string": self.device_string,
+            "compute_capability": list(self.compute_capability) if self.compute_capability else None,
+            "supports_fp16": self.supports_fp16,
+            "supports_bf16": self.supports_bf16,
+            "architecture": self.architecture,
+        }
+
+
+# ── NVIDIA compute-capability → architecture name ──
+_NVIDIA_ARCH_MAP: dict[int, str] = {
+    5: "maxwell", 6: "pascal", 7: "volta/turing", 8: "ampere", 9: "hopper/ada",
+}
+
+
+@dataclass
 class HardwareProfile:
     """Hardware fingerprint detected once at startup for backend selection."""
     # CPU
@@ -79,11 +115,20 @@ class HardwareProfile:
     has_avx2: bool = False
     has_avx512: bool = False
     has_vnni: bool = False            # Intel VNNI for INT8 acceleration
-    # GPU
+    has_amx: bool = False             # Intel AMX for INT8/BF16 acceleration
+    # GPU — multi-device aware
+    gpus: list[GPUInfo] | None = None  # All detected GPUs
+    primary_gpu: GPUInfo | None = None  # Best GPU by scoring (auto-selected)
+    # Backward-compat single-GPU fields (computed from primary_gpu)
     gpu_name: str | None = None
     gpu_vram_bytes: int = 0
     cuda_available: bool = False
     gpu_compute_cap: tuple[int, int] | None = None
+    # Multi-platform GPU availability
+    mps_available: bool = False       # Apple Metal Performance Shaders
+    xpu_available: bool = False       # Intel Arc / Data Center GPU
+    directml_available: bool = False  # Windows DirectML (any GPU)
+    rocm_available: bool = False      # AMD ROCm (via CUDA namespace)
     # RAM
     ram_total_bytes: int = 0
     ram_available_bytes: int = 0
@@ -93,6 +138,45 @@ class HardwareProfile:
     tomesd_available: bool = False
     deepcache_available: bool = False
     diffusers_available: bool = False
+    onnxruntime_available: bool = False
+    triton_available: bool = False    # For torch.compile on CUDA
+    xformers_available: bool = False  # Memory-efficient attention
+    # OS
+    os_platform: str = ""             # "windows", "linux", "darwin"
+
+    def __post_init__(self) -> None:
+        if self.gpus is None:
+            self.gpus = []
+
+    def _sync_compat_fields(self) -> None:
+        """Sync backward-compatible single-GPU fields from primary_gpu."""
+        if self.primary_gpu:
+            self.gpu_name = self.primary_gpu.name
+            self.gpu_vram_bytes = self.primary_gpu.vram_bytes
+            self.gpu_compute_cap = self.primary_gpu.compute_capability
+            self.cuda_available = self.primary_gpu.vendor in ("nvidia", "amd")
+        else:
+            self.gpu_name = None
+            self.gpu_vram_bytes = 0
+            self.cuda_available = False
+            self.gpu_compute_cap = None
+
+    @property
+    def any_gpu_available(self) -> bool:
+        """True if any usable GPU is detected (CUDA, MPS, XPU, DirectML)."""
+        return bool(self.gpus) or self.mps_available or self.xpu_available or self.directml_available
+
+    @property
+    def best_device_string(self) -> str:
+        """Return the device string for the best available accelerator."""
+        if self.primary_gpu:
+            return self.primary_gpu.device_string
+        if self.mps_available:
+            return "mps"
+        if self.xpu_available:
+            xpu = next((g for g in (self.gpus or []) if g.vendor == "intel"), None)
+            return xpu.device_string if xpu else "xpu:0"
+        return "cpu"
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -103,31 +187,57 @@ class HardwareProfile:
             "has_avx2": self.has_avx2,
             "has_avx512": self.has_avx512,
             "has_vnni": self.has_vnni,
+            "has_amx": self.has_amx,
+            # Backward-compat single-GPU fields
             "gpu_name": self.gpu_name,
             "gpu_vram_bytes": self.gpu_vram_bytes,
             "gpu_vram_human": format_bytes_human(self.gpu_vram_bytes) if self.gpu_vram_bytes else None,
             "cuda_available": self.cuda_available,
             "gpu_compute_cap": list(self.gpu_compute_cap) if self.gpu_compute_cap else None,
+            # Multi-GPU list
+            "gpus": [g.to_dict() for g in (self.gpus or [])],
+            "gpu_count": len(self.gpus or []),
+            "primary_gpu": self.primary_gpu.to_dict() if self.primary_gpu else None,
+            # Multi-platform flags
+            "mps_available": self.mps_available,
+            "xpu_available": self.xpu_available,
+            "directml_available": self.directml_available,
+            "rocm_available": self.rocm_available,
+            "any_gpu_available": self.any_gpu_available,
+            "best_device": self.best_device_string,
+            # RAM
             "ram_total_bytes": self.ram_total_bytes,
             "ram_total_human": format_bytes_human(self.ram_total_bytes) if self.ram_total_bytes else None,
             "ram_available_bytes": self.ram_available_bytes,
+            # Backends
             "openvino_available": self.openvino_available,
             "sdcpp_available": self.sdcpp_available,
             "tomesd_available": self.tomesd_available,
             "deepcache_available": self.deepcache_available,
             "diffusers_available": self.diffusers_available,
+            "onnxruntime_available": self.onnxruntime_available,
+            "triton_available": self.triton_available,
+            "xformers_available": self.xformers_available,
+            "os_platform": self.os_platform,
         }
 
 
 def _detect_hardware_profile() -> HardwareProfile:
-    """Detect hardware capabilities once. Called lazily on first access."""
-    import platform
-    hw = HardwareProfile()
+    """Detect hardware capabilities once.  Called lazily on first access.
 
-    # ── CPU ──
-    hw.cpu_model = platform.processor() or platform.machine() or "unknown"
+    Universal detection: NVIDIA CUDA, AMD ROCm, Apple MPS, Intel Arc XPU,
+    DirectML, plus CPU feature flags for all x86/ARM vendors.
+    """
+    import platform as _plat
+    import sys
+
+    hw = HardwareProfile()
+    hw.os_platform = {"win32": "windows", "linux": "linux", "darwin": "darwin"}.get(sys.platform, sys.platform)
+
+    # ── CPU ──────────────────────────────────────────────────────────
+    hw.cpu_model = _plat.processor() or _plat.machine() or "unknown"
     hw.cpu_cores = os.cpu_count() or 1
-    hw.cpu_threads = hw.cpu_cores  # Python can't distinguish; assume HT
+    hw.cpu_threads = hw.cpu_cores  # Python can't reliably distinguish HT
 
     # Detect vendor
     proc_lower = hw.cpu_model.lower()
@@ -135,10 +245,12 @@ def _detect_hardware_profile() -> HardwareProfile:
         hw.cpu_vendor = "Intel"
     elif "amd" in proc_lower or "authenticamd" in proc_lower:
         hw.cpu_vendor = "AMD"
-    elif "apple" in proc_lower or "arm" in platform.machine().lower():
+    elif "apple" in proc_lower or ("arm" in _plat.machine().lower() and sys.platform == "darwin"):
         hw.cpu_vendor = "Apple"
+    elif "arm" in _plat.machine().lower() or "aarch64" in _plat.machine().lower():
+        hw.cpu_vendor = "ARM"
 
-    # CPU flags (AVX2, AVX-512, VNNI) — try cpuinfo, fallback to platform heuristic
+    # CPU flags — try cpuinfo, fallback to platform heuristic
     try:
         import cpuinfo  # type: ignore[import-untyped]
         info = cpuinfo.get_cpu_info()
@@ -146,26 +258,150 @@ def _detect_hardware_profile() -> HardwareProfile:
         hw.has_avx2 = "avx2" in flags
         hw.has_avx512 = any(f.startswith("avx512") for f in flags)
         hw.has_vnni = "avx512_vnni" in flags or "avx_vnni" in flags
+        hw.has_amx = "amx_int8" in flags or "amx_bf16" in flags
         if info.get("brand_raw"):
             hw.cpu_model = info["brand_raw"]
     except Exception:
-        # Heuristic: most x86_64 CPUs since 2014 have AVX2
-        if platform.machine() in ("x86_64", "AMD64"):
-            hw.has_avx2 = True
+        if _plat.machine() in ("x86_64", "AMD64"):
+            hw.has_avx2 = True  # Safe assumption for post-2014 x86_64
 
-    # ── GPU ──
+    # ── GPUs ─────────────────────────────────────────────────────────
+    gpus: list[GPUInfo] = []
+
+    # 1. NVIDIA CUDA / AMD ROCm (both present via torch.cuda API)
     try:
         import torch
         if torch.cuda.is_available():
-            hw.cuda_available = True
-            hw.gpu_name = torch.cuda.get_device_name(0)
-            hw.gpu_vram_bytes = torch.cuda.get_device_properties(0).total_memory
-            cap = torch.cuda.get_device_capability(0)
-            hw.gpu_compute_cap = (cap[0], cap[1])
+            is_rocm = getattr(getattr(torch, "version", None), "hip", None) is not None
+            device_count = torch.cuda.device_count()
+            for i in range(device_count):
+                props = torch.cuda.get_device_properties(i)
+                name = torch.cuda.get_device_name(i)
+                vram_total = int(getattr(props, "total_memory", 0) or 0)
+                try:
+                    vram_free = torch.cuda.mem_get_info(i)[0]
+                except Exception:
+                    vram_free = vram_total
+
+                if is_rocm:
+                    vendor = "amd"
+                    arch = "rdna" if "RX" in name.upper() else "cdna"
+                    # ROCm fp16 is well-supported on RDNA2+, bf16 on RDNA3+
+                    supports_fp16 = True
+                    supports_bf16 = "RDNA 3" in name or "gfx11" in str(getattr(props, "gcnArchName", "")).lower()
+                else:
+                    vendor = "nvidia"
+                    cap = torch.cuda.get_device_capability(i)
+                    cc = (cap[0], cap[1])
+                    arch = _NVIDIA_ARCH_MAP.get(cc[0], f"cc{cc[0]}.{cc[1]}")
+                    supports_fp16 = cc >= (5, 3)   # Maxwell Gen2+
+                    supports_bf16 = cc >= (8, 0)   # Ampere+
+
+                gpu = GPUInfo(
+                    index=i,
+                    name=name,
+                    vendor=vendor,
+                    vram_bytes=vram_total,
+                    vram_free_bytes=vram_free,
+                    device_string=f"cuda:{i}",
+                    compute_capability=cc if not is_rocm else None,
+                    supports_fp16=supports_fp16,
+                    supports_bf16=supports_bf16,
+                    architecture=arch,
+                )
+                gpus.append(gpu)
+
+            if is_rocm:
+                hw.rocm_available = True
     except Exception:
         pass
 
-    # ── RAM ──
+    # 2. Apple MPS (Metal Performance Shaders)
+    try:
+        import torch
+        if hasattr(torch.backends, "mps") and torch.backends.mps.is_available():
+            hw.mps_available = True
+            # Apple Silicon uses unified memory — estimate VRAM as fraction of RAM
+            try:
+                import psutil
+                total_ram = psutil.virtual_memory().total
+            except Exception:
+                total_ram = 8 * 1024**3  # Conservative default
+            # MPS can use ~75% of unified memory for GPU tasks
+            mps_gpu = GPUInfo(
+                index=0,
+                name=_plat.processor() or "Apple Silicon",
+                vendor="apple",
+                vram_bytes=int(total_ram * 0.75),
+                vram_free_bytes=int(total_ram * 0.5),  # Rough estimate
+                device_string="mps",
+                supports_fp16=True,
+                supports_bf16=True,  # Apple Silicon M1+ natively supports bf16
+                architecture="apple_silicon",
+            )
+            gpus.append(mps_gpu)
+    except Exception:
+        pass
+
+    # 3. Intel Arc XPU (Intel Extension for PyTorch)
+    try:
+        import torch
+        if hasattr(torch, "xpu") and torch.xpu.is_available():
+            hw.xpu_available = True
+            xpu_count = torch.xpu.device_count()
+            for i in range(xpu_count):
+                name = torch.xpu.get_device_name(i)
+                try:
+                    props = torch.xpu.get_device_properties(i)
+                    vram = int(getattr(props, "total_memory", 0) or 0)
+                except Exception:
+                    vram = 0
+                xpu_gpu = GPUInfo(
+                    index=i,
+                    name=name,
+                    vendor="intel",
+                    vram_bytes=vram,
+                    vram_free_bytes=vram,
+                    device_string=f"xpu:{i}",
+                    supports_fp16=True,
+                    supports_bf16=True,  # Alchemist+ supports both
+                    architecture="alchemist",
+                )
+                gpus.append(xpu_gpu)
+    except Exception:
+        pass
+
+    # 4. DirectML (Windows — any GPU via DirectX 12)
+    try:
+        import torch_directml  # type: ignore[import-untyped]
+        if torch_directml.is_available():
+            hw.directml_available = True
+            # DirectML doesn't expose per-device VRAM easily
+            dml_gpu = GPUInfo(
+                index=0,
+                name="DirectML GPU",
+                vendor="unknown",
+                device_string="privateuseone:0",
+                supports_fp16=True,
+                architecture="directml",
+            )
+            # Only add if no better GPU backend was found for this hardware
+            if not any(g.vendor in ("nvidia", "amd", "intel", "apple") for g in gpus):
+                gpus.append(dml_gpu)
+    except (ImportError, Exception):
+        pass
+
+    # ── Select primary GPU (highest VRAM, prefer nvidia > amd > apple > intel > directml) ──
+    hw.gpus = gpus
+    if gpus:
+        vendor_priority = {"nvidia": 5, "amd": 4, "apple": 3, "intel": 2, "unknown": 1}
+        hw.primary_gpu = max(
+            gpus,
+            key=lambda g: (vendor_priority.get(g.vendor, 0), g.vram_bytes),
+        )
+    hw._sync_compat_fields()
+
+    # ── RAM ──────────────────────────────────────────────────────────
     try:
         import psutil
         vm = psutil.virtual_memory()
@@ -174,12 +410,14 @@ def _detect_hardware_profile() -> HardwareProfile:
     except Exception:
         pass
 
-    # ── Backend availability ──
+    # ── Backend availability ─────────────────────────────────────────
     for attr, module in [
         ("openvino_available", "openvino"),
         ("sdcpp_available", "stable_diffusion_cpp"),
         ("tomesd_available", "tomesd"),
         ("diffusers_available", "diffusers"),
+        ("onnxruntime_available", "onnxruntime"),
+        ("xformers_available", "xformers"),
     ]:
         try:
             __import__(module)
@@ -192,18 +430,81 @@ def _detect_hardware_profile() -> HardwareProfile:
         hw.deepcache_available = True
     except Exception:
         pass
+    # Triton: needed for torch.compile on CUDA
+    try:
+        import triton  # noqa: F401
+        hw.triton_available = True
+    except ImportError:
+        pass
 
+    # ── Summary log ──────────────────────────────────────────────────
+    gpu_summary = ", ".join(
+        f"{g.name}({g.vendor},{format_bytes_human(g.vram_bytes)})" for g in gpus
+    ) if gpus else "none"
     logger.info(
-        "hardware_profile: cpu=%s vendor=%s cores=%d avx2=%s avx512=%s vnni=%s | "
-        "gpu=%s vram=%s cuda=%s | ram=%s | backends: ov=%s sdcpp=%s tome=%s dc=%s diffusers=%s",
-        hw.cpu_model, hw.cpu_vendor, hw.cpu_cores, hw.has_avx2, hw.has_avx512, hw.has_vnni,
-        hw.gpu_name, format_bytes_human(hw.gpu_vram_bytes) if hw.gpu_vram_bytes else "none",
-        hw.cuda_available,
+        "hardware_profile: cpu=%s vendor=%s cores=%d avx2=%s avx512=%s vnni=%s amx=%s | "
+        "gpus=[%s] primary=%s mps=%s xpu=%s rocm=%s dml=%s | ram=%s | "
+        "backends: ov=%s sdcpp=%s tome=%s dc=%s diff=%s ort=%s xfm=%s triton=%s | os=%s",
+        hw.cpu_model, hw.cpu_vendor, hw.cpu_cores, hw.has_avx2, hw.has_avx512,
+        hw.has_vnni, hw.has_amx,
+        gpu_summary, hw.primary_gpu.name if hw.primary_gpu else "none",
+        hw.mps_available, hw.xpu_available, hw.rocm_available, hw.directml_available,
         format_bytes_human(hw.ram_total_bytes) if hw.ram_total_bytes else "?",
         hw.openvino_available, hw.sdcpp_available, hw.tomesd_available,
-        hw.deepcache_available, hw.diffusers_available,
+        hw.deepcache_available, hw.diffusers_available, hw.onnxruntime_available,
+        hw.xformers_available, hw.triton_available,
+        hw.os_platform,
     )
     return hw
+
+
+def _select_best_dtype(
+    device: str,
+    gpu_info: GPUInfo | None,
+    model_preferred: str | None,
+) -> str:
+    """Select the best dtype for a device, respecting model requirements.
+
+    Returns a dtype name suitable for diffusers: "float16", "bfloat16", or "float32".
+    Logic is hardware-aware: checks actual GPU capability rather than guessing.
+    """
+    # If model explicitly requires a dtype (e.g. bfloat16 for Flux), respect it
+    if model_preferred and model_preferred not in ("float32", "auto", ""):
+        # Verify the GPU actually supports it
+        if gpu_info:
+            if model_preferred == "bfloat16" and not gpu_info.supports_bf16:
+                return "float16" if gpu_info.supports_fp16 else "float32"
+        return model_preferred
+
+    # Per-device dtype selection
+    if device.startswith("cuda"):
+        if gpu_info and gpu_info.supports_bf16:
+            return "bfloat16"  # Ampere+ NVIDIA, RDNA3+ AMD — most stable
+        return "float16"       # Pascal/Turing NVIDIA, RDNA2 AMD
+    elif device == "mps":
+        return "float16"       # Apple MPS: fp16 well-supported, bf16 unreliable before PyTorch 2.3
+    elif device.startswith("xpu"):
+        return "float16"       # Intel XPU: fp16 reliable, bf16 on newer Arc only
+    elif device.startswith("privateuseone"):
+        return "float16"       # DirectML: fp16 is safest
+    else:
+        return "float32"       # CPU: always float32 for correctness
+
+
+def _get_device_family(device: str) -> str:
+    """Classify a device string into a family for branching logic.
+
+    Returns: "cuda", "mps", "xpu", "directml", or "cpu".
+    """
+    if device.startswith("cuda"):
+        return "cuda"
+    elif device == "mps":
+        return "mps"
+    elif device.startswith("xpu"):
+        return "xpu"
+    elif device.startswith("privateuseone"):
+        return "directml"
+    return "cpu"
 
 
 def _require_pillow():
@@ -595,6 +896,79 @@ CONTROLNET_PREPROCESSORS: dict[str, tuple[str, str, str | None]] = {
 }
 
 
+# ── MSVC environment detection for torch.compile on Windows ──────
+# torch.compile's inductor backend needs cl.exe + INCLUDE/LIB paths.
+# In a spawned subprocess these aren't available unless we explicitly
+# run vcvarsall.bat and capture the resulting environment.
+
+_msvc_env_cache: dict[str, str] | None = None
+
+def _get_msvc_env() -> dict[str, str] | None:
+    """Detect MSVC Build Tools and return the env vars needed for cl.exe.
+
+    Runs vcvarsall.bat once and caches the result.  Returns None if MSVC
+    is not installed.  Only relevant on Windows.
+    """
+    global _msvc_env_cache
+    if _msvc_env_cache is not None:
+        return _msvc_env_cache if _msvc_env_cache else None
+
+    import subprocess as _sp
+    import platform
+
+    if platform.system() != "Windows":
+        _msvc_env_cache = {}
+        return None
+
+    # Common vcvarsall.bat locations (VS 2019 + 2022, BuildTools + Community)
+    _candidates = [
+        r"C:\Program Files\Microsoft Visual Studio\2022\BuildTools\VC\Auxiliary\Build\vcvarsall.bat",
+        r"C:\Program Files\Microsoft Visual Studio\2022\Community\VC\Auxiliary\Build\vcvarsall.bat",
+        r"C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools\VC\Auxiliary\Build\vcvarsall.bat",
+        r"C:\Program Files (x86)\Microsoft Visual Studio\2019\BuildTools\VC\Auxiliary\Build\vcvarsall.bat",
+        r"C:\Program Files (x86)\Microsoft Visual Studio\2019\Community\VC\Auxiliary\Build\vcvarsall.bat",
+    ]
+
+    vcvarsall = None
+    for p in _candidates:
+        if os.path.isfile(p):
+            vcvarsall = p
+            break
+
+    if not vcvarsall:
+        _msvc_env_cache = {}
+        return None
+
+    try:
+        # Run vcvarsall.bat and capture the environment it sets.
+        # Must use cmd.exe explicitly — shell=True may route through bash on
+        # some environments (e.g. MSYS2, Git Bash, WSL Python).
+        arch = "amd64" if platform.machine().endswith("64") else "x86"
+        cmd = f'cmd /c "call "{vcvarsall}" {arch} && set"'
+        result = _sp.run(cmd, capture_output=True, text=True, timeout=30)
+        if result.returncode != 0:
+            _msvc_env_cache = {}
+            return None
+
+        # Parse env vars — only keep the ones torch.compile needs
+        _important_keys = {"PATH", "INCLUDE", "LIB", "LIBPATH", "VCINSTALLDIR",
+                           "WindowsSdkDir", "WindowsSDKLibVersion", "UCRTVersion",
+                           "UniversalCRTSdkDir", "VCToolsInstallDir"}
+        env_diff: dict[str, str] = {}
+        for line in result.stdout.splitlines():
+            if "=" in line:
+                k, _, v = line.partition("=")
+                k = k.strip()
+                if k.upper() in {x.upper() for x in _important_keys}:
+                    env_diff[k] = v.strip()
+
+        _msvc_env_cache = env_diff
+        return env_diff if env_diff else None
+    except Exception:
+        _msvc_env_cache = {}
+        return None
+
+
 # ── sd.cpp subprocess worker ──────────────────────────────────────
 
 def _sdcpp_worker(payload: dict[str, Any], out_q: Any) -> None:
@@ -842,9 +1216,6 @@ def _controlnet_worker(payload: dict[str, Any], out_q: Any) -> None:
         load_kwargs: dict[str, Any] = {
             "controlnet": controlnet,
             "torch_dtype": cn_dtype,
-            "safety_checker": None,
-            "feature_extractor": None,
-            "image_encoder": None,
             "local_files_only": bool(payload.get("local_files_only", False)),
             "low_cpu_mem_usage": True,
         }
@@ -1028,6 +1399,16 @@ def _diffusers_worker(payload: dict[str, Any], out_q: Any) -> None:
         os.environ["VECLIB_MAXIMUM_THREADS"] = cpu_threads
         os.environ["NUMEXPR_NUM_THREADS"] = cpu_threads
 
+        # ── MSVC environment injection for torch.compile (Windows) ──
+        # Spawned subprocesses don't inherit the VS Developer Command Prompt
+        # environment.  torch.compile's inductor backend needs cl.exe + headers.
+        # We run vcvarsall.bat and capture the resulting env vars.
+        if os.name == "nt" and "INCLUDE" not in os.environ:
+            _msvc_env = _get_msvc_env()
+            if _msvc_env:
+                for _k, _v in _msvc_env.items():
+                    os.environ[_k] = _v
+
         import torch
         from diffusers import AutoPipelineForImage2Image, AutoPipelineForText2Image, AutoPipelineForInpainting
 
@@ -1042,6 +1423,29 @@ def _diffusers_worker(payload: dict[str, Any], out_q: Any) -> None:
         mode = str(payload["mode"])
         local_files_only = bool(payload["local_files_only"])
         device = str(payload["device"])
+
+        # ── Dynamic memory gate ──
+        # Check actual available memory NOW (may differ from plan-time estimate).
+        # If VRAM is critically low, auto-enable CPU offload to prevent OOM.
+        _dev_fam = _get_device_family(device)
+        if _dev_fam == "cuda" and bool(payload.get("_enable_dynamic_memory_check", True)):
+            try:
+                _gpu_idx = int(device.split(":")[-1]) if ":" in device else 0
+                _free_vram, _total_vram = torch.cuda.mem_get_info(_gpu_idx)
+                _log(f"Runtime VRAM: {_free_vram / 1e9:.1f} GB free / {_total_vram / 1e9:.1f} GB total")
+                _est_needed = int(payload.get("estimated_vram_required_bytes") or 0)
+                if _est_needed and _free_vram < _est_needed * 0.5 and not payload.get("use_model_cpu_offload"):
+                    _log(f"⚠️ VRAM pressure: {_free_vram / 1e9:.1f}GB free < 50% of needed {_est_needed / 1e9:.1f}GB → enabling CPU offload")
+                    payload["use_model_cpu_offload"] = True
+                    _log_stage("dynamic_memory_adjustment", free_vram=_free_vram, needed=_est_needed)
+            except Exception:
+                pass
+        elif _dev_fam == "mps":
+            try:
+                _mps_alloc = torch.mps.current_allocated_size() if hasattr(torch.mps, "current_allocated_size") else 0
+                _log(f"Runtime MPS allocated: {_mps_alloc / 1e9:.1f} GB")
+            except Exception:
+                pass
         init_image_path = payload.get("init_image_path")
 
         load_kwargs: dict[str, Any] = {
@@ -1130,16 +1534,52 @@ def _diffusers_worker(payload: dict[str, Any], out_q: Any) -> None:
             pipe.safety_checker = None
         if hasattr(pipe, "feature_extractor") and pipe.feature_extractor is not None:
             pipe.feature_extractor = None
-        if bool(payload.get("enable_memory_efficient_attention", False)):
+        # ── Attention backend selection (universal) ──
+        # Priority: xformers > SDPA (PyTorch 2.0+) > sliced (memory-friendly)
+        _attn_backend = str(payload.get("attention_backend", "auto"))
+        if _attn_backend == "auto":
+            _dev_fam = _get_device_family(device)
+            if _dev_fam in ("cuda", "mps", "xpu"):
+                # Try xformers first (fastest on CUDA), then SDPA
+                _attn_set = False
+                try:
+                    pipe.enable_xformers_memory_efficient_attention()
+                    _attn_backend = "xformers"
+                    _attn_set = True
+                except Exception:
+                    pass
+                if not _attn_set and hasattr(torch.nn.functional, "scaled_dot_product_attention"):
+                    try:
+                        from diffusers.models.attention_processor import AttnProcessor2_0
+                        pipe.set_attn_processor(AttnProcessor2_0())
+                        _attn_backend = "sdpa"
+                        _attn_set = True
+                    except Exception:
+                        pass
+                if not _attn_set:
+                    _attn_backend = "vanilla"
+            else:
+                _attn_backend = "sliced"
+        elif _attn_backend == "xformers":
             try:
                 pipe.enable_xformers_memory_efficient_attention()
             except Exception:
-                pass
-        if bool(payload.get("use_attention_slicing", payload.get("low_memory_mode", True))):
+                _attn_backend = "sliced"
+        elif _attn_backend == "sdpa":
+            try:
+                from diffusers.models.attention_processor import AttnProcessor2_0
+                pipe.set_attn_processor(AttnProcessor2_0())
+            except Exception:
+                _attn_backend = "sliced"
+
+        # Attention slicing: always enable on CPU or low-memory GPU (works with any attention backend)
+        if _attn_backend == "sliced" or bool(payload.get("use_attention_slicing", payload.get("low_memory_mode", True))):
             try:
                 pipe.enable_attention_slicing()
             except Exception:
                 pass
+        _log(f"Attention backend: {_attn_backend}")
+        _log_stage("attention_setup", backend=_attn_backend)
         # VAE slicing: processes batch elements one at a time (saves memory for batch>1)
         try:
             if hasattr(pipe.vae, 'enable_slicing'):
@@ -1217,45 +1657,108 @@ def _diffusers_worker(payload: dict[str, Any], out_q: Any) -> None:
             except Exception as e:
                 _log(f"Lightning LoRA failed: {e} (continuing without it)")
 
-        if device == "cuda":
+        # ── Universal device placement ──
+        # Supports: cuda:N (NVIDIA/AMD ROCm), mps (Apple), xpu:N (Intel Arc),
+        # privateuseone:N (DirectML), cpu
+        _dev_family = _get_device_family(device)
+
+        if _dev_family in ("cuda", "mps", "xpu", "directml"):
             if _use_quantization:
-                # Quantized models MUST use model CPU offload — .to("cuda")
+                # Quantized models MUST use model CPU offload — .to(device)
                 # is a no-op or breaks quantized layers.  BitsAndBytes manages
                 # device placement internally during each component's forward pass.
-                _log("Applying model CPU offload (required for quantized model)")
+                _log(f"Applying model CPU offload (required for quantized model, device={device})")
                 try:
                     pipe.enable_model_cpu_offload()
                 except Exception as e:
                     _log(f"CPU offload failed for quantized model: {e}")
             elif bool(payload.get("use_sequential_cpu_offload", False)):
-                _log("Applying sequential CPU offload")
+                _log(f"Applying sequential CPU offload (device={device})")
                 try:
                     pipe.enable_sequential_cpu_offload()
                 except Exception as e:
                     _log(f"Sequential CPU offload failed: {e}")
             elif bool(payload.get("use_model_cpu_offload", payload.get("enable_cpu_offload", False))):
-                _log("Applying model CPU offload")
+                _log(f"Applying model CPU offload (device={device})")
                 try:
                     pipe.enable_model_cpu_offload()
                 except Exception as e:
-                    _log(f"Model CPU offload failed ({e}), moving pipe to CUDA directly")
-                    pipe = pipe.to("cuda")
+                    _log(f"Model CPU offload failed ({e}), moving pipe to {device} directly")
+                    pipe = pipe.to(device)
             else:
-                _log("Moving pipe directly to CUDA")
-                pipe = pipe.to("cuda")
+                _log(f"Moving pipe directly to {device}")
+                pipe = pipe.to(device)
         else:
             _log("Running on CPU")
 
-        # ── Channels-last memory format (isolated worker path) ──
-        if device == "cuda" and bool(payload.get("use_channels_last", False)):
+        # ── Channels-last memory format ──
+        # ~10-20% speedup for conv-heavy models on both CPU and CUDA.
+        # On CPU: optimized for AVX2 vectorization. On CUDA: optimized for tensor cores.
+        _apply_channels_last = bool(payload.get("use_channels_last", True))  # default ON
+        if _apply_channels_last:
             try:
                 for _attr_name in ("transformer", "unet", "vae"):
                     _component = getattr(pipe, _attr_name, None)
                     if _component is not None and hasattr(_component, "to"):
                         _component.to(memory_format=torch.channels_last)
-                _log("Channels-last memory format applied")
+                _log("Channels-last memory format applied (CPU+CUDA)")
             except Exception as e:
                 _log(f"Channels-last failed (non-critical): {e}")
+
+        # ── torch.compile (universal: CPU inductor, CUDA triton, MPS) ──
+        # JIT-compiles the UNet/transformer for 15-50% speedup after warm-up.
+        # Incompatible with CPU offload hooks (accelerate) — skip if offload active.
+        _offload_active = bool(payload.get("use_model_cpu_offload") or payload.get("use_sequential_cpu_offload"))
+        _compile_requested = bool(payload.get("use_torch_compile", True))
+        if _compile_requested and not _offload_active and hasattr(torch, "compile"):
+            _compile_ok = False
+            _compile_backend = "inductor"
+            _compile_mode = "reduce-overhead"
+
+            if _dev_family == "cuda":
+                # CUDA: use triton backend if available (best), else inductor
+                try:
+                    import triton  # noqa: F401
+                    _compile_ok = True
+                    # Adjust mode based on VRAM: max-autotune uses more memory
+                    _vram_gb = int(payload.get("_gpu_vram_bytes", 0)) / (1024**3)
+                    if _vram_gb > 8:
+                        _compile_mode = "reduce-overhead"
+                    else:
+                        _compile_mode = "max-autotune-no-cudagraphs"
+                except ImportError:
+                    _log("torch.compile on CUDA: triton not installed (try: pip install triton-windows)")
+            elif _dev_family in ("mps", "xpu"):
+                # MPS/XPU: inductor backend works but less mature
+                _compile_ok = True
+                _compile_mode = "reduce-overhead"
+            else:
+                # CPU: inductor with C++ codegen
+                try:
+                    from torch._inductor.cpp_builder import get_cpp_compiler
+                    get_cpp_compiler()
+                    _compile_ok = True
+                except (RuntimeError, ImportError):
+                    _log("torch.compile skipped: no C++ compiler (install MSVC Build Tools for ~2x speedup)")
+
+            if _compile_ok:
+                try:
+                    import torch._dynamo
+                    torch._dynamo.config.suppress_errors = True
+                    _unet_attr = "unet" if hasattr(pipe, "unet") else ("transformer" if hasattr(pipe, "transformer") else None)
+                    if _unet_attr:
+                        _compiled = torch.compile(getattr(pipe, _unet_attr), mode=_compile_mode, backend=_compile_backend)
+                        setattr(pipe, _unet_attr, _compiled)
+                        _log(f"torch.compile applied to pipe.{_unet_attr} ({_compile_backend}, mode={_compile_mode})")
+                        _log_stage("torch_compile", target=_unet_attr, mode=_compile_mode)
+                except Exception as e:
+                    _log(f"torch.compile failed: {e}")
+
+        # Float32 matmul precision: always safe to set (helps CPU and CUDA)
+        try:
+            torch.set_float32_matmul_precision("medium")
+        except Exception:
+            pass
 
         # ── VAE numerical stability (isolated worker path) ──
         # For most models: force VAE to float32 to prevent NaN/black images.
@@ -1360,6 +1863,23 @@ def _diffusers_worker(payload: dict[str, Any], out_q: Any) -> None:
                 _log("DeepCache not installed, skipping")
             except Exception as e:
                 _log(f"DeepCache failed: {e}")
+
+        # ── GPU Hybrid Mode: move VAE to CUDA for fast decode ──
+        # On CPU-only runs with a low-VRAM GPU available, the VAE (~150MB in fp16)
+        # easily fits in GPU memory. Moving it to GPU for decode gives a massive
+        # speedup (seconds vs minutes) while UNet stays on CPU.
+        _hybrid_vae_on_gpu = False
+        if device != "cuda" and torch.cuda.is_available() and hasattr(pipe, "vae"):
+            try:
+                vae_size = sum(p.numel() * p.element_size() for p in pipe.vae.parameters())
+                gpu_free = torch.cuda.mem_get_info()[0] if hasattr(torch.cuda, "mem_get_info") else 0
+                if vae_size < min(gpu_free * 0.8, 1.5 * 1024**3):  # VAE fits with margin
+                    pipe.vae = pipe.vae.to("cuda")
+                    _hybrid_vae_on_gpu = True
+                    _log(f"Hybrid: VAE on GPU ({vae_size / 1e6:.0f}MB, free={gpu_free / 1e6:.0f}MB)")
+                    _log_stage("hybrid_vae_gpu", vae_size_mb=round(vae_size / 1e6))
+            except Exception as e:
+                _log(f"Hybrid VAE-on-GPU failed: {e}")
 
         _log(f"Starting inference: {total_steps} steps, guidance={payload['guidance_scale']}, mode={mode}")
         inference_start = time.time()
@@ -1581,67 +2101,152 @@ class ImageGenerationService:
     ) -> list[dict[str, Any]]:
         """Score available backends and return sorted list (best first).
 
-        Each entry: {"backend": str, "score": int, "reason": str}
+        Universal: supports NVIDIA CUDA, AMD ROCm, Apple MPS, Intel Arc XPU,
+        DirectML, OpenVINO, ONNX Runtime, sd.cpp, and CPU fallback.
+
+        Each entry: {"backend": str, "score": int, "reason": str, "device": str}
         """
         family = str(model_hints.get("model_family", "")).lower()
         variant = str(model_hints.get("model_variant", "")).lower()
         is_few_step = variant in ("turbo", "lightning", "lcm", "hyper", "schnell")
-        gpu_usable = hw.cuda_available and hw.gpu_vram_bytes >= 3 * 1024**3  # ≥3GB
+        est_vram = int(folder_size_bytes * 1.3) if folder_size_bytes else 0
+        is_large_model = family in ("sdxl", "sd3", "flux", "dit", "pixart", "z-image")
         candidates: list[dict[str, Any]] = []
 
-        # 1. GGUF model → sd.cpp is unconditional winner
+        # ── 1. GGUF model → sd.cpp is unconditional winner ──
         if is_gguf and hw.sdcpp_available:
-            candidates.append({"backend": "sdcpp_gguf", "score": 95,
+            candidates.append({"backend": "sdcpp_gguf", "score": 95, "device": "cpu",
                                "reason": "GGUF model detected — using sd.cpp native engine"})
 
-        # 2. OpenVINO INT8 (Intel CPU, no usable GPU)
+        # ── 2. Score each detected GPU ──
+        for gpu in (hw.gpus or []):
+            if gpu.vendor == "nvidia":
+                score = 85
+                if est_vram and gpu.vram_bytes > est_vram * 2:
+                    score += 10
+                elif est_vram and gpu.vram_bytes < est_vram * 1.3:
+                    score -= 20
+                if gpu.vram_bytes < 3 * 1024**3:
+                    score -= 30
+                # Ampere+ GPUs get a boost (tensor cores, bf16, flash attention)
+                if gpu.compute_capability and gpu.compute_capability >= (8, 0):
+                    score += 5
+                candidates.append({
+                    "backend": "diffusers_cuda", "score": score,
+                    "device": gpu.device_string,
+                    "reason": f"NVIDIA CUDA on {gpu.name} ({format_bytes_human(gpu.vram_bytes)} VRAM, {gpu.architecture})",
+                })
+
+            elif gpu.vendor == "amd":
+                score = 80  # Slightly below CUDA (less mature diffusers support)
+                if est_vram and gpu.vram_bytes > est_vram * 2:
+                    score += 10
+                elif est_vram and gpu.vram_bytes < est_vram * 1.3:
+                    score -= 20
+                if gpu.vram_bytes < 4 * 1024**3:
+                    score -= 25
+                candidates.append({
+                    "backend": "diffusers_rocm", "score": score,
+                    "device": gpu.device_string,
+                    "reason": f"AMD ROCm on {gpu.name} ({format_bytes_human(gpu.vram_bytes)} VRAM, {gpu.architecture})",
+                })
+
+            elif gpu.vendor == "apple":
+                score = 78
+                # Apple unified memory means large models are more feasible
+                # but MPS has some op gaps for newest architectures
+                if is_large_model and family in ("flux", "dit", "z-image"):
+                    score -= 10  # These push unified memory hard
+                if gpu.vram_bytes >= 16 * 1024**3:
+                    score += 8  # M1 Pro/Max/Ultra with 16GB+ unified
+                candidates.append({
+                    "backend": "diffusers_mps", "score": score,
+                    "device": "mps",
+                    "reason": f"Apple MPS on {gpu.name} ({format_bytes_human(gpu.vram_bytes)} unified memory)",
+                })
+
+            elif gpu.vendor == "intel":
+                score = 75
+                if est_vram and gpu.vram_bytes > est_vram * 2:
+                    score += 8
+                elif est_vram and gpu.vram_bytes < est_vram * 1.5:
+                    score -= 15
+                candidates.append({
+                    "backend": "diffusers_xpu", "score": score,
+                    "device": gpu.device_string,
+                    "reason": f"Intel XPU on {gpu.name} ({format_bytes_human(gpu.vram_bytes)} VRAM)",
+                })
+
+        # ── 3. DirectML (Windows fallback for any GPU not covered above) ──
+        if hw.directml_available and hw.diffusers_available:
+            # Only useful if no native GPU backend scored well
+            score = 60
+            candidates.append({
+                "backend": "diffusers_directml", "score": score,
+                "device": "privateuseone:0",
+                "reason": "DirectML (Windows universal GPU via DirectX 12)",
+            })
+
+        # ── 4. OpenVINO INT8 (Intel CPU) ──
         if hw.openvino_available and hw.cpu_vendor == "Intel" and family in self._OPENVINO_FAMILIES:
             score = 90
             if hw.has_avx512:
                 score += 10
             if hw.has_vnni:
                 score += 5
-            if gpu_usable:
-                score -= 15  # GPU available, OpenVINO less attractive
-            candidates.append({"backend": "openvino_int8", "score": score,
-                               "reason": f"Intel {hw.cpu_model} with OpenVINO INT8 — optimized for this CPU"})
-
-        # 3. CUDA (GPU with enough VRAM)
-        if hw.cuda_available and hw.diffusers_available:
-            score = 85
-            est_vram = int(folder_size_bytes * 1.3) if folder_size_bytes else 0
-            if est_vram and hw.gpu_vram_bytes > est_vram * 2:
-                score += 10
-            elif est_vram and hw.gpu_vram_bytes < est_vram * 1.3:
+            if hw.has_amx:
+                score += 8  # AMX accelerates INT8 significantly
+            # Penalize if a good GPU is available
+            if any(g.vram_bytes >= 4 * 1024**3 for g in (hw.gpus or [])):
                 score -= 20
-            if hw.gpu_vram_bytes < 3 * 1024**3:
-                score -= 30  # < 3GB VRAM, very tight
-            candidates.append({"backend": "diffusers_cuda", "score": score,
-                               "reason": f"CUDA on {hw.gpu_name or 'GPU'} ({format_bytes_human(hw.gpu_vram_bytes)} VRAM)"})
+            candidates.append({
+                "backend": "openvino_int8", "score": score, "device": "cpu",
+                "reason": f"Intel {hw.cpu_model} with OpenVINO INT8 (AVX512={hw.has_avx512}, VNNI={hw.has_vnni}, AMX={hw.has_amx})",
+            })
 
-        # 4. OpenVINO FP32 fallback
+        # ── 5. OpenVINO FP32 fallback ──
         if hw.openvino_available and family in self._OPENVINO_FAMILIES:
             score = 70
             if hw.cpu_vendor != "Intel":
-                score -= 20  # OpenVINO less optimized for AMD
-            if gpu_usable:
+                score -= 20
+            if any(g.vram_bytes >= 4 * 1024**3 for g in (hw.gpus or [])):
                 score -= 15
-            candidates.append({"backend": "openvino_fp32", "score": score,
-                               "reason": f"OpenVINO FP32 on {hw.cpu_vendor} CPU"})
+            candidates.append({
+                "backend": "openvino_fp32", "score": score, "device": "cpu",
+                "reason": f"OpenVINO FP32 on {hw.cpu_vendor} CPU",
+            })
 
-        # 5. Diffusers CPU (always available)
+        # ── 6. ONNX Runtime CPU (cross-platform, good for AMD CPUs) ──
+        if hw.onnxruntime_available and hw.diffusers_available:
+            score = 55
+            if hw.cpu_vendor == "AMD":
+                score += 10  # ORT is well-optimized for AMD Zen
+            if hw.cpu_cores >= 8:
+                score += 5
+            candidates.append({
+                "backend": "onnxruntime_cpu", "score": score, "device": "cpu",
+                "reason": f"ONNX Runtime on {hw.cpu_vendor} CPU ({hw.cpu_cores} cores)",
+            })
+
+        # ── 7. Diffusers CPU (always available) ──
         if hw.diffusers_available:
             score = 40
             if hw.cpu_vendor == "Intel" and hw.has_avx2:
                 score += 10
+            elif hw.cpu_vendor == "AMD" and hw.has_avx2:
+                score += 8
             if hw.cpu_cores >= 8:
                 score += 5
-            candidates.append({"backend": "diffusers_cpu", "score": score,
-                               "reason": f"PyTorch CPU with {hw.cpu_cores} threads"})
+            if hw.cpu_cores >= 16:
+                score += 3
+            candidates.append({
+                "backend": "diffusers_cpu", "score": score, "device": "cpu",
+                "reason": f"PyTorch CPU with {hw.cpu_cores} threads ({hw.cpu_vendor})",
+            })
 
         # Sort by score descending
         candidates.sort(key=lambda c: c["score"], reverse=True)
-        return candidates if candidates else [{"backend": "diffusers_cpu", "score": 0, "reason": "fallback"}]
+        return candidates if candidates else [{"backend": "diffusers_cpu", "score": 0, "device": "cpu", "reason": "fallback"}]
 
     def _plan_optimizations(
         self,
@@ -1649,73 +2254,142 @@ class ImageGenerationService:
         model_hints: dict[str, Any],
         hw: HardwareProfile,
         steps: int = 20,
+        quality_tier: str = "balanced",
+        device: str = "cpu",
     ) -> dict[str, Any]:
-        """Decide which optimizations to enable for the selected backend."""
+        """Decide which optimizations to enable for the selected backend.
+
+        Quality tiers control the aggressiveness of speed optimizations:
+          - "max_quality": Never sacrifice quality (no ToMe, no TAESD, no Lightning)
+          - "balanced"   : Moderate trade-offs (TAESD on CPU/low-VRAM, ToMe@0.3)
+          - "performance": Aggressive (TAESD always, ToMe@0.5, Lightning LoRA)
+
+        Conflict avoidance:
+          - Lightning LoRA (4-step) + DeepCache → disable DeepCache (too few steps)
+          - Sequential/model CPU offload + torch.compile → skip compile (hooks break dynamo)
+        """
         family = str(model_hints.get("model_family", "")).lower()
         variant = str(model_hints.get("model_variant", "")).lower()
         is_few_step = variant in ("turbo", "lightning", "lcm", "hyper", "schnell")
-        is_cpu = backend in ("diffusers_cpu", "openvino_int8", "openvino_fp32")
-        low_vram = hw.gpu_vram_bytes < 4 * 1024**3
+        is_cpu = backend in ("diffusers_cpu", "openvino_int8", "openvino_fp32", "onnxruntime_cpu")
+        is_gpu = not is_cpu
+        gpu_vram = hw.primary_gpu.vram_bytes if hw.primary_gpu else 0
+        low_vram = gpu_vram < 4 * 1024**3
         is_sdxl_class = family in ("sdxl", "sd3", "flux", "dit", "pixart", "z-image")
-        weak_hw = is_cpu or (low_vram and hw.gpu_vram_bytes < 6 * 1024**3)
+        weak_hw = is_cpu or (low_vram and gpu_vram < 6 * 1024**3)
 
         opts: dict[str, Any] = {}
+        quality_notes: list[str] = []
 
-        # TAESD: always for CPU or low-VRAM GPU (critical — fixes VAE decode timeout)
-        if backend != "sdcpp_gguf" and (is_cpu or low_vram):
+        # ── 1. TAESD (Tiny VAE) ──
+        # Quality impact: Moderate (slightly softer details in VAE decode)
+        # Speed impact:  ~3x faster decode on CPU, ~1.5x on GPU
+        use_taesd = False
+        if backend != "sdcpp_gguf":
+            if quality_tier == "performance":
+                use_taesd = True  # Always for performance
+            elif quality_tier == "balanced" and (is_cpu or low_vram):
+                use_taesd = True  # Only when needed
+            # max_quality: never use TAESD
+        if use_taesd:
             taesd_model = self._TAESD_MAP.get(family)
             if taesd_model:
                 opts["use_tiny_vae"] = True
                 opts["tiny_vae_model"] = taesd_model
+                quality_notes.append("TAESD: slightly softer VAE decode (saves ~3x decode time)")
 
-        # DeepCache: enable for 8+ steps (not just 20+), not few-step, diffusers only
+        # ── 2. DeepCache (UNet feature caching) ──
+        # Quality impact: Minimal at interval=2, moderate at interval=3+
+        # Speed impact:  ~2.3x UNet speedup at interval=2
         if (backend.startswith("diffusers") and steps >= 8
                 and not is_few_step and hw.deepcache_available):
-            opts["use_deepcache"] = True
-            # More aggressive caching on CPU (slower per-step, so cache more)
-            opts["deepcache_interval"] = 3 if (is_cpu and steps >= 20) else 2
+            if quality_tier != "max_quality" or (is_cpu and steps >= 20):
+                opts["use_deepcache"] = True
+                if quality_tier == "max_quality":
+                    opts["deepcache_interval"] = 3  # Conservative
+                    quality_notes.append("DeepCache: conservative interval=3")
+                elif is_cpu and steps >= 20:
+                    opts["deepcache_interval"] = 3  # CPU: fewer unique steps needed
+                else:
+                    opts["deepcache_interval"] = 2  # Standard
 
-        # ToMe: for diffusers backends; use moderate ratio on CPU
-        if backend.startswith("diffusers") and hw.tomesd_available:
+        # ── 3. ToMe (Token Merging) ──
+        # Quality impact: Varies with ratio (0.3=minimal, 0.5=noticeable on fine detail)
+        # Speed impact:  ~1.3-1.8x depending on ratio
+        if backend.startswith("diffusers") and hw.tomesd_available and quality_tier != "max_quality":
             opts["use_tome"] = True
-            # Conservative ratio for SDXL (overhead can negate gains at high ratios)
-            opts["tome_ratio"] = 0.4 if is_sdxl_class else 0.5
+            if quality_tier == "balanced":
+                opts["tome_ratio"] = 0.3 if is_sdxl_class else 0.4
+            else:  # performance
+                opts["tome_ratio"] = 0.4 if is_sdxl_class else 0.5
+            quality_notes.append(f"ToMe: merging {int(opts['tome_ratio']*100)}% of attention tokens")
 
-        # Lightning LoRA: auto-apply for SDXL on weak hardware when not already distilled
-        if (family == "sdxl" and not is_few_step and weak_hw
-                and backend.startswith("diffusers") and steps > 8):
+        # ── 4. Lightning LoRA (4-step distillation for SDXL) ──
+        # Quality impact: Significant (changes model behavior, different style)
+        # Speed impact:  ~6x (25 steps → 4 steps)
+        use_lightning = False
+        if quality_tier == "performance" and family == "sdxl" and not is_few_step and weak_hw:
+            use_lightning = True
+        elif quality_tier == "balanced" and family == "sdxl" and not is_few_step and is_cpu:
+            use_lightning = True  # On CPU, SDXL without Lightning is impractically slow
+        if use_lightning and backend.startswith("diffusers") and steps > 8:
             opts["use_lightning_lora"] = True
             opts["lightning_lora_repo"] = "ByteDance/SDXL-Lightning"
             opts["lightning_lora_file"] = "sdxl_lightning_4step_lora.safetensors"
             opts["lightning_steps"] = 4
             opts["lightning_guidance"] = 0.0
+            quality_notes.append("Lightning LoRA: 4-step SDXL distillation (different aesthetic)")
+            # Conflict: Lightning 4 steps + DeepCache is useless (too few steps)
+            if opts.get("use_deepcache"):
+                del opts["use_deepcache"]
+                if "deepcache_interval" in opts:
+                    del opts["deepcache_interval"]
 
-        # ── BitsAndBytes NF4 Quantization ──
-        # Enable for large models (DiT, Flux, Z-Image) on GPUs with ≤ threshold VRAM.
-        # These 6B+ param models cannot fit in 8GB VRAM at bf16 (~12-16GB) without
-        # quantization.  NF4 reduces VRAM to ~4-5GB with acceptable quality.
+        # ── 5. BitsAndBytes NF4 Quantization ──
+        # Quality impact: Minimal for NF4 (barely perceptible)
+        # Required for large models on limited VRAM (Flux/DiT/Z-Image need 12-16GB)
         needs_quantization = (
-            backend == "diffusers_cuda"
+            backend in ("diffusers_cuda", "diffusers_rocm")
             and family in ("z-image", "flux", "dit")
-            and hw.gpu_vram_bytes > 0
+            and gpu_vram > 0
         )
         if needs_quantization:
             threshold_bytes = int(getattr(self.config, "image_quantization_threshold_gb", 8.0) * 1024**3)
-            if hw.gpu_vram_bytes <= threshold_bytes:
+            if gpu_vram <= threshold_bytes:
                 opts["use_quantization"] = True
                 opts["quantization_type"] = "nf4"
                 opts["quantize_transformer"] = True
-                opts["quantize_text_encoder"] = True
+                opts["quantize_text_encoder"] = quality_tier != "max_quality"
+                quality_notes.append("NF4 quantization: fits large model in VRAM with minimal quality loss")
             else:
-                # Even on larger GPUs, quantize if model is truly huge (>10GB weights)
                 opts["use_quantization"] = False
 
-        # ── Channels-last memory format ──
-        # ~5-15% speedup on NVIDIA GPUs by optimizing memory layout for convolutions.
-        # Safe to enable unconditionally on CUDA; no effect on CPU.
-        if backend == "diffusers_cuda":
+        # ── 6. Channels-last memory format ──
+        # Quality impact: None (purely a memory layout optimization)
+        # Speed impact:  5-15% on NVIDIA/AMD GPUs with conv-heavy models
+        if is_gpu and backend not in ("sdcpp_gguf", "onnxruntime_cpu"):
             opts["use_channels_last"] = True
 
+        # ── 7. Attention backend selection ──
+        # Quality impact: None (mathematically equivalent)
+        # Speed impact:  Flash Attention ~2x, SDPA ~1.5x vs vanilla
+        if backend.startswith("diffusers"):
+            if device.startswith("cuda") and hw.xformers_available:
+                opts["attention_backend"] = "xformers"
+            elif device.startswith("cuda") or device == "mps" or device.startswith("xpu"):
+                opts["attention_backend"] = "sdpa"  # PyTorch 2.0+ scaled_dot_product_attention
+            else:
+                opts["attention_backend"] = "sliced"  # CPU: use attention slicing
+
+        # ── 8. torch.compile ──
+        # Quality impact: None (JIT compilation, same math)
+        # Speed impact:  15-50% after warm-up; first run is slower
+        # Conflicts: incompatible with CPU offload hooks (accelerate)
+        if backend.startswith("diffusers") and hasattr(self, "config") and getattr(self.config, "image_enable_torch_compile", True):
+            opts["use_torch_compile"] = True  # Worker will check compiler availability
+
+        opts["quality_tier"] = quality_tier
+        opts["quality_notes"] = quality_notes
         return opts
 
     def get_generation_progress(self) -> dict[str, Any]:
@@ -2280,10 +2954,10 @@ class ImageGenerationService:
 
     def get_device_status(self) -> dict[str, Any]:
         pref = (self.config.hf_image_device or "auto").strip().lower()
-        if pref not in {"auto", "cuda", "cpu"}:
+        if pref not in {"auto", "cuda", "mps", "xpu", "directml", "cpu"}:
             pref = "auto"
 
-        status = {
+        status: dict[str, Any] = {
             "torch_installed": False,
             "torch_version": None,
             "diffusers_version": None,
@@ -2300,6 +2974,13 @@ class ImageGenerationService:
             "sdcpp_available": False,
             "controlnet_available": False,
             "available_controlnet_types": [],
+            # New multi-platform fields
+            "mps_available": False,
+            "xpu_available": False,
+            "directml_available": False,
+            "rocm_available": False,
+            "gpu_count": 0,
+            "gpus": [],
         }
 
         try:
@@ -2310,6 +2991,7 @@ class ImageGenerationService:
         status["torch_installed"] = True
         status["torch_version"] = getattr(torch, "__version__", None)
         status["cuda_version"] = getattr(getattr(torch, "version", None), "cuda", None)
+        status["hip_version"] = getattr(getattr(torch, "version", None), "hip", None)
 
         for pkg, field in [
             ("diffusers", "diffusers_version"),
@@ -2323,67 +3005,63 @@ class ImageGenerationService:
             except Exception:
                 status[field] = None
 
-        cuda_available = bool(torch.cuda.is_available())
-        status["cuda_available"] = cuda_available
-        if cuda_available:
-            try:
-                status["gpu_name"] = torch.cuda.get_device_name(0)
-                props = torch.cuda.get_device_properties(0)
-                status["gpu_total_vram_bytes"] = int(getattr(props, "total_memory", 0) or 0)
-            except Exception:
-                status["gpu_name"] = None
+        # ── Hardware profile (full multi-GPU, multi-platform) ──
+        hw = self._get_hardware_profile()
+        status["hardware_profile"] = hw.to_dict()
+        status["cuda_available"] = hw.cuda_available
+        status["mps_available"] = hw.mps_available
+        status["xpu_available"] = hw.xpu_available
+        status["directml_available"] = hw.directml_available
+        status["rocm_available"] = hw.rocm_available
+        status["gpu_count"] = len(hw.gpus or [])
+        status["gpus"] = [g.to_dict() for g in (hw.gpus or [])]
 
+        if hw.primary_gpu:
+            status["gpu_name"] = hw.primary_gpu.name
+            status["gpu_total_vram_bytes"] = hw.primary_gpu.vram_bytes
+            status["gpu_total_vram_human"] = format_bytes_human(hw.primary_gpu.vram_bytes)
+
+        # ── Device selection (universal: auto picks best accelerator) ──
         if pref == "cpu":
             status["effective_device"] = "cpu"
             status["reason"] = "forced cpu"
-            return status
-
-        if pref == "cuda":
-            if cuda_available:
-                status["effective_device"] = "cuda"
-                status["reason"] = "forced cuda"
-                return status
-            status["effective_device"] = "cpu"
-            status["reason"] = "requested cuda but cuda unavailable"
-            return status
-
-        # auto
-        if cuda_available:
-            status["effective_device"] = "cuda"
-            status["reason"] = "auto selected cuda"
-        else:
-            if status["cuda_version"] is None:
-                status["reason"] = "PyTorch build has no CUDA support (torch.version.cuda is None). Install CUDA-enabled torch."
+        elif pref != "auto":
+            # User explicitly requested a specific backend
+            device_map = {
+                "cuda": hw.cuda_available,
+                "mps": hw.mps_available,
+                "xpu": hw.xpu_available,
+                "directml": hw.directml_available,
+            }
+            if device_map.get(pref, False):
+                status["effective_device"] = hw.best_device_string if pref == "cuda" else pref
+                status["reason"] = f"forced {pref}"
             else:
-                status["reason"] = "cuda not available"
-            status["effective_device"] = "cpu"
+                status["effective_device"] = "cpu"
+                status["reason"] = f"requested {pref} but unavailable"
+        else:
+            # Auto: pick best available
+            status["effective_device"] = hw.best_device_string
+            if hw.any_gpu_available:
+                status["reason"] = f"auto selected {hw.best_device_string} ({hw.primary_gpu.name if hw.primary_gpu else '?'})"
+            else:
+                status["reason"] = "no GPU available — using CPU"
+                if status["cuda_version"] is None and not hw.mps_available:
+                    status["reason"] += " (PyTorch has no CUDA/MPS support)"
 
         # SD.cpp and ControlNet availability
-        status["sdcpp_available"] = False
-        try:
-            from stable_diffusion_cpp import StableDiffusion  # noqa: F401
-            status["sdcpp_available"] = True
-        except ImportError:
-            pass
-
+        status["sdcpp_available"] = hw.sdcpp_available
         status["controlnet_available"] = False
         status["available_controlnet_types"] = []
         try:
             from diffusers import ControlNetModel  # noqa: F401
             status["controlnet_available"] = True
-            # canny always works (OpenCV), depth works via MiDaS fallback
-            # Other types need controlnet_aux preprocessors, but the ControlNet
-            # *models* themselves work fine without preprocessors if the user
-            # provides a pre-processed control image. So list all types whose
-            # HF model repo is locally cached.
             available_types = []
             from huggingface_hub import try_to_load_from_cache
             for cn_type, repo_id in CONTROLNET_DEFAULTS.items():
-                # Check if the model config is cached locally
                 cached = try_to_load_from_cache(repo_id, "config.json")
                 if cached is not None and isinstance(cached, str):
                     available_types.append(cn_type)
-            # Always include canny (OpenCV fallback) and depth (MiDaS fallback)
             for t in ["canny", "depth"]:
                 if t not in available_types:
                     available_types.append(t)
@@ -2391,21 +3069,34 @@ class ImageGenerationService:
         except ImportError:
             pass
 
-        # Hardware profile and available backends
-        hw = self._get_hardware_profile()
-        status["hardware_profile"] = hw.to_dict()
+        # ── Available backends (universal) ──
         backends = []
         if hw.openvino_available and hw.cpu_vendor == "Intel":
             backends.append("openvino_int8")
-        if hw.cuda_available and hw.gpu_vram_bytes > 0:
-            backends.append("diffusers_cuda")
+        for gpu in (hw.gpus or []):
+            if gpu.vendor == "nvidia":
+                backends.append(f"diffusers_cuda ({gpu.name})")
+            elif gpu.vendor == "amd":
+                backends.append(f"diffusers_rocm ({gpu.name})")
+            elif gpu.vendor == "apple":
+                backends.append(f"diffusers_mps ({gpu.name})")
+            elif gpu.vendor == "intel":
+                backends.append(f"diffusers_xpu ({gpu.name})")
+        if hw.directml_available:
+            backends.append("diffusers_directml")
         if hw.openvino_available:
             backends.append("openvino_fp32")
-        backends.append("diffusers_cpu")  # always available
+        if hw.onnxruntime_available:
+            backends.append("onnxruntime_cpu")
+        backends.append("diffusers_cpu")
         if hw.sdcpp_available:
             backends.append("sdcpp_gguf")
         status["available_backends"] = backends
         status["recommended_backend"] = backends[0] if backends else "diffusers_cpu"
+
+        # Quality tier and attention backend
+        status["quality_tier"] = str(getattr(self.config, "image_quality_tier", "balanced"))
+        status["attention_backend"] = str(getattr(self.config, "image_attention_backend", "auto"))
 
         return status
 
@@ -2423,10 +3114,11 @@ class ImageGenerationService:
         est_vram = int(validation.get("estimated_vram_required_bytes") or 0)
         mem = validation.get("memory") or _system_memory_snapshot()
         avail_ram = int(mem.get("available_ram_bytes") or 0)
-        gpu_vram = int(status.get("gpu_total_vram_bytes") or 0)
+        hw = self._get_hardware_profile()
 
         # Get model-specific parameter hints (architecture, guidance, steps, dtype)
         model_hints = validation.get("hints") or {}
+        family = str(model_hints.get("model_family", "")).lower()
 
         plan: dict[str, Any] = {
             "device_plan": "cpu_low_memory",
@@ -2446,111 +3138,119 @@ class ImageGenerationService:
             "practical_on_cpu": True,
         }
 
-        if status.get("torch_installed") and status.get("cuda_version") is None:
+        if status.get("torch_installed") and status.get("cuda_version") is None and not hw.mps_available and not hw.xpu_available:
             plan["warnings"].append("Torch build is CPU-only; CUDA toolkit presence alone is not enough.")
 
-        cuda_available = bool(status.get("cuda_available"))
         low_memory_mode = bool(getattr(self.config, "hf_image_low_memory_mode", True))
-
         strategy_mode = str(getattr(self.config, "image_runtime_strategy", "auto") or "auto").strip().lower()
+        quality_tier = str(getattr(self.config, "image_quality_tier", "balanced") or "balanced").strip().lower()
 
-        # Determine the best half-precision dtype for this GPU.
-        # If the model specifies a preferred dtype (e.g. bfloat16 for DiT/Flux),
-        # use that.  Otherwise, prefer bfloat16 on GPUs that support it.
+        # ── Universal device + dtype selection ──
+        # Use the primary GPU (auto-selected from all detected GPUs) and the
+        # dtype helper to pick the best precision for this specific hardware.
+        primary_gpu = hw.primary_gpu
+        gpu_vram = primary_gpu.vram_bytes if primary_gpu else 0
+        best_device = hw.best_device_string  # "cuda:0", "mps", "xpu:0", "cpu"
+        dev_family = _get_device_family(best_device)
+        has_gpu = dev_family != "cpu"
+
         model_preferred_dtype = model_hints.get("preferred_dtype")
-        cuda_half_dtype = "float16"  # safe default
-        if cuda_available:
-            try:
-                import torch as _torch
-                if model_preferred_dtype and model_preferred_dtype != "float32":
-                    # Model explicitly requires a specific dtype (e.g. bfloat16)
-                    test_dtype = getattr(_torch, model_preferred_dtype, None)
-                    if test_dtype and _torch.cuda.is_available():
-                        try:
-                            _torch.zeros(1, dtype=test_dtype, device="cuda")
-                            cuda_half_dtype = model_preferred_dtype
-                        except Exception:
-                            pass
-                if cuda_half_dtype == "float16" and _torch.cuda.is_available() and _torch.cuda.is_bf16_supported():
-                    cuda_half_dtype = "bfloat16"
-            except Exception:
-                pass
+        best_dtype = _select_best_dtype(best_device, primary_gpu, model_preferred_dtype)
 
-        # Threshold: GPUs with <3GB VRAM (e.g. MX150, GT 1030) cannot fit
-        # even a single SD 1.5 component reliably.  Model-level CPU offload
-        # causes constant GPU↔CPU thrashing that is *slower* than pure CPU.
-        # In this case, run entirely on CPU with multithreaded inference.
-        _VERY_LOW_VRAM_THRESHOLD = 3 * (1024 ** 3)  # 3 GB
+        # ── VRAM thresholds ──
+        _VERY_LOW_VRAM = 3 * (1024 ** 3)    # 3 GB (MX150, GT 1030)
+        _LOW_VRAM = 6 * (1024 ** 3)          # 6 GB (GTX 1060, RX 580)
+        _SMALL_MODEL_FAMILIES = {"sd15", "sd1.5", "sd1.x", "sd2", "sd2.x"}
 
-        if cuda_available:
+        if has_gpu:
             if strategy_mode == "safest":
                 plan.update({
-                    "device_plan": "cuda_with_cpu_offload",
-                    "torch_dtype": cuda_half_dtype,
+                    "device_plan": f"{dev_family}_with_cpu_offload",
+                    "torch_dtype": best_dtype,
                     "use_model_cpu_offload": True,
                     "use_sequential_cpu_offload": False,
                     "use_attention_slicing": True,
                     "use_vae_tiling": True,
-                    "reason": f"Safest strategy selected: CUDA with model-level CPU offload ({cuda_half_dtype}).",
+                    "device": best_device,
+                    "reason": f"Safest strategy: {best_device} with model-level CPU offload ({best_dtype}).",
                     "expected_timeout_sec": 320,
                 })
             elif strategy_mode == "performance":
                 plan.update({
-                    "device_plan": "cuda",
-                    "torch_dtype": cuda_half_dtype,
+                    "device_plan": dev_family,
+                    "torch_dtype": best_dtype,
                     "use_model_cpu_offload": False,
                     "use_sequential_cpu_offload": False,
                     "use_attention_slicing": False,
                     "use_vae_tiling": False,
-                    "reason": f"Performance strategy selected: direct CUDA execution ({cuda_half_dtype}).",
+                    "device": best_device,
+                    "reason": f"Performance strategy: direct {best_device} execution ({best_dtype}).",
                     "expected_timeout_sec": 200,
                 })
-            elif gpu_vram and gpu_vram < _VERY_LOW_VRAM_THRESHOLD:
-                # GPU has too little VRAM for even model-level CPU offload to
-                # be practical (constant GPU↔CPU transfers are slower than
-                # pure CPU with multithreaded inference).  Use CPU-optimized
-                # plan instead, with all available CPU threads.
-                import os
-                cpu_threads = os.cpu_count() or 4
-                plan.update({
-                    "device_plan": "cpu_multithreaded",
-                    "torch_dtype": "float32",
-                    "use_model_cpu_offload": False,
-                    "use_sequential_cpu_offload": False,
-                    "use_attention_slicing": True,
-                    "use_vae_tiling": True,
-                    "cpu_threads": cpu_threads,
-                    "reason": (
-                        f"GPU has only {gpu_vram / (1024**3):.1f} GB VRAM (<3 GB) — too little "
-                        f"for model offload.  Using CPU with {cpu_threads} threads and "
-                        f"VAE tiling for lower-memory generation."
-                    ),
-                    "expected_timeout_sec": 600,
-                    "practical_on_cpu": True,
-                })
+            elif gpu_vram and gpu_vram < _VERY_LOW_VRAM:
+                # Very low VRAM GPU (MX150, GT 1030, etc.)
+                # SD 1.5 UNet fp16 ≈ 1.7GB → fits with sequential offload
+                # SDXL UNet fp16 ≈ 4.8GB → too large → use CPU
+                _small_model = family in _SMALL_MODEL_FAMILIES
+                if _small_model:
+                    plan.update({
+                        "device_plan": f"{dev_family}_sequential_offload",
+                        "torch_dtype": "float16",
+                        "use_model_cpu_offload": False,
+                        "use_sequential_cpu_offload": True,
+                        "use_attention_slicing": True,
+                        "use_vae_tiling": True,
+                        "device": best_device,
+                        "reason": (
+                            f"Low VRAM ({format_bytes_human(gpu_vram)}) + small model ({family}) "
+                            f"→ sequential offload on {best_device} (fp16, ~2-3x vs CPU)."
+                        ),
+                        "expected_timeout_sec": 300,
+                    })
+                else:
+                    cpu_threads = os.cpu_count() or 4
+                    plan.update({
+                        "device_plan": "cpu_multithreaded",
+                        "torch_dtype": "float32",
+                        "use_model_cpu_offload": False,
+                        "use_sequential_cpu_offload": False,
+                        "use_attention_slicing": True,
+                        "use_vae_tiling": True,
+                        "cpu_threads": cpu_threads,
+                        "device": "cpu",
+                        "reason": (
+                            f"GPU has only {format_bytes_human(gpu_vram)} VRAM — too little "
+                            f"for {family} model.  Using CPU with {cpu_threads} threads."
+                        ),
+                        "expected_timeout_sec": 600,
+                        "practical_on_cpu": True,
+                    })
             elif gpu_vram and est_vram and gpu_vram < int(est_vram * 0.7):
                 plan.update({
-                    "device_plan": "cuda_with_cpu_offload",
-                    "torch_dtype": cuda_half_dtype,
+                    "device_plan": f"{dev_family}_with_cpu_offload",
+                    "torch_dtype": best_dtype,
                     "use_model_cpu_offload": True,
                     "use_sequential_cpu_offload": False,
                     "use_attention_slicing": True,
                     "use_vae_tiling": True,
-                    "reason": f"CUDA available but VRAM is tight; using model-level CPU offload ({cuda_half_dtype}).",
+                    "device": best_device,
+                    "reason": f"VRAM tight on {best_device}; using model-level CPU offload ({best_dtype}).",
                     "expected_timeout_sec": 300,
                 })
             else:
                 plan.update({
-                    "device_plan": "cuda",
-                    "torch_dtype": cuda_half_dtype,
+                    "device_plan": dev_family,
+                    "torch_dtype": best_dtype,
                     "use_model_cpu_offload": False,
                     "use_sequential_cpu_offload": False,
                     "use_attention_slicing": low_memory_mode,
                     "use_vae_tiling": low_memory_mode,
-                    "reason": f"CUDA available and VRAM appears sufficient ({cuda_half_dtype}).",
+                    "device": best_device,
+                    "reason": f"VRAM sufficient on {best_device} ({best_dtype}).",
                     "expected_timeout_sec": 220,
                 })
         else:
+            plan["device"] = "cpu"
             if avail_ram and est_ram and avail_ram < int(est_ram * 0.7):
                 plan["warnings"].append("Available RAM looks tight for this model; using conservative CPU settings.")
 
@@ -2580,6 +3280,19 @@ class ImageGenerationService:
             plan["recommended_height"] = max(min(plan["recommended_height"], clamp_res), min_res)
             plan["recommended_steps"] = min(plan["recommended_steps"], 20)
 
+        # CPU with heavy models: aggressively reduce resolution to prevent RAM exhaustion
+        # and reduce generation time. SDXL/SD3/Flux at 1024x1024 on CPU = 25+ min.
+        # At 768x768 it's ~40% faster with similar quality.
+        is_cpu_plan = plan.get("device_plan", "").startswith("cpu")
+        if is_cpu_plan and needs_high_res:
+            # Cap to 768 for CPU (1024 is too slow and causes RAM swapping)
+            max_cpu_res = 768
+            if plan["recommended_width"] > max_cpu_res:
+                plan["recommended_width"] = max_cpu_res
+            if plan["recommended_height"] > max_cpu_res:
+                plan["recommended_height"] = max_cpu_res
+            plan["warnings"].append(f"Resolution capped to {max_cpu_res}px for CPU mode (faster + less RAM).")
+
         plan["model_size_bytes"] = folder_size or None
         plan["estimated_ram_required_bytes"] = est_ram or None
         plan["estimated_vram_required_bytes"] = est_vram or None
@@ -2601,7 +3314,11 @@ class ImageGenerationService:
 
         # Determine optimization flags
         steps = plan.get("recommended_steps", 20)
-        opts = self._plan_optimizations(best["backend"], model_hints, hw, steps=steps)
+        _plan_device = str(plan.get("device", "cpu"))
+        opts = self._plan_optimizations(
+            best["backend"], model_hints, hw,
+            steps=steps, quality_tier=quality_tier, device=_plan_device,
+        )
         plan.update(opts)
 
         # Model recommendation: suggest lighter alternatives for weak hardware
@@ -3086,10 +3803,9 @@ class ImageGenerationService:
             }
             if is_standalone:
                 entry["supported_features"] = {"text2img": True, "img2img": True, "inpaint": False}
-            else:
-                entry["is_component"] = True
-                entry["supported_features"] = {"text2img": False, "img2img": False, "inpaint": False}
-            image_models.append(entry)
+                image_models.append(entry)
+            # Skip component models (ControlNet, VAE, etc.) — they clutter the model list
+            # and can't be used for generation directly.
 
         return image_models
 
@@ -3614,6 +4330,14 @@ class ImageGenerationService:
             "quantize_text_encoder": bool(execution_plan.get("quantize_text_encoder")),
             # Channels-last memory format (GPU perf optimization)
             "use_channels_last": bool(execution_plan.get("use_channels_last")),
+            # Attention backend selection (universal)
+            "attention_backend": execution_plan.get("attention_backend", "auto"),
+            # torch.compile
+            "use_torch_compile": bool(execution_plan.get("use_torch_compile")),
+            # Dynamic memory check
+            "_enable_dynamic_memory_check": bool(getattr(self.config, "image_enable_dynamic_memory_check", True)),
+            "_gpu_vram_bytes": (self._get_hardware_profile().primary_gpu.vram_bytes if self._get_hardware_profile().primary_gpu else 0),
+            "estimated_vram_required_bytes": int(execution_plan.get("estimated_vram_required_bytes") or 0),
         }
         proc = ctx.Process(target=_diffusers_worker, args=(payload, q), daemon=True)
         self._current_worker_proc = proc
@@ -3740,6 +4464,18 @@ class ImageGenerationService:
         local_only = model_source == "local" or not self.config.hf_image_allow_auto_download
         started = time.time()
 
+        # Generation log for post-analysis (mirrors subprocess worker log)
+        _gen_log: list[dict[str, Any]] = []
+        _stage_start = started
+
+        def _log_stage(name: str, **extra: Any) -> None:
+            nonlocal _stage_start
+            now = time.time()
+            entry: dict[str, Any] = {"stage": name, "elapsed_sec": round(now - _stage_start, 2), "wall_time_sec": round(now - started, 2)}
+            entry.update(extra)
+            _gen_log.append(entry)
+            _stage_start = now
+
         try:
             # Set up progress tracking
             stage_file = tempfile.NamedTemporaryFile(prefix="img_stage_", suffix=".txt", delete=False)
@@ -3756,6 +4492,24 @@ class ImageGenerationService:
                 device=device,
                 execution_plan=execution_plan,
             )
+            _log_stage("pipeline_load", pipeline_class=type(pipe).__name__)
+
+            # Log optimization application
+            ep = execution_plan or {}
+            if ep.get("use_tiny_vae"):
+                _log_stage("tiny_vae", model=ep.get("tiny_vae_model", ""))
+            if ep.get("use_tome"):
+                _log_stage("tome", ratio=ep.get("tome_ratio", 0.5))
+            if ep.get("use_deepcache"):
+                _log_stage("deepcache", interval=ep.get("deepcache_interval", 2))
+            if ep.get("use_lightning_lora"):
+                _log_stage("lightning_lora", repo=ep.get("lightning_lora_repo", ""))
+            if ep.get("use_attention_slicing"):
+                _log_stage("attention_slicing")
+            if ep.get("use_vae_tiling"):
+                _log_stage("vae_tiling")
+            if ep.get("use_model_cpu_offload"):
+                _log_stage("model_cpu_offload")
 
             # Generator for reproducible seeds.
             # Use CUDA generator when model is fully on GPU (faster RNG),
@@ -3768,14 +4522,67 @@ class ImageGenerationService:
             generator.manual_seed(actual_seed)
 
             total_steps = steps
+
+            # ── CPU optimizations (in-process path) ──
+            if device != "cuda":
+                # Channels-last memory format
+                try:
+                    for _attr in ("unet", "transformer", "vae"):
+                        _comp = getattr(pipe, _attr, None)
+                        if _comp and hasattr(_comp, "to"):
+                            _comp.to(memory_format=torch.channels_last)
+                    logger.info("[IMG] Channels-last applied")
+                    _log_stage("channels_last")
+                except Exception:
+                    pass
+                # torch.compile on UNet (requires C++ compiler)
+                if os.name == "nt" and "INCLUDE" not in os.environ:
+                    _env = _get_msvc_env()
+                    if _env:
+                        for _ek, _ev in _env.items():
+                            os.environ[_ek] = _ev
+                if hasattr(torch, "compile"):
+                    try:
+                        from torch._inductor.cpp_builder import get_cpp_compiler
+                        get_cpp_compiler()  # Raises if no compiler
+                        import torch._dynamo
+                        torch._dynamo.config.suppress_errors = True
+                        _unet_attr = "unet" if hasattr(pipe, "unet") else ("transformer" if hasattr(pipe, "transformer") else None)
+                        if _unet_attr:
+                            setattr(pipe, _unet_attr, torch.compile(getattr(pipe, _unet_attr), mode="reduce-overhead", backend="inductor"))
+                            logger.info("[IMG] torch.compile applied to %s", _unet_attr)
+                            _log_stage("torch_compile", target=_unet_attr)
+                    except (RuntimeError, ImportError):
+                        logger.info("[IMG] torch.compile skipped: no C++ compiler")
+                    except Exception as e:
+                        logger.info("[IMG] torch.compile skipped: %s", e)
+                try:
+                    torch.set_float32_matmul_precision("medium")
+                except Exception:
+                    pass
+
+            # ── Hybrid VAE on GPU (in-process path) ──
+            if device != "cuda" and torch.cuda.is_available() and hasattr(pipe, "vae"):
+                try:
+                    vae_sz = sum(p.numel() * p.element_size() for p in pipe.vae.parameters())
+                    gpu_free = torch.cuda.mem_get_info()[0] if hasattr(torch.cuda, "mem_get_info") else 0
+                    if vae_sz < min(gpu_free * 0.8, 1.5 * 1024**3):
+                        pipe.vae = pipe.vae.to("cuda")
+                        logger.info("[IMG] Hybrid: VAE on GPU (%dMB)", vae_sz // 1e6)
+                        _log_stage("hybrid_vae_gpu", vae_size_mb=round(vae_sz / 1e6))
+                except Exception as e:
+                    logger.info("[IMG] Hybrid VAE failed: %s", e)
+
             _write_stage_marker(stage_file_path, f"inference:0/{total_steps}")
             logger.info("[IMG] Starting inference: %d steps, guidance=%.1f, size=%dx%d, seed=%d",
                         total_steps, guidance_scale, width, height, actual_seed)
 
             # Step preview: decode latents at each step if enabled
-            _step_previews_dir = (execution_plan or {}).get("step_previews_dir")
-            if _step_previews_dir:
+            _step_previews_dir: str | None = None
+            if (execution_plan or {}).get("enable_step_previews") or (execution_plan or {}).get("step_previews_dir"):
+                _step_previews_dir = (execution_plan or {}).get("step_previews_dir") or tempfile.mkdtemp(prefix="img_steps_")
                 Path(_step_previews_dir).mkdir(parents=True, exist_ok=True)
+                logger.info("[IMG] Step previews enabled: %s", _step_previews_dir)
 
             def _step_cb(pipe_obj: Any, step: int, timestep: Any, cb_kwargs: dict[str, Any]) -> dict[str, Any]:
                 clamped = min(step + 1, total_steps)
@@ -3829,6 +4636,8 @@ class ImageGenerationService:
                     callback_on_step_end=_step_cb,
                 )
             inf_elapsed = time.time() - inf_start
+            _log_stage("inference", steps=total_steps, elapsed_sec=round(inf_elapsed, 2),
+                       sec_per_step=round(inf_elapsed / max(total_steps, 1), 2))
             logger.info("[IMG] Inference completed in %.1fs (%.1fs/step)", inf_elapsed, inf_elapsed / max(total_steps, 1))
 
             _write_stage_marker(stage_file_path, "saving")
@@ -3866,6 +4675,19 @@ class ImageGenerationService:
             except Exception:
                 pass
 
+            _log_stage("save_png", bytes=len(buf.getvalue()))
+
+            # Build optimizations list
+            optimizations_used = []
+            ep = execution_plan or {}
+            if ep.get("use_tiny_vae"): optimizations_used.append(f"TAESD ({ep.get('tiny_vae_model', '?')})")
+            if ep.get("use_deepcache"): optimizations_used.append(f"DeepCache (interval={ep.get('deepcache_interval', 2)})")
+            if ep.get("use_tome"): optimizations_used.append(f"ToMe (ratio={ep.get('tome_ratio', 0.5)})")
+            if ep.get("use_lightning_lora"): optimizations_used.append("Lightning LoRA (4-step)")
+            if ep.get("use_attention_slicing"): optimizations_used.append("Attention Slicing")
+            if ep.get("use_vae_tiling"): optimizations_used.append("VAE Tiling")
+            if ep.get("use_model_cpu_offload"): optimizations_used.append("Model CPU Offload")
+
             return ImageRuntimeResult(
                 ok=True,
                 image_bytes=buf.getvalue(),
@@ -3881,6 +4703,22 @@ class ImageGenerationService:
                     "execution_plan": execution_plan,
                     "stage": "completed",
                     "selected_args": {"width": width, "height": height, "steps": steps, "guidance_scale": guidance_scale},
+                    "step_previews_dir": _step_previews_dir,
+                    "step_preview_count": len(list(Path(_step_previews_dir).glob("step_*.png"))) if _step_previews_dir and Path(_step_previews_dir).exists() else 0,
+                    "generation_log": {
+                        "total_elapsed_sec": round(total_elapsed, 1),
+                        "stages": _gen_log,
+                        "optimizations_used": optimizations_used,
+                        "model": model_id_or_path,
+                        "device": device,
+                        "dtype": str(ep.get("torch_dtype") or ""),
+                        "resolution": f"{width}x{height}",
+                        "steps": steps,
+                        "guidance_scale": guidance_scale,
+                        "seed": actual_seed,
+                        "scheduler": ep.get("scheduler"),
+                        "cpu_threads": os.cpu_count(),
+                    },
                 },
             )
         except RuntimeError as exc:
@@ -4092,29 +4930,40 @@ class ImageGenerationService:
 
         device_status = self.get_device_status()
         plan_device = str(execution_plan.get("device_plan") or "cpu_low_memory")
-        preferred = "cuda" if plan_device in {"cuda", "cuda_with_cpu_offload"} else "cpu"
-        # cpu_multithreaded: GPU VRAM is too small; run entirely on CPU with
-        # all available threads for faster, more reliable generation.
+        # Determine preferred device from the execution plan.  Any plan that
+        # starts with a GPU family name (cuda, mps, xpu, directml, rocm) means
+        # we want to use that accelerator.
+        _gpu_plan_prefixes = ("cuda", "mps", "xpu", "directml", "rocm")
+        _plan_is_gpu = any(plan_device.startswith(p) for p in _gpu_plan_prefixes)
+        # Use the explicit device string from the plan if set, otherwise derive from plan_device
+        preferred = str(execution_plan.get("device") or ("cuda" if _plan_is_gpu else "cpu"))
         if plan_device == "cpu_multithreaded":
             preferred = "cpu"
 
-        # Client-side device override: "cuda" or "cpu"
+        # Client-side device override
         _dev_pref = str(device_preference or params.get("device_preference") or "auto").strip().lower()
         if _dev_pref == "cpu":
             preferred = "cpu"
             execution_plan["device_plan"] = "cpu_low_memory"
+            execution_plan["device"] = "cpu"
             execution_plan["torch_dtype"] = "float32"
             execution_plan["use_model_cpu_offload"] = False
             execution_plan["use_sequential_cpu_offload"] = False
             logger.info("[IMG] Device override: forced CPU by user preference")
-        elif _dev_pref == "cuda" and device_status.get("cuda_available"):
-            preferred = "cuda"
-            if plan_device not in {"cuda", "cuda_with_cpu_offload"}:
-                execution_plan["device_plan"] = "cuda"
-            logger.info("[IMG] Device override: forced CUDA by user preference")
+        elif _dev_pref in ("cuda", "mps", "xpu", "directml"):
+            hw = self._get_hardware_profile()
+            _avail_map = {"cuda": hw.cuda_available, "mps": hw.mps_available,
+                          "xpu": hw.xpu_available, "directml": hw.directml_available}
+            if _avail_map.get(_dev_pref, False):
+                preferred = hw.best_device_string if _dev_pref == "cuda" else _dev_pref
+                execution_plan["device"] = preferred
+                if not any(plan_device.startswith(p) for p in _gpu_plan_prefixes):
+                    execution_plan["device_plan"] = _dev_pref
+                logger.info("[IMG] Device override: forced %s by user preference", _dev_pref)
 
         cpu_override_warning: str | None = None
-        if self.config.hf_image_require_gpu and not device_status.get("cuda_available"):
+        _any_gpu = any(plan_device.startswith(p) for p in _gpu_plan_prefixes)
+        if self.config.hf_image_require_gpu and not _any_gpu and preferred == "cpu":
             if self.config.hf_image_allow_cpu_fallback:
                 preferred = "cpu"
                 execution_plan["device_plan"] = "cpu_low_memory"
@@ -4164,7 +5013,7 @@ class ImageGenerationService:
                      result.ok, result.error_code, result.error_message[:200] if result.error_message else None)
 
         # NaN output fallback: retry with a safer dtype.
-        if not result.ok and result.error_code == "nan_output" and preferred == "cuda":
+        if not result.ok and result.error_code == "nan_output" and preferred != "cpu":
             used_dtype = str((result.metadata or {}).get("dtype_used") or execution_plan.get("torch_dtype") or "")
             fallback_dtypes = []
             if used_dtype != "bfloat16":
@@ -4206,7 +5055,7 @@ class ImageGenerationService:
                 # Clear again for next dtype attempt
                 self._pipelines.clear()
 
-        if not result.ok and preferred == "cuda" and bool(self.config.hf_image_allow_cpu_fallback) and result.error_code in {"out_of_memory", "provider_unavailable", "runtime_crash"}:
+        if not result.ok and preferred != "cpu" and bool(self.config.hf_image_allow_cpu_fallback) and result.error_code in {"out_of_memory", "provider_unavailable", "runtime_crash"}:
             logger.warning("[IMG] ⚠️  CUDA generation FAILED (code=%s: %s) — FALLING BACK TO CPU. "
                           "This will be much slower! Check RAM/VRAM availability.",
                           result.error_code, (result.error_message or "")[:200])

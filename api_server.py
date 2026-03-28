@@ -647,6 +647,11 @@ _DIFFUSION_DOWNLOAD_BYTES: dict[str, int] = {
     "pixart": int(2.4e9),
     "playground": int(4e9),
     "wuerstchen": int(4e9),
+    # SD 3.x variants (transformer + 3 text encoders + VAE)
+    "stable-diffusion-3.5-large": int(24e9),
+    "stable-diffusion-3.5-medium": int(12e9),
+    "stable-diffusion-3-medium": int(12e9),
+    "stable-cascade": int(5.5e9),
 }
 
 
@@ -1056,18 +1061,28 @@ def _hf_download_worker(model_id: str, token: str | None) -> None:
             repo_id=model_id,
             token=token or None,
             resume_download=True,
+            allow_patterns=[
+                # Pipeline/model configs
+                "*.json",
+                "*.txt",                   # tokenizer vocab, merges
+                "*.model",                 # sentencepiece models
+                # Safetensors weights (preferred format)
+                "*.safetensors",
+                # Special files
+                "*.md",
+            ],
             ignore_patterns=[
-                "*non_ema*",                # Training artifacts
-                "*.ckpt",                   # Legacy full checkpoint
-                "*.msgpack",               # Flax weights
-                "*.h5",                    # TF weights
-                "flax_model*",             # Flax
-                "tf_model*",               # TensorFlow
-                "openvino_*",              # OpenVINO
+                "*non_ema*",               # Training artifacts (huge, not needed)
+                "*.fp16.*",                # Skip fp16 variant if fp32 exists
+                "*fp16*safetensors",       # Explicit fp16 variants
+                "flax_model*",             # Flax weights
+                "tf_model*",              # TensorFlow weights
+                "openvino_*",              # OpenVINO pre-compiled
                 "*.ot",                    # ONNX training
                 "training_args*",          # Training artifacts
-                "optimizer*",              # Training artifacts
+                "optimizer*",              # Training optimizer state
                 "runs/*",                  # TensorBoard logs
+                ".git*",                   # Git metadata
             ],
         )
         _hf_downloads[model_id]["status"] = "completed"
@@ -1907,6 +1922,21 @@ async def get_image_session(session_id: str):
         if not session:
             raise HTTPException(404, "Session not found")
         return session
+    except HTTPException:
+        raise
+    except Exception as exc:
+        raise HTTPException(500, str(exc))
+
+
+@app.delete("/images/sessions/{session_id}")
+async def delete_image_session_endpoint(session_id: str):
+    """Delete an image session and all its images."""
+    try:
+        from local_ai_platform.repositories.images_repo import delete_image_session
+        deleted = delete_image_session(session_id)
+        if not deleted:
+            raise HTTPException(404, "Session not found")
+        return {"status": "ok", "deleted": session_id}
     except HTTPException:
         raise
     except Exception as exc:

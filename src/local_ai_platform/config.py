@@ -70,6 +70,10 @@ class AppConfig:
     image_quantization_threshold_gb: float = 8.0  # Quantize models estimated > this size when VRAM is tight
     image_enable_channels_last: bool = True    # Use channels-last memory format (5-15% speedup on GPU)
     image_enable_torch_compile: bool = True    # Enable torch.compile when available (incl. Windows w/ triton-windows)
+    image_quality_tier: str = "balanced"       # "max_quality", "balanced", "performance"
+    image_attention_backend: str = "auto"      # "auto", "flash_attn", "sdpa", "xformers", "sliced"
+    image_preferred_gpu_index: int = -1        # -1 = auto-select best, 0+ = specific GPU
+    image_enable_dynamic_memory_check: bool = True  # Check available memory before generation
 
     # ── Memory / vector store ─────────────────────────────────────
     vector_store_dir: str = "./data/vectorstore"
@@ -135,6 +139,10 @@ def load_config() -> AppConfig:
         image_quantization_threshold_gb=float(os.getenv("IMAGE_QUANTIZATION_THRESHOLD_GB", "8.0")),
         image_enable_channels_last=_as_bool(os.getenv("IMAGE_ENABLE_CHANNELS_LAST"), default=True),
         image_enable_torch_compile=_as_bool(os.getenv("IMAGE_ENABLE_TORCH_COMPILE"), default=True),
+        image_quality_tier=os.getenv("IMAGE_QUALITY_TIER", "balanced"),
+        image_attention_backend=os.getenv("IMAGE_ATTENTION_BACKEND", "auto"),
+        image_preferred_gpu_index=int(os.getenv("IMAGE_PREFERRED_GPU_INDEX", "-1")),
+        image_enable_dynamic_memory_check=_as_bool(os.getenv("IMAGE_ENABLE_DYNAMIC_MEMORY_CHECK"), default=True),
 
         # Memory
         vector_store_dir=os.getenv("VECTOR_STORE_DIR", "./data/vectorstore"),

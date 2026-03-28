@@ -94,6 +94,7 @@ class _ImagesPageState extends State<ImagesPage> with TickerProviderStateMixin {
 
   // Tab controller for right panel
   late TabController _rightTabController;
+  final ScrollController _thumbnailScrollCtrl = ScrollController();
 
   @override
   void initState() {
@@ -111,6 +112,7 @@ class _ImagesPageState extends State<ImagesPage> with TickerProviderStateMixin {
     _seedController.dispose();
     _loraDownloadId.dispose();
     _rightTabController.dispose();
+    _thumbnailScrollCtrl.dispose();
     super.dispose();
   }
 
@@ -390,6 +392,43 @@ class _ImagesPageState extends State<ImagesPage> with TickerProviderStateMixin {
     await _openSession(body['id'].toString());
   }
 
+  Future<void> _deleteSession(String id, String title) async {
+    final confirm = await showDialog<bool>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: const Text('Delete Session'),
+        content: Text('Delete "$title" and all its images? This cannot be undone.'),
+        actions: [
+          TextButton(onPressed: () => Navigator.pop(ctx, false), child: const Text('Cancel')),
+          FilledButton(
+            onPressed: () => Navigator.pop(ctx, true),
+            style: FilledButton.styleFrom(backgroundColor: Theme.of(ctx).colorScheme.error),
+            child: const Text('Delete'),
+          ),
+        ],
+      ),
+    );
+    if (confirm != true || !mounted) return;
+    try {
+      await widget.api.delete('/images/sessions/$id');
+      if (!mounted) return;
+      // If we deleted the active session, clear it
+      if (_activeSession?['id']?.toString() == id) {
+        setState(() {
+          _activeSession = null;
+          _selectedImageId = null;
+        });
+      }
+      await _load();
+    } catch (e) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text('Failed to delete: $e'), duration: const Duration(seconds: 3)),
+        );
+      }
+    }
+  }
+
   Future<void> _openSession(String id) async {
     final body = await widget.api.get('/images/sessions/$id') as Map<String, dynamic>;
     if (!mounted) return;
@@ -512,7 +551,7 @@ class _ImagesPageState extends State<ImagesPage> with TickerProviderStateMixin {
     if (_isSelectedModelComponent) return;
     _safeSetState(() {
       _busy = true;
-      _status = _runtime['effective_device'] == 'cuda' ? 'Loading model on GPU...' : 'Loading model on CPU...';
+      _status = (_runtime['effective_device']?.toString() ?? 'cpu') != 'cpu' ? 'Loading model on ${_runtime['effective_device']}...' : 'Loading model on CPU...';
       _errorCode = '';
       _errorMessage = '';
       _errorDetails = '';
@@ -748,15 +787,18 @@ class _ImagesPageState extends State<ImagesPage> with TickerProviderStateMixin {
 
   String _runtimeChipText() {
     final plan = (_runtime['runtime_strategy'] ?? '').toString();
-    if (plan == 'cuda') return 'GPU';
-    if (plan == 'cuda_with_cpu_offload') return 'GPU+CPU';
-    if (plan == 'cpu_low_memory') return 'CPU';
-    final cuda = _runtime['cuda_available'] == true;
+    if (plan.startsWith('cuda') || plan.startsWith('mps') || plan.startsWith('xpu') || plan.startsWith('directml') || plan.startsWith('rocm')) {
+      final effectiveDevice = _runtime['effective_device']?.toString() ?? 'GPU';
+      if (plan.contains('cpu_offload')) return '$effectiveDevice+CPU';
+      return effectiveDevice;
+    }
+    if (plan == 'cpu_low_memory' || plan == 'cpu_multithreaded') return 'CPU';
+    // Fallback: check for any GPU
     final gpuName = _runtime['gpu_name']?.toString();
-    if (cuda) {
+    final effectiveDevice = _runtime['effective_device']?.toString() ?? 'cpu';
+    if (effectiveDevice != 'cpu' && gpuName != null && gpuName.isNotEmpty) {
       final vram = _runtime['gpu_total_vram_human']?.toString();
-      if (gpuName == null || gpuName.isEmpty) return 'GPU';
-      return vram == null || vram.isEmpty ? gpuName : '$gpuName ($vram)';
+      return vram != null && vram.isNotEmpty ? '$gpuName ($vram)' : gpuName;
     }
     return 'CPU';
   }
@@ -772,6 +814,9 @@ class _ImagesPageState extends State<ImagesPage> with TickerProviderStateMixin {
     final selectedUrl = _imageUrlFor(_selectedImageId);
     final cs = Theme.of(context).colorScheme;
 
+    // Error boundary: catch rendering crashes and show the error
+    // instead of a blank grey screen
+    try {
     return Column(
       children: [
         // ── Top status bar ──
@@ -796,11 +841,22 @@ class _ImagesPageState extends State<ImagesPage> with TickerProviderStateMixin {
         ),
       ],
     );
+    } catch (e, st) {
+      return Center(
+        child: Padding(
+          padding: const EdgeInsets.all(32),
+          child: SelectableText(
+            'Images page error:\n$e\n\n$st',
+            style: TextStyle(color: Theme.of(context).colorScheme.error, fontSize: 12),
+          ),
+        ),
+      );
+    }
   }
 
   // ── STATUS BAR ──
   Widget _buildStatusBar(ColorScheme cs) {
-    final isCuda = _runtime['cuda_available'] == true;
+    final isCuda = (_runtime['effective_device']?.toString() ?? 'cpu') != 'cpu';
     return Container(
       padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
       decoration: BoxDecoration(
@@ -934,6 +990,12 @@ class _ImagesPageState extends State<ImagesPage> with TickerProviderStateMixin {
                             style: TextStyle(fontSize: 10, color: cs.onSurfaceVariant),
                           ),
                           onTap: () => _openSession(s['id'].toString()),
+                          trailing: IconButton(
+                            icon: Icon(Icons.delete_outline, size: 18, color: cs.error.withValues(alpha: 0.6)),
+                            tooltip: 'Delete session',
+                            visualDensity: VisualDensity.compact,
+                            onPressed: () => _deleteSession(s['id'].toString(), s['title']?.toString() ?? 'session'),
+                          ),
                         ),
                       );
                     },
@@ -977,19 +1039,25 @@ class _ImagesPageState extends State<ImagesPage> with TickerProviderStateMixin {
             ),
           ),
         ),
-        // Thumbnail filmstrip
+        // Thumbnail filmstrip (scrollable horizontally)
         if (images.isNotEmpty)
           Container(
-            height: 88,
+            height: 96,
             decoration: BoxDecoration(
               color: cs.surfaceContainerHigh,
               borderRadius: const BorderRadius.vertical(bottom: Radius.circular(12)),
               border: Border.all(color: cs.outlineVariant.withValues(alpha: 0.2)),
             ),
-            child: ListView.builder(
-              scrollDirection: Axis.horizontal,
-              padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 6),
-              itemCount: images.length,
+            child: Scrollbar(
+              controller: _thumbnailScrollCtrl,
+              thumbVisibility: true,
+              thickness: 3,
+              radius: const Radius.circular(2),
+              child: ListView.builder(
+                controller: _thumbnailScrollCtrl,
+                scrollDirection: Axis.horizontal,
+                padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 6),
+                itemCount: images.length,
               itemBuilder: (ctx, i) {
                 final img = images[i];
                 final id = img['id'].toString();
@@ -1019,6 +1087,7 @@ class _ImagesPageState extends State<ImagesPage> with TickerProviderStateMixin {
                   ),
                 );
               },
+            ),
             ),
           ),
       ],
@@ -1107,21 +1176,14 @@ class _ImagesPageState extends State<ImagesPage> with TickerProviderStateMixin {
             children: [
               Expanded(
                 child: DropdownButtonFormField<String>(
-                  initialValue: _models.any((m) => m['model_id'].toString() == _selectedModel) ? _selectedModel : null,
+                  value: _models.any((m) => m['model_id'].toString() == _selectedModel) ? _selectedModel : null,
                   isExpanded: true,
                   isDense: true,
-                  items: _models.map((m) {
+                  items: _models.where((m) => m['is_component'] != true).map((m) {
                     final id = m['model_id'].toString();
-                    final isComponent = m['is_component'] == true;
-                    final modelType = (m['model_type'] ?? '').toString();
-                    final label = isComponent ? '$id ($modelType)' : id;
                     return DropdownMenuItem(
                       value: id,
-                      child: Text(label, overflow: TextOverflow.ellipsis, style: TextStyle(
-                        fontSize: 12,
-                        color: isComponent ? cs.onSurfaceVariant : null,
-                        fontStyle: isComponent ? FontStyle.italic : FontStyle.normal,
-                      )),
+                      child: Text(id, overflow: TextOverflow.ellipsis, style: const TextStyle(fontSize: 12)),
                     );
                   }).toList(),
                   onChanged: (v) { setState(() => _selectedModel = v); _loadModelFit(); },
@@ -1194,7 +1256,7 @@ class _ImagesPageState extends State<ImagesPage> with TickerProviderStateMixin {
             // Ollama model picker
             Expanded(
               child: DropdownButtonFormField<String>(
-                initialValue: _enhancerModel,
+                value: (_enhancerModel == null || _ollamaModels.contains(_enhancerModel)) ? _enhancerModel : null,
                 isExpanded: true,
                 isDense: true,
                 decoration: const InputDecoration(
@@ -1259,12 +1321,15 @@ class _ImagesPageState extends State<ImagesPage> with TickerProviderStateMixin {
                 cs: cs,
               ),
               const SizedBox(width: 4),
-              // Device chip
+              // Device chip — universal: shows all available accelerators
               _buildChipDropdown<String>(
                 value: _devicePreference,
                 items: {
                   'auto': 'Auto',
-                  'cuda': 'GPU',
+                  if (_runtime['cuda_available'] == true) 'cuda': _runtime['rocm_available'] == true ? 'AMD GPU' : 'NVIDIA GPU',
+                  if (_runtime['mps_available'] == true) 'mps': 'Apple GPU',
+                  if (_runtime['xpu_available'] == true) 'xpu': 'Intel GPU',
+                  if (_runtime['directml_available'] == true) 'directml': 'DirectML',
                   'cpu': 'CPU',
                   if (_runtime['sdcpp_available'] == true) 'sdcpp': 'SD.cpp',
                 },
@@ -1428,7 +1493,7 @@ class _ImagesPageState extends State<ImagesPage> with TickerProviderStateMixin {
           // Sampler
           Expanded(
             child: DropdownButtonFormField<String>(
-              initialValue: _scheduler,
+              value: _scheduler,
               isExpanded: true,
               isDense: true,
               decoration: const InputDecoration(
@@ -1674,7 +1739,7 @@ class _ImagesPageState extends State<ImagesPage> with TickerProviderStateMixin {
           DropdownButtonFormField<String>(
             isExpanded: true,
             isDense: true,
-            initialValue: _controlNetType,
+            value: _controlNetTypes.any((t) => t['type'] == _controlNetType) ? _controlNetType : null,
             items: _controlNetTypes.map((t) => DropdownMenuItem(
               value: t['type'] as String,
               child: Text('${t["name"]} -- ${t["description"]}', overflow: TextOverflow.ellipsis, style: const TextStyle(fontSize: 12)),
@@ -1882,7 +1947,7 @@ class _ImagesPageState extends State<ImagesPage> with TickerProviderStateMixin {
           ),
           child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
             _infoRow('Torch', '${_runtime['torch_version'] ?? 'n/a'} | CUDA: ${_runtime['cuda_version'] ?? 'none'}', cs),
-            _infoRow('CUDA', '${_runtime['cuda_available'] == true ? 'Yes' : 'No'} | Effective: ${_runtime['effective_device'] ?? 'cpu'}', cs),
+            _infoRow('Device', 'Effective: ${_runtime['effective_device'] ?? 'cpu'} | GPUs: ${_runtime['gpu_count'] ?? 0}', cs),
             _infoRow('Plan', '${(_runtime['execution_plan'] as Map?)?['device_plan'] ?? _runtime['runtime_strategy'] ?? '?'}', cs),
             _infoRow('Timeout', '${(_runtime['execution_plan'] as Map?)?['expected_timeout_sec'] ?? 'n/a'}s recommended', cs),
             if (((_runtime['warnings'] as List?) ?? const []).isNotEmpty)
@@ -1897,16 +1962,32 @@ class _ImagesPageState extends State<ImagesPage> with TickerProviderStateMixin {
               _infoChip('${(_runtime['hardware_profile'] as Map)['cpu_vendor']} CPU', cs),
             if ((_runtime['hardware_profile'] as Map?)?['has_avx2'] == true)
               _infoChip('AVX2', cs),
+            if ((_runtime['hardware_profile'] as Map?)?['has_avx512'] == true)
+              _infoChip('AVX-512', cs),
+            if ((_runtime['hardware_profile'] as Map?)?['has_amx'] == true)
+              _infoChip('AMX', cs),
+            // GPU chips — show each detected GPU
+            for (final gpu in ((_runtime['hardware_profile'] as Map?)?['gpus'] as List? ?? []))
+              _infoChip('${(gpu as Map)['vendor']?.toString().toUpperCase() ?? '?'}: ${gpu['name'] ?? '?'}'
+                  '${gpu['vram_human'] != null ? ' (${gpu['vram_human']})' : ''}', cs),
             if ((_runtime['hardware_profile'] as Map?)?['openvino_available'] == true)
               _infoChip('OpenVINO', cs),
+            if ((_runtime['hardware_profile'] as Map?)?['onnxruntime_available'] == true)
+              _infoChip('ONNX Runtime', cs),
             if ((_runtime['hardware_profile'] as Map?)?['tomesd_available'] == true)
               _infoChip('ToMe', cs),
             if ((_runtime['hardware_profile'] as Map?)?['deepcache_available'] == true)
               _infoChip('DeepCache', cs),
+            if ((_runtime['hardware_profile'] as Map?)?['xformers_available'] == true)
+              _infoChip('xFormers', cs),
+            if ((_runtime['hardware_profile'] as Map?)?['triton_available'] == true)
+              _infoChip('Triton', cs),
             if (_runtime['sdcpp_available'] == true)
               _infoChip('SD.cpp', cs),
             if (_runtime['controlnet_available'] == true)
               _infoChip('ControlNet', cs),
+            if (_runtime['quality_tier'] != null)
+              _infoChip('Quality: ${_runtime['quality_tier']}', cs),
           ]),
         ],
         const SizedBox(height: 6),
@@ -1934,6 +2015,12 @@ class _ImagesPageState extends State<ImagesPage> with TickerProviderStateMixin {
           _sectionLabel('Generation Log', cs),
           const SizedBox(height: 4),
           _buildGenerationLog(cs, selected),
+        ],
+
+        // Step Previews
+        if (selected != null && _selectedImageId != null) ...[
+          const SizedBox(height: 12),
+          _buildStepPreviews(cs),
         ],
 
         // Help
@@ -2016,6 +2103,70 @@ class _ImagesPageState extends State<ImagesPage> with TickerProviderStateMixin {
         ],
         if (fallback) Text('Fallback to CPU: $fallbackReason', style: const TextStyle(color: Colors.orange, fontSize: 10)),
       ]),
+    );
+  }
+
+  // Cache step preview futures to avoid re-fetching on every rebuild
+  String? _stepPreviewsCacheKey;
+  Future<dynamic>? _stepPreviewsFuture;
+
+  Widget _buildStepPreviews(ColorScheme cs) {
+    final sid = _activeSession?['id']?.toString() ?? '';
+    final iid = _selectedImageId ?? '';
+    if (sid.isEmpty || iid.isEmpty) return const SizedBox.shrink();
+
+    // Only fetch once per image selection
+    final cacheKey = '$sid/$iid';
+    if (_stepPreviewsCacheKey != cacheKey) {
+      _stepPreviewsCacheKey = cacheKey;
+      _stepPreviewsFuture = widget.api.get('/images/files/$sid/$iid/steps');
+    }
+
+    return FutureBuilder(
+      future: _stepPreviewsFuture,
+      builder: (ctx, snap) {
+        if (snap.connectionState == ConnectionState.waiting || snap.hasError || snap.data == null) {
+          return const SizedBox.shrink();
+        }
+        final data = snap.data as Map<String, dynamic>?;
+        final steps = (data?['steps'] as List<dynamic>?) ?? [];
+        if (steps.isEmpty) return const SizedBox.shrink();
+
+        return Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            _sectionLabel('Step Previews (${steps.length} steps)', cs),
+            const SizedBox(height: 4),
+            SizedBox(
+              height: 80,
+              child: ListView.builder(
+                scrollDirection: Axis.horizontal,
+                itemCount: steps.length,
+                itemBuilder: (ctx, i) {
+                  final step = steps[i] as Map<String, dynamic>;
+                  final url = '${widget.api.baseUrl}${step['url']}';
+                  return Padding(
+                    padding: const EdgeInsets.only(right: 4),
+                    child: Tooltip(
+                      message: 'Step ${step['step']}',
+                      child: ClipRRect(
+                        borderRadius: BorderRadius.circular(6),
+                        child: Image.network(url, width: 80, height: 80, fit: BoxFit.cover,
+                          errorBuilder: (_, __, ___) => Container(
+                            width: 80, height: 80,
+                            color: cs.surfaceContainerHighest,
+                            child: const Icon(Icons.broken_image, size: 16),
+                          ),
+                        ),
+                      ),
+                    ),
+                  );
+                },
+              ),
+            ),
+          ],
+        );
+      },
     );
   }
 

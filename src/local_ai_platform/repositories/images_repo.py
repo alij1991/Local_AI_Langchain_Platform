@@ -102,6 +102,40 @@ def get_image(image_id: str) -> dict | None:
         conn.close()
 
 
+def delete_image_session(session_id: str) -> bool:
+    """Delete an image session and all its images from DB. Returns True if deleted."""
+    conn = get_conn()
+    try:
+        # Get all image file paths before deleting records
+        rows = conn.execute("SELECT file_path FROM images WHERE session_id = ?", (session_id,)).fetchall()
+        file_paths = [row["file_path"] for row in rows if row["file_path"]]
+
+        # Delete from DB
+        conn.execute("DELETE FROM images WHERE session_id = ?", (session_id,))
+        result = conn.execute("DELETE FROM image_sessions WHERE id = ?", (session_id,))
+        conn.commit()
+
+        # Delete image files from disk
+        for fp in file_paths:
+            try:
+                Path(fp).unlink(missing_ok=True)
+            except Exception:
+                pass
+
+        # Try to remove the session directory if empty
+        session_dir = Path("data/images") / session_id
+        if session_dir.exists():
+            import shutil
+            try:
+                shutil.rmtree(session_dir, ignore_errors=True)
+            except Exception:
+                pass
+
+        return result.rowcount > 0
+    finally:
+        conn.close()
+
+
 def image_output_path(session_id: str, image_id: str) -> Path:
     base = Path("data/images") / session_id
     base.mkdir(parents=True, exist_ok=True)
