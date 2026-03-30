@@ -444,36 +444,99 @@ async def get_ollama_models():
     }
 
 
+# ── Ollama pull state (background pulls with progress) ──────────
+_ollama_pulls: dict[str, dict[str, Any]] = {}  # name → {status, progress, error, ...}
+
+
 @app.post("/models/ollama/pull")
 async def pull_ollama_model(req: ModelLoadRequest):
+    """Start pulling an Ollama model in the background.  Returns immediately."""
     if not ollama_ctrl:
         raise HTTPException(503, "Not initialized")
     name = req.resolved_name
     if not name:
         raise HTTPException(400, "model_name is required")
-    result = ollama_ctrl.load_model(name)
-    if not result.ok:
-        raise HTTPException(500, result.output)
-    _invalidate_cache("models:")  # New model installed, clear model caches
-    return {"status": "ok", "message": result.output}
+
+    # If already pulling this model, return current status
+    if name in _ollama_pulls and _ollama_pulls[name]["status"] == "pulling":
+        return {"status": "pulling", "model": name, "progress": _ollama_pulls[name].get("progress", "")}
+
+    _ollama_pulls[name] = {"status": "pulling", "progress": "Starting download...", "error": None}
+    logger.info("Starting background pull for model: %s", name)
+
+    def _do_pull():
+        """Run the blocking pull in a worker thread."""
+        try:
+            from local_ai_platform.providers.ollama_provider import OllamaProvider
+            prov = OllamaProvider()
+            client = prov._get_client()
+            # Use streaming pull to track progress
+            last_status = ""
+            for progress in client.pull(name, stream=True):
+                if isinstance(progress, dict):
+                    status = progress.get("status", "")
+                    completed = progress.get("completed", 0)
+                    total = progress.get("total", 0)
+                    if total and completed:
+                        pct = min(100, int(completed / total * 100))
+                        last_status = f"{status} {pct}%"
+                    elif status:
+                        last_status = status
+                    _ollama_pulls[name]["progress"] = last_status
+                elif hasattr(progress, "status"):
+                    last_status = progress.status or ""
+                    _ollama_pulls[name]["progress"] = last_status
+
+            _ollama_pulls[name]["status"] = "done"
+            _ollama_pulls[name]["progress"] = "Complete"
+            _invalidate_cache("models:")
+            logger.info("Pull complete: %s", name)
+        except Exception as exc:
+            _ollama_pulls[name]["status"] = "error"
+            _ollama_pulls[name]["error"] = str(exc)
+            logger.error("Pull failed for %s: %s", name, exc)
+
+    # Run in background thread so we don't block the event loop
+    asyncio.get_event_loop().run_in_executor(None, _do_pull)
+    return {"status": "pulling", "model": name, "progress": "Starting download..."}
+
+
+@app.get("/models/ollama/pull/status")
+async def get_ollama_pull_status(model: str | None = None):
+    """Check progress of active Ollama model pulls."""
+    if model:
+        info = _ollama_pulls.get(model)
+        if not info:
+            return {"status": "unknown", "model": model}
+        return {"model": model, **info}
+    # Return all active pulls
+    return {"pulls": {k: v for k, v in _ollama_pulls.items()}}
 
 
 @app.get("/models/ollama/library")
 async def get_ollama_library(search: str | None = None, tag: str | None = None):
-    """Return Ollama model library from remote registry, merged with installed status."""
-    # Check TTL cache
+    """Return comprehensive Ollama model library with variants grouped under base model.
+
+    Combines: (1) trending models from /api/tags, (2) scraping ollama.com/search for
+    broader results, and (3) a curated catalog of popular models for when the remote
+    is unavailable.  Each model is grouped by base name with available parameter
+    sizes listed as variants (e.g. llama3.2 → [1b, 3b]).
+    """
     cache_key = f"ollama:library:{search or ''}:{tag or ''}"
     cached = _cached(cache_key, ttl=300)
     if cached is not None:
         return cached
 
-    # Get installed models
+    # ── Installed models ────────────────────────────────────────────
     installed_names: set[str] = set()
+    installed_bases: set[str] = set()
     if ollama_ctrl:
         try:
             ok, infos, _ = ollama_ctrl.list_local_models_detailed()
             if ok:
-                installed_names = {i.name for i in infos}
+                for i in infos:
+                    installed_names.add(i.name)
+                    installed_bases.add(i.name.split(":")[0])
         except Exception:
             pass
     if router:
@@ -482,74 +545,210 @@ async def get_ollama_library(search: str | None = None, tag: str | None = None):
             try:
                 for m in prov.list_models():
                     installed_names.add(m.name)
+                    installed_bases.add(m.name.split(":")[0])
             except Exception:
                 pass
 
-    # Fetch from Ollama remote registry
-    items: list[dict[str, Any]] = []
+    # ── Curated catalog of popular models with metadata ─────────────
+    # This ensures good coverage even when scraping fails.
+    # Format: (base_name, description, variants, tags)
+    _CURATED_MODELS: list[tuple[str, str, list[str], list[str]]] = [
+        # --- Chat / General ---
+        ("llama4", "Meta's latest Llama 4 — Maverick & Scout architectures", ["scout", "maverick"], ["chat", "tools"]),
+        ("llama3.3", "Meta Llama 3.3 — strong 70B reasoning model", ["70b"], ["chat", "tools"]),
+        ("llama3.2", "Meta Llama 3.2 — compact & fast", ["1b", "3b"], ["chat"]),
+        ("llama3.1", "Meta Llama 3.1 — balanced quality & speed", ["8b", "70b", "405b"], ["chat", "tools"]),
+        ("llama3", "Meta Llama 3 — strong general purpose", ["8b", "70b"], ["chat", "tools"]),
+        ("gemma3", "Google Gemma 3 — efficient & capable", ["1b", "4b", "12b", "27b"], ["chat", "tools"]),
+        ("gemma3n", "Google Gemma 3n — optimized for on-device", ["e2b", "e4b"], ["chat"]),
+        ("gemma2", "Google Gemma 2 — solid mid-tier", ["2b", "9b", "27b"], ["chat"]),
+        ("qwen3", "Alibaba Qwen 3 — thinking & non-thinking modes", ["0.6b", "1.7b", "4b", "8b", "14b", "30b", "32b", "235b"], ["chat", "tools"]),
+        ("qwen3.5", "Alibaba Qwen 3.5 — latest improvements", ["7b", "14b", "32b"], ["chat", "tools"]),
+        ("qwen2.5", "Alibaba Qwen 2.5 — strong multilingual", ["0.5b", "1.5b", "3b", "7b", "14b", "32b", "72b"], ["chat", "tools"]),
+        ("phi4", "Microsoft Phi-4 — small but powerful reasoning", ["14b"], ["chat"]),
+        ("phi4-mini", "Microsoft Phi-4 Mini — ultra-compact reasoning", ["3.8b"], ["chat"]),
+        ("mistral", "Mistral 7B — fast European model", ["7b"], ["chat"]),
+        ("mistral-large", "Mistral Large — flagship quality", ["123b"], ["chat", "tools"]),
+        ("mistral-small", "Mistral Small — efficient assistant", ["22b", "24b"], ["chat", "tools"]),
+        ("mixtral", "Mistral MoE — fast with large capacity", ["8x7b", "8x22b"], ["chat"]),
+        ("nemotron", "NVIDIA Nemotron — RLHF-aligned", ["49b", "70b"], ["chat", "tools"]),
+        ("command-r", "Cohere Command R — RAG-optimized", ["35b"], ["chat", "tools"]),
+        ("command-r-plus", "Cohere Command R+ — large RAG model", ["104b"], ["chat", "tools"]),
+        ("deepseek-r1", "DeepSeek R1 — strong reasoning / chain-of-thought", ["1.5b", "7b", "8b", "14b", "32b", "70b", "671b"], ["chat", "reasoning"]),
+        ("deepseek-v3", "DeepSeek V3 — large MoE model", ["671b"], ["chat"]),
+        ("granite4", "IBM Granite 4 — enterprise-grade", ["8b", "34b"], ["chat", "tools"]),
+        ("glm4", "Zhipu GLM-4 — Chinese+English bilingual", ["9b"], ["chat", "tools"]),
+        ("internlm3", "InternLM 3 — strong Chinese model", ["8b"], ["chat"]),
+        ("yi", "01.AI Yi — multilingual capable", ["6b", "9b", "34b"], ["chat"]),
+        ("tinyllama", "TinyLlama — ultra-small 1.1B", ["1.1b"], ["chat", "tiny"]),
+
+        # --- Code ---
+        ("qwen3-coder", "Alibaba Qwen 3 Coder — code-specialized", ["7b", "14b", "30b", "480b"], ["code", "tools"]),
+        ("qwen2.5-coder", "Alibaba Qwen 2.5 Coder", ["0.5b", "1.5b", "3b", "7b", "14b", "32b"], ["code"]),
+        ("codellama", "Meta Code Llama — coding specialist", ["7b", "13b", "34b", "70b"], ["code"]),
+        ("codegemma", "Google CodeGemma — code generation", ["2b", "7b"], ["code"]),
+        ("starcoder2", "BigCode StarCoder 2", ["3b", "7b", "15b"], ["code"]),
+        ("deepseek-coder-v2", "DeepSeek Coder V2 — code MoE", ["16b", "236b"], ["code"]),
+        ("devstral", "Mistral DevStral — agentic coding", ["24b"], ["code", "tools"]),
+
+        # --- Vision ---
+        ("llama3.2-vision", "Meta Llama 3.2 Vision — multimodal", ["11b", "90b"], ["vision"]),
+        ("llava", "LLaVA — visual chat assistant", ["7b", "13b", "34b"], ["vision"]),
+        ("qwen2.5vl", "Alibaba Qwen 2.5 VL — vision-language", ["3b", "7b", "32b", "72b"], ["vision"]),
+        ("qwen3-vl", "Alibaba Qwen 3 VL — latest vision-language", ["8b", "32b", "235b"], ["vision"]),
+        ("granite3.2-vision", "IBM Granite 3.2 Vision", ["2b"], ["vision"]),
+        ("moondream", "Moondream — tiny vision model", ["2b"], ["vision", "tiny"]),
+        ("minicpm-v", "MiniCPM-V — compact multimodal", ["8b"], ["vision"]),
+
+        # --- Embedding ---
+        ("nomic-embed-text", "Nomic Embed — text embeddings", ["137m"], ["embedding"]),
+        ("mxbai-embed-large", "Mixed Bread Embed — high quality embeddings", ["335m"], ["embedding"]),
+        ("all-minilm", "All-MiniLM — fast sentence embeddings", ["33m"], ["embedding"]),
+        ("snowflake-arctic-embed", "Snowflake Arctic Embed", ["33m", "110m", "335m"], ["embedding"]),
+        ("qwen3-embedding", "Qwen 3 Embedding", ["0.6b", "4b", "8b"], ["embedding"]),
+
+        # --- Thinking / Reasoning ---
+        ("qwq", "Alibaba QwQ — dedicated reasoning model", ["32b"], ["reasoning"]),
+        ("marco-o1", "MFAI Marco-o1 — open reasoning", ["7b"], ["reasoning"]),
+        ("smallthinker", "PowerInfer SmallThinker — compact reasoner", ["3b"], ["reasoning"]),
+
+        # --- Tools / Function Calling ---
+        ("firefunction-v2", "Fireworks FireFunction v2 — function calling", ["70b"], ["tools"]),
+        ("llama3-groq-tool-use", "Groq tool-use fine-tune of Llama 3", ["8b", "70b"], ["tools"]),
+
+        # --- Other ---
+        ("orca-mini", "Orca Mini — small instruction model", ["3b", "7b", "13b"], ["chat"]),
+        ("dolphin3", "Dolphin 3 — uncensored chat", ["8b"], ["chat"]),
+        ("nous-hermes2", "Nous Hermes 2 — fine-tuned quality", ["11b"], ["chat"]),
+        ("vicuna", "LMSYS Vicuna — chat assistant", ["7b", "13b", "33b"], ["chat"]),
+        ("zephyr", "Zephyr — DPO-aligned", ["7b"], ["chat"]),
+        ("solar", "Upstage Solar — instruction-tuned", ["10.7b"], ["chat"]),
+        ("wizardlm2", "WizardLM 2 — enhanced instruction", ["7b", "8x22b"], ["chat"]),
+    ]
+
+    # ── Collect models from multiple sources ───────────────────────
+    # model_name -> {description, variants, tags, from_remote}
+    seen: dict[str, dict[str, Any]] = {}
+
+    def _add_model(base: str, desc: str = "", variants: list[str] | None = None,
+                   tags: list[str] | None = None, from_remote: bool = False) -> None:
+        base = base.strip().lower()
+        if not base:
+            return
+        if base in seen:
+            entry = seen[base]
+            if desc and not entry["description"]:
+                entry["description"] = desc
+            if variants:
+                for v in variants:
+                    if v not in entry["variants"]:
+                        entry["variants"].append(v)
+            if tags:
+                for t in tags:
+                    if t not in entry["tags"]:
+                        entry["tags"].append(t)
+            if from_remote:
+                entry["from_remote"] = True
+        else:
+            seen[base] = {
+                "description": desc,
+                "variants": list(variants or []),
+                "tags": list(tags or []),
+                "from_remote": from_remote,
+            }
+
+    # Source 1: Curated catalog (always available)
+    for base, desc, variants, tags in _CURATED_MODELS:
+        _add_model(base, desc, variants, tags)
+
+    # Source 2: Remote /api/tags (trending)
     try:
         import urllib.request as urllib_req
-
         req = urllib_req.Request(
             "https://ollama.com/api/tags",
             headers={"Accept": "application/json"},
         )
-        with urllib_req.urlopen(req, timeout=10) as resp:
+        with urllib_req.urlopen(req, timeout=8) as resp:
             data = json.loads(resp.read().decode("utf-8"))
-
         for model in data.get("models", []):
             name = model.get("name", "")
             if not name:
                 continue
-
+            base = name.split(":")[0]
+            tag = name.split(":")[1] if ":" in name else ""
             details = model.get("details") if isinstance(model.get("details"), dict) else {}
-            family = details.get("family", name.split(":")[0].split("-")[0]) if details else name.split(":")[0].split("-")[0]
-            parameters = details.get("parameter_size", "") if details else ""
-            size_bytes = model.get("size", 0)
-
-            # Apply search filter
-            if search:
-                q = search.lower()
-                if q not in name.lower() and q not in family.lower():
-                    continue
-
-            is_installed = name in installed_names
-            if not is_installed:
-                base_name = name.split(":")[0]
-                is_installed = any(inst.split(":")[0] == base_name for inst in installed_names)
-
-            items.append({
-                "id": f"ollama:{name}",
-                "name": name,
-                "display_name": name,
-                "model_id": name,
-                "provider": "ollama",
-                "family": family,
-                "parameters": parameters,
-                "size_gb": round(size_bytes / (1024**3), 1) if size_bytes else None,
-                "description": "",
-                "tags": [],
-                "quantization": details.get("quantization_level", "") if details else "",
-                "installed": is_installed,
-            })
+            params = details.get("parameter_size", "") if details else ""
+            _add_model(
+                base,
+                variants=[tag] if tag and tag != "latest" else ([params.lower()] if params else []),
+                tags=["trending"],
+                from_remote=True,
+            )
     except Exception as exc:
-        logger.warning("Failed to fetch Ollama library from remote registry: %s", exc)
-        # Fallback: return installed models only
-        for name in sorted(installed_names):
-            items.append({
-                "id": f"ollama:{name}",
-                "name": name,
-                "display_name": name,
-                "model_id": name,
-                "provider": "ollama",
-                "family": name.split(":")[0].split("-")[0],
-                "parameters": "",
-                "size_gb": None,
-                "description": "",
-                "tags": [],
-                "quantization": "",
-                "installed": True,
-            })
+        logger.debug("Ollama /api/tags fetch failed (non-critical): %s", exc)
+
+    # Source 3: Scrape ollama.com/search for broader results (when user searches)
+    if search:
+        try:
+            import urllib.request as urllib_req
+            import re as _re
+            search_url = f"https://ollama.com/search?q={urllib_req.quote(search)}"
+            req2 = urllib_req.Request(search_url)
+            with urllib_req.urlopen(req2, timeout=8) as resp2:
+                html = resp2.read().decode("utf-8", errors="replace")
+            scraped = set(_re.findall(r'/library/([a-z0-9][-a-z0-9.]*)', html))
+            for base in scraped:
+                _add_model(base, from_remote=True)
+        except Exception as exc:
+            logger.debug("Ollama search scrape failed (non-critical): %s", exc)
+
+    # ── Apply search filter ─────────────────────────────────────────
+    if search:
+        q = search.lower()
+        filtered = {}
+        for base, info in seen.items():
+            if (q in base or q in info["description"].lower()
+                    or any(q in t for t in info["tags"])):
+                filtered[base] = info
+        seen = filtered
+
+    # ── Build response items ────────────────────────────────────────
+    items: list[dict[str, Any]] = []
+    for base in sorted(seen.keys()):
+        info = seen[base]
+        # Check if any variant of this model is installed
+        is_installed = base in installed_bases or any(
+            n.split(":")[0] == base for n in installed_names
+        )
+        # Find which specific variants are installed
+        installed_variants: list[str] = []
+        for n in installed_names:
+            if n.split(":")[0] == base:
+                variant = n.split(":")[1] if ":" in n else "latest"
+                installed_variants.append(variant)
+
+        items.append({
+            "id": f"ollama:{base}",
+            "name": base,
+            "display_name": base,
+            "model_id": base,
+            "provider": "ollama",
+            "family": base.split("-")[0].split(".")[0],
+            "description": info["description"],
+            "variants": info["variants"],  # e.g. ["1b", "3b", "7b"]
+            "tags": info["tags"],
+            "installed": is_installed,
+            "installed_variants": installed_variants,  # e.g. ["3b"]
+        })
+
+    # Sort: installed first, then trending, then alphabetical
+    def _sort_key(m: dict) -> tuple:
+        return (
+            0 if m["installed"] else 1,
+            0 if "trending" in m.get("tags", []) else 1,
+            m["name"],
+        )
+    items.sort(key=_sort_key)
 
     result = {"items": items}
     if items:
@@ -628,13 +827,22 @@ _DIFFUSION_PARAM_HINTS: dict[str, int] = {
 
 # Actual pipeline download sizes (FP32 safetensors, configs, tokenizer)
 # Measured with snapshot_download allow_patterns filter — what we actually download.
+# Measured pipeline download sizes: total bytes of all files a `from_pretrained`
+# call actually fetches (safetensors + configs + tokeniser + VAE + text encoders).
+# Values updated 2026-03 from HuggingFace repo file listings.
 _DIFFUSION_DOWNLOAD_BYTES: dict[str, int] = {
-    "sdxl": int(14.2e9),
-    "sd-xl": int(14.2e9),
-    "stable-diffusion-xl": int(14.2e9),
-    "sd3": int(16e9),
-    "stable-diffusion-3": int(16e9),
-    "flux": int(24e9),
+    # SDXL: unet(5.1G) + vae(335M) + text_encoder(246M) + text_encoder_2(1.39G) + configs ≈ 7.1 GB FP16 / 13.9 GB FP32
+    "sdxl": int(7.2e9),
+    "sd-xl": int(7.2e9),
+    "stable-diffusion-xl": int(7.2e9),
+    # SD 3 medium: transformer(4.3G) + 3 text encoders(~5.5G) + VAE(168M) ≈ 10.2 GB
+    "sd3": int(10.2e9),
+    "stable-diffusion-3": int(10.2e9),
+    # Flux dev / schnell: transformer(23.8G) + text_encoder(246M) + text_encoder_2(9.79G) + VAE(168M) ≈ 33.7 GB
+    "flux-dev": int(33.7e9),
+    "flux-schnell": int(33.7e9),
+    "flux": int(33.7e9),
+    # SD 1.5: unet(1.72G) + vae(335M) + text_encoder(492M) + safety(1.22G) + configs ≈ 3.8 GB FP16 / 5.5 GB FP32
     "sd-1": int(5.5e9),
     "sd-2": int(5.5e9),
     "stable-diffusion-v1": int(5.5e9),
@@ -644,14 +852,21 @@ _DIFFUSION_DOWNLOAD_BYTES: dict[str, int] = {
     "sd-turbo": int(5.5e9),
     "if-i": int(8.6e9),
     "deepfloyd": int(8.6e9),
-    "pixart": int(2.4e9),
-    "playground": int(4e9),
+    # PixArt-α / Σ: transformer(2.4G) + text_encoder(~4.9G) + VAE(168M) ≈ 7.5 GB
+    "pixart": int(7.5e9),
+    "playground": int(7.2e9),
     "wuerstchen": int(4e9),
-    # SD 3.x variants (transformer + 3 text encoders + VAE)
-    "stable-diffusion-3.5-large": int(24e9),
-    "stable-diffusion-3.5-medium": int(12e9),
-    "stable-diffusion-3-medium": int(12e9),
+    # SD 3.5 large: transformer(~10G) + 3 text encoders(~10G) + VAE ≈ 20.4 GB
+    "stable-diffusion-3.5-large": int(20.4e9),
+    "stable-diffusion-3.5-medium": int(12.4e9),
+    "stable-diffusion-3-medium": int(12.4e9),
     "stable-cascade": int(5.5e9),
+    # Z-Image / Kolors / HunyuanDiT
+    "z-image": int(12.5e9),
+    "kolors": int(13e9),
+    "hunyuandit": int(8e9),
+    "hunyuan-dit": int(8e9),
+    "animatediff": int(4e9),
 }
 
 
@@ -691,6 +906,30 @@ def _estimate_diffusion_download_bytes(model_id: str) -> int | None:
     return None
 
 
+def _sum_siblings_bytes(siblings: list[dict[str, Any]]) -> int | None:
+    """Sum actual file sizes from HF API ``siblings`` expansion.
+
+    Each sibling is ``{"rfilename": "...", "size": <bytes>, ...}``.
+    Returns total download size or *None* if data is unusable.
+    """
+    if not siblings:
+        return None
+    total = 0
+    for s in siblings:
+        sz = s.get("size")
+        if isinstance(sz, (int, float)) and sz > 0:
+            total += int(sz)
+        else:
+            # Some entries (like .gitattributes) may lack size —
+            # check LFS pointer for the real size
+            lfs = s.get("lfs")
+            if isinstance(lfs, dict):
+                lfs_sz = lfs.get("size")
+                if isinstance(lfs_sz, (int, float)) and lfs_sz > 0:
+                    total += int(lfs_sz)
+    return total if total > 0 else None
+
+
 def _params_to_size_bytes(param_count: int, pipeline_tag: str = "", model_id: str = "") -> int:
     """Estimate download size from parameter count.
 
@@ -702,9 +941,10 @@ def _params_to_size_bytes(param_count: int, pipeline_tag: str = "", model_id: st
         dl = _estimate_diffusion_download_bytes(model_id)
         if dl:
             return dl
-        # Generic diffusers fallback: full pipeline is roughly 5x the param count
-        # (FP32 unet + vae + text_encoder + safety_checker + configs)
-        return int(param_count * 5)
+        # Fallback: safetensors 'total' includes ALL pipeline components
+        # (UNet/transformer + VAE + text encoders).  FP16 = 2 bytes/param
+        # plus ~5-8 % overhead for tokeniser, scheduler, configs.
+        return int(param_count * 2.1)
     return param_count * 2
 
 
@@ -850,6 +1090,7 @@ async def discover_hf_models(
             ("sort", sort),
             ("limit", str(min(limit, 100))),
             ("expand[]", "safetensors"),
+            ("expand[]", "siblings"),          # ← actual file sizes for accurate totals
             ("expand[]", "tags"),
             ("expand[]", "pipeline_tag"),
             ("expand[]", "likes"),
@@ -921,9 +1162,16 @@ async def discover_hf_models(
                             break
 
             pipeline_tag = model.get("pipeline_tag", "") or ""
-            if param_count:
+
+            # ── Accurate download size ──────────────────────────────
+            # 1st: sum actual file sizes from siblings (gold standard)
+            siblings = model.get("siblings")
+            size_bytes = _sum_siblings_bytes(siblings) if isinstance(siblings, list) else None
+            # 2nd: param-based estimate
+            if not size_bytes and param_count:
                 size_bytes = _params_to_size_bytes(param_count, pipeline_tag, model_id)
-            else:
+            # 3rd: architecture-based lookup
+            if not size_bytes:
                 size_bytes = _estimate_diffusion_download_bytes(model_id)
             # Last resort: if text-to-image with no size, assume SD 1.5 (~5 GB)
             if not size_bytes and pipeline_tag in ("text-to-image", "image-to-image"):
@@ -974,8 +1222,8 @@ async def get_vllm_library(search: str = ""):
         api_url = (
             f"https://huggingface.co/api/models?search={query}"
             f"&pipeline_tag=text-generation&sort=downloads&limit=30"
-            f"&expand[]=safetensors&expand[]=tags&expand[]=pipeline_tag"
-            f"&expand[]=likes&expand[]=lastModified"
+            f"&expand[]=safetensors&expand[]=siblings&expand[]=tags"
+            f"&expand[]=pipeline_tag&expand[]=likes&expand[]=lastModified"
         )
         req = urllib_req.Request(api_url, headers={"Accept": "application/json"})
         with urllib_req.urlopen(req, timeout=10) as resp:
@@ -1003,7 +1251,11 @@ async def get_vllm_library(search: str = ""):
             if not param_count:
                 param_count = _estimate_hf_params(model_id, tags)
 
-            size_bytes = _params_to_size_bytes(param_count, model_id=model_id) if param_count else None
+            # Prefer actual file sizes from siblings over param-based estimates
+            _siblings = m.get("siblings")
+            size_bytes = _sum_siblings_bytes(_siblings) if isinstance(_siblings, list) else None
+            if not size_bytes and param_count:
+                size_bytes = _params_to_size_bytes(param_count, model_id=model_id)
             is_serving = model_id in vllm_serving
 
             items.append({
@@ -2192,14 +2444,89 @@ def _extract_json_from_llm(text: str) -> dict | None:
 
 @app.post("/images/enhance-prompt")
 async def enhance_image_prompt(body: dict[str, Any]):
-    """Use Ollama LLM to enhance a simple description into a detailed SD prompt + negative prompt."""
+    """Use Ollama or HuggingFace LLM to enhance a simple description into a detailed SD prompt + negative prompt."""
     user_prompt = (body.get("prompt") or "").strip()
     if not user_prompt:
         raise HTTPException(400, "prompt is required")
     model_family = (body.get("model_family") or "sdxl").lower()
     ollama_model = (body.get("ollama_model") or "").strip()
+    hf_model = (body.get("hf_model") or "").strip()
     timeout_sec = int(body.get("timeout_sec") or 120)
 
+    # ── HuggingFace text model path ─────────────────────────────────
+    if hf_model:
+        try:
+            from transformers import pipeline as hf_pipeline
+            import torch
+
+            enhance_system = (
+                f"You are an expert at writing Stable Diffusion {model_family} prompts. "
+                "Given a simple description, create a detailed image generation prompt with "
+                "quality tags (masterpiece, best quality, highly detailed, sharp focus), "
+                "style, lighting, and composition details. Also provide a negative prompt. "
+                "IMPORTANT: The prompt MUST be under 60 words (CLIP token limit is 77 tokens — "
+                "anything longer gets silently truncated and wasted). Be concise and impactful. "
+                "Output ONLY JSON: {\"prompt\": \"...\", \"negative_prompt\": \"...\"}"
+            )
+            logger.info("enhance-prompt using HF model: %s", hf_model)
+            pipe = hf_pipeline(
+                "text-generation",
+                model=hf_model,
+                torch_dtype=torch.float16 if torch.cuda.is_available() else torch.float32,
+                device_map="auto",
+            )
+            messages = [
+                {"role": "system", "content": enhance_system},
+                {"role": "user", "content": user_prompt},
+            ]
+            # Try chat template first, fall back to raw text
+            try:
+                outputs = pipe(messages, max_new_tokens=512, temperature=0.7, do_sample=True)
+                content = outputs[0]["generated_text"]
+                if isinstance(content, list):
+                    content = content[-1].get("content", "") if content else ""
+            except Exception:
+                raw_prompt = f"{enhance_system}\n\nUser: {user_prompt}\nAssistant:"
+                outputs = pipe(raw_prompt, max_new_tokens=512, temperature=0.7, do_sample=True)
+                content = outputs[0]["generated_text"]
+                if raw_prompt in content:
+                    content = content[len(raw_prompt):]
+
+            content = content.strip()
+            logger.info("enhance-prompt HF response (%d chars): %s", len(content), content[:500])
+
+            result = _extract_json_from_llm(content)
+            if result and isinstance(result.get("prompt"), str) and result["prompt"].strip():
+                return {
+                    "prompt": result["prompt"].strip(),
+                    "negative_prompt": (result.get("negative_prompt") or "").strip(),
+                    "original_prompt": user_prompt,
+                    "hf_model": hf_model,
+                }
+
+            # Use raw text as prompt if JSON extraction failed
+            if content and len(content) > 10:
+                for fence in ("```json", "```", "`"):
+                    content = content.replace(fence, "")
+                return {
+                    "prompt": content.strip(),
+                    "negative_prompt": "worst quality, low quality, blurry, deformed, ugly, bad anatomy, watermark, text",
+                    "original_prompt": user_prompt,
+                    "hf_model": hf_model,
+                    "warning": "HF model did not return structured JSON; using raw text",
+                }
+
+            return {
+                "prompt": user_prompt,
+                "negative_prompt": "worst quality, low quality, blurry, deformed, watermark, text",
+                "original_prompt": user_prompt,
+                "error": "HF model response was empty or unusable",
+            }
+        except Exception as exc:
+            logger.error("enhance-prompt HF model failed: %s", exc)
+            raise HTTPException(500, f"HF prompt enhancement failed: {exc}")
+
+    # ── Ollama path ─────────────────────────────────────────────────
     # Find a working Ollama model — prefer small/fast models for prompt enhancement
     if not ollama_model:
         try:
@@ -2226,8 +2553,9 @@ async def enhance_image_prompt(body: dict[str, Any]):
 
     # Use /api/generate (simpler, works better with thinking models via /no_think)
     generate_prompt = f"""/no_think
+IMPORTANT: Keep the prompt UNDER 60 words. CLIP only accepts 77 tokens — longer prompts get silently truncated.
 Output ONLY this JSON object, nothing else:
-{{"prompt": "[detailed Stable Diffusion {model_family} prompt for: {user_prompt}. Include quality tags like masterpiece, best quality, highly detailed, sharp focus. Add style, lighting, composition details. Comma-separated tags.]", "negative_prompt": "[things to avoid: worst quality, low quality, blurry, deformed, ugly, bad anatomy, watermark, text, plus scene-specific negatives]"}}"""
+{{"prompt": "[concise Stable Diffusion {model_family} prompt for: {user_prompt}. Include key quality tags (masterpiece, best quality, highly detailed). Add style, lighting, composition. Comma-separated tags. MAX 60 words.]", "negative_prompt": "[things to avoid: worst quality, low quality, blurry, deformed, ugly, bad anatomy, watermark, text, plus scene-specific negatives]"}}"""
 
     try:
         import urllib.request
@@ -2236,7 +2564,7 @@ Output ONLY this JSON object, nothing else:
             "model": ollama_model,
             "prompt": generate_prompt,
             "stream": False,
-            "options": {"temperature": 0.7, "num_predict": 512},
+            "options": {"temperature": 0.7, "num_predict": 256},
         }).encode()
         req = urllib.request.Request(
             "http://localhost:11434/api/generate",
@@ -2266,7 +2594,7 @@ Output ONLY this JSON object, nothing else:
                 {"role": "user", "content": f'/no_think\n{generate_prompt}'},
             ],
             "stream": False,
-            "options": {"temperature": 0.7, "num_predict": 1024},
+            "options": {"temperature": 0.7, "num_predict": 256},
         }).encode()
         chat_req = urllib.request.Request(
             "http://localhost:11434/api/chat",
@@ -2311,14 +2639,41 @@ Output ONLY this JSON object, nothing else:
                     "source": "extracted from model reasoning",
                 }
 
-        # Fallback: use any available text
+        # Fallback: use any available text — the LLM may have returned a verbose
+        # explanation with the prompt buried inside.  Try to extract it.
         combined = content or chat_content or chat_thinking or ""
         if combined and combined != user_prompt:
             cleaned = combined
             for fence in ("```json", "```", "`"):
                 cleaned = cleaned.replace(fence, "")
             cleaned = cleaned.strip()
-            if cleaned and len(cleaned) < 2000:
+
+            # If the response is too long, the LLM likely included an explanation.
+            # Try to extract just the prompt portion (look for quoted strings or
+            # lines after "prompt:" / "enhanced:" markers).
+            if cleaned and len(cleaned) > 2000:
+                # Try to find the actual prompt in verbose output
+                _extracted = None
+                # Look for "prompt:" or "enhanced prompt:" followed by text
+                _prompt_match = _re.search(
+                    r'(?:enhanced\s+)?prompt\s*[:=]\s*["\u201c]?(.{20,800}?)["\u201d]?\s*(?:\n|negative|$)',
+                    cleaned, _re.IGNORECASE | _re.DOTALL,
+                )
+                if _prompt_match:
+                    _extracted = _prompt_match.group(1).strip().rstrip(",")
+                else:
+                    # Take the longest quoted string as the prompt
+                    _quotes = _re.findall(r'["\u201c]([^"\u201d]{20,})["\u201d]', cleaned)
+                    if _quotes:
+                        _extracted = max(_quotes, key=len).strip().rstrip(",")
+                if _extracted and len(_extracted) < 1500:
+                    cleaned = _extracted
+                    logger.info("enhance-prompt: extracted prompt (%d chars) from verbose %d-char response", len(cleaned), len(combined))
+                else:
+                    # Truncate to first 1500 chars as last resort
+                    cleaned = cleaned[:1500].rsplit(",", 1)[0].strip()
+
+            if cleaned:
                 return {
                     "prompt": cleaned,
                     "negative_prompt": "worst quality, low quality, blurry, deformed, ugly, bad anatomy, watermark, text",

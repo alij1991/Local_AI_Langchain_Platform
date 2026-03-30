@@ -14,18 +14,38 @@ Requires-Dist: langchain-text-splitters>=0.3.8
 Requires-Dist: langgraph>=0.2.74
 Requires-Dist: pydantic>=2.7.0
 Requires-Dist: ollama>=0.4.0
+Requires-Dist: fastapi>=0.115.12
+Requires-Dist: uvicorn>=0.30.6
 Requires-Dist: langchain-huggingface>=0.1.2
 Requires-Dist: transformers>=4.45.0
 Requires-Dist: accelerate>=0.34.0
+Requires-Dist: huggingface-hub[hf_xet]>=0.30.0
+Requires-Dist: safetensors>=0.4.0
+Requires-Dist: diffusers>=0.30.0
+Requires-Dist: Pillow>=10.0.0
+Requires-Dist: pypdf>=5.0.0
+Requires-Dist: aiosqlite>=0.20.0
+Requires-Dist: aiohttp>=3.9.0
+Requires-Dist: tiktoken>=0.7.0
 Requires-Dist: tavily-python>=0.5.0
 Requires-Dist: langchain-tavily>=0.1.5
 Requires-Dist: langchain-mcp-adapters>=0.1.9
-Requires-Dist: fastapi>=0.115.12
-Requires-Dist: uvicorn>=0.30.6
-Requires-Dist: pypdf>=5.0.0
+Requires-Dist: psutil>=5.9.0
+Requires-Dist: py-cpuinfo>=9.0.0
 Provides-Extra: dev
 Requires-Dist: pytest; extra == "dev"
 Requires-Dist: ruff; extra == "dev"
+Provides-Extra: images
+Requires-Dist: tomesd>=0.1.3; extra == "images"
+Requires-Dist: DeepCache>=0.1.1; extra == "images"
+Requires-Dist: controlnet-aux>=0.0.9; extra == "images"
+Requires-Dist: mediapipe==0.10.14; extra == "images"
+Requires-Dist: triton-windows>=3.2.0; sys_platform == "win32" and extra == "images"
+Provides-Extra: openvino
+Requires-Dist: optimum-intel>=1.20.0; extra == "openvino"
+Requires-Dist: openvino>=2024.0.0; extra == "openvino"
+Provides-Extra: all
+Requires-Dist: local-ai-langchain-platform[images,openvino]; extra == "all"
 
 # Local AI LangChain Platform
 
@@ -386,8 +406,51 @@ curl "http://127.0.0.1:8000/models/catalog?provider=ollama&supports_tools=true"
 
 Returned fields include: `id`, `name`, `model_id`, `provider`, capability flags, install status, metadata, and raw provider payload.
 
+Hugging Face local-only mode (default in Flutter Models HF tab):
+```bash
+curl "http://127.0.0.1:8000/models/catalog?provider=huggingface&scope=local"
+```
+This returns only verified local models found in `LOCAL_MODELS_DIR` and local Hugging Face cache locations.
+
+Hugging Face discover mode:
+```bash
+curl "http://127.0.0.1:8000/models/hf/discover?q=phi&task=text-generation&sort=downloads&limit=20"
+```
+
+Download endpoint (explicit action only):
+```bash
+curl -X POST "http://127.0.0.1:8000/models/hf/download" \
+  -H "Content-Type: application/json" \
+  -d '{"model_id":"sentence-transformers/all-MiniLM-L6-v2"}'
+```
+The API returns a `download_id` and processes downloads in the background.
+
+Check progress/status:
+```bash
+curl "http://127.0.0.1:8000/models/hf/downloads"
+curl "http://127.0.0.1:8000/models/hf/downloads/<download_id>"
+```
+
+Downloads are stored under `./models/<model_id with / replaced by -->`.
+
+Metadata quality notes:
+- `size_bytes`, `parameters`, `context_length`, and `quantization` are best-effort (local inspection + inference).
+- Hub fields (`downloads`, `likes`, `library_name`, `license`, `pipeline_tag`) are used when available.
+- `source_url` points to `https://huggingface.co/<model_id>` and is always included for HF entries.
 
 Systems run now returns `run_id` in `POST /systems/{name}/run` so executions appear in Runs/Traces.
+
+
+Discover metadata sources:
+- Hugging Face Hub listing fields (`pipeline_tag`, downloads, likes, tags, library/license).
+- Best-effort size from Hub file metadata (`siblings` size sum) when available.
+- Local on-disk cache/folder inspection fallback for installed models.
+- If size still cannot be resolved, it remains unavailable and is shown as "Size not available yet" in UI.
+
+Download polling behavior:
+- Flutter Models page polls `/models/hf/downloads` only when there are active download jobs.
+- Polling automatically stops when all jobs complete/fail.
+- Idle Models page does not run heartbeat download polling.
 
 
 ## Images generation (Hugging Face)
@@ -395,6 +458,8 @@ Systems run now returns `run_id` in `POST /systems/{name}/run` so executions app
 New endpoints:
 - `GET /images/models`
 - `GET /images/runtime`
+- `POST /images/validate-model`
+- `GET /images/recommendations?model_id=...`
 - `POST /images/sessions`
 - `GET /images/sessions`
 - `GET /images/sessions/{session_id}`
@@ -413,7 +478,9 @@ Key env vars:
 - `HF_IMAGE_ALLOW_AUTO_DOWNLOAD` (default false)
 - `HF_IMAGE_ALLOW_PLACEHOLDER` (default false, dev fallback)
 - `HF_IMAGE_DEVICE` (`auto` | `cuda` | `cpu`)
-- `HF_IMAGE_ALLOW_CPU_FALLBACK` (default true; retry on CPU after CUDA failure)
+- `HF_IMAGE_ALLOW_CPU_FALLBACK` (default true; retry/override to CPU when CUDA is unavailable)
+- `HF_IMAGE_JOB_TIMEOUT_SEC` (default 180; terminates stuck image worker job)
+- `HF_IMAGE_LOW_MEMORY_MODE` (default true; uses conservative loading/generation options for limited hardware)
 - `HF_API_TOKEN` (required for `hf_inference_api` runtime)
 
 For local runtime install:
@@ -423,6 +490,14 @@ pip install diffusers transformers accelerate safetensors huggingface_hub pillow
 
 The service does not silently download large models unless `HF_IMAGE_ALLOW_AUTO_DOWNLOAD=true`.
 
+Diffusers local folder requirements:
+- directory exists under `./models/<name>`
+- must include `model_index.json`
+- should include model weights (`*.safetensors` or `*.bin`)
+
+Troubleshooting:
+- use `POST /images/validate-model` to inspect a selected model folder before generation
+- use `GET /images/runtime` to inspect torch/diffusers/transformers/accelerate versions and device selection
 
 
 ## Local models folder (git-ignored)
@@ -438,3 +513,27 @@ Model discovery supports:
 Refresh endpoints:
 - `POST /images/models/refresh`
 - `POST /models/refresh`
+
+
+### Windows memory troubleshooting (Diffusers)
+- `pagefile_too_small` means Windows virtual memory (paging file) is not large enough to load the selected model.
+- Increase your Windows paging file size, or use a smaller/quantized image model.
+- Prefer CUDA with a CUDA-enabled torch build when available to reduce CPU RAM pressure.
+- Use `POST /images/validate-model` to estimate fit before generating.
+- Use low memory mode (UI toggle / `HF_IMAGE_LOW_MEMORY_MODE=true`) for safer defaults on constrained systems.
+
+
+### GPU-first runtime policy
+- In `auto` mode, the platform attempts CUDA first for Hugging Face text/image runtimes when available.
+- If CUDA is unavailable or fails, the runtime falls back gracefully based on configured fallback/offload flags.
+- Runtime responses include `device_used`, `runtime_strategy`, and fallback metadata for debugging.
+
+### Size formatting behavior
+- API responses keep raw `size_bytes` for programmatic use.
+- UI-facing responses also include `size_human` (MB/GB/TB formatting).
+- If size cannot be determined after Hub/local checks, the UI shows `Size not available yet`.
+
+### Optional CUDA/offload dependencies
+- Core: `torch`, `transformers`, `diffusers`, `accelerate`, `safetensors`, `huggingface_hub`.
+- Optional: `xformers` for memory-efficient attention (when supported by your torch/CUDA build).
+- Use CUDA-enabled PyTorch builds for GPU acceleration.

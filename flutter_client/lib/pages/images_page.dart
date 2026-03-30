@@ -87,7 +87,9 @@ class _ImagesPageState extends State<ImagesPage> with TickerProviderStateMixin {
   bool _enhancingPrompt = false;
   String? _enhancerModel; // null = auto (server picks smallest)
   int _enhancerTimeout = 120;
-  List<String> _ollamaModels = [];
+  List<String> _ollamaModels = [];      // Ollama text models
+  List<String> _hfTextModels = [];       // HF text-generation models
+  List<String> get _allEnhancerModels => [..._ollamaModels, ..._hfTextModels];
 
   // Edit settings
   double _editStrength = 0.65;
@@ -178,10 +180,14 @@ class _ImagesPageState extends State<ImagesPage> with TickerProviderStateMixin {
       final family = (hints?['model_family'] ?? 'sdxl').toString();
 
       debugPrint('[enhance] POSTing to /images/enhance-prompt with family=$family, model=$_enhancerModel, timeout=$_enhancerTimeout');
+      // Determine if model is HF or Ollama
+      final isHf = _enhancerModel != null && _enhancerModel!.startsWith('hf:');
+      final modelName = isHf ? _enhancerModel!.replaceFirst('hf:', '') : _enhancerModel;
       final data = await widget.api.post('/images/enhance-prompt', {
         'prompt': original,
         'model_family': family,
-        if (_enhancerModel != null) 'ollama_model': _enhancerModel,
+        if (modelName != null && !isHf) 'ollama_model': modelName,
+        if (modelName != null && isHf) 'hf_model': modelName,
         'timeout_sec': _enhancerTimeout,
       }) as Map<String, dynamic>;
 
@@ -284,12 +290,57 @@ class _ImagesPageState extends State<ImagesPage> with TickerProviderStateMixin {
   }
 
   Future<void> _fetchOllamaModels() async {
+    // Fetch Ollama models (locally installed)
     try {
       final data = await widget.api.get('/models/ollama') as Map<String, dynamic>;
       if (!mounted) return;
       final items = (data['models'] as List<dynamic>?) ?? [];
       _safeSetState(() {
-        _ollamaModels = items.map((m) => (m['name'] ?? m['model'] ?? '').toString()).where((n) => n.isNotEmpty).toList();
+        _ollamaModels = items
+            .where((m) {
+              final name = (m['name'] ?? m['model'] ?? '').toString().toLowerCase();
+              if (name.contains('embed')) return false;
+              return true;
+            })
+            .map((m) => (m['name'] ?? m['model'] ?? '').toString())
+            .where((n) => n.isNotEmpty)
+            .toList();
+      });
+    } catch (_) {}
+
+    // Fetch ALL available text models from all providers (Ollama + HF + vLLM etc.)
+    try {
+      final data = await widget.api.get('/models/catalog') as Map<String, dynamic>;
+      if (!mounted) return;
+      final items = ((data['items'] as List<dynamic>?) ?? []).cast<Map<String, dynamic>>();
+      final hfModels = <String>[];
+      final extraOllama = <String>[];
+      for (final m in items) {
+        final provider = (m['provider'] ?? '').toString();
+        final task = (m['task'] ?? '').toString().toLowerCase();
+        final name = (m['name'] ?? m['model_id'] ?? '').toString();
+        final nameLower = name.toLowerCase();
+        // Skip embedding/image/audio models
+        if (nameLower.contains('embed') || task.contains('image') || task.contains('audio')) continue;
+        if (name.isEmpty) continue;
+
+        if (provider == 'huggingface') {
+          if (task.contains('text-generation') || task.contains('text2text') || task.isEmpty) {
+            final hfName = 'hf:$name';
+            if (!hfModels.contains(hfName)) hfModels.add(hfName);
+          }
+        } else if (provider == 'ollama') {
+          // Add any Ollama models we might have missed from /models/ollama
+          if (!_ollamaModels.contains(name) && !extraOllama.contains(name)) {
+            extraOllama.add(name);
+          }
+        }
+      }
+      _safeSetState(() {
+        _hfTextModels = hfModels;
+        if (extraOllama.isNotEmpty) {
+          _ollamaModels = [..._ollamaModels, ...extraOllama];
+        }
       });
     } catch (_) {}
   }
@@ -1253,10 +1304,10 @@ class _ImagesPageState extends State<ImagesPage> with TickerProviderStateMixin {
                     ),
                   ),
             const SizedBox(width: 4),
-            // Ollama model picker
+            // LLM model picker (Ollama + HF text models)
             Expanded(
               child: DropdownButtonFormField<String>(
-                value: (_enhancerModel == null || _ollamaModels.contains(_enhancerModel)) ? _enhancerModel : null,
+                value: (_enhancerModel == null || _allEnhancerModels.contains(_enhancerModel)) ? _enhancerModel : null,
                 isExpanded: true,
                 isDense: true,
                 decoration: const InputDecoration(
@@ -1266,9 +1317,23 @@ class _ImagesPageState extends State<ImagesPage> with TickerProviderStateMixin {
                 ),
                 items: [
                   const DropdownMenuItem<String>(value: null, child: Text('Auto (smallest)', style: TextStyle(fontSize: 11))),
-                  ..._ollamaModels.map((m) => DropdownMenuItem(value: m, child: Text(m, style: const TextStyle(fontSize: 11), overflow: TextOverflow.ellipsis))),
+                  if (_ollamaModels.isNotEmpty) ...[
+                    const DropdownMenuItem<String>(enabled: false, value: '__ollama_header__',
+                      child: Text('── Ollama ──', style: TextStyle(fontSize: 10, fontWeight: FontWeight.w600))),
+                    ..._ollamaModels.map((m) => DropdownMenuItem(value: m,
+                      child: Text(m, style: const TextStyle(fontSize: 11), overflow: TextOverflow.ellipsis))),
+                  ],
+                  if (_hfTextModels.isNotEmpty) ...[
+                    const DropdownMenuItem<String>(enabled: false, value: '__hf_header__',
+                      child: Text('── HuggingFace ──', style: TextStyle(fontSize: 10, fontWeight: FontWeight.w600))),
+                    ..._hfTextModels.map((m) => DropdownMenuItem(value: m,
+                      child: Text(m.replaceFirst('hf:', ''), style: const TextStyle(fontSize: 11), overflow: TextOverflow.ellipsis))),
+                  ],
                 ],
-                onChanged: (v) => setState(() => _enhancerModel = v),
+                onChanged: (v) {
+                  if (v == '__ollama_header__' || v == '__hf_header__') return;
+                  setState(() => _enhancerModel = v);
+                },
               ),
             ),
             const SizedBox(width: 4),
@@ -1437,7 +1502,7 @@ class _ImagesPageState extends State<ImagesPage> with TickerProviderStateMixin {
                 SliderTheme(
                   data: SliderThemeData(overlayShape: const RoundSliderOverlayShape(overlayRadius: 14)),
                   child: Slider(
-                    value: _guidance, min: 1.0, max: 12.0, divisions: 22,
+                    value: _guidance, min: 0.0, max: 12.0, divisions: 22,
                     onChanged: _busy ? null : (v) => setState(() => _guidance = v),
                   ),
                 ),

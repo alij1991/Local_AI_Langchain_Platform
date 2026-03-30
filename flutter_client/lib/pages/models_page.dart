@@ -56,7 +56,7 @@ class _ModelsPageState extends State<ModelsPage> with SingleTickerProviderStateM
   Map<String, dynamic>? _selected;
   String _error = '';
   Timer? _searchDebounce;
-  bool _pullingOllama = false;
+  bool _pullingOllama = false; // kept in sync with _pullingModels.isNotEmpty
 
   @override
   void initState() {
@@ -229,6 +229,72 @@ class _ModelsPageState extends State<ModelsPage> with SingleTickerProviderStateM
 
   // ── Data Loading ───────────────────────────────────────────────
 
+  /// Group Ollama models by base name so e.g. qwen3:8b + qwen3:14b become one entry.
+  /// Non-Ollama models pass through unchanged.
+  List<Map<String, dynamic>> _groupOllamaModels(List<Map<String, dynamic>> items) {
+    final List<Map<String, dynamic>> result = [];
+    final Map<String, Map<String, dynamic>> ollamaGroups = {};
+    final Map<String, List<String>> ollamaVariants = {};
+    final Map<String, int> ollamaTotalSize = {};
+
+    for (final m in items) {
+      final provider = (m['provider'] ?? '').toString();
+      if (provider != 'ollama') {
+        result.add(m);
+        continue;
+      }
+
+      final fullName = (m['name'] ?? m['model_id'] ?? '').toString();
+      final parts = fullName.split(':');
+      final baseName = parts[0];
+      final variant = parts.length > 1 ? parts[1] : 'latest';
+
+      if (!ollamaGroups.containsKey(baseName)) {
+        // Use first encountered model as the group representative
+        ollamaGroups[baseName] = Map<String, dynamic>.from(m);
+        ollamaGroups[baseName]!['name'] = baseName;
+        ollamaGroups[baseName]!['display_name'] = baseName;
+        ollamaGroups[baseName]!['model_id'] = baseName;
+        ollamaGroups[baseName]!['id'] = 'ollama:$baseName';
+        ollamaVariants[baseName] = [];
+        ollamaTotalSize[baseName] = 0;
+      }
+
+      ollamaVariants[baseName]!.add(variant);
+      final sizeBytes = m['size_bytes'];
+      if (sizeBytes is int) {
+        ollamaTotalSize[baseName] = ollamaTotalSize[baseName]! + sizeBytes;
+      }
+
+      // Merge capabilities — if any variant has tools/vision, show it
+      if (m['supports_tools'] == true) {
+        ollamaGroups[baseName]!['supports_tools'] = true;
+      }
+      if (m['supports_vision'] == true) {
+        ollamaGroups[baseName]!['supports_vision'] = true;
+      }
+    }
+
+    // Build grouped entries
+    for (final baseName in ollamaGroups.keys) {
+      final group = ollamaGroups[baseName]!;
+      final variants = ollamaVariants[baseName]!;
+      group['variants'] = variants;
+      group['installed_variants'] = variants;  // all are installed (they're local)
+      if (ollamaTotalSize[baseName]! > 0) {
+        group['size_bytes'] = ollamaTotalSize[baseName];
+        group['size_human'] = _formatSize(ollamaTotalSize[baseName]);
+      }
+      // Update description to show variants
+      if (variants.length > 1) {
+        group['description'] = 'Installed: ${variants.join(", ")}';
+      }
+      result.add(group);
+    }
+
+    return result;
+  }
+
   Future<void> _loadLocal() async {
     setState(() => _localLoading = true);
     try {
@@ -241,8 +307,12 @@ class _ModelsPageState extends State<ModelsPage> with SingleTickerProviderStateM
 
       final body = await widget.api.get('/models/catalog?$params') as Map<String, dynamic>;
       if (!mounted) return;
-      final items = ((body['items'] as List<dynamic>?) ?? []).cast<Map<String, dynamic>>();
+      final rawItems = ((body['items'] as List<dynamic>?) ?? []).cast<Map<String, dynamic>>();
       final status = (body['provider_status'] as Map<String, dynamic>?) ?? {};
+
+      // Group Ollama models by base name (e.g. qwen3:8b + qwen3:14b → one entry)
+      final items = _groupOllamaModels(rawItems);
+
       setState(() {
         _localModels = items;
         _providerStatus = status;
@@ -370,6 +440,11 @@ class _ModelsPageState extends State<ModelsPage> with SingleTickerProviderStateM
 
   // ── Actions ────────────────────────────────────────────────────
 
+  // Track which models are currently being pulled and their progress
+  final Map<String, String> _pullingModels = {};  // model_name → progress text
+
+  bool get _anyPulling => _pullingModels.isNotEmpty;
+
   Future<void> _pullOllamaModel([String? modelName]) async {
     String? name = modelName;
     if (name == null || name.isEmpty) {
@@ -406,21 +481,96 @@ class _ModelsPageState extends State<ModelsPage> with SingleTickerProviderStateM
     }
 
     if (name == null || name.trim().isEmpty) return;
+    final pullName = name.trim();
 
-    setState(() => _pullingOllama = true);
+    // Already pulling this model?
+    if (_pullingModels.containsKey(pullName)) return;
+
+    setState(() {
+      _pullingOllama = true;
+      _pullingModels[pullName] = 'Starting...';
+    });
+
     try {
-      await widget.api.post('/models/ollama/pull', {'model_name': name.trim()});
+      // Start the pull (returns immediately — runs in background on server)
+      await widget.api.post('/models/ollama/pull', {'model_name': pullName});
       if (!mounted) return;
-      ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('Pulled: ${name.trim()}')));
-      await _loadLocal();
-      if (_tabCtrl.index == 1) await _loadDiscover();
+
+      // Poll for progress
+      _pollPullProgress(pullName);
     } catch (e) {
       if (!mounted) return;
+      setState(() {
+        _pullingModels.remove(pullName);
+        _pullingOllama = _pullingModels.isNotEmpty;
+      });
       ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('Pull failed: $e')));
-    } finally {
-      if (mounted) setState(() => _pullingOllama = false);
     }
   }
+
+  Future<void> _pollPullProgress(String modelName) async {
+    int unknownCount = 0;
+    while (mounted && _pullingModels.containsKey(modelName)) {
+      await Future.delayed(const Duration(seconds: 2));
+      if (!mounted) return;
+
+      try {
+        final data = await widget.api.get(
+            '/models/ollama/pull/status?model=${Uri.encodeComponent(modelName)}') as Map<String, dynamic>;
+        final status = (data['status'] ?? '').toString();
+        final progress = (data['progress'] ?? '').toString();
+
+        if (status == 'done') {
+          if (!mounted) return;
+          setState(() {
+            _pullingModels.remove(modelName);
+            _pullingOllama = _pullingModels.isNotEmpty;
+          });
+          ScaffoldMessenger.of(context).showSnackBar(
+            SnackBar(content: Text('Pulled: $modelName'), backgroundColor: Colors.green.shade700),
+          );
+          await _loadLocal();
+          if (_tabCtrl.index == 1) await _loadDiscover();
+          return;
+        } else if (status == 'error') {
+          if (!mounted) return;
+          final error = (data['error'] ?? 'Unknown error').toString();
+          setState(() {
+            _pullingModels.remove(modelName);
+            _pullingOllama = _pullingModels.isNotEmpty;
+          });
+          ScaffoldMessenger.of(context).showSnackBar(
+            SnackBar(content: Text('Pull failed: $error')),
+          );
+          return;
+        } else if (status == 'unknown') {
+          unknownCount++;
+          if (unknownCount > 10) {
+            // Server lost track of this pull — stop polling
+            if (!mounted) return;
+            setState(() {
+              _pullingModels.remove(modelName);
+              _pullingOllama = _pullingModels.isNotEmpty;
+            });
+            ScaffoldMessenger.of(context).showSnackBar(
+              SnackBar(content: Text('Pull status lost for $modelName — check server logs')),
+            );
+            return;
+          }
+        } else {
+          unknownCount = 0; // Reset on valid status
+          // Still pulling — update progress
+          if (mounted) {
+            setState(() => _pullingModels[modelName] = progress.isNotEmpty ? progress : 'Downloading...');
+          }
+        }
+      } catch (_) {
+        // Network error during poll — keep trying
+      }
+    }
+  }
+
+  bool _isModelPulling(String modelName) => _pullingModels.containsKey(modelName);
 
   Future<void> _downloadHfModel(String modelId) async {
     if (_isModelDownloading(modelId)) return;
@@ -591,11 +741,11 @@ class _ModelsPageState extends State<ModelsPage> with SingleTickerProviderStateM
               ),
               const Spacer(),
               IconButton(
-                onPressed: _pullingOllama ? null : () => _pullOllamaModel(),
-                icon: _pullingOllama
+                onPressed: () => _pullOllamaModel(),
+                icon: _anyPulling
                     ? const SizedBox(width: 18, height: 18, child: CircularProgressIndicator(strokeWidth: 2))
                     : const Icon(Icons.download),
-                tooltip: 'Pull Ollama model',
+                tooltip: _anyPulling ? 'Pulling ${_pullingModels.length} model(s)...' : 'Pull Ollama model',
               ),
               IconButton(
                 onPressed: _loadLocal,
@@ -826,11 +976,19 @@ class _ModelsPageState extends State<ModelsPage> with SingleTickerProviderStateM
         final m = _ollamaLibrary[i];
         final name = (m['name'] ?? '').toString();
         final desc = (m['description'] ?? '').toString();
-        final params = (m['parameters'] ?? '').toString();
-        final sizeGb = m['size_gb'];
         final installed = m['installed'] == true;
-        final tags = ((m['tags'] as List<dynamic>?) ?? []).cast<String>();
-        final isPulling = _pullingOllama;
+        final tags = ((m['tags'] as List<dynamic>?) ?? []).cast<String>()
+            .where((t) => t != 'trending').toList();
+        final variants = ((m['variants'] as List<dynamic>?) ?? []).cast<String>();
+        final installedVariants = ((m['installed_variants'] as List<dynamic>?) ?? []).cast<String>();
+
+        // Icon based on tags
+        IconData modelIcon = Icons.smart_toy;
+        if (tags.contains('code')) modelIcon = Icons.code;
+        if (tags.contains('vision')) modelIcon = Icons.visibility;
+        if (tags.contains('embedding')) modelIcon = Icons.scatter_plot;
+        if (tags.contains('reasoning')) modelIcon = Icons.psychology;
+        if (tags.contains('tools')) modelIcon = Icons.build_circle;
 
         return Card(
           elevation: 0,
@@ -841,74 +999,135 @@ class _ModelsPageState extends State<ModelsPage> with SingleTickerProviderStateM
             onTap: () => _selectModel(m),
             child: Padding(
               padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
-              child: Row(
-                children: [
-                  // Icon
-                  Container(
-                    width: 40,
-                    height: 40,
-                    decoration: BoxDecoration(
-                      color: installed ? colors.primaryContainer : colors.surfaceContainerHighest,
-                      borderRadius: BorderRadius.circular(10),
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Row(
+                  children: [
+                    // Icon
+                    Container(
+                      width: 40,
+                      height: 40,
+                      decoration: BoxDecoration(
+                        color: installed ? colors.primaryContainer : colors.surfaceContainerHighest,
+                        borderRadius: BorderRadius.circular(10),
+                      ),
+                      child: Icon(modelIcon, size: 20,
+                        color: installed ? colors.onPrimaryContainer : colors.onSurfaceVariant),
                     ),
-                    child: Icon(
-                      Icons.smart_toy,
-                      size: 20,
-                      color: installed ? colors.onPrimaryContainer : colors.onSurfaceVariant,
-                    ),
-                  ),
-                  const SizedBox(width: 12),
-                  // Info
-                  Expanded(
-                    child: Column(
-                      crossAxisAlignment: CrossAxisAlignment.start,
-                      children: [
-                        Row(
-                          children: [
-                            Expanded(
-                              child: Text(name, style: const TextStyle(fontWeight: FontWeight.w500), maxLines: 1, overflow: TextOverflow.ellipsis),
-                            ),
-                            if (installed)
-                              Container(
-                                padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
-                                decoration: BoxDecoration(color: Colors.green.withValues(alpha: 0.15), borderRadius: BorderRadius.circular(4)),
-                                child: const Text('installed', style: TextStyle(fontSize: 10, color: Colors.green, fontWeight: FontWeight.w500)),
+                    const SizedBox(width: 12),
+                    // Name + description
+                    Expanded(
+                      child: Column(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        children: [
+                          Row(
+                            children: [
+                              Expanded(
+                                child: Text(name, style: const TextStyle(fontWeight: FontWeight.w600, fontSize: 14),
+                                    maxLines: 1, overflow: TextOverflow.ellipsis),
                               ),
-                          ],
-                        ),
-                        const SizedBox(height: 2),
-                        Text(desc, style: TextStyle(fontSize: 12, color: colors.onSurfaceVariant), maxLines: 1, overflow: TextOverflow.ellipsis),
-                        const SizedBox(height: 4),
-                        Row(
-                          children: [
-                            _infoChip(params, colors),
-                            if (sizeGb != null) ...[
-                              const SizedBox(width: 4),
-                              _infoChip('$sizeGb GB', colors),
+                              if (installed)
+                                Container(
+                                  padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
+                                  decoration: BoxDecoration(color: Colors.green.withValues(alpha: 0.15), borderRadius: BorderRadius.circular(4)),
+                                  child: Text(
+                                    installedVariants.isNotEmpty ? installedVariants.join(', ') : 'installed',
+                                    style: const TextStyle(fontSize: 10, color: Colors.green, fontWeight: FontWeight.w500),
+                                  ),
+                                ),
                             ],
-                            ...tags.take(2).map((t) => Padding(
-                              padding: const EdgeInsets.only(left: 4),
-                              child: _tagChip(t, colors),
-                            )),
+                          ),
+                          if (desc.isNotEmpty) ...[
+                            const SizedBox(height: 2),
+                            Text(desc, style: TextStyle(fontSize: 12, color: colors.onSurfaceVariant),
+                                maxLines: 1, overflow: TextOverflow.ellipsis),
                           ],
-                        ),
-                      ],
+                        ],
+                      ),
                     ),
+                  ],
+                ),
+                // Tags row
+                if (tags.isNotEmpty) ...[
+                  const SizedBox(height: 6),
+                  Wrap(
+                    spacing: 4,
+                    runSpacing: 2,
+                    children: tags.take(4).map((t) => _tagChip(t, colors)).toList(),
                   ),
-                  const SizedBox(width: 8),
-                  // Action
-                  if (!installed)
-                    FilledButton.tonal(
-                      onPressed: isPulling ? null : () => _pullOllamaModel(name),
-                      child: isPulling
-                          ? const SizedBox(width: 16, height: 16, child: CircularProgressIndicator(strokeWidth: 2))
-                          : const Text('Pull', style: TextStyle(fontSize: 12)),
-                    )
-                  else
-                    Icon(Icons.check_circle, size: 20, color: Colors.green.withValues(alpha: 0.7)),
                 ],
-              ),
+                // Variants row — pull buttons for each size
+                if (variants.isNotEmpty) ...[
+                  const SizedBox(height: 8),
+                  Wrap(
+                    spacing: 6,
+                    runSpacing: 4,
+                    children: variants.map((v) {
+                      final isVariantInstalled = installedVariants.contains(v) ||
+                          (installedVariants.contains('latest') && variants.indexOf(v) == 0);
+                      final fullName = '$name:$v';
+                      final pulling = _isModelPulling(fullName);
+                      final pullProgress = _pullingModels[fullName] ?? '';
+                      return ActionChip(
+                        avatar: pulling
+                            ? const SizedBox(width: 14, height: 14, child: CircularProgressIndicator(strokeWidth: 2))
+                            : isVariantInstalled
+                                ? Icon(Icons.check_circle, size: 16, color: Colors.green.shade600)
+                                : Icon(Icons.download, size: 14, color: colors.primary),
+                        label: Text(
+                          pulling ? '$v $pullProgress' : v,
+                          style: TextStyle(
+                            fontSize: 12,
+                            fontWeight: isVariantInstalled ? FontWeight.w600 : FontWeight.normal,
+                            color: pulling ? colors.primary : isVariantInstalled ? Colors.green.shade700 : colors.onSurface,
+                          ),
+                        ),
+                        backgroundColor: pulling
+                            ? colors.primaryContainer.withValues(alpha: 0.3)
+                            : isVariantInstalled
+                                ? Colors.green.withValues(alpha: 0.08)
+                                : colors.surfaceContainerHighest,
+                        side: BorderSide(
+                          color: pulling ? colors.primary.withValues(alpha: 0.5)
+                              : isVariantInstalled ? Colors.green.withValues(alpha: 0.3) : colors.outlineVariant,
+                          width: 0.5,
+                        ),
+                        visualDensity: VisualDensity.compact,
+                        // Installed chips → select model for details; non-installed → pull
+                        onPressed: pulling
+                            ? null
+                            : isVariantInstalled
+                                ? () => _selectModel(m)
+                                : () => _pullOllamaModel(fullName),
+                      );
+                    }).toList(),
+                  ),
+                ],
+                // If no variants, show a single pull button
+                if (variants.isEmpty && !installed) ...[
+                  const SizedBox(height: 8),
+                  Builder(builder: (_) {
+                    final pulling = _isModelPulling(name);
+                    final pullProgress = _pullingModels[name] ?? '';
+                    return Align(
+                      alignment: Alignment.centerRight,
+                      child: FilledButton.tonal(
+                        onPressed: pulling ? null : () => _pullOllamaModel(name),
+                        child: pulling
+                            ? Row(mainAxisSize: MainAxisSize.min, children: [
+                                const SizedBox(width: 14, height: 14, child: CircularProgressIndicator(strokeWidth: 2)),
+                                const SizedBox(width: 6),
+                                Text(pullProgress, style: const TextStyle(fontSize: 11)),
+                              ])
+                            : const Text('Pull', style: TextStyle(fontSize: 12)),
+                      ),
+                    );
+                  }),
+                ],
+              ],
             ),
+          ),
           ),
         );
       },
@@ -1448,14 +1667,35 @@ class _ModelsPageState extends State<ModelsPage> with SingleTickerProviderStateM
               spacing: 8,
               runSpacing: 8,
               children: [
-                if (isOllamaLibrary)
-                  FilledButton.icon(
-                    onPressed: _pullingOllama ? null : () => _pullOllamaModel(modelId),
-                    icon: _pullingOllama
-                        ? const SizedBox(width: 16, height: 16, child: CircularProgressIndicator(strokeWidth: 2))
-                        : const Icon(Icons.download, size: 16),
-                    label: const Text('Pull Model'),
-                  ),
+                if (isOllamaLibrary) ...[
+                  // Pull buttons for each variant
+                  if ((m['variants'] as List<dynamic>?)?.isNotEmpty == true)
+                    ...((m['variants'] as List<dynamic>).cast<String>().map((v) {
+                      final fullName = '$name:$v';
+                      final isPulling = _isModelPulling(fullName);
+                      final isInstalled = ((m['installed_variants'] as List<dynamic>?) ?? []).contains(v);
+                      return Padding(
+                        padding: const EdgeInsets.only(right: 6, bottom: 4),
+                        child: FilledButton.icon(
+                          onPressed: isPulling || isInstalled ? null : () => _pullOllamaModel(fullName),
+                          icon: isPulling
+                              ? const SizedBox(width: 16, height: 16, child: CircularProgressIndicator(strokeWidth: 2))
+                              : isInstalled
+                                  ? const Icon(Icons.check_circle, size: 16)
+                                  : const Icon(Icons.download, size: 16),
+                          label: Text(isPulling ? '$v ${_pullingModels[fullName] ?? ""}' : isInstalled ? '$v (installed)' : 'Pull $v'),
+                        ),
+                      );
+                    }))
+                  else
+                    FilledButton.icon(
+                      onPressed: _isModelPulling(name) ? null : () => _pullOllamaModel(name),
+                      icon: _isModelPulling(name)
+                          ? const SizedBox(width: 16, height: 16, child: CircularProgressIndicator(strokeWidth: 2))
+                          : const Icon(Icons.download, size: 16),
+                      label: Text(_isModelPulling(name) ? 'Pulling... ${_pullingModels[name] ?? ""}' : 'Pull Model'),
+                    ),
+                ],
                 if (isHfDiscover)
                   FilledButton.icon(
                     onPressed: _isModelDownloading(modelId) ? null : () => _downloadHfModel(modelId),
