@@ -669,6 +669,56 @@ def _quality_profile_defaults(profile: str) -> dict[str, Any]:
     return {"width": 768, "height": 768, "steps": 20, "guidance_scale": 7.0, "refine": False, "upscale": False, "postprocess": False}
 
 
+def _detect_component_base_model(model_id: str) -> str:
+    """Guess which base model family a component (ControlNet, VAE, LoRA) targets.
+
+    Uses naming conventions common across HuggingFace repos:
+      - "xl", "sdxl"  → sdxl
+      - "flux"         → flux
+      - "sd3"          → sd3
+      - "sd15", "sd-1", "v1-5", "1.5" → sd15
+      - "sd2", "v2"    → sd2
+    Falls back to "unknown" if no pattern matches.
+    """
+    low = model_id.lower().replace("/", " ").replace("-", " ").replace("_", " ")
+    # Order matters: check more specific patterns first
+    if any(k in low for k in ["flux"]):
+        return "flux"
+    if any(k in low for k in ["sd3", "stable diffusion 3"]):
+        return "sd3"
+    if any(k in low for k in ["sdxl", "sd xl", "stable diffusion xl"]):
+        return "sdxl"
+    if any(k in low for k in ["xl"]):
+        # "xl" alone is likely SDXL (e.g. "controlnet-canny-xl")
+        return "sdxl"
+    if any(k in low for k in ["sd2", "v2 1", "2.1"]):
+        return "sd2"
+    if any(k in low for k in ["sd15", "sd 1", "v1 5", "1.5", "sd1"]):
+        return "sd15"
+    # If none matched, try reading config from HF cache snapshot
+    try:
+        hf_root = Path(os.getenv("HF_HOME") or (Path.home() / ".cache" / "huggingface"))
+        repo_dir = hf_root / "hub" / f"models--{model_id.replace('/', '--')}" / "snapshots"
+        if repo_dir.exists():
+            snaps = sorted([s for s in repo_dir.iterdir() if s.is_dir()],
+                           key=lambda p: p.stat().st_mtime, reverse=True)
+            if snaps:
+                cfg_path = snaps[0] / "config.json"
+                if cfg_path.exists():
+                    cfg = json.loads(cfg_path.read_text(encoding="utf-8"))
+                    cross_attn = cfg.get("cross_attention_dim")
+                    if cross_attn:
+                        if cross_attn >= 2048:
+                            return "sdxl"
+                        elif cross_attn == 1024:
+                            return "sd2"
+                        elif cross_attn == 768:
+                            return "sd15"
+    except Exception:
+        pass
+    return "unknown"
+
+
 def _detect_model_hints(model_path: str | Path) -> dict[str, Any]:
     """Detect the model architecture and return optimal parameter hints.
 
@@ -688,6 +738,10 @@ def _detect_model_hints(model_path: str | Path) -> dict[str, Any]:
         "recommended_height": 768,
         "recommended_negative_prompt": "blurry, low quality, distorted, deformed",
         "recommended_scheduler": None,  # None = keep model default; set per-family below
+        "recommended_clip_skip": 0,  # 0 = no skip; 1-2 for anime/stylized models
+        "recommended_hires_fix": False,  # True = 2-pass generation recommended
+        "recommended_hires_denoise": 0.55,  # Only used if hires_fix is True
+        "recommended_quality_profile": "balanced",
         "preferred_dtype": None,  # None = use auto-detection
         "needs_cpu_offload_8gb": False,  # True = model won't fit in 8GB VRAM without offload
         "notes": [],
@@ -726,6 +780,13 @@ def _detect_model_hints(model_path: str | Path) -> dict[str, Any]:
 
     # ── Detect model family from pipeline + scheduler + text encoder ──
 
+    # ── Detect model family from pipeline + scheduler + text encoder ──
+    # Additional name-based detection for anime/stylized models
+    _is_anime = any(k in path_str_lower for k in (
+        "anime", "anything", "waifu", "nai", "novelai", "pastel", "counterfeit",
+        "abyssorange", "meinamix", "ghostmix", "dreamshaper", "deliberate",
+    ))
+
     # Z-Image / Tongyi DiT models
     if "ZImage" in pipeline_class or "ZImage" in str(index_data):
         hints.update({
@@ -737,13 +798,18 @@ def _detect_model_hints(model_path: str | Path) -> dict[str, Any]:
             "recommended_height": 1024,
             "preferred_dtype": "bfloat16",
             "recommended_negative_prompt": "",
-            "recommended_scheduler": "euler",  # FlowMatch Euler — native for Z-Image
-            "needs_cpu_offload_8gb": True,  # ~12GB unquantized
+            "recommended_scheduler": "euler",
+            "recommended_clip_skip": 0,
+            "recommended_hires_fix": False,
+            "recommended_quality_profile": "balanced",
+            "needs_cpu_offload_8gb": True,
             "notes": [
-                "Z-Image Turbo: use guidance_scale=0.0 (distilled model, CFG must be off)",
-                "9 steps produces 8 NFEs — optimal for this model",
-                "Requires bfloat16 — float16 will produce NaN/black images",
-                "Best at 1024x1024 resolution",
+                "Z-Image: guidance_scale MUST be 0.0 (distilled model, CFG breaks output)",
+                "9 steps = optimal (8 NFEs). More steps won't improve quality.",
+                "Requires bfloat16 — float16 produces NaN/black images",
+                "Best at 1024x1024. Supports 512-2048px range.",
+                "Negative prompts have NO effect (no classifier-free guidance)",
+                "Fastest high-quality model — ideal for rapid iteration",
             ],
         })
 
@@ -759,13 +825,26 @@ def _detect_model_hints(model_path: str | Path) -> dict[str, Any]:
             "recommended_height": 1024,
             "preferred_dtype": "bfloat16",
             "recommended_negative_prompt": "",
-            "recommended_scheduler": "euler",  # FlowMatch Euler — native for Flux
-            "needs_cpu_offload_8gb": True,  # ~16GB unquantized
-            "notes": [
-                f"Flux {'Schnell' if is_schnell else 'Dev'}: {'no CFG needed (guidance=0)' if is_schnell else 'use low guidance (3.5)'}",
-                "Requires bfloat16 for stable inference",
-                "Best at 1024x1024 or 1024x768",
-            ] + (["Schnell: only 4 steps needed (distilled)"] if is_schnell else []),
+            "recommended_scheduler": "euler",
+            "recommended_clip_skip": 0,
+            "recommended_hires_fix": False,  # Flux handles high-res natively
+            "recommended_quality_profile": "balanced",
+            "needs_cpu_offload_8gb": True,
+            "notes": ([
+                "Flux Schnell: guidance MUST be 0.0 (distilled, no CFG)",
+                "4 steps only — more steps won't help and waste time",
+                "Negative prompts have NO effect",
+                "Fastest Flux variant — great for drafts and iteration",
+            ] if is_schnell else [
+                "Flux Dev: use guidance 3.0-4.0 (sweet spot is 3.5)",
+                "28 steps for best quality, 20 steps for good speed/quality balance",
+                "Supports long, detailed prompts (T5-XXL encoder)",
+                "No negative prompt support — describe what you WANT instead",
+            ]) + [
+                "Requires bfloat16 — float16 causes NaN",
+                "Best at 1024x1024. Also good at 1024x768, 768x1024",
+                "~12GB VRAM (Dev), ~4GB (Schnell) in bfloat16",
+            ],
         })
 
     # SDXL Turbo / Lightning / LCM (distilled SDXL)
@@ -780,29 +859,41 @@ def _detect_model_hints(model_path: str | Path) -> dict[str, Any]:
                 "recommended_width": 1024,
                 "recommended_height": 1024,
                 "recommended_negative_prompt": "",
-                "recommended_scheduler": "euler",  # Euler works best for distilled SDXL
-                "needs_cpu_offload_8gb": True,  # SDXL UNet ~4.8GB + activations > 8GB
+                "recommended_scheduler": "euler",
+                "recommended_clip_skip": 0,
+                "recommended_hires_fix": False,
+                "recommended_quality_profile": "performance",
+                "needs_cpu_offload_8gb": True,
                 "notes": [
-                    "SDXL Turbo/Lightning: use guidance_scale=0.0 and 1-4 steps",
-                    "Negative prompts have no effect (CFG disabled)",
-                    "Best at 1024x1024",
+                    "SDXL Turbo/Lightning: guidance MUST be 0.0 and use 1-4 steps",
+                    "Negative prompts have NO effect (CFG disabled)",
+                    "Best at 1024x1024 or 512x512 (Turbo)",
+                    "Fastest SDXL variant — ideal for quick previews",
+                    "~5GB VRAM in float16",
                 ],
             })
         else:
             hints.update({
                 "model_family": "sdxl",
                 "model_variant": "base",
-                "recommended_guidance_scale": 5.0,
+                "recommended_guidance_scale": 5.5,
                 "recommended_steps": 25,
                 "recommended_width": 1024,
                 "recommended_height": 1024,
-                "recommended_negative_prompt": "blurry, low quality, distorted, deformed, ugly, bad anatomy",
-                "recommended_scheduler": "dpmpp_2m_sde_karras",  # Best quality for SDXL at 20-30 steps
-                "needs_cpu_offload_8gb": True,  # SDXL UNet ~4.8GB + VAE + text encoders > 8GB
+                "recommended_negative_prompt": "blurry, low quality, distorted, deformed, ugly, bad anatomy, watermark, text",
+                "recommended_scheduler": "dpmpp_2m_sde_karras",
+                "recommended_clip_skip": 0,
+                "recommended_hires_fix": False,  # SDXL handles 1024 natively
+                "recommended_quality_profile": "balanced",
+                "needs_cpu_offload_8gb": True,
                 "notes": [
-                    "SDXL: use guidance_scale 5.0-7.0",
-                    "Best at 1024x1024 (trained at this resolution)",
-                    "Needs ~6.5 GB VRAM in float16/bfloat16",
+                    "SDXL: best guidance range is 5.0-7.0 (5.5 sweet spot)",
+                    "25-30 steps for quality, 20 steps for speed",
+                    "DPM++ 2M SDE Karras is the best sampler for SDXL",
+                    "Best at 1024x1024 (trained resolution). Also: 1024x768, 768x1024",
+                    "Going below 768px significantly degrades quality",
+                    "~6.5GB VRAM in float16. Needs CPU offload on 8GB cards.",
+                    "Use negative prompt to avoid common artifacts",
                 ],
             })
 
@@ -816,52 +907,102 @@ def _detect_model_hints(model_path: str | Path) -> dict[str, Any]:
             "recommended_steps": 4,
             "recommended_width": 512,
             "recommended_height": 512,
-            "preferred_dtype": "float16",  # SD 1.5 trained in fp16, NOT bf16
+            "preferred_dtype": "float16",
             "recommended_negative_prompt": "",
             "recommended_scheduler": "lcm" if "lcm" in path_str_lower else "euler",
+            "recommended_clip_skip": 0,
+            "recommended_hires_fix": False,
+            "recommended_quality_profile": "performance",
             "notes": [
-                "SD 1.5 Turbo/LCM: use guidance_scale=1.0 and 4-8 steps",
+                "SD 1.5 Turbo/LCM: guidance 0.0-1.0, only 4-8 steps needed",
+                "LCM models: use LCM sampler specifically",
                 "Best at 512x512 (trained resolution)",
+                "~2GB VRAM — runs on almost any GPU",
             ],
         })
 
     # Standard SD 1.x / 2.x
     elif "StableDiffusion" in pipeline_class or "stable-diffusion" in path_str_lower:
         is_v2 = "2" in path_str_lower or "v2" in path_str_lower
-        hints.update({
-            "model_family": "sd2" if is_v2 else "sd15",
-            "model_variant": "base",
-            "recommended_guidance_scale": 7.5,
-            "recommended_steps": 25,
-            "recommended_width": 768 if is_v2 else 512,
-            "recommended_height": 768 if is_v2 else 512,
-            "preferred_dtype": "float16",  # SD 1.5/2.x trained in fp16, NOT bf16
-            "recommended_negative_prompt": "blurry, low quality, distorted, deformed, ugly, bad anatomy, worst quality",
-            "recommended_scheduler": "dpmpp_2m_sde_karras",  # Best quality/speed for SD 1.5/2.x
-            "notes": [
-                f"SD {'2.x' if is_v2 else '1.5'}: use guidance_scale 7.0-8.5",
-                f"Best at {'768x768' if is_v2 else '512x512'} (trained resolution)",
-                f"~{'5' if is_v2 else '4'} GB VRAM in float16",
-                "Higher resolution possible but may reduce quality without img2img upscaling",
-            ],
-        })
+        if is_v2:
+            hints.update({
+                "model_family": "sd2",
+                "model_variant": "base",
+                "recommended_guidance_scale": 7.5,
+                "recommended_steps": 25,
+                "recommended_width": 768,
+                "recommended_height": 768,
+                "preferred_dtype": "float16",
+                "recommended_negative_prompt": "blurry, low quality, distorted, deformed, ugly, bad anatomy, worst quality, lowres",
+                "recommended_scheduler": "dpmpp_2m_sde_karras",
+                "recommended_clip_skip": 0,
+                "recommended_hires_fix": True,  # SD2 at 768 benefits from hires fix for detail
+                "recommended_hires_denoise": 0.55,
+                "recommended_quality_profile": "balanced",
+                "notes": [
+                    "SD 2.x: guidance 7.0-9.0 works best (7.5 sweet spot)",
+                    "Best at 768x768 (trained resolution)",
+                    "Hires fix recommended for sharper detail at 768px+",
+                    "~5GB VRAM in float16",
+                    "Use negative prompt — it significantly improves SD2 output",
+                ],
+            })
+        else:
+            hints.update({
+                "model_family": "sd15",
+                "model_variant": "base",
+                "recommended_guidance_scale": 7.5 if not _is_anime else 8.0,
+                "recommended_steps": 25 if not _is_anime else 28,
+                "recommended_width": 512,
+                "recommended_height": 512,
+                "preferred_dtype": "float16",
+                "recommended_negative_prompt": (
+                    "blurry, low quality, distorted, deformed, ugly, bad anatomy, worst quality, lowres, watermark"
+                    if not _is_anime else
+                    "lowres, bad anatomy, bad hands, text, error, missing fingers, extra digit, fewer digits, cropped, worst quality, low quality, jpeg artifacts"
+                ),
+                "recommended_scheduler": "dpmpp_2m_sde_karras",
+                "recommended_clip_skip": 2 if _is_anime else 0,
+                "recommended_hires_fix": True,  # SD1.5 at 512 almost always benefits
+                "recommended_hires_denoise": 0.50 if _is_anime else 0.55,
+                "recommended_quality_profile": "balanced",
+                "notes": [
+                    f"SD 1.5{' (anime/stylized)' if _is_anime else ''}: guidance 7.0-9.0 (7.5 default)",
+                    "Best at 512x512 (trained resolution)",
+                    "Hires fix strongly recommended — generates at 512 then upscales for detail",
+                    "DPM++ 2M SDE Karras is the best sampler at 20-30 steps",
+                    "~4GB VRAM in float16 — lightweight, fast, huge model ecosystem",
+                ] + ([
+                    "Anime model detected: CLIP skip=2 recommended for this style",
+                    "Anime negative prompt pre-applied for better output quality",
+                ] if _is_anime else [
+                    "Use detailed negative prompts to avoid common artifacts",
+                ]),
+            })
 
     # Pixart / DiT-based models
     elif "PixArt" in pipeline_class or "pixart" in path_str_lower:
+        is_sigma = "sigma" in path_str_lower
         hints.update({
             "model_family": "pixart",
-            "model_variant": "alpha",
+            "model_variant": "sigma" if is_sigma else "alpha",
             "recommended_guidance_scale": 4.5,
             "recommended_steps": 20,
             "recommended_width": 1024,
             "recommended_height": 1024,
             "preferred_dtype": "bfloat16",
             "recommended_scheduler": "dpmpp_2m_sde_karras",
-            "needs_cpu_offload_8gb": True,  # PixArt transformer ~6GB + text encoder
+            "recommended_clip_skip": 0,
+            "recommended_hires_fix": False,
+            "recommended_quality_profile": "balanced",
+            "needs_cpu_offload_8gb": True,
             "notes": [
-                "PixArt: use guidance_scale 4.0-5.0",
+                f"PixArt {'Sigma' if is_sigma else 'Alpha'}: guidance 4.0-5.0 (4.5 sweet spot)",
+                "20 steps is optimal — more steps have minimal benefit",
                 "Prefers bfloat16 for numerical stability",
-                "Best at 1024x1024",
+                "Best at 1024x1024. Supports various aspect ratios.",
+                "~6GB VRAM in bfloat16",
+                "T5 text encoder understands long, detailed prompts well",
             ],
         })
 
@@ -874,8 +1015,13 @@ def _detect_model_hints(model_path: str | Path) -> dict[str, Any]:
             "recommended_steps": 25,
             "recommended_width": 768,
             "recommended_height": 768,
+            "recommended_scheduler": "dpmpp_2m_sde_karras",
+            "recommended_clip_skip": 0,
+            "recommended_hires_fix": False,
+            "recommended_quality_profile": "balanced",
             "notes": [
-                "Kandinsky: use guidance_scale 3.0-5.0",
+                "Kandinsky: guidance 3.0-5.0 (4.0 sweet spot)",
+                "Two-stage pipeline: prior + decoder",
                 "Best at 768x768",
             ],
         })
@@ -889,11 +1035,16 @@ def _detect_model_hints(model_path: str | Path) -> dict[str, Any]:
             "recommended_steps": 20,
             "recommended_width": 1024,
             "recommended_height": 1024,
-            "recommended_scheduler": "euler",  # FlowMatch models use Euler
+            "recommended_scheduler": "euler",
+            "recommended_clip_skip": 0,
+            "recommended_hires_fix": False,
+            "recommended_quality_profile": "balanced",
             "needs_cpu_offload_8gb": True,
             "notes": [
-                "Flow-matching model detected: likely needs bfloat16",
-                "Try guidance_scale 0.0-3.5 depending on distillation",
+                "Flow-matching DiT model: requires bfloat16",
+                "Euler sampler is optimal for flow-matching architectures",
+                "Try guidance 0.0-3.5 depending on whether model is distilled",
+                "If output is blurry/noisy, try guidance=0.0 (may be a distilled model)",
             ],
         })
 
@@ -907,11 +1058,15 @@ def _detect_model_hints(model_path: str | Path) -> dict[str, Any]:
             "recommended_width": 1024,
             "recommended_height": 1024,
             "recommended_scheduler": "euler",
+            "recommended_clip_skip": 0,
+            "recommended_hires_fix": False,
+            "recommended_quality_profile": "balanced",
             "needs_cpu_offload_8gb": True,
             "notes": [
-                "Qwen-based text encoder detected — likely a DiT turbo model",
-                "Requires bfloat16 — float16 causes NaN",
-                "Try guidance_scale=0.0 (distilled models)",
+                "Qwen text encoder detected — likely a distilled DiT model",
+                "guidance_scale MUST be 0.0 (distilled, no CFG)",
+                "9 steps optimal. Requires bfloat16.",
+                "Negative prompts have no effect",
             ],
         })
 
@@ -2963,7 +3118,7 @@ class ImageGenerationService:
         return repo_dir if repo_dir.exists() else None
 
     @staticmethod
-    def _dir_size(path: Path) -> int:
+    def _dir_size(path: Path | None) -> int | None:
         """Calculate total unique file size, correctly handling HF cache structure.
 
         HuggingFace cache layout:
@@ -2975,13 +3130,23 @@ class ImageGenerationService:
         Naively scanning the whole repo directory double-counts because both
         blobs/ and snapshots/ reference the same data.  When we detect an HF
         repo root (has a blobs/ subdirectory), we only sum the blobs.
+
+        On Windows without Developer Mode, snapshots may contain full copies
+        instead of symlinks.  In that case ``stat()`` on the copy returns its
+        own size (same value), so counting blobs-only is still correct —
+        we report the *unique* data size, not total disk footprint.
         """
-        blobs_dir = path / "blobs"
-        if blobs_dir.is_dir():
-            # HF cache repo root – count blobs only to avoid double-counting
-            return sum(p.stat().st_size for p in blobs_dir.rglob("*") if p.is_file())
-        # Snapshot dir or regular directory – count everything
-        return sum(p.stat().st_size for p in path.rglob("*") if p.is_file())
+        if path is None or not path.exists():
+            return None
+        try:
+            blobs_dir = path / "blobs"
+            if blobs_dir.is_dir():
+                # HF cache repo root – count blobs only to avoid double-counting
+                return sum(p.stat().st_size for p in blobs_dir.rglob("*") if p.is_file())
+            # Snapshot dir or regular directory – count everything
+            return sum(p.stat().st_size for p in path.rglob("*") if p.is_file())
+        except (PermissionError, OSError):
+            return None
 
     # ── GGUF model helpers ────────────────────────────────────────
 
@@ -3035,6 +3200,7 @@ class ImageGenerationService:
                     "path": str(f),
                     "size_bytes": f.stat().st_size,
                     "size_human": format_bytes_human(f.stat().st_size),
+                    "base_model": _detect_component_base_model(lora_id),
                 })
 
         # 2. Scan HF cache for LoRA repos (they typically have adapter_config.json)
@@ -3063,6 +3229,17 @@ class ImageGenerationService:
                     if (snap / "adapter_config.json").exists():
                         seen.add(model_id)
                         size = self._dir_size(d)
+                        # Try to read base_model from adapter_config
+                        _lora_base = "unknown"
+                        try:
+                            _acfg = json.loads((snap / "adapter_config.json").read_text(encoding="utf-8"))
+                            _lora_base = _acfg.get("base_model_name_or_path", "") or ""
+                            if _lora_base:
+                                _lora_base = _detect_component_base_model(_lora_base)
+                            else:
+                                _lora_base = _detect_component_base_model(model_id)
+                        except Exception:
+                            _lora_base = _detect_component_base_model(model_id)
                         loras.append({
                             "id": model_id,
                             "name": model_id.split("/")[-1] if "/" in model_id else model_id,
@@ -3070,6 +3247,7 @@ class ImageGenerationService:
                             "path": str(snap),
                             "size_bytes": size,
                             "size_human": format_bytes_human(size),
+                            "base_model": _lora_base,
                         })
                     else:
                         # Also check for standalone .safetensors LoRA files (no adapter_config)
@@ -3085,6 +3263,7 @@ class ImageGenerationService:
                                 "size_bytes": size,
                                 "size_human": format_bytes_human(size),
                                 "weight_files": [f.name for f in st_files],
+                                "base_model": _detect_component_base_model(model_id),
                             })
         except Exception:
             pass
@@ -4195,7 +4374,7 @@ class ImageGenerationService:
                 folder_size = self._dir_size(_vrepo) if _vrepo else self._dir_size(cache)
                 result["folder_size_bytes"] = folder_size
                 result["folder_size_human"] = format_bytes_human(folder_size)
-                est = _estimate_memory_requirements(folder_size, device_candidate)
+                est = _estimate_memory_requirements(folder_size or 0, device_candidate)
                 result.update(est)
                 result["estimated_ram_required_human"] = format_bytes_human(est.get("estimated_ram_required_bytes"))
                 result["estimated_vram_required_human"] = format_bytes_human(est.get("estimated_vram_required_bytes"))
@@ -4228,7 +4407,7 @@ class ImageGenerationService:
         folder_size = self._dir_size(path) if path.exists() else 0
         result["folder_size_bytes"] = folder_size
         result["folder_size_human"] = format_bytes_human(folder_size)
-        est = _estimate_memory_requirements(folder_size, device_candidate)
+        est = _estimate_memory_requirements(folder_size or 0, device_candidate)
         result.update(est)
         result["estimated_ram_required_human"] = format_bytes_human(est.get("estimated_ram_required_bytes"))
         result["estimated_vram_required_human"] = format_bytes_human(est.get("estimated_vram_required_bytes"))
@@ -4284,6 +4463,11 @@ class ImageGenerationService:
             "recommended_steps": int(hints.get("recommended_steps") or plan.get("recommended_steps") or 20),
             "recommended_guidance_scale": float(_g if _g is not None else 7.0),
             "recommended_negative_prompt": hints.get("recommended_negative_prompt") if hints.get("recommended_negative_prompt") is not None else "",
+            "recommended_scheduler": hints.get("recommended_scheduler"),
+            "recommended_clip_skip": int(hints.get("recommended_clip_skip") or 0),
+            "recommended_hires_fix": bool(hints.get("recommended_hires_fix", False)),
+            "recommended_hires_denoise": float(hints.get("recommended_hires_denoise") or 0.55),
+            "recommended_quality_profile": hints.get("recommended_quality_profile") or "balanced",
             "model_family": hints.get("model_family") or "unknown",
             "model_variant": hints.get("model_variant"),
             "notes": hints.get("notes") or [],
@@ -4354,9 +4538,24 @@ class ImageGenerationService:
             }
             if is_standalone:
                 entry["supported_features"] = {"text2img": True, "img2img": True, "inpaint": False}
+                # Enrich with model family hints for categorization
+                try:
+                    hints = _detect_model_hints(snapshot)
+                    entry["model_family"] = hints.get("model_family", "unknown")
+                    entry["model_variant"] = hints.get("model_variant")
+                except Exception:
+                    entry["model_family"] = "unknown"
+                    entry["model_variant"] = None
+                entry["category"] = "pipeline"
                 image_models.append(entry)
-            # Skip component models (ControlNet, VAE, etc.) — they clutter the model list
-            # and can't be used for generation directly.
+            elif is_component:
+                # Include component models with category for UI grouping
+                entry["is_component"] = True
+                entry["category"] = det.get("model_type", "component")  # "controlnet", "vae", "t2i_adapter", "diffusers_component"
+                # Detect which base model this component is for
+                _base = _detect_component_base_model(model_id)
+                entry["base_model"] = _base
+                image_models.append(entry)
 
         return image_models
 
@@ -4370,6 +4569,16 @@ class ImageGenerationService:
             if cache:
                 _repo_root = self._hf_repo_root(model_id)
                 _repo_size = self._dir_size(_repo_root) if _repo_root else self._dir_size(cache)
+            # Detect model family for configured models
+            _cfg_family = "unknown"
+            _cfg_variant = None
+            if cache:
+                try:
+                    _cfg_hints = _detect_model_hints(cache)
+                    _cfg_family = _cfg_hints.get("model_family", "unknown")
+                    _cfg_variant = _cfg_hints.get("model_variant")
+                except Exception:
+                    pass
             configured_items.append(
                 {
                     "provider": "huggingface",
@@ -4382,6 +4591,10 @@ class ImageGenerationService:
                     "runtime": self.config.hf_image_runtime,
                     "size_bytes": _repo_size,
                     "size_human": format_bytes_human(_repo_size),
+                    "category": "pipeline",
+                    "model_family": _cfg_family,
+                    "model_variant": _cfg_variant,
+                    "loadable_for_images": True,
                 }
             )
 
@@ -4892,7 +5105,7 @@ class ImageGenerationService:
                         try:
                             _vae_p = next(_vae_ref.parameters(), None)
                             if _vae_p is not None and _vae_p.device != _in_dev:
-                                logger.warning("[IMG] VAE on %s but latents on %s — moving VAE", _vae_p.device, _in_dev)
+                                logger.info("[IMG] VAE on %s but latents on %s — moving VAE to match", _vae_p.device, _in_dev)
                                 _vae_ref.to(_in_dev)
                         except Exception:
                             pass
@@ -5498,6 +5711,62 @@ class ImageGenerationService:
             if ep.get("use_model_cpu_offload"):
                 _log_stage("model_cpu_offload")
 
+            # ── CLIP Skip (Feature 1.3) ──
+            _clip_skip = int(ep.get("clip_skip", 0))
+            if _clip_skip > 0 and not _two_stage_active:
+                try:
+                    _te = getattr(pipe, "text_encoder", None)
+                    if _te and hasattr(_te, "text_model") and hasattr(_te.text_model, "encoder"):
+                        _layers = _te.text_model.encoder.layers
+                        _max_layers = len(_layers)
+                        if 0 < _clip_skip < _max_layers:
+                            _te.text_model.encoder.layers = _layers[:_max_layers - _clip_skip]
+                            logger.info("[IMG] CLIP skip applied: removed last %d of %d layers", _clip_skip, _max_layers)
+                            _log_stage("clip_skip", layers_removed=_clip_skip, total_layers=_max_layers)
+                        else:
+                            logger.info("[IMG] CLIP skip=%d out of range (max=%d), ignoring", _clip_skip, _max_layers)
+                except Exception as _cs_err:
+                    logger.warning("[IMG] CLIP skip failed: %s", _cs_err)
+
+            # ── Prompt Weighting via compel (Feature 1.4) ──
+            _use_compel = bool(ep.get("prompt_weighting", False)) and not _two_stage_active
+            _compel_embeds: dict[str, Any] = {}
+            if _use_compel and prompt and ("(" in prompt or "+" in prompt or "-" in prompt):
+                try:
+                    from compel import Compel, ReturnedEmbeddingsType
+                    _ip_family = str(ep.get("model_hints", {}).get("model_family", "")).lower()
+                    if _ip_family in ("sdxl",) and hasattr(pipe, "tokenizer_2"):
+                        compel_proc = Compel(
+                            tokenizer=[pipe.tokenizer, pipe.tokenizer_2],
+                            text_encoder=[pipe.text_encoder, pipe.text_encoder_2],
+                            returned_embeddings_type=ReturnedEmbeddingsType.PENULTIMATE_HIDDEN_STATES_NON_NORMALIZED,
+                            requires_pooled=[False, True],
+                        )
+                        conditioning, pooled = compel_proc.build_conditioning_tensor(prompt)
+                        _compel_embeds["prompt_embeds"] = conditioning
+                        _compel_embeds["pooled_prompt_embeds"] = pooled
+                        if negative_prompt:
+                            neg_cond, neg_pooled = compel_proc.build_conditioning_tensor(negative_prompt)
+                            _compel_embeds["negative_prompt_embeds"] = neg_cond
+                            _compel_embeds["negative_pooled_prompt_embeds"] = neg_pooled
+                    elif _ip_family not in ("flux", "z-image", "sd3"):
+                        compel_proc = Compel(
+                            tokenizer=pipe.tokenizer,
+                            text_encoder=pipe.text_encoder,
+                        )
+                        conditioning = compel_proc.build_conditioning_tensor(prompt)
+                        _compel_embeds["prompt_embeds"] = conditioning
+                        if negative_prompt:
+                            _compel_embeds["negative_prompt_embeds"] = compel_proc.build_conditioning_tensor(negative_prompt)
+                    if _compel_embeds:
+                        logger.info("[IMG] Prompt weighting (compel) applied for %s", _ip_family or "sd15")
+                        _log_stage("prompt_weighting", family=_ip_family)
+                except ImportError:
+                    logger.info("[IMG] compel not installed, prompt weighting skipped (pip install compel)")
+                except Exception as _cw_err:
+                    logger.warning("[IMG] Prompt weighting failed: %s", _cw_err)
+                    _compel_embeds = {}
+
             # Generator for reproducible seeds.
             # Use CUDA generator when model is fully on GPU (faster RNG),
             # CPU generator when model uses CPU offload or group offloading
@@ -5623,6 +5892,9 @@ class ImageGenerationService:
             # _pre_encoded is populated by the two-stage loading above
             # (text encoders loaded separately, prompt encoded, then freed
             # before the main pipeline was loaded).
+            # _compel_embeds is populated by prompt weighting (Feature 1.4).
+            # Priority: _pre_encoded (two-stage) > _compel_embeds > raw prompt.
+            _effective_embeds = _pre_encoded or _compel_embeds or {}
 
             inf_start = time.time()
             if mode == "inpaint" and init_image_path and mask_image_path:
@@ -5643,8 +5915,8 @@ class ImageGenerationService:
                     "generator": generator,
                     "callback_on_step_end": _step_cb,
                 }
-                if _pre_encoded:
-                    _inpaint_kwargs.update(_pre_encoded)
+                if _effective_embeds:
+                    _inpaint_kwargs.update(_effective_embeds)
                 else:
                     _inpaint_kwargs["prompt"] = prompt
                     _inpaint_kwargs["negative_prompt"] = _ip_neg
@@ -5660,8 +5932,8 @@ class ImageGenerationService:
                     "generator": generator,
                     "callback_on_step_end": _step_cb,
                 }
-                if _pre_encoded:
-                    _i2i_kwargs.update(_pre_encoded)
+                if _effective_embeds:
+                    _i2i_kwargs.update(_effective_embeds)
                 else:
                     _i2i_kwargs["prompt"] = prompt
                     _i2i_kwargs["negative_prompt"] = _ip_neg
@@ -5675,8 +5947,8 @@ class ImageGenerationService:
                     "generator": generator,
                     "callback_on_step_end": _step_cb,
                 }
-                if _pre_encoded:
-                    _t2i_kwargs.update(_pre_encoded)
+                if _effective_embeds:
+                    _t2i_kwargs.update(_effective_embeds)
                 else:
                     _t2i_kwargs["prompt"] = prompt
                     _t2i_kwargs["negative_prompt"] = _ip_neg
@@ -5820,7 +6092,40 @@ class ImageGenerationService:
         scheduler: str | None = None,
         # LoRA list: [{"id": "path_or_repo", "weight": 0.8, "weight_name": "file.safetensors"}]
         loras: list[dict[str, Any]] | None = None,
-    ) -> ImageRuntimeResult:
+        # ── Batch 1 features ─────────────────────────────────────
+        num_images: int = 1,
+        clip_skip: int = 0,
+        hires_fix: bool = False,
+        hires_denoise: float = 0.55,
+        prompt_weighting: bool = True,
+    ) -> ImageRuntimeResult | list[ImageRuntimeResult]:
+        # ── Batch generation: iterate with incrementing seeds ──
+        num_images = max(1, min(num_images, 8))
+        if num_images > 1:
+            base_seed = seed if seed is not None else random.randint(1, 2**31 - 1)
+            results: list[ImageRuntimeResult] = []
+            for i in range(num_images):
+                logger.info("[IMG] Batch %d/%d (seed=%d)", i + 1, num_images, base_seed + i)
+                single = self.generate(
+                    model_id=model_id, prompt=prompt, negative_prompt=negative_prompt,
+                    seed=base_seed + i, steps=steps, guidance_scale=guidance_scale,
+                    width=width, height=height, init_image_path=init_image_path,
+                    mask_image_path=mask_image_path, strength=strength,
+                    params_json=params_json, timeout_sec=timeout_sec,
+                    controlnet_type=controlnet_type, control_image_path=control_image_path,
+                    controlnet_model_id=controlnet_model_id,
+                    controlnet_conditioning_scale=controlnet_conditioning_scale,
+                    device_preference=device_preference, scheduler=scheduler,
+                    loras=loras, num_images=1, clip_skip=clip_skip,
+                    hires_fix=hires_fix, hires_denoise=hires_denoise,
+                    prompt_weighting=prompt_weighting,
+                )
+                # single is always a single ImageRuntimeResult when num_images=1
+                results.append(single)  # type: ignore[arg-type]
+                if not single.ok:  # type: ignore[union-attr]
+                    break  # stop batch on first failure
+            return results
+
         # Route 1: GGUF model → sd.cpp backend
         if self._is_gguf_model(model_id):
             return self._generate_sdcpp(
@@ -5910,6 +6215,14 @@ class ImageGenerationService:
         # Step previews: decode and save intermediate latents at each step
         if params.get("enable_step_previews"):
             execution_plan["enable_step_previews"] = True
+        # ── Batch 1 feature injection into execution plan ──
+        if clip_skip and clip_skip > 0:
+            execution_plan["clip_skip"] = clip_skip
+        if prompt_weighting:
+            execution_plan["prompt_weighting"] = True
+        if hires_fix:
+            execution_plan["hires_fix"] = True
+            execution_plan["hires_denoise"] = hires_denoise
         model_hints = execution_plan.get("model_hints") or {}
 
         # Parameter resolution order: user params → execution plan → model hints → quality profile
@@ -6165,6 +6478,47 @@ class ImageGenerationService:
 
         image_bytes = result.image_bytes or b""
         logger.info("[IMG] Base generation OK (%d bytes)", len(image_bytes))
+
+        # ── Hires Fix (2-pass upscale + re-denoise) ──
+        _model_family = str(model_hints.get("model_family", "")).lower()
+        if hires_fix and _model_family not in ("flux", "z-image") and not init_image_path:
+            logger.info("[IMG] === HIRES FIX === target=%dx%d, denoise=%.2f", width, height, hires_denoise)
+            stages_run.append("hires_fix")
+            try:
+                Image_hf, _ = _require_pillow()
+                # Save base image to temp file for img2img pass
+                _hf_tmp = tempfile.NamedTemporaryFile(prefix="hires_base_", suffix=".png", delete=False)
+                _hf_tmp.write(image_bytes)
+                _hf_tmp.close()
+                # Run img2img at full resolution using the base image
+                hires_result = self._run_diffusers(
+                    model_id_or_path=resolved_model,
+                    model_source=model_source,
+                    prompt=prompt,
+                    negative_prompt=negative_prompt,
+                    seed=seed,
+                    steps=max(8, steps // 2),
+                    guidance_scale=guidance_scale,
+                    width=width,
+                    height=height,
+                    init_image_path=_hf_tmp.name,
+                    strength=hires_denoise,
+                    device=preferred,
+                    execution_plan=execution_plan,
+                    timeout_s=timeout_s,
+                )
+                if hires_result.ok and hires_result.image_bytes:
+                    image_bytes = hires_result.image_bytes
+                    logger.info("[IMG] Hires fix completed (%d bytes)", len(image_bytes))
+                else:
+                    execution_plan["warnings"] = list(execution_plan.get("warnings") or []) + ["Hires fix pass failed, using base image."]
+                try:
+                    Path(_hf_tmp.name).unlink(missing_ok=True)
+                except Exception:
+                    pass
+            except Exception as hf_err:
+                logger.warning("[IMG] Hires fix error: %s", hf_err)
+                execution_plan["warnings"] = list(execution_plan.get("warnings") or []) + [f"Hires fix failed: {hf_err}"]
 
         if enable_refine:
             logger.info("[IMG] === REFINEMENT STAGE === (reusing cached pipeline)")

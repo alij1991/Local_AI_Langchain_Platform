@@ -2,6 +2,7 @@ import 'dart:async';
 
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
+import 'package:url_launcher/url_launcher.dart';
 import 'package:local_ai_flutter_client/services/api_client.dart';
 
 class ModelsPage extends StatefulWidget {
@@ -35,6 +36,7 @@ class _ModelsPageState extends State<ModelsPage> with SingleTickerProviderStateM
   String _discoverTask = '';
   bool _hfHasMore = false;
   bool _hfLoadingMore = false;
+  String? _hfCategoryFilter;  // null = All
 
   // HF Downloads
   List<Map<String, dynamic>> _downloads = [];
@@ -236,6 +238,7 @@ class _ModelsPageState extends State<ModelsPage> with SingleTickerProviderStateM
     final Map<String, Map<String, dynamic>> ollamaGroups = {};
     final Map<String, List<String>> ollamaVariants = {};
     final Map<String, int> ollamaTotalSize = {};
+    final Map<String, List<Map<String, dynamic>>> ollamaVariantDetails = {};
 
     for (final m in items) {
       final provider = (m['provider'] ?? '').toString();
@@ -258,9 +261,19 @@ class _ModelsPageState extends State<ModelsPage> with SingleTickerProviderStateM
         ollamaGroups[baseName]!['id'] = 'ollama:$baseName';
         ollamaVariants[baseName] = [];
         ollamaTotalSize[baseName] = 0;
+        ollamaVariantDetails[baseName] = [];
       }
 
       ollamaVariants[baseName]!.add(variant);
+      ollamaVariantDetails[baseName]!.add({
+        'name': variant,
+        'size_bytes': m['size_bytes'],
+        'size_human': m['size_human'] ?? _formatSize(m['size_bytes']),
+        'quantization': m['quantization'] ?? '',
+        'context_length': m['context_length'] ?? '',
+        'parameters': m['parameters'] ?? '',
+        'full_name': fullName,
+      });
       final sizeBytes = m['size_bytes'];
       if (sizeBytes is int) {
         ollamaTotalSize[baseName] = ollamaTotalSize[baseName]! + sizeBytes;
@@ -285,6 +298,7 @@ class _ModelsPageState extends State<ModelsPage> with SingleTickerProviderStateM
         group['size_bytes'] = ollamaTotalSize[baseName];
         group['size_human'] = _formatSize(ollamaTotalSize[baseName]);
       }
+      group['variant_details'] = ollamaVariantDetails[baseName];
       // Update description to show variants
       if (variants.length > 1) {
         group['description'] = 'Installed: ${variants.join(", ")}';
@@ -1063,45 +1077,92 @@ class _ModelsPageState extends State<ModelsPage> with SingleTickerProviderStateM
                   Wrap(
                     spacing: 6,
                     runSpacing: 4,
-                    children: variants.map((v) {
-                      final isVariantInstalled = installedVariants.contains(v) ||
-                          (installedVariants.contains('latest') && variants.indexOf(v) == 0);
-                      final fullName = '$name:$v';
-                      final pulling = _isModelPulling(fullName);
-                      final pullProgress = _pullingModels[fullName] ?? '';
-                      return ActionChip(
-                        avatar: pulling
-                            ? const SizedBox(width: 14, height: 14, child: CircularProgressIndicator(strokeWidth: 2))
-                            : isVariantInstalled
-                                ? Icon(Icons.check_circle, size: 16, color: Colors.green.shade600)
-                                : Icon(Icons.download, size: 14, color: colors.primary),
-                        label: Text(
-                          pulling ? '$v $pullProgress' : v,
-                          style: TextStyle(
-                            fontSize: 12,
-                            fontWeight: isVariantInstalled ? FontWeight.w600 : FontWeight.normal,
-                            color: pulling ? colors.primary : isVariantInstalled ? Colors.green.shade700 : colors.onSurface,
+                    children: () {
+                      final vDetails = (m['variant_details'] as List<dynamic>?) ?? [];
+                      if (vDetails.isEmpty) {
+                        // Fallback to flat variant names
+                        return variants.map((v) {
+                          final isVariantInstalled = installedVariants.contains(v) ||
+                              (installedVariants.contains('latest') && variants.indexOf(v) == 0);
+                          final fullName = '$name:$v';
+                          final pulling = _isModelPulling(fullName);
+                          final pullProgress = _pullingModels[fullName] ?? '';
+                          return ActionChip(
+                            avatar: pulling
+                                ? const SizedBox(width: 14, height: 14, child: CircularProgressIndicator(strokeWidth: 2))
+                                : isVariantInstalled
+                                    ? Icon(Icons.check_circle, size: 16, color: Colors.green.shade600)
+                                    : Icon(Icons.download, size: 14, color: colors.primary),
+                            label: Text(
+                              pulling ? '$v $pullProgress' : v,
+                              style: TextStyle(
+                                fontSize: 12,
+                                fontWeight: isVariantInstalled ? FontWeight.w600 : FontWeight.normal,
+                                color: pulling ? colors.primary : isVariantInstalled ? Colors.green.shade700 : colors.onSurface,
+                              ),
+                            ),
+                            backgroundColor: pulling
+                                ? colors.primaryContainer.withValues(alpha: 0.3)
+                                : isVariantInstalled
+                                    ? Colors.green.withValues(alpha: 0.08)
+                                    : colors.surfaceContainerHighest,
+                            side: BorderSide(
+                              color: pulling ? colors.primary.withValues(alpha: 0.5)
+                                  : isVariantInstalled ? Colors.green.withValues(alpha: 0.3) : colors.outlineVariant,
+                              width: 0.5,
+                            ),
+                            visualDensity: VisualDensity.compact,
+                            onPressed: pulling
+                                ? null
+                                : isVariantInstalled
+                                    ? () => _selectModel(m)
+                                    : () => _pullOllamaModel(fullName),
+                          );
+                        }).toList();
+                      }
+                      return vDetails.map((vd) {
+                        final vMap = vd as Map<String, dynamic>;
+                        final v = (vMap['name'] ?? '').toString();
+                        final sizeH = (vMap['size_human'] ?? '').toString();
+                        final isVariantInstalled = installedVariants.contains(v) ||
+                            (installedVariants.contains('latest') && vDetails.indexOf(vd) == 0);
+                        final fullName = '$name:$v';
+                        final pulling = _isModelPulling(fullName);
+                        final pullProgress = _pullingModels[fullName] ?? '';
+                        final label = sizeH.isNotEmpty ? '$v ($sizeH)' : v;
+                        return ActionChip(
+                          avatar: pulling
+                              ? const SizedBox(width: 14, height: 14, child: CircularProgressIndicator(strokeWidth: 2))
+                              : isVariantInstalled
+                                  ? Icon(Icons.check_circle, size: 16, color: Colors.green.shade600)
+                                  : Icon(Icons.download, size: 14, color: colors.primary),
+                          label: Text(
+                            pulling ? '$v $pullProgress' : label,
+                            style: TextStyle(
+                              fontSize: 11,
+                              fontWeight: isVariantInstalled ? FontWeight.w600 : FontWeight.normal,
+                              color: pulling ? colors.primary : isVariantInstalled ? Colors.green.shade700 : colors.onSurface,
+                            ),
                           ),
-                        ),
-                        backgroundColor: pulling
-                            ? colors.primaryContainer.withValues(alpha: 0.3)
-                            : isVariantInstalled
-                                ? Colors.green.withValues(alpha: 0.08)
-                                : colors.surfaceContainerHighest,
-                        side: BorderSide(
-                          color: pulling ? colors.primary.withValues(alpha: 0.5)
-                              : isVariantInstalled ? Colors.green.withValues(alpha: 0.3) : colors.outlineVariant,
-                          width: 0.5,
-                        ),
-                        visualDensity: VisualDensity.compact,
-                        // Installed chips → select model for details; non-installed → pull
-                        onPressed: pulling
-                            ? null
-                            : isVariantInstalled
-                                ? () => _selectModel(m)
-                                : () => _pullOllamaModel(fullName),
-                      );
-                    }).toList(),
+                          backgroundColor: pulling
+                              ? colors.primaryContainer.withValues(alpha: 0.3)
+                              : isVariantInstalled
+                                  ? Colors.green.withValues(alpha: 0.08)
+                                  : colors.surfaceContainerHighest,
+                          side: BorderSide(
+                            color: pulling ? colors.primary.withValues(alpha: 0.5)
+                                : isVariantInstalled ? Colors.green.withValues(alpha: 0.3) : colors.outlineVariant,
+                            width: 0.5,
+                          ),
+                          visualDensity: VisualDensity.compact,
+                          onPressed: pulling
+                              ? null
+                              : isVariantInstalled
+                                  ? () => _selectModel(m)
+                                  : () => _pullOllamaModel(fullName),
+                        );
+                      }).toList();
+                    }(),
                   ),
                 ],
                 // If no variants, show a single pull button
@@ -1150,11 +1211,52 @@ class _ModelsPageState extends State<ModelsPage> with SingleTickerProviderStateM
       );
     }
 
-    return ListView.builder(
-      itemCount: _hfDiscover.length + (_hfHasMore ? 1 : 0),
+    // Category filter bar
+    final categories = <String, String>{
+      '': 'All',
+      'base_model': 'Base Models',
+      'fine_tune': 'Fine-tunes',
+      'lora_adapter': 'LoRA',
+      'controlnet': 'ControlNet',
+      'embedding': 'Embedding',
+      'diffusion': 'Diffusion',
+      'quantized': 'Quantized',
+      'multimodal': 'Multimodal',
+    };
+
+    final filtered = _hfCategoryFilter == null || _hfCategoryFilter!.isEmpty
+        ? _hfDiscover
+        : _hfDiscover.where((m) => m['category'] == _hfCategoryFilter).toList();
+
+    return Column(
+      children: [
+        Padding(
+          padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
+          child: Wrap(
+            spacing: 6,
+            runSpacing: 4,
+            children: categories.entries.map((e) {
+              final isSelected = (_hfCategoryFilter ?? '') == e.key;
+              return FilterChip(
+                label: Text(e.value, style: const TextStyle(fontSize: 11)),
+                selected: isSelected,
+                onSelected: (sel) {
+                  setState(() => _hfCategoryFilter = sel ? e.key : null);
+                },
+                visualDensity: VisualDensity.compact,
+                showCheckmark: false,
+                padding: const EdgeInsets.symmetric(horizontal: 4),
+                materialTapTargetSize: MaterialTapTargetSize.shrinkWrap,
+              );
+            }).toList(),
+          ),
+        ),
+        Expanded(
+          child: ListView.builder(
+      itemCount: filtered.length + (_hfHasMore ? 1 : 0),
       itemBuilder: (_, i) {
         // "Load More" button at the end
-        if (i >= _hfDiscover.length) {
+        if (i >= filtered.length) {
           return Padding(
             padding: const EdgeInsets.symmetric(vertical: 12, horizontal: 16),
             child: Center(
@@ -1168,7 +1270,7 @@ class _ModelsPageState extends State<ModelsPage> with SingleTickerProviderStateM
             ),
           );
         }
-        final m = _hfDiscover[i];
+        final m = filtered[i];
         final modelId = (m['model_id'] ?? '').toString();
         final task = (m['task'] ?? '').toString();
         final downloads = m['downloads'];
@@ -1214,6 +1316,10 @@ class _ModelsPageState extends State<ModelsPage> with SingleTickerProviderStateM
                               _tagChip(task, colors),
                               const SizedBox(width: 6),
                             ],
+                            if ((m['category'] ?? '').toString().isNotEmpty) ...[
+                              _categoryChip((m['category'] ?? '').toString(), colors),
+                              const SizedBox(width: 4),
+                            ],
                             if (paramHuman.isNotEmpty) ...[
                               _infoChip(paramHuman, colors),
                               const SizedBox(width: 4),
@@ -1249,6 +1355,9 @@ class _ModelsPageState extends State<ModelsPage> with SingleTickerProviderStateM
           ),
         );
       },
+    ),
+        ),
+      ],
     );
   }
 
@@ -1577,6 +1686,11 @@ class _ModelsPageState extends State<ModelsPage> with SingleTickerProviderStateM
 
             // HF rich detail (gated warning, hub info, model card)
             if (isHfDiscover) ...[
+              // Show category help immediately from discover data (before readme loads)
+              if (!_hfDetailCache.containsKey(modelId) && (m['category'] ?? '').toString().isNotEmpty) ...[
+                const SizedBox(height: 12),
+                _buildCategoryHelp((m['category'] ?? '').toString(), m, colors),
+              ],
               if (_loadingReadme == modelId) ...[
                 const SizedBox(height: 12),
                 const Center(child: SizedBox(width: 20, height: 20, child: CircularProgressIndicator(strokeWidth: 2))),
@@ -1593,6 +1707,34 @@ class _ModelsPageState extends State<ModelsPage> with SingleTickerProviderStateM
                 runSpacing: 4,
                 children: tags.take(8).map((t) => _tagChip(t, colors)).toList(),
               ),
+            ],
+
+            // Installed Ollama variant details
+            if (installed && provider == 'ollama' && (m['variant_details'] as List<dynamic>?)?.isNotEmpty == true) ...[
+              const SizedBox(height: 12),
+              Text('Installed Variants', style: Theme.of(context).textTheme.titleSmall),
+              const SizedBox(height: 8),
+              ...((m['variant_details'] as List<dynamic>).map((vd) {
+                final vMap = vd as Map<String, dynamic>;
+                final v = (vMap['name'] ?? '').toString();
+                final sizeH = (vMap['size_human'] ?? '').toString();
+                final quant = (vMap['quantization'] ?? '').toString();
+                final ctx = (vMap['context_length'] ?? '').toString();
+                return Container(
+                  margin: const EdgeInsets.only(bottom: 4),
+                  padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
+                  decoration: BoxDecoration(
+                    color: colors.surfaceContainerHighest.withValues(alpha: 0.4),
+                    borderRadius: BorderRadius.circular(6),
+                  ),
+                  child: Row(children: [
+                    Expanded(flex: 2, child: Text(v, style: const TextStyle(fontSize: 12, fontWeight: FontWeight.w500))),
+                    if (sizeH.isNotEmpty) Expanded(flex: 2, child: Text(sizeH, style: TextStyle(fontSize: 11, color: colors.onSurfaceVariant))),
+                    if (quant.isNotEmpty) Expanded(flex: 2, child: Text(quant, style: TextStyle(fontSize: 11, color: colors.onSurfaceVariant))),
+                    if (ctx.isNotEmpty) Expanded(flex: 1, child: Text(ctx, style: TextStyle(fontSize: 11, color: colors.onSurfaceVariant))),
+                  ]),
+                );
+              })),
             ],
 
             const SizedBox(height: 20),
@@ -1659,6 +1801,82 @@ class _ModelsPageState extends State<ModelsPage> with SingleTickerProviderStateM
               _specRow('Path', (m['local_path'] ?? meta['local_path'] ?? '').toString(), colors),
               _specRow('Snapshot', (m['resolved_snapshot_path'] ?? meta['resolved_snapshot_path'] ?? '').toString(), colors),
               _specRow('Cached Files', (m['cached_files_count'] ?? meta['cached_files_count'] ?? '').toString(), colors),
+            ],
+
+            // Ollama resources
+            if (provider == 'ollama') ...[
+              const SizedBox(height: 16),
+              Text('Resources', style: Theme.of(context).textTheme.titleSmall),
+              const SizedBox(height: 8),
+              ..._buildResourceLinks({
+                'huggingface_url': 'https://ollama.com/library/${name.split(':').first}',
+                'discussions_url': null,
+              }, colors),
+              const SizedBox(height: 8),
+              Container(
+                padding: const EdgeInsets.all(10),
+                decoration: BoxDecoration(
+                  color: colors.surfaceContainerHighest.withValues(alpha: 0.5),
+                  borderRadius: BorderRadius.circular(8),
+                ),
+                child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+                  Text('Quick Start', style: TextStyle(fontSize: 12, fontWeight: FontWeight.w600, color: colors.onSurface)),
+                  const SizedBox(height: 6),
+                  SelectableText('ollama run $name', style: TextStyle(fontSize: 12, fontFamily: 'monospace', color: colors.primary)),
+                  const SizedBox(height: 4),
+                  Text('Or use the API:', style: TextStyle(fontSize: 11, color: colors.onSurfaceVariant)),
+                  const SizedBox(height: 2),
+                  SelectableText('curl http://localhost:11434/api/generate -d \'{"model": "$name"}\'',
+                    style: TextStyle(fontSize: 11, fontFamily: 'monospace', color: colors.primary)),
+                ]),
+              ),
+            ],
+
+            // Ollama variant comparison table (for library models)
+            if (isOllamaLibrary && (m['variant_details'] as List<dynamic>?)?.isNotEmpty == true) ...[
+              const SizedBox(height: 16),
+              Text('Variants', style: Theme.of(context).textTheme.titleSmall),
+              const SizedBox(height: 8),
+              Table(
+                columnWidths: const {
+                  0: FlexColumnWidth(2),
+                  1: FlexColumnWidth(2),
+                  2: FlexColumnWidth(1.5),
+                },
+                defaultVerticalAlignment: TableCellVerticalAlignment.middle,
+                children: [
+                  TableRow(
+                    decoration: BoxDecoration(color: colors.surfaceContainerHighest.withValues(alpha: 0.5)),
+                    children: [
+                      Padding(padding: const EdgeInsets.all(6), child: Text('Variant', style: TextStyle(fontSize: 11, fontWeight: FontWeight.w600, color: colors.onSurface))),
+                      Padding(padding: const EdgeInsets.all(6), child: Text('Size', style: TextStyle(fontSize: 11, fontWeight: FontWeight.w600, color: colors.onSurface))),
+                      Padding(padding: const EdgeInsets.all(6), child: Text('Status', style: TextStyle(fontSize: 11, fontWeight: FontWeight.w600, color: colors.onSurface))),
+                    ],
+                  ),
+                  ...((m['variant_details'] as List<dynamic>).map((vd) {
+                    final vMap = vd as Map<String, dynamic>;
+                    final v = (vMap['name'] ?? '').toString();
+                    final sizeH = (vMap['size_human'] ?? '').toString();
+                    final params = (vMap['params'] ?? '').toString();
+                    final isInstalled = ((m['installed_variants'] as List<dynamic>?) ?? []).contains(v);
+                    final fullName = '$name:$v';
+                    final pulling = _isModelPulling(fullName);
+                    return TableRow(children: [
+                      Padding(padding: const EdgeInsets.all(6), child: Text('$v${params.isNotEmpty ? " ($params)" : ""}', style: const TextStyle(fontSize: 11))),
+                      Padding(padding: const EdgeInsets.all(6), child: Text(sizeH, style: TextStyle(fontSize: 11, color: colors.onSurfaceVariant))),
+                      Padding(padding: const EdgeInsets.all(6), child: isInstalled
+                        ? Text('Installed', style: TextStyle(fontSize: 11, color: Colors.green.shade600, fontWeight: FontWeight.w500))
+                        : pulling
+                          ? const SizedBox(width: 14, height: 14, child: CircularProgressIndicator(strokeWidth: 2))
+                          : InkWell(
+                              onTap: () => _pullOllamaModel(fullName),
+                              child: Text('Pull', style: TextStyle(fontSize: 11, color: colors.primary, decoration: TextDecoration.underline)),
+                            ),
+                      ),
+                    ]);
+                  })),
+                ],
+              ),
             ],
 
             const SizedBox(height: 20),
@@ -1784,6 +2002,12 @@ class _ModelsPageState extends State<ModelsPage> with SingleTickerProviderStateM
           ),
         ],
 
+        // Category context
+        if (d.containsKey('category')) ...[
+          const SizedBox(height: 12),
+          _buildCategoryHelp((d['category'] ?? '').toString(), d, colors),
+        ],
+
         // Hub info section
         const SizedBox(height: 16),
         Text('Hub Details', style: Theme.of(context).textTheme.titleSmall),
@@ -1798,6 +2022,14 @@ class _ModelsPageState extends State<ModelsPage> with SingleTickerProviderStateM
         if (license.isNotEmpty) _specRow('License', license, colors),
         if (storageHuman.isNotEmpty) _specRow('Repo Size', storageHuman, colors),
         if (fileCount > 0) _specRow('Files', '$fileCount', colors),
+
+        // Resources
+        if (d.containsKey('resources')) ...[
+          const SizedBox(height: 16),
+          Text('Resources', style: Theme.of(context).textTheme.titleSmall),
+          const SizedBox(height: 8),
+          ..._buildResourceLinks(d['resources'] as Map<String, dynamic>? ?? {}, colors),
+        ],
 
         // Model Card
         const SizedBox(height: 12),
@@ -1933,6 +2165,183 @@ class _ModelsPageState extends State<ModelsPage> with SingleTickerProviderStateM
       ),
       child: Text(tag, style: TextStyle(fontSize: 10, color: colors.onSecondaryContainer)),
     );
+  }
+
+  IconData _categoryIcon(String category) {
+    switch (category) {
+      case 'base_model': return Icons.hub;
+      case 'fine_tune': return Icons.tune;
+      case 'lora_adapter': return Icons.layers;
+      case 'controlnet': return Icons.account_tree;
+      case 'embedding': return Icons.scatter_plot;
+      case 'diffusion': return Icons.palette;
+      case 'multimodal': return Icons.visibility;
+      case 'quantized': return Icons.compress;
+      default: return Icons.extension;
+    }
+  }
+
+  String _categoryLabel(String category) {
+    switch (category) {
+      case 'base_model': return 'Base Model';
+      case 'fine_tune': return 'Fine-tune';
+      case 'lora_adapter': return 'LoRA';
+      case 'controlnet': return 'ControlNet';
+      case 'embedding': return 'Embedding';
+      case 'diffusion': return 'Diffusion';
+      case 'multimodal': return 'Multimodal';
+      case 'quantized': return 'Quantized';
+      default: return 'Other';
+    }
+  }
+
+  Widget _categoryChip(String category, ColorScheme colors) {
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
+      decoration: BoxDecoration(
+        color: colors.secondaryContainer,
+        borderRadius: BorderRadius.circular(8),
+      ),
+      child: Row(mainAxisSize: MainAxisSize.min, children: [
+        Icon(_categoryIcon(category), size: 11, color: colors.onSecondaryContainer),
+        const SizedBox(width: 3),
+        Text(_categoryLabel(category), style: TextStyle(fontSize: 10, fontWeight: FontWeight.w500, color: colors.onSecondaryContainer)),
+      ]),
+    );
+  }
+
+  Widget _buildCategoryHelp(String category, Map<String, dynamic> detail, ColorScheme colors) {
+    String helpText = '';
+    IconData icon = _categoryIcon(category);
+    final cardMeta = detail['card_metadata'] as Map<String, dynamic>? ?? {};
+    // base_model comes from either the detail response directly or card_metadata
+    final baseModel = (detail['base_model'] ?? cardMeta['base_model'] ?? '').toString();
+    final baseInstalled = detail['base_model_installed'] == true;
+
+    switch (category) {
+      case 'lora_adapter':
+        helpText = 'This is a LoRA adapter — a lightweight file (typically 10–500 MB) that modifies a base model\'s behavior without full retraining.';
+        if (baseModel.isNotEmpty) helpText += ' Requires base model: $baseModel.';
+        break;
+      case 'controlnet':
+        helpText = 'ControlNet models guide image generation using reference images (edges, depth maps, poses). Use them in the Images section with a compatible base model.';
+        break;
+      case 'quantized':
+        final name = (detail['model_id'] ?? '').toString().toLowerCase();
+        String method = 'quantized';
+        if (name.contains('gptq')) method = 'GPTQ (GPU inference)';
+        if (name.contains('awq')) method = 'AWQ (fast GPU inference)';
+        if (name.contains('gguf')) method = 'GGUF (CPU+GPU via llama.cpp)';
+        if (name.contains('exl2')) method = 'EXL2 (ExLlamaV2 GPU inference)';
+        helpText = 'This is a $method version. Quantization reduces model size and memory usage with minimal quality loss.';
+        if (baseModel.isNotEmpty) helpText += ' Based on: $baseModel.';
+        break;
+      case 'embedding':
+        helpText = 'Embedding models convert text into numerical vectors for semantic search, RAG, and clustering. They do not generate text.';
+        break;
+      case 'multimodal':
+        helpText = 'This model can process both text and images. Upload images in the chat interface to use vision capabilities.';
+        break;
+      case 'diffusion':
+        helpText = 'Image generation model. Download it and use the Images section to generate images from text prompts.';
+        break;
+      case 'fine_tune':
+        helpText = 'Fine-tuned version of a base model, specialized for specific tasks or improved instruction-following.';
+        if (baseModel.isNotEmpty) helpText += ' Based on: $baseModel.';
+        break;
+      default:
+        return const SizedBox.shrink();
+    }
+
+    final widgets = <Widget>[
+      Container(
+        padding: const EdgeInsets.all(10),
+        decoration: BoxDecoration(
+          color: colors.secondaryContainer.withValues(alpha: 0.3),
+          borderRadius: BorderRadius.circular(8),
+          border: Border.all(color: colors.secondary.withValues(alpha: 0.2)),
+        ),
+        child: Row(crossAxisAlignment: CrossAxisAlignment.start, children: [
+          Icon(icon, size: 16, color: colors.secondary),
+          const SizedBox(width: 8),
+          Expanded(child: Text(helpText, style: TextStyle(fontSize: 12, height: 1.4, color: colors.onSecondaryContainer))),
+        ]),
+      ),
+    ];
+
+    // Base model status banner for LoRAs, fine-tunes, quantized models
+    if (baseModel.isNotEmpty && (category == 'lora_adapter' || category == 'fine_tune' || category == 'quantized')) {
+      widgets.add(const SizedBox(height: 6));
+      widgets.add(Container(
+        padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 8),
+        decoration: BoxDecoration(
+          color: baseInstalled
+              ? Colors.green.withValues(alpha: 0.1)
+              : Colors.orange.withValues(alpha: 0.1),
+          borderRadius: BorderRadius.circular(8),
+          border: Border.all(color: baseInstalled
+              ? Colors.green.withValues(alpha: 0.3)
+              : Colors.orange.withValues(alpha: 0.3)),
+        ),
+        child: Row(children: [
+          Icon(
+            baseInstalled ? Icons.check_circle : Icons.info_outline,
+            size: 16,
+            color: baseInstalled ? Colors.green.shade600 : Colors.orange.shade700,
+          ),
+          const SizedBox(width: 8),
+          Expanded(child: Text(
+            baseInstalled
+                ? 'Base model "$baseModel" is already installed locally. Only the adapter/variant files will be downloaded.'
+                : 'Base model "$baseModel" is not installed. You may need to download it separately for this ${_categoryLabel(category).toLowerCase()} to work.',
+            style: TextStyle(fontSize: 11, height: 1.3, color: baseInstalled ? Colors.green.shade800 : Colors.orange.shade800),
+          )),
+        ]),
+      ));
+    }
+
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.stretch,
+      children: widgets,
+    );
+  }
+
+  List<Widget> _buildResourceLinks(Map<String, dynamic> resources, ColorScheme colors) {
+    final links = <Widget>[];
+    void addLink(String label, String? url, IconData icon) {
+      if (url == null || url.isEmpty) return;
+      links.add(InkWell(
+        onTap: () async {
+          final uri = Uri.tryParse(url);
+          if (uri != null) {
+            try {
+              await launchUrl(uri, mode: LaunchMode.externalApplication);
+            } catch (_) {
+              if (mounted) {
+                Clipboard.setData(ClipboardData(text: url));
+                ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('Copied: $url'), duration: const Duration(seconds: 2)));
+              }
+            }
+          }
+        },
+        borderRadius: BorderRadius.circular(6),
+        child: Padding(
+          padding: const EdgeInsets.symmetric(vertical: 4, horizontal: 4),
+          child: Row(children: [
+            Icon(icon, size: 14, color: colors.primary),
+            const SizedBox(width: 8),
+            Expanded(child: Text(label, style: TextStyle(fontSize: 12, color: colors.primary, decoration: TextDecoration.underline))),
+            Icon(Icons.open_in_new, size: 12, color: colors.onSurfaceVariant),
+          ]),
+        ),
+      ));
+    }
+    addLink('View on HuggingFace', resources['huggingface_url'] as String?, Icons.hub);
+    addLink('Research Paper', resources['paper_url'] as String?, Icons.article);
+    addLink('Documentation', resources['docs_url'] as String?, Icons.menu_book);
+    addLink('GitHub Repository', resources['github_url'] as String?, Icons.code);
+    addLink('Community Discussions', resources['discussions_url'] as String?, Icons.forum);
+    return links;
   }
 
   String _formatCount(dynamic count) {

@@ -94,6 +94,14 @@ class _ImagesPageState extends State<ImagesPage> with TickerProviderStateMixin {
   // Edit settings
   double _editStrength = 0.65;
 
+  // Batch 1 features
+  int _numImages = 1;
+  int _clipSkip = 0;
+  bool _hiresFix = false;
+  double _hiresDenoise = 0.55;
+  bool _promptWeighting = true;
+  String _attentionBackend = 'auto';
+
   // Tab controller for right panel
   late TabController _rightTabController;
   final ScrollController _thumbnailScrollCtrl = ScrollController();
@@ -189,6 +197,7 @@ class _ImagesPageState extends State<ImagesPage> with TickerProviderStateMixin {
         if (modelName != null && !isHf) 'ollama_model': modelName,
         if (modelName != null && isHf) 'hf_model': modelName,
         'timeout_sec': _enhancerTimeout,
+        'prompt_weighting': _promptWeighting,
       }) as Map<String, dynamic>;
 
       debugPrint('[enhance] Response: ${data.keys.toList()}');
@@ -573,9 +582,46 @@ class _ImagesPageState extends State<ImagesPage> with TickerProviderStateMixin {
         _height = (rec['recommended_height'] as num?)?.toInt() ?? _height;
         _steps = (rec['recommended_steps'] as num?)?.toInt() ?? _steps;
         _guidance = (rec['recommended_guidance_scale'] as num?)?.toDouble() ?? _guidance;
+
+        // Apply scheduler if recommended
+        final recScheduler = rec['recommended_scheduler'] as String?;
+        if (recScheduler != null && recScheduler.isNotEmpty) {
+          _scheduler = recScheduler;
+        }
+
+        // Apply negative prompt if recommended
+        final recNeg = rec['recommended_negative_prompt'] as String?;
+        if (recNeg != null) {
+          _negativePrompt.text = recNeg;
+          _showNegativePrompt = recNeg.isNotEmpty;
+        }
+
+        // Apply clip skip based on model family
         final family = rec['model_family'] as String? ?? '';
         final variant = rec['model_variant'] as String? ?? '';
-        _status = 'Applied: ${_width}x$_height, $_steps steps, guidance ${_guidance.toStringAsFixed(1)}'
+        _clipSkip = (rec['recommended_clip_skip'] as num?)?.toInt() ?? 0;
+
+        // Apply hires fix recommendation (good for SD 1.5 at higher resolutions)
+        _hiresFix = rec['recommended_hires_fix'] == true;
+        if (rec['recommended_hires_denoise'] != null) {
+          _hiresDenoise = (rec['recommended_hires_denoise'] as num).toDouble();
+        }
+
+        // Apply quality profile recommendation
+        final recQuality = rec['recommended_quality_profile'] as String?;
+        if (recQuality != null && recQuality.isNotEmpty) {
+          _qualityProfile = recQuality;
+        }
+
+        final parts = <String>[
+          '${_width}x$_height',
+          '$_steps steps',
+          'guidance ${_guidance.toStringAsFixed(1)}',
+          if (_scheduler != null) 'sampler: $_scheduler',
+          if (_clipSkip > 0) 'clip skip $_clipSkip',
+          if (_hiresFix) 'hires fix',
+        ];
+        _status = 'Applied: ${parts.join(', ')}'
             '${family.isNotEmpty ? ' ($family${variant.isNotEmpty ? '/$variant' : ''})' : ''}';
       });
     } catch (e) {
@@ -624,6 +670,12 @@ class _ImagesPageState extends State<ImagesPage> with TickerProviderStateMixin {
         'guidance_scale': _guidance,
         'timeout_sec': _timeoutSec,
         'device_preference': _devicePreference,
+        // Batch 1 features
+        if (_numImages > 1) 'num_images': _numImages,
+        if (_clipSkip > 0) 'clip_skip': _clipSkip,
+        if (_hiresFix) 'hires_fix': true,
+        if (_hiresFix) 'hires_denoise': _hiresDenoise,
+        'prompt_weighting': _promptWeighting,
         'params_json': {
           'quality_profile': _qualityProfile,
           'enable_refine': _enableRefine,
@@ -646,6 +698,7 @@ class _ImagesPageState extends State<ImagesPage> with TickerProviderStateMixin {
       };
       final resp = await widget.api.post('/images/generate', payload) as Map<String, dynamic>?;
       if (resp != null) {
+        // Handle batch response: extract seed from first image
         final seedUsed = resp['seed_used'] ?? (resp['metadata'] as Map<String, dynamic>?)?['seed'];
         if (seedUsed != null) _lastSeedUsed = seedUsed is int ? seedUsed : int.tryParse(seedUsed.toString());
       }
@@ -1230,14 +1283,12 @@ class _ImagesPageState extends State<ImagesPage> with TickerProviderStateMixin {
                   value: _models.any((m) => m['model_id'].toString() == _selectedModel) ? _selectedModel : null,
                   isExpanded: true,
                   isDense: true,
-                  items: _models.where((m) => m['is_component'] != true).map((m) {
-                    final id = m['model_id'].toString();
-                    return DropdownMenuItem(
-                      value: id,
-                      child: Text(id, overflow: TextOverflow.ellipsis, style: const TextStyle(fontSize: 12)),
-                    );
-                  }).toList(),
-                  onChanged: (v) { setState(() => _selectedModel = v); _loadModelFit(); },
+                  items: _buildGroupedModelItems(),
+                  onChanged: (v) {
+                    if (v != null && v.startsWith('__header_')) return;
+                    setState(() => _selectedModel = v);
+                    _loadModelFit();
+                  },
                   decoration: const InputDecoration(
                     labelText: 'Model',
                     isDense: true,
@@ -1267,6 +1318,29 @@ class _ImagesPageState extends State<ImagesPage> with TickerProviderStateMixin {
                 style: TextStyle(fontSize: 10, color: cs.onTertiaryContainer),
               ),
             ),
+          ] else if (_selectedModel != null) ...[
+            // Model info chips
+            Builder(builder: (ctx) {
+              final sel = _models.firstWhere(
+                (m) => m['model_id'].toString() == _selectedModel,
+                orElse: () => <String, dynamic>{},
+              );
+              final family = sel['model_family'] as String? ?? '';
+              final variant = sel['model_variant'] as String? ?? '';
+              final sizeH = sel['size_human'] as String? ?? '';
+              if (family.isEmpty && sizeH.isEmpty) return const SizedBox.shrink();
+              return Padding(
+                padding: const EdgeInsets.only(top: 4),
+                child: Wrap(spacing: 6, runSpacing: 4, children: [
+                  if (family.isNotEmpty && family != 'unknown')
+                    _iconChip(_familyDisplayName(family), Icons.category_outlined, cs),
+                  if (variant.isNotEmpty)
+                    _iconChip(variant, Icons.style_outlined, cs),
+                  if (sizeH.isNotEmpty)
+                    _iconChip(sizeH, Icons.storage_outlined, cs),
+                ]),
+              );
+            }),
           ],
           const SizedBox(height: 8),
           // Prompt field
@@ -1473,9 +1547,15 @@ class _ImagesPageState extends State<ImagesPage> with TickerProviderStateMixin {
         _sectionLabel('Resolution', cs),
         const SizedBox(height: 4),
         Row(children: [
-          Expanded(child: _compactField('Width', _width.toString(), (v) => _width = int.tryParse(v) ?? _width)),
+          Expanded(child: Tooltip(
+            message: 'Image width in pixels. Must be a multiple of 8.\nSD 1.5: 512  |  SDXL: 1024  |  Flux: 1024',
+            child: _compactField('Width', _width.toString(), (v) => _width = int.tryParse(v) ?? _width),
+          )),
           const SizedBox(width: 8),
-          Expanded(child: _compactField('Height', _height.toString(), (v) => _height = int.tryParse(v) ?? _height)),
+          Expanded(child: Tooltip(
+            message: 'Image height in pixels. Must be a multiple of 8.\nSD 1.5: 512  |  SDXL: 1024  |  Flux: 1024',
+            child: _compactField('Height', _height.toString(), (v) => _height = int.tryParse(v) ?? _height),
+          )),
           const SizedBox(width: 8),
           // Quick aspect ratio buttons
           _aspectButton('1:1', 1024, 1024, cs),
@@ -1490,32 +1570,47 @@ class _ImagesPageState extends State<ImagesPage> with TickerProviderStateMixin {
         _sectionLabel('Generation', cs),
         const SizedBox(height: 4),
         Row(children: [
-          SizedBox(width: 80, child: _compactField('Steps', _steps.toString(), (v) => _steps = int.tryParse(v) ?? _steps)),
+          SizedBox(width: 80, child: Tooltip(
+            message: 'Number of denoising steps. More steps = better quality but slower.\n'
+                '10-15: Fast drafts\n20-30: Good quality (recommended)\n40+: Diminishing returns',
+            child: _compactField('Steps', _steps.toString(), (v) => _steps = int.tryParse(v) ?? _steps),
+          )),
           const SizedBox(width: 8),
-          SizedBox(width: 80, child: _compactField('Timeout', _timeoutSec.toString(), (v) => _timeoutSec = int.tryParse(v) ?? _timeoutSec)),
+          SizedBox(width: 80, child: Tooltip(
+            message: 'Max seconds before generation is cancelled. Increase for large models or CPU mode.',
+            child: _compactField('Timeout', _timeoutSec.toString(), (v) => _timeoutSec = int.tryParse(v) ?? _timeoutSec),
+          )),
           const SizedBox(width: 12),
           Expanded(
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                Text('Guidance: ${_guidance.toStringAsFixed(1)}', style: TextStyle(fontSize: 11, color: cs.onSurfaceVariant)),
-                SliderTheme(
-                  data: SliderThemeData(overlayShape: const RoundSliderOverlayShape(overlayRadius: 14)),
-                  child: Slider(
-                    value: _guidance, min: 0.0, max: 12.0, divisions: 22,
-                    onChanged: _busy ? null : (v) => setState(() => _guidance = v),
+            child: Tooltip(
+              message: 'How closely the image follows your prompt.\n'
+                  '0-1: Very creative/random (used by turbo models)\n'
+                  '5-7: Balanced (recommended for most models)\n'
+                  '8-12: Very literal, may look artificial\n\n'
+                  'Some models (Flux Schnell, SDXL Turbo) need guidance=0.',
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Text('Guidance: ${_guidance.toStringAsFixed(1)}', style: TextStyle(fontSize: 11, color: cs.onSurfaceVariant)),
+                  SliderTheme(
+                    data: SliderThemeData(overlayShape: const RoundSliderOverlayShape(overlayRadius: 14)),
+                    child: Slider(
+                      value: _guidance, min: 0.0, max: 12.0, divisions: 22,
+                      onChanged: _busy ? null : (v) => setState(() => _guidance = v),
+                    ),
                   ),
-                ),
-              ],
+                ],
+              ),
             ),
           ),
         ]),
         const SizedBox(height: 8),
 
-        // Seed & Sampler
+        // Seed, Batch Count & Sampler
         Row(children: [
           // Seed
           Expanded(
+            flex: 3,
             child: TextField(
               controller: _seedController,
               style: const TextStyle(fontSize: 12),
@@ -1554,9 +1649,30 @@ class _ImagesPageState extends State<ImagesPage> with TickerProviderStateMixin {
               onChanged: (v) => _seed = int.tryParse(v),
             ),
           ),
+          const SizedBox(width: 6),
+          // Batch count (num_images)
+          SizedBox(
+            width: 68,
+            child: Tooltip(
+              message: 'Generate multiple images in one batch.\nEach uses an incremented seed (seed+1, seed+2, etc.) for variation.',
+              child: DropdownButtonFormField<int>(
+                value: _numImages,
+                isDense: true,
+                isExpanded: true,
+                decoration: const InputDecoration(
+                  labelText: 'Count',
+                  isDense: true,
+                  contentPadding: EdgeInsets.symmetric(horizontal: 8, vertical: 8),
+                ),
+                items: List.generate(8, (i) => DropdownMenuItem(value: i + 1, child: Text('${i + 1}', style: const TextStyle(fontSize: 12)))),
+                onChanged: _busy ? null : (v) => setState(() => _numImages = v ?? 1),
+              ),
+            ),
+          ),
           const SizedBox(width: 8),
           // Sampler
           Expanded(
+            flex: 3,
             child: DropdownButtonFormField<String>(
               value: _scheduler,
               isExpanded: true,
@@ -1567,13 +1683,13 @@ class _ImagesPageState extends State<ImagesPage> with TickerProviderStateMixin {
                 contentPadding: EdgeInsets.symmetric(horizontal: 8, vertical: 8),
               ),
               items: const [
-                DropdownMenuItem(value: null, child: Text('Auto', style: TextStyle(fontSize: 12))),
-                DropdownMenuItem(value: 'dpmpp_2m_sde_karras', child: Text('DPM++ 2M SDE K', style: TextStyle(fontSize: 12))),
-                DropdownMenuItem(value: 'euler', child: Text('Euler', style: TextStyle(fontSize: 12))),
-                DropdownMenuItem(value: 'euler_a', child: Text('Euler A', style: TextStyle(fontSize: 12))),
-                DropdownMenuItem(value: 'ddim', child: Text('DDIM', style: TextStyle(fontSize: 12))),
-                DropdownMenuItem(value: 'lcm', child: Text('LCM', style: TextStyle(fontSize: 12))),
-                DropdownMenuItem(value: 'unipc', child: Text('UniPC', style: TextStyle(fontSize: 12))),
+                DropdownMenuItem(value: null, child: Tooltip(message: 'Uses the model\'s bundled default sampler', child: Text('Auto', style: TextStyle(fontSize: 12)))),
+                DropdownMenuItem(value: 'dpmpp_2m_sde_karras', child: Tooltip(message: 'Best general-purpose. High quality at 20-30 steps', child: Text('DPM++ 2M SDE K', style: TextStyle(fontSize: 12)))),
+                DropdownMenuItem(value: 'euler', child: Tooltip(message: 'Fast and simple. Good for Flux and Z-Image models', child: Text('Euler', style: TextStyle(fontSize: 12)))),
+                DropdownMenuItem(value: 'euler_a', child: Tooltip(message: 'Euler Ancestral: more variation/creativity per run', child: Text('Euler A', style: TextStyle(fontSize: 12)))),
+                DropdownMenuItem(value: 'ddim', child: Tooltip(message: 'Deterministic: same seed always gives identical results', child: Text('DDIM', style: TextStyle(fontSize: 12)))),
+                DropdownMenuItem(value: 'lcm', child: Tooltip(message: 'For distilled models only: 4-8 steps, very fast', child: Text('LCM', style: TextStyle(fontSize: 12)))),
+                DropdownMenuItem(value: 'unipc', child: Tooltip(message: 'Fast convergence at low step counts (8-15 steps)', child: Text('UniPC', style: TextStyle(fontSize: 12)))),
               ],
               onChanged: _busy ? null : (v) => setState(() => _scheduler = v),
             ),
@@ -1588,18 +1704,129 @@ class _ImagesPageState extends State<ImagesPage> with TickerProviderStateMixin {
           spacing: 6,
           runSpacing: 4,
           children: [
-            _toggleChip('Refine', _enableRefine, (v) => setState(() => _enableRefine = v), cs),
-            _toggleChip('Upscale', _enableUpscale, (v) => setState(() => _enableUpscale = v), cs),
-            _toggleChip('Postprocess', _enablePostprocess, (v) => setState(() => _enablePostprocess = v), cs),
-            _toggleChip('Step Previews', _enableStepPreviews, (v) => setState(() => _enableStepPreviews = v), cs),
-            _toggleChip('Low Memory', _lowMemoryMode, (v) => setState(() => _lowMemoryMode = v), cs),
+            _toggleChipWithTooltip('Refine', _enableRefine, (v) => setState(() => _enableRefine = v), cs,
+              'Runs a second pass at lower strength to smooth artifacts and add detail. Best for final renders.'),
+            _toggleChipWithTooltip('Upscale', _enableUpscale, (v) => setState(() => _enableUpscale = v), cs,
+              'Applies AI super-resolution (Real-ESRGAN) after generation. Doubles or quadruples resolution.'),
+            _toggleChipWithTooltip('Postprocess', _enablePostprocess, (v) => setState(() => _enablePostprocess = v), cs,
+              'Applies sharpening and color correction after generation for a polished look.'),
+            _toggleChipWithTooltip('Hires Fix', _hiresFix, (v) => setState(() => _hiresFix = v), cs,
+              '2-pass generation: generates at lower resolution, then re-denoises at full size. '
+              'Prevents the "tiled look" artifacts that happen when generating directly at high res. '
+              'Best for 1024x1024+ images with SD 1.5 or SDXL models.'),
+            _toggleChipWithTooltip('Prompt Weights', _promptWeighting, (v) => setState(() => _promptWeighting = v), cs,
+              'Enables per-word emphasis control in your prompt using (word:weight) syntax. '
+              'Requires the compel library (pip install compel). '
+              'Works with SD 1.5 and SDXL. Not supported on Flux or SD3.'),
+            _toggleChipWithTooltip('Step Previews', _enableStepPreviews, (v) => setState(() => _enableStepPreviews = v), cs,
+              'Saves a preview image at each denoising step. Useful for understanding how the model builds the image. Slows generation slightly.'),
+            _toggleChipWithTooltip('Low Memory', _lowMemoryMode, (v) => setState(() => _lowMemoryMode = v), cs,
+              'Forces 512x512, 16 steps for reliability on limited RAM/VRAM (<4GB). Use when generation crashes with OOM errors.'),
           ],
         ),
+        if (_hiresFix) ...[
+          const SizedBox(height: 6),
+          Row(children: [
+            Text('Hires Denoise: ${_hiresDenoise.toStringAsFixed(2)}', style: TextStyle(fontSize: 11, color: cs.onSurfaceVariant)),
+            Expanded(
+              child: SliderTheme(
+                data: SliderThemeData(overlayShape: const RoundSliderOverlayShape(overlayRadius: 14)),
+                child: Slider(
+                  value: _hiresDenoise, min: 0.3, max: 0.8, divisions: 10,
+                  onChanged: _busy ? null : (v) => setState(() => _hiresDenoise = v),
+                ),
+              ),
+            ),
+          ]),
+          _settingHelpBox(
+            'Lower values (0.3-0.4) keep the original composition but add sharpness. '
+            'Higher values (0.6-0.8) allow more creative deviation in the second pass. '
+            '0.55 is a good balance between detail and consistency.',
+            cs,
+          ),
+        ],
+        if (_promptWeighting) ...[
+          const SizedBox(height: 4),
+          _settingHelpBox(
+            'Prompt weighting syntax:\n'
+            '  (red hair:1.3) = 30% more emphasis on "red hair"\n'
+            '  (background:0.5) = 50% less focus on background\n'
+            '  word+ / word++ = slight / more emphasis\n'
+            '  word- / word-- = slight / more de-emphasis\n'
+            'Range: 0.0 (ignore) to 2.0 (max). Values above 1.5 may cause artifacts.\n'
+            'Example: a portrait of (crystal eyes:1.4), (soft lighting:1.2), (noise:0.3)',
+            cs, icon: Icons.lightbulb_outline,
+          ),
+        ],
         if (_lowMemoryMode) ...[
           const SizedBox(height: 4),
-          Text('Forces 512x512, 16 steps for reliability on limited RAM/VRAM.',
-              style: TextStyle(fontSize: 10, color: cs.onSurfaceVariant)),
+          _settingHelpBox('Forces 512x512 at 16 steps with minimal optimizations for reliability on systems with limited RAM/VRAM.', cs),
         ],
+        const SizedBox(height: 8),
+
+        // Advanced: CLIP Skip & Attention Backend
+        _sectionLabel('Advanced', cs),
+        const SizedBox(height: 4),
+        Row(children: [
+          // CLIP Skip
+          Expanded(
+            child: Tooltip(
+              message: 'Skips the last N layers of the CLIP text encoder.\n'
+                  'Each layer adds abstraction — skipping them gives rawer, more stylized results.\n\n'
+                  'None: Use all layers (default, most accurate to prompt)\n'
+                  '1: Slightly more artistic, good for anime/illustration styles\n'
+                  '2: Popular for anime models (NAI, AnythingV5, etc.)\n'
+                  '3-4: Very loose interpretation, experimental',
+              child: DropdownButtonFormField<int>(
+                value: _clipSkip,
+                isDense: true,
+                isExpanded: true,
+                decoration: const InputDecoration(
+                  labelText: 'CLIP Skip',
+                  isDense: true,
+                  contentPadding: EdgeInsets.symmetric(horizontal: 8, vertical: 8),
+                ),
+                items: const [
+                  DropdownMenuItem(value: 0, child: Text('None', style: TextStyle(fontSize: 12))),
+                  DropdownMenuItem(value: 1, child: Text('1', style: TextStyle(fontSize: 12))),
+                  DropdownMenuItem(value: 2, child: Text('2 (anime)', style: TextStyle(fontSize: 12))),
+                  DropdownMenuItem(value: 3, child: Text('3', style: TextStyle(fontSize: 12))),
+                  DropdownMenuItem(value: 4, child: Text('4', style: TextStyle(fontSize: 12))),
+                ],
+                onChanged: _busy ? null : (v) => setState(() => _clipSkip = v ?? 0),
+              ),
+            ),
+          ),
+          const SizedBox(width: 8),
+          // Attention Backend
+          Expanded(
+            child: Tooltip(
+              message: 'Controls how the model computes attention (the core diffusion operation).\n\n'
+                  'Auto: Best available backend for your hardware (recommended)\n'
+                  'SDPA: PyTorch native scaled dot-product attention (good default)\n'
+                  'xFormers: Memory-efficient attention, ~20% less VRAM (requires xformers package)\n'
+                  'Sliced: Processes attention in chunks, slowest but lowest memory. Use if OOM.',
+              child: DropdownButtonFormField<String>(
+                value: _attentionBackend,
+                isDense: true,
+                isExpanded: true,
+                decoration: const InputDecoration(
+                  labelText: 'Attention',
+                  isDense: true,
+                  contentPadding: EdgeInsets.symmetric(horizontal: 8, vertical: 8),
+                ),
+                items: [
+                  const DropdownMenuItem(value: 'auto', child: Text('Auto', style: TextStyle(fontSize: 12))),
+                  const DropdownMenuItem(value: 'sdpa', child: Text('SDPA', style: TextStyle(fontSize: 12))),
+                  if (_runtime['xformers_available'] == true)
+                    const DropdownMenuItem(value: 'xformers', child: Text('xFormers', style: TextStyle(fontSize: 12))),
+                  const DropdownMenuItem(value: 'sliced', child: Text('Sliced', style: TextStyle(fontSize: 12))),
+                ],
+                onChanged: _busy ? null : (v) => setState(() => _attentionBackend = v ?? 'auto'),
+              ),
+            ),
+          ),
+        ]),
         const SizedBox(height: 12),
 
         // Effective settings preview
@@ -1616,7 +1843,10 @@ class _ImagesPageState extends State<ImagesPage> with TickerProviderStateMixin {
               '${_lowMemoryMode ? 512 : _width}x${_lowMemoryMode ? 512 : _height} | '
               '${_lowMemoryMode ? 16 : _steps} steps | '
               'guidance ${_guidance.toStringAsFixed(1)} | '
-              '$_qualityProfile',
+              '$_qualityProfile'
+              '${_numImages > 1 ? ' | ${_numImages}x batch' : ''}'
+              '${_hiresFix ? ' | hires fix' : ''}'
+              '${_clipSkip > 0 ? ' | clip skip $_clipSkip' : ''}',
               style: TextStyle(fontSize: 11, color: cs.onSurfaceVariant),
             ),
           ]),
@@ -1805,13 +2035,57 @@ class _ImagesPageState extends State<ImagesPage> with TickerProviderStateMixin {
             isExpanded: true,
             isDense: true,
             value: _controlNetTypes.any((t) => t['type'] == _controlNetType) ? _controlNetType : null,
-            items: _controlNetTypes.map((t) => DropdownMenuItem(
-              value: t['type'] as String,
-              child: Text('${t["name"]} -- ${t["description"]}', overflow: TextOverflow.ellipsis, style: const TextStyle(fontSize: 12)),
-            )).toList(),
+            items: _controlNetTypes.map((t) {
+              final bases = (t['base_models'] as List<dynamic>?)?.cast<String>() ?? [];
+              final compat = bases.isNotEmpty ? bases.map(_familyDisplayName).join(', ') : '';
+              return DropdownMenuItem(
+                value: t['type'] as String,
+                child: Tooltip(
+                  message: '${t["description"]}\nWorks with: ${compat.isNotEmpty ? compat : "all models"}',
+                  child: Row(children: [
+                    Expanded(child: Text('${t["name"]}', overflow: TextOverflow.ellipsis, style: const TextStyle(fontSize: 12))),
+                    if (compat.isNotEmpty)
+                      Text(compat, style: TextStyle(fontSize: 9, color: Colors.grey.shade500)),
+                  ]),
+                ),
+              );
+            }).toList(),
             onChanged: (v) => setState(() => _controlNetType = v),
             decoration: const InputDecoration(labelText: 'Control type', isDense: true, contentPadding: EdgeInsets.symmetric(horizontal: 8, vertical: 8)),
           ),
+          // Compatibility warning
+          if (_controlNetType != null && _selectedModel != null) ...[
+            Builder(builder: (ctx) {
+              final selectedFamily = _models
+                  .where((m) => m['model_id'].toString() == _selectedModel)
+                  .map((m) => m['model_family'] as String?)
+                  .firstOrNull ?? '';
+              final ctrlType = _controlNetTypes.firstWhere(
+                  (t) => t['type'] == _controlNetType,
+                  orElse: () => <String, dynamic>{});
+              final bases = (ctrlType['base_models'] as List<dynamic>?)?.cast<String>() ?? [];
+              if (bases.isNotEmpty && selectedFamily.isNotEmpty && !bases.contains(selectedFamily)) {
+                return Container(
+                  margin: const EdgeInsets.only(top: 4),
+                  padding: const EdgeInsets.all(6),
+                  decoration: BoxDecoration(
+                    color: Colors.orange.withValues(alpha: 0.15),
+                    borderRadius: BorderRadius.circular(6),
+                  ),
+                  child: Row(children: [
+                    Icon(Icons.warning_amber_rounded, size: 14, color: Colors.orange.shade700),
+                    const SizedBox(width: 6),
+                    Expanded(child: Text(
+                      'This ControlNet type works best with ${bases.map(_familyDisplayName).join("/")} models. '
+                      'Your selected model is ${_familyDisplayName(selectedFamily)}.',
+                      style: TextStyle(fontSize: 10, color: Colors.orange.shade800),
+                    )),
+                  ]),
+                );
+              }
+              return const SizedBox.shrink();
+            }),
+          ],
           const SizedBox(height: 6),
           Row(children: [
             Expanded(child: Text(_controlImagePath ?? 'No image selected', style: TextStyle(fontSize: 11, color: cs.onSurfaceVariant), overflow: TextOverflow.ellipsis)),
@@ -1873,7 +2147,7 @@ class _ImagesPageState extends State<ImagesPage> with TickerProviderStateMixin {
               ]),
             ),
         ],
-        // Available LoRAs
+        // Available LoRAs (grouped by base model)
         if (_loadingLoras)
           const Center(child: Padding(padding: EdgeInsets.all(8), child: SizedBox(width: 18, height: 18, child: CircularProgressIndicator(strokeWidth: 2))))
         else if (_availableLoras.isEmpty)
@@ -1885,20 +2159,7 @@ class _ImagesPageState extends State<ImagesPage> with TickerProviderStateMixin {
             ),
           ])
         else
-          ...List.generate(_availableLoras.length, (i) {
-            final lora = _availableLoras[i];
-            final isSelected = _selectedLoras.any((l) => l['id'] == lora['id']);
-            return ListTile(
-              dense: true,
-              visualDensity: VisualDensity.compact,
-              contentPadding: EdgeInsets.zero,
-              leading: Icon(isSelected ? Icons.check_circle : Icons.circle_outlined, size: 18,
-                  color: isSelected ? cs.primary : cs.onSurfaceVariant),
-              title: Text(lora['name'] ?? lora['id'], style: const TextStyle(fontSize: 11)),
-              subtitle: Text('${lora['source']} | ${lora['size_human'] ?? '?'}', style: TextStyle(fontSize: 9, color: cs.onSurfaceVariant)),
-              onTap: () => _toggleLora(lora),
-            );
-          }),
+          ..._buildGroupedLoraList(cs),
         // Download LoRA
         const SizedBox(height: 4),
         Row(children: [
@@ -2237,13 +2498,161 @@ class _ImagesPageState extends State<ImagesPage> with TickerProviderStateMixin {
 
   // ── Helper widgets ──
 
+  static const _familyOrder = ['flux', 'sdxl', 'sd15', 'sd2', 'pixart', 'z-image', 'kandinsky', 'dit', 'unknown'];
+
+  String _familyDisplayName(String family) {
+    switch (family) {
+      case 'flux': return 'Flux';
+      case 'sdxl': return 'SDXL';
+      case 'sd15': return 'SD 1.5';
+      case 'sd2': return 'SD 2.x';
+      case 'sd3': return 'SD 3';
+      case 'pixart': return 'PixArt';
+      case 'z-image': return 'Z-Image';
+      case 'kandinsky': return 'Kandinsky';
+      case 'dit': return 'DiT';
+      default: return 'Other';
+    }
+  }
+
+  /// Short display name: strip org prefix for common repos
+  String _modelShortName(String modelId) {
+    // "stabilityai/stable-diffusion-xl-base-1.0" → "stable-diffusion-xl-base-1.0"
+    if (modelId.contains('/')) return modelId.split('/').last;
+    return modelId;
+  }
+
+  List<DropdownMenuItem<String>> _buildGroupedModelItems() {
+    final pipelines = _models.where((m) => m['is_component'] != true).toList();
+    // Group by model_family
+    final Map<String, List<Map<String, dynamic>>> grouped = {};
+    for (final m in pipelines) {
+      final family = (m['model_family'] as String?) ?? 'unknown';
+      grouped.putIfAbsent(family, () => []).add(m);
+    }
+    // Sort groups by our preferred order
+    final sortedFamilies = grouped.keys.toList()
+      ..sort((a, b) {
+        final ai = _familyOrder.indexOf(a);
+        final bi = _familyOrder.indexOf(b);
+        return (ai < 0 ? 99 : ai).compareTo(bi < 0 ? 99 : bi);
+      });
+
+    final items = <DropdownMenuItem<String>>[];
+    for (final family in sortedFamilies) {
+      final models = grouped[family]!;
+      // Add group header
+      if (sortedFamilies.length > 1 || family != 'unknown') {
+        final variant = models.length == 1 ? models.first['model_variant'] as String? : null;
+        final label = variant != null
+            ? '── ${_familyDisplayName(family)} ($variant) ──'
+            : '── ${_familyDisplayName(family)} (${models.length}) ──';
+        items.add(DropdownMenuItem<String>(
+          enabled: false,
+          value: '__header_$family',
+          child: Text(label,
+            style: const TextStyle(fontSize: 10, fontWeight: FontWeight.w700, letterSpacing: 0.5)),
+        ));
+      }
+      // Sort models: downloaded first, then by name
+      models.sort((a, b) {
+        final aDown = (a['local_status'] as Map?)?['downloaded'] == true ? 0 : 1;
+        final bDown = (b['local_status'] as Map?)?['downloaded'] == true ? 0 : 1;
+        if (aDown != bDown) return aDown.compareTo(bDown);
+        return a['model_id'].toString().compareTo(b['model_id'].toString());
+      });
+      for (final m in models) {
+        final id = m['model_id'].toString();
+        final shortName = _modelShortName(id);
+        final sizeStr = m['size_human'] as String? ?? '';
+        final downloaded = (m['local_status'] as Map?)?['downloaded'] == true;
+        items.add(DropdownMenuItem(
+          value: id,
+          child: Row(children: [
+            Icon(downloaded ? Icons.check_circle_outline : Icons.cloud_outlined,
+                size: 12, color: downloaded ? Colors.green.shade400 : Colors.grey),
+            const SizedBox(width: 6),
+            Expanded(child: Text(shortName, overflow: TextOverflow.ellipsis,
+                style: const TextStyle(fontSize: 12))),
+            if (sizeStr.isNotEmpty)
+              Text(sizeStr, style: TextStyle(fontSize: 9, color: Colors.grey.shade500)),
+          ]),
+        ));
+      }
+    }
+    return items;
+  }
+
+  Widget _iconChip(String label, IconData icon, ColorScheme cs) {
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
+      decoration: BoxDecoration(
+        color: cs.surfaceContainerHighest.withValues(alpha: 0.6),
+        borderRadius: BorderRadius.circular(10),
+      ),
+      child: Row(mainAxisSize: MainAxisSize.min, children: [
+        Icon(icon, size: 11, color: cs.onSurfaceVariant),
+        const SizedBox(width: 3),
+        Text(label, style: TextStyle(fontSize: 10, color: cs.onSurfaceVariant)),
+      ]),
+    );
+  }
+
+  List<Widget> _buildGroupedLoraList(ColorScheme cs) {
+    final Map<String, List<Map<String, dynamic>>> grouped = {};
+    for (final lora in _availableLoras) {
+      final base = (lora['base_model'] as String?) ?? 'unknown';
+      grouped.putIfAbsent(base, () => []).add(lora);
+    }
+    final sortedBases = grouped.keys.toList()
+      ..sort((a, b) {
+        final ai = _familyOrder.indexOf(a);
+        final bi = _familyOrder.indexOf(b);
+        return (ai < 0 ? 99 : ai).compareTo(bi < 0 ? 99 : bi);
+      });
+    final widgets = <Widget>[];
+    for (final base in sortedBases) {
+      final loras = grouped[base]!;
+      // Group header if more than one group
+      if (sortedBases.length > 1 || base != 'unknown') {
+        widgets.add(Padding(
+          padding: const EdgeInsets.only(top: 4, bottom: 2),
+          child: Text('${_familyDisplayName(base)} LoRAs',
+            style: TextStyle(fontSize: 10, fontWeight: FontWeight.w600, color: cs.primary.withValues(alpha: 0.7))),
+        ));
+      }
+      for (final lora in loras) {
+        final isSelected = _selectedLoras.any((l) => l['id'] == lora['id']);
+        widgets.add(ListTile(
+          dense: true,
+          visualDensity: VisualDensity.compact,
+          contentPadding: EdgeInsets.zero,
+          leading: Icon(isSelected ? Icons.check_circle : Icons.circle_outlined, size: 18,
+              color: isSelected ? cs.primary : cs.onSurfaceVariant),
+          title: Text(lora['name'] ?? lora['id'], style: const TextStyle(fontSize: 11)),
+          subtitle: Text('${lora['source']} | ${lora['size_human'] ?? '?'} | ${_familyDisplayName(base)}',
+            style: TextStyle(fontSize: 9, color: cs.onSurfaceVariant)),
+          onTap: () => _toggleLora(lora),
+        ));
+      }
+    }
+    if (widgets.isEmpty) {
+      widgets.add(Text('No LoRAs available.', style: TextStyle(fontSize: 11, color: cs.onSurfaceVariant)));
+    }
+    return widgets;
+  }
+
   Widget _sectionLabel(String text, ColorScheme cs) {
     return Text(text, style: TextStyle(fontSize: 12, fontWeight: FontWeight.w700, color: cs.primary, letterSpacing: 0.5));
   }
 
-  Widget _compactField(String label, String initialValue, ValueChanged<String> onChanged) {
-    return TextFormField(
-      initialValue: initialValue,
+  Widget _compactField(String label, String currentValue, ValueChanged<String> onChanged) {
+    // Use a keyed TextField so Flutter rebuilds it when the value changes
+    // externally (e.g., when "Apply recommended" updates _width/_height).
+    // The onChanged wraps in setState so the Preview section updates live.
+    return TextField(
+      key: ValueKey('$label-$currentValue'),
+      controller: TextEditingController(text: currentValue),
       style: const TextStyle(fontSize: 12),
       keyboardType: TextInputType.number,
       decoration: InputDecoration(
@@ -2251,7 +2660,10 @@ class _ImagesPageState extends State<ImagesPage> with TickerProviderStateMixin {
         isDense: true,
         contentPadding: const EdgeInsets.symmetric(horizontal: 8, vertical: 8),
       ),
-      onChanged: onChanged,
+      onChanged: (v) {
+        onChanged(v);
+        setState(() {}); // Trigger rebuild so Preview and dependent UI update
+      },
     );
   }
 
@@ -2273,14 +2685,35 @@ class _ImagesPageState extends State<ImagesPage> with TickerProviderStateMixin {
     );
   }
 
-  Widget _toggleChip(String label, bool value, ValueChanged<bool> onChanged, ColorScheme cs) {
-    return FilterChip(
-      label: Text(label, style: TextStyle(fontSize: 11, color: value ? cs.onPrimaryContainer : cs.onSurfaceVariant)),
-      selected: value,
-      onSelected: _busy ? null : onChanged,
-      visualDensity: VisualDensity.compact,
-      padding: const EdgeInsets.symmetric(horizontal: 2),
-      materialTapTargetSize: MaterialTapTargetSize.shrinkWrap,
+  Widget _toggleChipWithTooltip(String label, bool value, ValueChanged<bool> onChanged, ColorScheme cs, String tooltip) {
+    return Tooltip(
+      message: tooltip,
+      preferBelow: true,
+      waitDuration: const Duration(milliseconds: 400),
+      child: FilterChip(
+        label: Text(label, style: TextStyle(fontSize: 11, color: value ? cs.onPrimaryContainer : cs.onSurfaceVariant)),
+        selected: value,
+        onSelected: _busy ? null : onChanged,
+        visualDensity: VisualDensity.compact,
+        padding: const EdgeInsets.symmetric(horizontal: 2),
+        materialTapTargetSize: MaterialTapTargetSize.shrinkWrap,
+      ),
+    );
+  }
+
+  Widget _settingHelpBox(String text, ColorScheme cs, {IconData icon = Icons.info_outline}) {
+    return Container(
+      padding: const EdgeInsets.all(8),
+      decoration: BoxDecoration(
+        color: cs.primaryContainer.withValues(alpha: 0.2),
+        borderRadius: BorderRadius.circular(6),
+        border: Border.all(color: cs.primaryContainer.withValues(alpha: 0.4)),
+      ),
+      child: Row(crossAxisAlignment: CrossAxisAlignment.start, children: [
+        Icon(icon, size: 14, color: cs.primary.withValues(alpha: 0.7)),
+        const SizedBox(width: 6),
+        Expanded(child: Text(text, style: TextStyle(fontSize: 10, color: cs.onSurfaceVariant, height: 1.4))),
+      ]),
     );
   }
 

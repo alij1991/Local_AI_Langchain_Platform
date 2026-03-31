@@ -513,6 +513,38 @@ async def get_ollama_pull_status(model: str | None = None):
     return {"pulls": {k: v for k, v in _ollama_pulls.items()}}
 
 
+def _estimate_ollama_variant_size(variant_str: str) -> dict[str, Any]:
+    """Estimate download size for an Ollama model variant based on parameter count.
+
+    Default quantization for Ollama is Q4_K_M.
+    Q4_K_M uses ~0.55 bytes per parameter on average (4.4 bits/param).
+    """
+    v = variant_str.lower().strip()
+    # Parse parameter count from variant string
+    multiplier = 1e9  # default: billions
+    if v.endswith("m"):
+        multiplier = 1e6
+        v = v[:-1]
+    elif v.endswith("b"):
+        multiplier = 1e9
+        v = v[:-1]
+
+    try:
+        num = float(v.replace("x", "*").split("*")[0]) if "*" not in v else eval(v.replace("x", "*"))
+        params = int(num * multiplier)
+    except Exception:
+        return {"name": variant_str, "params": variant_str.upper(), "size_bytes": None, "size_human": None}
+
+    # Q4_K_M: ~0.55 bytes per parameter + ~300MB overhead (tokenizer, metadata)
+    size_bytes = int(params * 0.55 + 300 * 1024 * 1024)
+    return {
+        "name": variant_str,
+        "params": f"{num:.1f}{('B' if multiplier >= 1e9 else 'M')}".replace('.0', ''),
+        "size_bytes": size_bytes,
+        "size_human": format_bytes_human(size_bytes),
+    }
+
+
 @app.get("/models/ollama/library")
 async def get_ollama_library(search: str | None = None, tag: str | None = None):
     """Return comprehensive Ollama model library with variants grouped under base model.
@@ -548,6 +580,17 @@ async def get_ollama_library(search: str | None = None, tag: str | None = None):
                     installed_bases.add(m.name.split(":")[0])
             except Exception:
                 pass
+
+    # Build a map of installed model sizes for accurate variant sizes
+    installed_sizes: dict[str, int] = {}
+    try:
+        if ollama_ctrl:
+            _ok, _ollama_models, _ = ollama_ctrl.list_local_models_detailed()
+            if _ok:
+                for m in _ollama_models:
+                    installed_sizes[m.name] = m.size_bytes or 0
+    except Exception:
+        pass
 
     # ── Curated catalog of popular models with metadata ─────────────
     # This ensures good coverage even when scraping fails.
@@ -727,6 +770,18 @@ async def get_ollama_library(search: str | None = None, tag: str | None = None):
                 variant = n.split(":")[1] if ":" in n else "latest"
                 installed_variants.append(variant)
 
+        # Build rich variant info with size estimates
+        variant_details = []
+        for v in info["variants"]:
+            vd = _estimate_ollama_variant_size(v)
+            # Override with actual installed size if available
+            full_name = f"{base}:{v}"
+            if full_name in installed_sizes:
+                vd["size_bytes"] = installed_sizes[full_name]
+                vd["size_human"] = format_bytes_human(installed_sizes[full_name])
+                vd["actual_size"] = True
+            variant_details.append(vd)
+
         items.append({
             "id": f"ollama:{base}",
             "name": base,
@@ -735,10 +790,11 @@ async def get_ollama_library(search: str | None = None, tag: str | None = None):
             "provider": "ollama",
             "family": base.split("-")[0].split(".")[0],
             "description": info["description"],
-            "variants": info["variants"],  # e.g. ["1b", "3b", "7b"]
+            "variants": info["variants"],  # keep flat list for backward compat
+            "variant_details": variant_details,  # rich variant info with sizes
             "tags": info["tags"],
             "installed": is_installed,
-            "installed_variants": installed_variants,  # e.g. ["3b"]
+            "installed_variants": installed_variants,
         })
 
     # Sort: installed first, then trending, then alphabetical
@@ -1065,6 +1121,53 @@ def _extract_hf_capabilities(pipeline_tag: str, tags: list[str]) -> list[str]:
     return list(dict.fromkeys(caps))  # deduplicate preserving order
 
 
+def _classify_hf_model(model_id: str, pipeline_tag: str, tags: list[str]) -> str:
+    """Classify a HuggingFace model into a UI category.
+
+    In the diffusion world almost every model has a ``base_model:`` tag
+    because they derive from SD/SDXL/Flux.  Those are still usable as
+    standalone image generators → keep them as "diffusion".  The
+    "fine_tune" label is reserved for *text/LLM* fine-tunes (instruct,
+    chat, DPO, RLHF) where the distinction matters for the user.
+    """
+    tag_set = {t.lower() for t in tags}
+    name_low = model_id.lower()
+    _is_image_pipeline = pipeline_tag in (
+        "text-to-image", "image-to-image", "image-to-video",
+        "text-to-video",
+    )
+
+    # 1. LoRA / adapters — always first (can sit on any pipeline)
+    if any(t in tag_set for t in ("lora", "peft", "adapter")):
+        return "lora_adapter"
+    # 2. ControlNet
+    if "controlnet" in name_low or pipeline_tag == "controlnet":
+        return "controlnet"
+    # 3. Quantized variants (GPTQ / AWQ / GGUF / EXL2)
+    if any(q in name_low for q in ("gptq", "awq", "gguf", "exl2")):
+        return "quantized"
+    # 4. Embedding
+    if pipeline_tag in ("feature-extraction", "sentence-similarity") or (
+        "embed" in name_low and pipeline_tag not in ("text-generation",)
+    ):
+        return "embedding"
+    # 5. Diffusion — image generation models.  Even if they have a
+    #    base_model tag they are standalone generators, not "fine-tunes"
+    #    in the LLM sense, so keep them under Diffusion.
+    if _is_image_pipeline:
+        return "diffusion"
+    # 6. Multimodal / vision-language
+    if pipeline_tag in ("image-text-to-text",) or {"multimodal", "image-text"} & tag_set:
+        return "multimodal"
+    # 7. Fine-tunes — LLM/text models with a base_model tag or
+    #    instruct/chat suffix.  Only reaches here for non-image models.
+    if any(t.startswith("base_model:") for t in tags):
+        return "fine_tune"
+    if any(k in name_low for k in ("-instruct", "-chat", "-ft", "-finetuned", "-dpo", "-rlhf")):
+        return "fine_tune"
+    return "base_model"
+
+
 @app.get("/models/hf/discover")
 async def discover_hf_models(
     q: str = "",
@@ -1181,7 +1284,25 @@ async def discover_hf_models(
 
             description = _synthesize_hf_description(model_id, pipeline_tag, tags, param_count)
             capabilities = _extract_hf_capabilities(pipeline_tag, tags)
+            category = _classify_hf_model(model_id, pipeline_tag, tags)
             gated = model.get("gated", False)
+
+            # Extract base_model from tags for fine-tunes/LoRAs
+            _base_model_id = ""
+            for _t in tags:
+                if _t.startswith("base_model:"):
+                    _bm = _t.replace("base_model:", "").strip()
+                    # Skip "quantized:" or "adapter:" prefixes
+                    if ":" in _bm:
+                        _bm = _bm.split(":", 1)[-1]
+                    _base_model_id = _bm
+                    break
+
+            # Check if the base model is installed locally
+            _base_installed = False
+            if _base_model_id:
+                _base_cache = Path(os.getenv("HF_HOME") or (Path.home() / ".cache" / "huggingface")) / "hub" / f"models--{_base_model_id.replace('/', '--')}"
+                _base_installed = _base_cache.exists() and any((_base_cache / "snapshots").iterdir()) if (_base_cache / "snapshots").exists() else False
 
             items.append({
                 "id": f"huggingface:{model_id}",
@@ -1198,12 +1319,15 @@ async def discover_hf_models(
                 "tags": tags[:10],
                 "description": description,
                 "capabilities": capabilities,
+                "category": category,
                 "installed": False,
                 "gated": gated,
                 "param_count": param_count,
                 "param_count_human": _format_param_count(param_count) if param_count else None,
                 "size_bytes": size_bytes,
                 "size_human": format_bytes_human(size_bytes) if size_bytes else None,
+                "base_model": _base_model_id or None,
+                "base_model_installed": _base_installed if _base_model_id else None,
             })
     except Exception as exc:
         logger.warning("HF Hub discovery failed: %s", exc)
@@ -1483,10 +1607,66 @@ async def get_hf_model_readme(model_id: str):
         except Exception:
             pass
 
+    # ── Build resource links ────────────────────────────────
+    resources: dict[str, str] = {
+        "huggingface_url": f"https://huggingface.co/{model_id}",
+        "discussions_url": f"https://huggingface.co/{model_id}/discussions",
+    }
+    # Paper / arXiv link
+    all_tags = hub_info.get("tags", [])
+    for t in all_tags:
+        if t.startswith("arxiv:"):
+            resources["paper_url"] = f"https://arxiv.org/abs/{t.replace('arxiv:', '')}"
+            break
+    if not resources.get("paper_url"):
+        _paper = card_meta.get("paper_url") or card_meta.get("arxiv")
+        if _paper:
+            resources["paper_url"] = str(_paper) if str(_paper).startswith("http") else f"https://arxiv.org/abs/{_paper}"
+    # GitHub link
+    _gh = card_meta.get("github_url") or card_meta.get("repo_url") or card_meta.get("github")
+    if _gh and "github.com" in str(_gh):
+        resources["github_url"] = str(_gh)
+    # Documentation link (auto-generate from library)
+    _lib = hub_info.get("library_name", "")
+    _mtype = hub_info.get("model_type", "")
+    if _lib == "transformers" and _mtype:
+        resources["docs_url"] = f"https://huggingface.co/docs/transformers/model_doc/{_mtype}"
+    elif _lib == "diffusers":
+        resources["docs_url"] = "https://huggingface.co/docs/diffusers"
+    elif _lib == "peft":
+        resources["docs_url"] = "https://huggingface.co/docs/peft"
+    elif _lib == "sentence-transformers":
+        resources["docs_url"] = "https://www.sbert.net/"
+    # Category
+    _readme_category = _classify_hf_model(
+        model_id,
+        hub_info.get("pipeline_tag", ""),
+        all_tags,
+    )
+    # Base model check — is the base model already installed locally?
+    _readme_base_model = ""
+    for _t in all_tags:
+        if _t.startswith("base_model:"):
+            _bm = _t.replace("base_model:", "").strip()
+            if ":" in _bm:
+                _bm = _bm.split(":", 1)[-1]
+            _readme_base_model = _bm
+            break
+    if not _readme_base_model:
+        _readme_base_model = str(card_meta.get("base_model") or "")
+    _readme_base_installed = False
+    if _readme_base_model:
+        _bc = Path(os.getenv("HF_HOME") or (Path.home() / ".cache" / "huggingface")) / "hub" / f"models--{_readme_base_model.replace('/', '--')}"
+        _readme_base_installed = _bc.exists() and (_bc / "snapshots").exists() and any((_bc / "snapshots").iterdir()) if (_bc / "snapshots").exists() else False
+
     result = {
         "model_id": model_id,
         "readme": readme,
         "card_metadata": card_meta,
+        "resources": resources,
+        "category": _readme_category,
+        "base_model": _readme_base_model or None,
+        "base_model_installed": _readme_base_installed if _readme_base_model else None,
         **hub_info,
     }
     _set_cache(cache_key, result)
@@ -2452,6 +2632,7 @@ async def enhance_image_prompt(body: dict[str, Any]):
     ollama_model = (body.get("ollama_model") or "").strip()
     hf_model = (body.get("hf_model") or "").strip()
     timeout_sec = int(body.get("timeout_sec") or 120)
+    use_prompt_weighting = bool(body.get("prompt_weighting", False))
 
     # ── HuggingFace text model path ─────────────────────────────────
     if hf_model:
@@ -2459,15 +2640,28 @@ async def enhance_image_prompt(body: dict[str, Any]):
             from transformers import pipeline as hf_pipeline
             import torch
 
-            enhance_system = (
-                f"You are an expert at writing Stable Diffusion {model_family} prompts. "
-                "Given a simple description, create a detailed image generation prompt with "
-                "quality tags (masterpiece, best quality, highly detailed, sharp focus), "
-                "style, lighting, and composition details. Also provide a negative prompt. "
-                "IMPORTANT: The prompt MUST be under 60 words (CLIP token limit is 77 tokens — "
-                "anything longer gets silently truncated and wasted). Be concise and impactful. "
-                "Output ONLY JSON: {\"prompt\": \"...\", \"negative_prompt\": \"...\"}"
-            )
+            if use_prompt_weighting:
+                enhance_system = (
+                    f"You are an expert at writing Stable Diffusion {model_family} prompts with emphasis weighting. "
+                    "Given a simple description, create a detailed image generation prompt. "
+                    "YOU MUST use (word:weight) syntax on the 3-5 most important phrases. "
+                    "Weights: 1.3 = strong emphasis, 1.2 = medium, 0.7 = less focus, 0.5 = minimal. "
+                    "Leave quality tags and common words unweighted. "
+                    "Example: (red-haired woman:1.3), portrait, (crystal blue eyes:1.2), masterpiece, best quality, (blurred background:0.6). "
+                    "Also provide a negative prompt. "
+                    "IMPORTANT: The prompt MUST be under 60 words (CLIP token limit is 77 tokens). "
+                    "Output ONLY JSON: {\"prompt\": \"...\", \"negative_prompt\": \"...\"}"
+                )
+            else:
+                enhance_system = (
+                    f"You are an expert at writing Stable Diffusion {model_family} prompts. "
+                    "Given a simple description, create a detailed image generation prompt with "
+                    "quality tags (masterpiece, best quality, highly detailed, sharp focus), "
+                    "style, lighting, and composition details. Also provide a negative prompt. "
+                    "IMPORTANT: The prompt MUST be under 60 words (CLIP token limit is 77 tokens — "
+                    "anything longer gets silently truncated and wasted). Be concise and impactful. "
+                    "Output ONLY JSON: {\"prompt\": \"...\", \"negative_prompt\": \"...\"}"
+                )
             logger.info("enhance-prompt using HF model: %s", hf_model)
             pipe = hf_pipeline(
                 "text-generation",
@@ -2552,7 +2746,23 @@ async def enhance_image_prompt(body: dict[str, Any]):
         raise HTTPException(503, "No Ollama model available. Install one with: ollama pull gemma3:1b")
 
     # Use /api/generate (simpler, works better with thinking models via /no_think)
-    generate_prompt = f"""/no_think
+    if use_prompt_weighting:
+        generate_prompt = f"""/no_think
+Write a Stable Diffusion {model_family} prompt for: {user_prompt}
+
+RULES:
+1. MAX 60 words (CLIP truncates at 77 tokens)
+2. YOU MUST use (word:weight) syntax on the 3-5 most important phrases
+3. Weights: 1.3 = strong emphasis, 1.2 = medium, 0.7 = less focus, 0.5 = minimal
+4. Leave quality tags and common words unweighted
+5. Comma-separated tags
+
+EXAMPLE output format:
+{{"prompt": "(red-haired woman:1.3), portrait, (crystal blue eyes:1.2), (soft golden hour lighting:1.1), detailed face, masterpiece, best quality, (blurred background:0.6)", "negative_prompt": "worst quality, low quality, blurry, deformed, ugly, bad anatomy, watermark, text"}}
+
+Now output ONLY the JSON for: {user_prompt}"""
+    else:
+        generate_prompt = f"""/no_think
 IMPORTANT: Keep the prompt UNDER 60 words. CLIP only accepts 77 tokens — longer prompts get silently truncated.
 Output ONLY this JSON object, nothing else:
 {{"prompt": "[concise Stable Diffusion {model_family} prompt for: {user_prompt}. Include key quality tags (masterpiece, best quality, highly detailed). Add style, lighting, composition. Comma-separated tags. MAX 60 words.]", "negative_prompt": "[things to avoid: worst quality, low quality, blurry, deformed, ugly, bad anatomy, watermark, text, plus scene-specific negatives]"}}"""
@@ -2750,61 +2960,84 @@ def generate_image(body: dict[str, Any]):
         device_preference=body.get("device_preference"),
         scheduler=body.get("scheduler"),
         loras=body.get("loras"),
+        # Batch 1 features
+        num_images=int(body.get("num_images", 1)),
+        clip_skip=int(body.get("clip_skip", 0)),
+        hires_fix=bool(body.get("hires_fix", False)),
+        hires_denoise=float(body.get("hires_denoise", 0.55)),
+        prompt_weighting=bool(body.get("prompt_weighting", True)),
     )
 
-    if not result.ok:
-        raise HTTPException(500, {
-            "error": {
-                "code": result.error_code,
-                "message": result.error_message,
-                "metadata": result.metadata,
-            }
+    # Handle batch results (list) or single result
+    results_list: list = result if isinstance(result, list) else [result]
+
+    session_id = body.get("session_id")
+    saved_images: list[dict[str, Any]] = []
+
+    for single_result in results_list:
+        if not single_result.ok:
+            # If any image in the batch fails, return error with partial results
+            if saved_images:
+                return {"status": "partial", "images": saved_images, "error": {
+                    "code": single_result.error_code,
+                    "message": single_result.error_message,
+                }}
+            raise HTTPException(500, {
+                "error": {
+                    "code": single_result.error_code,
+                    "message": single_result.error_message,
+                    "metadata": single_result.metadata,
+                }
+            })
+
+        seed_used = (single_result.metadata or {}).get("seed")
+        image_id_saved: str | None = None
+
+        if session_id and single_result.image_bytes:
+            try:
+                from local_ai_platform.repositories.images_repo import add_image, image_output_path
+                image_id_saved = str(uuid.uuid4())
+                out_path = image_output_path(session_id, image_id_saved)
+                out_path.parent.mkdir(parents=True, exist_ok=True)
+                out_path.write_bytes(single_result.image_bytes)
+                save_params = dict(body.get("params_json") or {})
+                save_params["seed_used"] = seed_used
+                if body.get("scheduler"):
+                    save_params["scheduler"] = body["scheduler"]
+                gen_log = (single_result.metadata or {}).get("generation_log")
+                if gen_log:
+                    save_params["generation_log"] = gen_log
+                add_image(
+                    session_id=session_id,
+                    model_id=model_id,
+                    prompt=prompt,
+                    file_path=str(out_path),
+                    negative_prompt=body.get("negative_prompt"),
+                    params=save_params,
+                )
+                # Copy step preview images to session folder if they were generated
+                step_previews_dir = (single_result.metadata or {}).get("step_previews_dir")
+                if step_previews_dir and Path(step_previews_dir).is_dir():
+                    steps_dest = out_path.parent / f"{image_id_saved}_steps"
+                    steps_dest.mkdir(parents=True, exist_ok=True)
+                    import shutil
+                    for preview in sorted(Path(step_previews_dir).glob("step_*.png")):
+                        shutil.copy2(str(preview), str(steps_dest / preview.name))
+                    shutil.rmtree(step_previews_dir, ignore_errors=True)
+                    logger.info("Saved %d step previews to %s", len(list(steps_dest.glob("*.png"))), steps_dest)
+            except Exception as exc:
+                logger.warning("Failed to save generated image: %s", exc)
+
+        saved_images.append({
+            "image_id": image_id_saved,
+            "seed_used": seed_used,
+            "metadata": single_result.metadata,
         })
 
-    # Extract seed from result metadata
-    seed_used = (result.metadata or {}).get("seed")
-
-    # Save image to session if provided
-    session_id = body.get("session_id")
-    image_id_saved: str | None = None
-    if session_id and result.image_bytes:
-        try:
-            from local_ai_platform.repositories.images_repo import add_image, image_output_path
-            image_id_saved = str(uuid.uuid4())
-            out_path = image_output_path(session_id, image_id_saved)
-            out_path.parent.mkdir(parents=True, exist_ok=True)
-            out_path.write_bytes(result.image_bytes)
-            # Persist seed, scheduler, and other metadata alongside the image
-            save_params = dict(body.get("params_json") or {})
-            save_params["seed_used"] = seed_used
-            if body.get("scheduler"):
-                save_params["scheduler"] = body["scheduler"]
-            gen_log = (result.metadata or {}).get("generation_log")
-            if gen_log:
-                save_params["generation_log"] = gen_log
-            add_image(
-                session_id=session_id,
-                model_id=model_id,
-                prompt=prompt,
-                file_path=str(out_path),
-                negative_prompt=body.get("negative_prompt"),
-                params=save_params,
-            )
-            # Copy step preview images to session folder if they were generated
-            step_previews_dir = (result.metadata or {}).get("step_previews_dir")
-            if step_previews_dir and Path(step_previews_dir).is_dir():
-                steps_dest = out_path.parent / f"{image_id_saved}_steps"
-                steps_dest.mkdir(parents=True, exist_ok=True)
-                import shutil
-                for preview in sorted(Path(step_previews_dir).glob("step_*.png")):
-                    shutil.copy2(str(preview), str(steps_dest / preview.name))
-                # Clean up temp directory
-                shutil.rmtree(step_previews_dir, ignore_errors=True)
-                logger.info("Saved %d step previews to %s", len(list(steps_dest.glob("*.png"))), steps_dest)
-        except Exception as exc:
-            logger.warning("Failed to save generated image: %s", exc)
-
-    return {"status": "ok", "metadata": result.metadata, "seed_used": seed_used}
+    # Backward-compatible response: single image returns flat, batch returns list
+    if len(saved_images) == 1:
+        return {"status": "ok", "metadata": saved_images[0]["metadata"], "seed_used": saved_images[0]["seed_used"]}
+    return {"status": "ok", "images": saved_images, "seed_used": saved_images[0]["seed_used"] if saved_images else None}
 
 
 @app.post("/images/edit")
@@ -2964,13 +3197,13 @@ async def preprocess_control_image_endpoint(body: dict[str, Any]):
 async def list_controlnet_types():
     """Available ControlNet types for the Flutter UI dropdown."""
     all_types = [
-        {"type": "canny", "name": "Canny Edge Detection", "description": "Preserves edges and outlines. Works without controlnet_aux."},
-        {"type": "depth", "name": "Depth Map", "description": "Maintains 3D spatial layout. Falls back to MiDaS if controlnet_aux unavailable."},
-        {"type": "openpose", "name": "OpenPose", "description": "Detects body poses and hand positions. Requires controlnet_aux."},
-        {"type": "scribble", "name": "Scribble", "description": "Interprets rough sketches. Requires controlnet_aux."},
-        {"type": "lineart", "name": "Line Art", "description": "Renders clean line drawings. Requires controlnet_aux."},
-        {"type": "segmentation", "name": "Segmentation", "description": "Object region composition. Requires controlnet_aux."},
-        {"type": "normal", "name": "Normal Map", "description": "Surface lighting control. Requires controlnet_aux."},
+        {"type": "canny", "name": "Canny Edge Detection", "description": "Preserves edges and outlines. Works without controlnet_aux.", "base_models": ["sd15", "sdxl"]},
+        {"type": "depth", "name": "Depth Map", "description": "Maintains 3D spatial layout. Falls back to MiDaS if controlnet_aux unavailable.", "base_models": ["sd15", "sdxl"]},
+        {"type": "openpose", "name": "OpenPose", "description": "Detects body poses and hand positions. Requires controlnet_aux.", "base_models": ["sd15"]},
+        {"type": "scribble", "name": "Scribble", "description": "Interprets rough sketches. Requires controlnet_aux.", "base_models": ["sd15"]},
+        {"type": "lineart", "name": "Line Art", "description": "Renders clean line drawings. Requires controlnet_aux.", "base_models": ["sd15", "sdxl"]},
+        {"type": "segmentation", "name": "Segmentation", "description": "Object region composition. Requires controlnet_aux.", "base_models": ["sd15"]},
+        {"type": "normal", "name": "Normal Map", "description": "Surface lighting control. Requires controlnet_aux.", "base_models": ["sd15"]},
     ]
     available = False
     available_type_names: list[str] = []
