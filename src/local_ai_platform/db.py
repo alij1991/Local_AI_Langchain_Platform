@@ -133,6 +133,33 @@ CREATE TABLE IF NOT EXISTS mcp_discovered_tools (
     PRIMARY KEY(server_id, tool_name),
     FOREIGN KEY(server_id) REFERENCES mcp_servers(id) ON DELETE CASCADE
 );
+
+CREATE TABLE IF NOT EXISTS agent_tools (
+    agent_name TEXT NOT NULL,
+    tool_id TEXT NOT NULL,
+    sort_order INTEGER DEFAULT 0,
+    PRIMARY KEY (agent_name, tool_id),
+    FOREIGN KEY (agent_name) REFERENCES agents(name) ON DELETE CASCADE
+);
+
+CREATE TABLE IF NOT EXISTS threads (
+    thread_id TEXT PRIMARY KEY,
+    conversation_id TEXT,
+    agent_name TEXT NOT NULL,
+    title TEXT,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    FOREIGN KEY (conversation_id) REFERENCES conversations(id) ON DELETE CASCADE
+);
+
+CREATE TABLE IF NOT EXISTS memory_store (
+    namespace TEXT NOT NULL,
+    key TEXT NOT NULL,
+    value_json TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    PRIMARY KEY (namespace, key)
+);
 """
 
 

@@ -2255,9 +2255,11 @@ def _diffusers_worker(payload: dict[str, Any], out_q: Any) -> None:
                 except Exception as e:
                     _log(f"torch.compile failed: {e}")
 
-        # Float32 matmul precision: always safe to set (helps CPU and CUDA)
+        # Float32 matmul precision: "high" enables TF32 on Ampere+ (10-15% faster)
+        # "medium" is the fallback for CPU-only. Don't overwrite the "high" we set earlier.
         try:
-            torch.set_float32_matmul_precision("medium")
+            if not torch.cuda.is_available():
+                torch.set_float32_matmul_precision("medium")
         except Exception:
             pass
 
@@ -5948,7 +5950,8 @@ class ImageGenerationService:
                             except Exception as e:
                                 logger.info("[IMG] torch.compile skipped: %s", e)
                 try:
-                    torch.set_float32_matmul_precision("medium")
+                    if not torch.cuda.is_available():
+                        torch.set_float32_matmul_precision("medium")
                 except Exception:
                     pass
 

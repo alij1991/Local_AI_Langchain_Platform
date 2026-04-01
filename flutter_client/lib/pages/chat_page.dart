@@ -131,6 +131,7 @@ class _ChatPageState extends State<ChatPage> {
   List<String> _agents = [];
   String _selectedAgent = 'assistant';
   String? _conversationId;
+  String? _threadId;
 
   /// true = use an agent, false = use a model directly
   bool _useAgent = true;
@@ -297,11 +298,12 @@ class _ChatPageState extends State<ChatPage> {
   Future<void> _createConversation() async {
     final body = await widget.api.post('/conversations', {'title': 'New chat'}) as Map<String, dynamic>;
     _conversationId = body['id']?.toString();
+    _threadId = null; // Reset thread for new conversation
     await _load();
   }
 
   Future<void> _selectConversation(String id) async {
-    setState(() => _conversationId = id);
+    setState(() { _conversationId = id; _threadId = null; });
     final messages = await widget.api.get('/conversations/$id/messages') as List<dynamic>;
     if (!mounted) return;
     setState(() => _messages = messages.cast<Map<String, dynamic>>().map(_fromServerMessage).toList());
@@ -350,6 +352,106 @@ class _ChatPageState extends State<ChatPage> {
   }
 
   // ─── Message Sending ───────────────────────────────────────
+
+  Future<void> _showToolApprovalDialog(List<dynamic> toolCalls, String threadId) async {
+    final result = await showDialog<String>(
+      context: context,
+      barrierDismissible: false,
+      builder: (ctx) => AlertDialog(
+        icon: const Icon(Icons.warning_amber, color: Colors.orange, size: 36),
+        title: const Text('Tool Approval Required'),
+        content: SizedBox(
+          width: 500,
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              const Text('The agent wants to execute the following tools:'),
+              const SizedBox(height: 12),
+              for (final tc in toolCalls)
+                Card(
+                  margin: const EdgeInsets.only(bottom: 8),
+                  child: ListTile(
+                    leading: const Icon(Icons.terminal, color: Colors.orange),
+                    title: Text(tc['name']?.toString() ?? 'unknown', style: const TextStyle(fontWeight: FontWeight.w600)),
+                    subtitle: Text('Args: ${tc['args'] ?? '{}'}', style: const TextStyle(fontSize: 12, fontFamily: 'Consolas'), maxLines: 3, overflow: TextOverflow.ellipsis),
+                  ),
+                ),
+            ],
+          ),
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(ctx, 'reject'),
+            child: const Text('Reject', style: TextStyle(color: Colors.red)),
+          ),
+          FilledButton(
+            onPressed: () => Navigator.pop(ctx, 'approve'),
+            child: const Text('Approve & Run'),
+          ),
+        ],
+      ),
+    );
+
+    if (result != null && mounted) {
+      // Resume the agent
+      final agent = _useAgent ? _selectedAgent : 'chat';
+      setState(() => _isStreaming = true);
+      final stream = widget.api.postSse('/chat/resume', {
+        'agent': agent,
+        'thread_id': threadId,
+        'action': result,
+        'conversation_id': _conversationId,
+      });
+
+      // Add a new assistant message for the resumed response
+      final resumeLocalId = 'resume_${DateTime.now().millisecondsSinceEpoch}';
+      setState(() {
+        _messages.add(ChatUiMessage(
+          localId: resumeLocalId,
+          role: 'assistant',
+          content: result == 'reject' ? '*(Tool execution rejected by user)*\n\n' : '',
+          status: ChatMessageStatus.streaming,
+        ));
+      });
+
+      stream.listen((event) {
+        if (!mounted) return;
+        final type = event['event']?.toString() ?? '';
+        final idx = _messages.indexWhere((m) => m.localId == resumeLocalId);
+
+        if (type == 'token') {
+          final text = event['text']?.toString() ?? '';
+          setState(() {
+            if (idx >= 0) _messages[idx].content = '${_messages[idx].content}$text';
+          });
+          _scheduleAutoScroll();
+        } else if (type == 'tool_call') {
+          final toolName = event['name']?.toString() ?? '';
+          setState(() {
+            if (idx >= 0) _messages[idx].content = '${_messages[idx].content}\n\n> **Using tool:** `$toolName`\n';
+          });
+        } else if (type == 'tool_result') {
+          final toolName = event['name']?.toString() ?? '';
+          final content = event['content']?.toString() ?? '';
+          final preview = content.length > 300 ? '${content.substring(0, 300)}...' : content;
+          setState(() {
+            if (idx >= 0) _messages[idx].content = '${_messages[idx].content}> **Result from** `$toolName`:\n> ```\n> $preview\n> ```\n\n';
+          });
+        } else if (type == 'end') {
+          setState(() {
+            if (idx >= 0) _messages[idx].status = ChatMessageStatus.complete;
+            _isStreaming = false;
+          });
+        } else if (type == 'error') {
+          setState(() {
+            _error = event['error']?.toString() ?? 'Resume error';
+            _isStreaming = false;
+          });
+        }
+      });
+    }
+  }
 
   Future<void> _sendMessage({String? overrideText, List<PlatformFile>? overrideAttachments, String? retryLocalId}) async {
     final text = (overrideText ?? _messageController.text).trim();
@@ -470,6 +572,7 @@ class _ChatPageState extends State<ChatPage> {
       'agent': agent,
       'message': text,
       'conversation_id': _conversationId,
+      if (_threadId != null) 'thread_id': _threadId,
       if (modelOverride != null) 'model': modelOverride.split(':').skip(1).join(':'),
       if (modelOverride != null) 'provider': modelOverride.split(':').first,
       'settings': {
@@ -496,6 +599,7 @@ class _ChatPageState extends State<ChatPage> {
       if (type == 'start') {
         setState(() {
           _conversationId = event['conversation_id']?.toString() ?? _conversationId;
+          _threadId = event['thread_id']?.toString() ?? _threadId;
           if (assistantIndex >= 0) _messages[assistantIndex].runId = currentRunId;
           if (userIndex >= 0) _messages[userIndex].status = ChatMessageStatus.sent;
         });
@@ -509,6 +613,50 @@ class _ChatPageState extends State<ChatPage> {
           }
         });
         _scheduleAutoScroll();
+      } else if (type == 'tool_call') {
+        final toolName = event['name']?.toString() ?? '';
+        final toolArgs = event['args']?.toString() ?? '';
+        if (toolName.isNotEmpty) {
+          setState(() {
+            if (assistantIndex >= 0) {
+              _messages[assistantIndex].content =
+                  '${_messages[assistantIndex].content}\n\n> **Using tool:** `$toolName`${toolArgs.length > 2 ? ' — $toolArgs' : ''}\n';
+              _messages[assistantIndex].status = ChatMessageStatus.streaming;
+            }
+          });
+          _scheduleAutoScroll();
+        }
+      } else if (type == 'tool_result') {
+        final toolName = event['name']?.toString() ?? '';
+        final toolContent = event['content']?.toString() ?? '';
+        setState(() {
+          if (assistantIndex >= 0) {
+            final preview = toolContent.length > 300 ? '${toolContent.substring(0, 300)}...' : toolContent;
+            _messages[assistantIndex].content =
+                '${_messages[assistantIndex].content}> **Result from** `$toolName`:\n> ```\n> $preview\n> ```\n\n';
+          }
+        });
+        _scheduleAutoScroll();
+      } else if (type == 'interrupt') {
+        // Human-in-the-loop: agent wants to use a dangerous tool
+        final toolCalls = (event['tool_calls'] as List<dynamic>?) ?? [];
+        final interruptThreadId = event['thread_id']?.toString() ?? _threadId ?? '';
+        setState(() {
+          if (assistantIndex >= 0) {
+            _messages[assistantIndex].content =
+                '${_messages[assistantIndex].content}\n\n> **Approval needed:** The agent wants to execute the following tools:\n';
+            for (final tc in toolCalls) {
+              _messages[assistantIndex].content =
+                  '${_messages[assistantIndex].content}> - `${tc['name']}` with args: ${tc['args']}\n';
+            }
+            _messages[assistantIndex].status = ChatMessageStatus.complete;
+          }
+          _isStreaming = false;
+        });
+        // Show approval dialog
+        if (mounted) {
+          _showToolApprovalDialog(toolCalls, interruptThreadId);
+        }
       } else if (type == 'end') {
         setState(() {
           if (assistantIndex >= 0) {

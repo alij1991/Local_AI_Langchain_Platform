@@ -15,10 +15,12 @@ class ToolsPage extends StatefulWidget {
 class _ToolsPageState extends State<ToolsPage> {
   List<Map<String, dynamic>> _tools = [];
   List<String> _agents = [];
+  List<Map<String, dynamic>> _categories = [];
   bool _loading = false;
   String _error = '';
   String _search = '';
   Map<String, dynamic>? _tavily;
+  bool _showCategories = true; // default to categorized view
 
   @override
   void initState() {
@@ -29,14 +31,23 @@ class _ToolsPageState extends State<ToolsPage> {
   Future<void> _load() async {
     setState(() { _loading = true; _error = ''; });
     try {
-      final tools = await widget.api.get('/tools') as Map<String, dynamic>;
-      final agents = await widget.api.get('/agents') as Map<String, dynamic>;
+      final toolsFuture = widget.api.get('/tools');
+      final agentsFuture = widget.api.get('/agents');
+      final catsFuture = widget.api.get('/tools/categories').catchError((_) => <String, dynamic>{'categories': []});
+
+      final results = await Future.wait([toolsFuture, agentsFuture, catsFuture]);
       if (!mounted) return;
+
+      final tools = results[0] as Map<String, dynamic>;
+      final agents = results[1] as Map<String, dynamic>;
+      final cats = results[2] as Map<String, dynamic>;
+
       final items = ((tools['items'] as List<dynamic>?) ?? const []).cast<Map<String, dynamic>>();
       setState(() {
         _tavily = items.where((t) => t['tool_id'] == 'tavily_web_search').cast<Map<String, dynamic>?>().firstWhere((e) => e != null, orElse: () => null);
         _tools = items.where((t) => t['tool_id'] != 'tavily_web_search').toList();
         _agents = ((agents['agents'] as List<dynamic>?) ?? const []).cast<String>();
+        _categories = ((cats['categories'] as List<dynamic>?) ?? const []).cast<Map<String, dynamic>>();
       });
     } catch (e) {
       if (!mounted) return;
@@ -125,9 +136,10 @@ class _ToolsPageState extends State<ToolsPage> {
   }
 
   Future<void> _showAddDialog() async {
-    String type = 'mcp_server';
+    String type = 'instruction';
     final name = TextEditingController();
     final desc = TextEditingController();
+    final instructions = TextEditingController(text: 'You are a helpful tool that...');
     final jsonCfg = TextEditingController(text: '{\n  "transport": "streamable_http",\n  "url": "https://mcp.example.com"\n}');
     final target = ValueNotifier<String>(_agents.isNotEmpty ? _agents.first : 'assistant');
     bool raw = true;
@@ -147,6 +159,7 @@ class _ToolsPageState extends State<ToolsPage> {
                 children: [
                   SegmentedButton<String>(
                     segments: const [
+                      ButtonSegment(value: 'instruction', label: Text('Custom Tool')),
                       ButtonSegment(value: 'mcp_server', label: Text('MCP Server')),
                       ButtonSegment(value: 'agent_tool', label: Text('Agent Tool')),
                     ],
@@ -170,6 +183,18 @@ class _ToolsPageState extends State<ToolsPage> {
                     ),
                   ),
                   const SizedBox(height: 12),
+                  if (type == 'instruction') ...[
+                    TextField(
+                      controller: instructions,
+                      minLines: 4,
+                      maxLines: 10,
+                      decoration: InputDecoration(
+                        labelText: 'Instructions / System Prompt',
+                        helperText: 'Define what this tool does. The tool will wrap an LLM call with these instructions.',
+                        border: OutlineInputBorder(borderRadius: BorderRadius.circular(8)),
+                      ),
+                    ),
+                  ],
                   if (type == 'mcp_server') ...[
                     TextField(
                       controller: jsonCfg,
@@ -237,7 +262,17 @@ class _ToolsPageState extends State<ToolsPage> {
             FilledButton(
               onPressed: () async {
                 try {
-                  if (type == 'mcp_server') {
+                  if (type == 'instruction') {
+                    await widget.api.post('/tools', {
+                      'name': name.text.trim(),
+                      'type': 'instruction',
+                      'description': desc.text.trim(),
+                      'config_json': {
+                        'instructions': instructions.text,
+                      },
+                      'is_enabled': true,
+                    });
+                  } else if (type == 'mcp_server') {
                     final parsed = jsonDecode(jsonCfg.text) as Map<String, dynamic>;
                     await widget.api.post('/mcp/servers/json', {'name': name.text.trim(), 'description': desc.text.trim(), 'config_json': parsed});
                   } else {
@@ -310,6 +345,12 @@ class _ToolsPageState extends State<ToolsPage> {
                 ),
               ),
               const SizedBox(width: 8),
+              IconButton(
+                onPressed: () => setState(() => _showCategories = !_showCategories),
+                icon: Icon(_showCategories ? Icons.view_list : Icons.category),
+                tooltip: _showCategories ? 'Flat view' : 'Categorized view',
+              ),
+              const SizedBox(width: 4),
               FilledButton.icon(
                 onPressed: _showAddDialog,
                 icon: const Icon(Icons.add, size: 18),
@@ -381,25 +422,27 @@ class _ToolsPageState extends State<ToolsPage> {
             ),
           ),
 
-        // Tool list
+        // Tool list (categorized or flat)
         Expanded(
-          child: _visible.isEmpty && !_loading
-              ? Center(
-                  child: Column(
-                    mainAxisSize: MainAxisSize.min,
-                    children: [
-                      Icon(Icons.build_outlined, size: 48, color: colors.onSurfaceVariant.withValues(alpha: 0.3)),
-                      const SizedBox(height: 12),
-                      Text('No tools found', style: TextStyle(color: colors.onSurfaceVariant)),
-                      const SizedBox(height: 8),
-                      FilledButton.tonal(onPressed: _showAddDialog, child: const Text('Create a tool')),
-                    ],
-                  ),
-                )
-              : ListView.builder(
-                  itemCount: _visible.length,
-                  itemBuilder: (_, i) => _buildToolCard(_visible[i], colors),
-                ),
+          child: _showCategories && _categories.isNotEmpty
+              ? _buildCategorizedView(colors)
+              : _visible.isEmpty && !_loading
+                  ? Center(
+                      child: Column(
+                        mainAxisSize: MainAxisSize.min,
+                        children: [
+                          Icon(Icons.build_outlined, size: 48, color: colors.onSurfaceVariant.withValues(alpha: 0.3)),
+                          const SizedBox(height: 12),
+                          Text('No tools found', style: TextStyle(color: colors.onSurfaceVariant)),
+                          const SizedBox(height: 8),
+                          FilledButton.tonal(onPressed: _showAddDialog, child: const Text('Create a tool')),
+                        ],
+                      ),
+                    )
+                  : ListView.builder(
+                      itemCount: _visible.length,
+                      itemBuilder: (_, i) => _buildToolCard(_visible[i], colors),
+                    ),
         ),
       ],
     );
@@ -487,6 +530,69 @@ class _ToolsPageState extends State<ToolsPage> {
               ),
             ),
     );
+  }
+
+  Widget _buildCategorizedView(ColorScheme colors) {
+    final q = _search.toLowerCase();
+    return ListView(
+      children: [
+        for (final cat in _categories)
+          Builder(builder: (_) {
+            final tools = ((cat['tools'] as List<dynamic>?) ?? const []).cast<Map<String, dynamic>>();
+            final filtered = q.isEmpty
+                ? tools
+                : tools.where((t) =>
+                    (t['name']?.toString().toLowerCase().contains(q) ?? false) ||
+                    (t['description']?.toString().toLowerCase().contains(q) ?? false)).toList();
+            if (filtered.isEmpty) return const SizedBox.shrink();
+            return Card(
+              margin: const EdgeInsets.only(bottom: 8),
+              child: ExpansionTile(
+                initiallyExpanded: true,
+                leading: Container(
+                  width: 36, height: 36,
+                  decoration: BoxDecoration(color: colors.primaryContainer, borderRadius: BorderRadius.circular(8)),
+                  child: Icon(_categoryIcon(cat['icon']?.toString() ?? ''), size: 18, color: colors.onPrimaryContainer),
+                ),
+                title: Text('${cat['label'] ?? cat['id']}', style: const TextStyle(fontWeight: FontWeight.w600)),
+                subtitle: Text('${filtered.length} tools', style: TextStyle(fontSize: 12, color: colors.onSurfaceVariant)),
+                children: [
+                  for (final t in filtered)
+                    ListTile(
+                      dense: true,
+                      leading: t['dangerous'] == true
+                          ? Icon(Icons.warning_amber, size: 18, color: colors.error)
+                          : Icon(Icons.extension, size: 18, color: colors.primary),
+                      title: Text(t['name']?.toString() ?? '', style: const TextStyle(fontSize: 13, fontWeight: FontWeight.w500)),
+                      subtitle: Text(t['description']?.toString() ?? '', style: TextStyle(fontSize: 11, color: colors.onSurfaceVariant), maxLines: 2, overflow: TextOverflow.ellipsis),
+                    ),
+                ],
+              ),
+            );
+          }),
+        // Custom/DB tools at the bottom
+        if (_visible.isNotEmpty) ...[
+          Padding(
+            padding: const EdgeInsets.only(top: 8, bottom: 4, left: 4),
+            child: Text('Custom & MCP Tools', style: TextStyle(fontWeight: FontWeight.w600, color: colors.onSurfaceVariant)),
+          ),
+          for (final tool in _visible)
+            _buildToolCard(tool, colors),
+        ],
+      ],
+    );
+  }
+
+  IconData _categoryIcon(String icon) {
+    switch (icon) {
+      case 'build': return Icons.build;
+      case 'folder_open': return Icons.folder_open;
+      case 'terminal': return Icons.terminal;
+      case 'search': return Icons.search;
+      case 'image': return Icons.image;
+      case 'hub': return Icons.hub;
+      default: return Icons.extension;
+    }
   }
 
   IconData _toolTypeIcon(String type) {

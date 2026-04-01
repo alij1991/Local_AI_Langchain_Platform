@@ -183,6 +183,7 @@ class ChatRequest(BaseModel):
     settings: dict[str, Any] | None = None
     model: str | None = None
     provider: str | None = None
+    thread_id: str | None = None
 
     @property
     def resolved_agent(self) -> str:
@@ -2618,29 +2619,41 @@ async def agent_chat_stream(req: ChatRequest):
     chat_history = langchain_to_chat_messages(lc_history)
 
     async def stream_gen():
+        thread_id = req.thread_id or uuid.uuid4().hex
         # Send start event
-        yield f"event: start\ndata: {json.dumps({'conversation_id': conv_id, 'run_id': run_id})}\n\n"
+        yield f"event: start\ndata: {json.dumps({'conversation_id': conv_id, 'run_id': run_id, 'thread_id': thread_id})}\n\n"
 
         full_response = ""
         stream_start_time = time.monotonic()
         first_token_time: float | None = None
         token_count = 0
         try:
-            prev_text = ""
-            async for accumulated in orchestrator.astream_chat_with_agent(agent_name, req.message, history_override=chat_history, settings_override=req.settings):
-                # astream_chat_with_agent yields accumulated text
-                new_text = accumulated[len(prev_text):]
-                prev_text = accumulated
-                if new_text:
-                    if first_token_time is None:
-                        first_token_time = time.monotonic()
-                    # Rough token count (words/subwords)
-                    token_count += max(1, len(new_text.split()))
-                    full_response = accumulated
-                    yield f"event: token\ndata: {json.dumps({'text': new_text})}\n\n"
+            async for event in orchestrator.astream_chat_with_agent(
+                agent_name, req.message,
+                history_override=chat_history,
+                settings_override=req.settings,
+                thread_id=thread_id,
+            ):
+                etype = event.get("type", "")
 
-            if not full_response:
-                full_response = prev_text or "No response returned."
+                if etype == "token":
+                    text = event.get("text", "")
+                    if text:
+                        if first_token_time is None:
+                            first_token_time = time.monotonic()
+                        token_count += max(1, len(text.split()))
+                        full_response += text
+                        yield f"event: token\ndata: {json.dumps({'text': text})}\n\n"
+
+                elif etype == "tool_call":
+                    yield f"event: tool_call\ndata: {json.dumps({'name': event.get('name', ''), 'args': event.get('args', ''), 'call_id': event.get('call_id', '')})}\n\n"
+
+                elif etype == "tool_result":
+                    yield f"event: tool_result\ndata: {json.dumps({'name': event.get('name', ''), 'content': event.get('content', ''), 'call_id': event.get('call_id', '')})}\n\n"
+
+                elif etype == "done":
+                    if not full_response:
+                        full_response = event.get("content", "") or "No response returned."
 
             add_message(
                 conv_id, "assistant", full_response,
@@ -2657,7 +2670,7 @@ async def agent_chat_stream(req: ChatRequest):
             ttft = (first_token_time - stream_start_time) if first_token_time else 0
             tokens_per_sec = token_count / total_time if total_time > 0 else 0
 
-            yield f"event: end\ndata: {json.dumps({'conversation_id': conv_id, 'run_id': run_id, 'perf': {'tokens': token_count, 'total_sec': round(total_time, 2), 'tokens_per_sec': round(tokens_per_sec, 1), 'ttft_sec': round(ttft, 3)}})}\n\n"
+            yield f"event: end\ndata: {json.dumps({'conversation_id': conv_id, 'run_id': run_id, 'thread_id': thread_id, 'perf': {'tokens': token_count, 'total_sec': round(total_time, 2), 'tokens_per_sec': round(tokens_per_sec, 1), 'ttft_sec': round(ttft, 3)}})}\n\n"
 
         except Exception as exc:
             trace_data = recorder.finalize(success=False, error=str(exc))
@@ -2682,6 +2695,53 @@ async def supervisor_chat(supervisor_name: str, req: ChatRequest):
 
     result = orchestrator.chat_with_supervisor(supervisor_name, req.message)
     return result
+
+
+# ── Chat Resume (after human-in-the-loop interrupt) ──────────────
+
+@app.post("/chat/resume")
+async def resume_chat(body: dict[str, Any]):
+    """Resume an interrupted agent after human approval/rejection."""
+    if not orchestrator:
+        raise HTTPException(503, "Not initialized")
+
+    agent_name = body.get("agent", body.get("agent_name", ""))
+    thread_id = body.get("thread_id", "")
+    action = body.get("action", "approve")  # "approve" or "reject"
+    conv_id = body.get("conversation_id", "")
+
+    if not agent_name or not thread_id:
+        raise HTTPException(400, "agent and thread_id required")
+
+    async def stream_gen():
+        yield f"event: start\ndata: {json.dumps({'thread_id': thread_id, 'action': action})}\n\n"
+
+        full_response = ""
+        try:
+            async for event in orchestrator.astream_resume_after_interrupt(agent_name, thread_id, action):
+                etype = event.get("type", "")
+                if etype == "token":
+                    text = event.get("text", "")
+                    full_response += text
+                    yield f"event: token\ndata: {json.dumps({'text': text})}\n\n"
+                elif etype == "tool_call":
+                    yield f"event: tool_call\ndata: {json.dumps(event)}\n\n"
+                elif etype == "tool_result":
+                    yield f"event: tool_result\ndata: {json.dumps(event)}\n\n"
+                elif etype == "done":
+                    if not full_response:
+                        full_response = event.get("content", "")
+
+            if conv_id:
+                add_message(conv_id, "assistant", full_response,
+                            agent=agent_name,
+                            model=orchestrator.definitions.get(agent_name, {}).model_name if agent_name in orchestrator.definitions else "")
+
+            yield f"event: end\ndata: {json.dumps({'thread_id': thread_id})}\n\n"
+        except Exception as exc:
+            yield f"event: error\ndata: {json.dumps({'error': str(exc)})}\n\n"
+
+    return StreamingResponse(stream_gen(), media_type="text/event-stream")
 
 
 # ── Agent Workflow ────────────────────────────────────────────────
@@ -2717,6 +2777,7 @@ async def get_agents():
                 "settings": defn.settings,
                 "role": defn.role,
                 "delegatable_agents": defn.delegatable_agents,
+                "tool_ids": orchestrator.get_agent_tool_ids(name),
             })
 
     return {
@@ -2958,14 +3019,34 @@ async def get_tools():
 
 @app.post("/tools")
 async def create_tool(body: dict[str, Any]):
-    return upsert_tool(
+    tool_type = body.get("type", "custom")
+    name = body.get("name", "").strip()
+    description = body.get("description", "").strip()
+    config = body.get("config_json", {})
+
+    # Persist to DB
+    result = upsert_tool(
         tool_id=None,
-        name=body.get("name", ""),
-        tool_type=body.get("type", "custom"),
-        description=body.get("description", ""),
-        config=body.get("config_json", {}),
+        name=name,
+        tool_type=tool_type,
+        description=description,
+        config=config,
         is_enabled=body.get("is_enabled", True),
     )
+
+    # Also register as a runtime tool in the orchestrator
+    if orchestrator and name:
+        if tool_type == "instruction":
+            # Instruction tool: wraps an LLM call with a custom system prompt
+            instructions = config.get("instructions", description)
+            orchestrator.add_instruction_tool(name, instructions)
+        elif tool_type == "agent_tool":
+            # Agent delegation tool
+            target = config.get("target_agent", "")
+            if target:
+                orchestrator.add_agent_delegate_tool(name, target)
+
+    return result
 
 
 @app.delete("/tools/{tool_id}")
@@ -3010,10 +3091,31 @@ async def create_mcp_server(body: dict[str, Any]):
     )
 
 
+@app.get("/tools/categories")
+async def get_tool_categories():
+    """Return tools grouped by category."""
+    from local_ai_platform.tools import get_tools_by_category
+    return {"categories": get_tools_by_category()}
+
+
 @app.post("/mcp/servers/{server_id}/discover")
 async def discover_mcp_tools(server_id: str):
-    """Discover tools from an MCP server (stub)."""
-    return {"items": []}
+    """Discover tools from an MCP server."""
+    from local_ai_platform.repositories.tools_repo import list_mcp_servers, upsert_mcp_discovered_tools
+    servers = list_mcp_servers()
+    server = next((s for s in servers if s["id"] == server_id), None)
+    if not server:
+        raise HTTPException(404, f"MCP server '{server_id}' not found")
+
+    try:
+        from local_ai_platform.tools.mcp_tools import discover_mcp_server_tools
+        import asyncio
+        tools = await discover_mcp_server_tools(server)
+        if tools and not any("error" in t for t in tools):
+            upsert_mcp_discovered_tools(server_id, tools)
+        return {"items": tools}
+    except Exception as exc:
+        return {"items": [], "error": str(exc)}
 
 
 @app.post("/mcp/servers/{server_id}/tools/{tool_name}/invoke")
@@ -3022,11 +3124,123 @@ async def invoke_mcp_tool(server_id: str, tool_name: str, body: dict[str, Any]):
     return {"result": f"MCP tool invocation not yet implemented: {tool_name}"}
 
 
-# ── Systems (prompt templates) ────────────────────────────────────
+# ── Threads (conversation threads with LangGraph checkpointing) ───
+
+@app.get("/threads")
+async def get_threads(agent_name: str | None = None, conversation_id: str | None = None):
+    from local_ai_platform.repositories.threads_repo import list_threads
+    return {"items": list_threads(agent_name=agent_name, conversation_id=conversation_id)}
+
+
+@app.post("/threads")
+async def create_thread_endpoint(body: dict[str, Any]):
+    from local_ai_platform.repositories.threads_repo import create_thread
+    agent_name = body.get("agent_name", "assistant")
+    conversation_id = body.get("conversation_id")
+    title = body.get("title")
+    return create_thread(agent_name=agent_name, conversation_id=conversation_id, title=title)
+
+
+@app.delete("/threads/{thread_id}")
+async def delete_thread_endpoint(thread_id: str):
+    from local_ai_platform.repositories.threads_repo import delete_thread
+    delete_thread(thread_id)
+    return {"status": "deleted"}
+
+
+# ── System Templates (pre-built agent configs) ───────────────────
+
+@app.get("/systems/templates")
+async def get_system_templates():
+    """Return pre-built system templates for one-click agent deployment."""
+    from local_ai_platform.system_templates import list_templates
+    return {"templates": list_templates()}
+
+
+@app.post("/systems/deploy/{template_id}")
+async def deploy_system_template(template_id: str, body: dict[str, Any] = {}):
+    """Deploy a system template as a new agent."""
+    if not orchestrator:
+        raise HTTPException(503, "Not initialized")
+
+    from local_ai_platform.system_templates import get_template
+    template = get_template(template_id)
+    if not template:
+        raise HTTPException(404, f"Template '{template_id}' not found")
+
+    # Allow overriding the model and name
+    agent_name = body.get("name", template.id)
+    model_name = body.get("model_name", template.recommended_models[0] if template.recommended_models else "gemma3:4b")
+    provider = body.get("provider", "ollama")
+
+    # Create the agent
+    orchestrator.add_agent(
+        name=agent_name,
+        model_name=model_name,
+        system_prompt=template.system_prompt,
+        provider=provider,
+        settings=template.default_settings,
+        role="general",
+    )
+    if template.tool_ids:
+        orchestrator.set_agent_tools(agent_name, template.tool_ids)
+
+    # Persist to DB
+    save_agent(agent_name, {
+        "name": agent_name,
+        "model_name": model_name,
+        "system_prompt": template.system_prompt,
+        "provider": provider,
+        "settings": template.default_settings,
+        "role": "general",
+        "tool_ids": template.tool_ids,
+        "template_id": template.id,
+    })
+
+    return {
+        "status": "deployed",
+        "agent": agent_name,
+        "template": template.id,
+        "tools": template.tool_ids,
+    }
+
+
+@app.get("/systems/recommend")
+async def recommend_systems():
+    """Recommend system templates based on available models."""
+    from local_ai_platform.system_templates import SYSTEM_TEMPLATES
+
+    # Get available Ollama models
+    available_models: list[str] = []
+    try:
+        if router:
+            models_resp = router.list_models("ollama")
+            available_models = [m.model_id for m in models_resp]
+    except Exception:
+        pass
+
+    recommendations = []
+    for t in SYSTEM_TEMPLATES:
+        matching_models = [m for m in t.recommended_models if any(m.split(":")[0] in am for am in available_models)]
+        recommendations.append({
+            "id": t.id,
+            "name": t.name,
+            "description": t.description,
+            "icon": t.icon,
+            "category": t.category,
+            "has_matching_model": len(matching_models) > 0,
+            "matching_models": matching_models,
+            "recommended_models": t.recommended_models,
+        })
+
+    return {"recommendations": recommendations, "available_models": available_models}
+
+
+# ── Systems (custom graph-based systems, kept for backward compat) ─
 
 @app.get("/systems")
 async def get_systems():
-    """Return systems in the format Flutter expects: {items: [...]}."""
+    """Return custom systems in the format Flutter expects: {items: [...]}."""
     return {"items": list_systems()}
 
 

@@ -3,11 +3,19 @@ from __future__ import annotations
 import base64
 import logging
 import mimetypes
+import uuid
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, AsyncGenerator, Generator, TypedDict
 
-from langchain_core.messages import AIMessage, BaseMessage, HumanMessage, SystemMessage
+from langchain_core.messages import (
+    AIMessage,
+    AIMessageChunk,
+    BaseMessage,
+    HumanMessage,
+    SystemMessage,
+    ToolMessage,
+)
 from langchain_core.tools import StructuredTool
 from langchain_ollama import ChatOllama
 
@@ -20,6 +28,7 @@ from .providers import (
     ProviderRouter,
     build_router_from_config,
 )
+from .repositories import agent_tools_repo
 from .tools import build_default_tools
 
 logger = logging.getLogger(__name__)
@@ -46,14 +55,14 @@ class WorkflowState(TypedDict):
 # ── Agent orchestrator ────────────────────────────────────────────
 
 class AgentOrchestrator:
-    """Runtime agent registry + tool registry + multi-agent system.
+    """LangGraph-powered agent engine with checkpointing and typed streaming.
 
-    Key improvements over v1:
-    - Uses ProviderRouter for all model calls (Ollama, HF, llama.cpp, LM Studio)
-    - Proper LangGraph ReAct agents with tool-calling loops
-    - Supervisor agent pattern for multi-agent routing
-    - Token-aware smart memory
-    - Async support throughout
+    Key features:
+    - Uses `create_react_agent` with InMemorySaver checkpointer
+    - Typed streaming events (token, tool_call, tool_result, done)
+    - Persistent agent-tool bindings via SQLite
+    - Graceful fallback for models without tool support
+    - Multi-provider support (Ollama, HF, llama.cpp, LM Studio, vLLM)
     """
 
     def __init__(self, config: AppConfig, router: ProviderRouter | None = None) -> None:
@@ -66,9 +75,24 @@ class AgentOrchestrator:
         self._models_without_tool_support: set[str] = set()
         self._smart_memories: dict[str, SmartMemory] = {}
 
+        # LangGraph checkpointer — keeps conversation state per thread_id
+        from langgraph.checkpoint.memory import InMemorySaver
+        self.checkpointer = InMemorySaver()
+
         # Cap in-memory history to prevent unbounded growth.
         # DB stores full history; this is just for session context.
         self._max_in_memory_history = 100  # messages (50 turns)
+
+        # Load persisted agent-tool bindings from DB
+        self._load_tool_bindings_from_db()
+
+    def _load_tool_bindings_from_db(self) -> None:
+        """Load all agent-tool bindings from the database into cache."""
+        try:
+            all_bindings = agent_tools_repo.list_all_agent_tools()
+            self._agent_tool_ids.update(all_bindings)
+        except Exception:
+            logger.debug("Could not load agent-tool bindings from DB (table may not exist yet)")
 
     # ── Agent management ──────────────────────────────────────────
 
@@ -109,7 +133,12 @@ class AgentOrchestrator:
         return {name: f"{d.provider}:{d.model_name}" for name, d in self.definitions.items()}
 
     def set_agent_tools(self, agent_name: str, tool_ids: list[str]) -> None:
+        """Set tool bindings for an agent (persisted to DB)."""
         self._agent_tool_ids[agent_name] = list(tool_ids)
+        try:
+            agent_tools_repo.set_agent_tools(agent_name, tool_ids)
+        except Exception:
+            logger.debug("Could not persist agent-tool bindings for %s", agent_name)
 
     def get_agent_tool_ids(self, agent_name: str) -> list[str]:
         return list(self._agent_tool_ids.get(agent_name, []))
@@ -119,6 +148,89 @@ class AgentOrchestrator:
         if not selected:
             return self.tools
         return [t for t in self.tools if t.name in set(selected)]
+
+    def _has_dangerous_tools(self, agent_name: str) -> bool:
+        """Check if any of the agent's tools are marked as dangerous."""
+        tools = self._tools_for_agent(agent_name)
+        return any(bool((t.metadata or {}).get("dangerous")) for t in tools)
+
+    async def astream_resume_after_interrupt(
+        self,
+        agent_name: str,
+        thread_id: str,
+        action: str = "approve",
+    ) -> AsyncGenerator[dict[str, Any], None]:
+        """Resume an interrupted agent after human approval.
+
+        action: "approve" continues with the pending tool call.
+                "reject" sends a rejection message and continues.
+
+        Yields the same typed events as astream_chat_with_agent.
+        """
+        from langgraph.types import Command
+        from langgraph.prebuilt import create_react_agent
+
+        definition = self.definitions.get(agent_name)
+        if not definition:
+            yield {"type": "done", "content": f"Agent '{agent_name}' not found"}
+            return
+
+        llm = self._build_langchain_llm(definition)
+        tools = self._tools_for_agent(agent_name)
+
+        agent = create_react_agent(
+            model=llm,
+            tools=tools,
+            prompt=definition.system_prompt,
+            checkpointer=self.checkpointer,
+            interrupt_before=["tools"],
+        )
+
+        cfg = {"configurable": {"thread_id": thread_id}}
+
+        if action == "reject":
+            # Send a human message saying the tool call was rejected
+            resume_input = Command(resume={"action": "reject"})
+        else:
+            resume_input = Command(resume={"action": "approve"})
+
+        full_text = ""
+        try:
+            async for event in agent.astream_events(
+                resume_input, config=cfg, version="v2",
+            ):
+                kind = event.get("event", "")
+                data = event.get("data", {})
+
+                if kind == "on_chat_model_stream":
+                    chunk = data.get("chunk")
+                    if chunk and isinstance(chunk, AIMessageChunk):
+                        text = self._stringify_content(chunk.content)
+                        if text:
+                            full_text += text
+                            yield {"type": "token", "text": text}
+                        if chunk.tool_call_chunks:
+                            for tc in chunk.tool_call_chunks:
+                                if tc.get("name"):
+                                    yield {
+                                        "type": "tool_call",
+                                        "name": tc.get("name", ""),
+                                        "args": tc.get("args", ""),
+                                        "call_id": tc.get("id", ""),
+                                    }
+                elif kind == "on_tool_end":
+                    output = data.get("output", "")
+                    tool_name = event.get("name", "")
+                    yield {
+                        "type": "tool_result",
+                        "name": tool_name,
+                        "content": str(output)[:2000],
+                        "call_id": event.get("run_id", ""),
+                    }
+        except Exception as exc:
+            yield {"type": "error", "content": str(exc)}
+
+        yield {"type": "done", "content": full_text}
 
     def _get_smart_memory(self, agent_name: str) -> SmartMemory:
         if agent_name not in self._smart_memories:
@@ -221,7 +333,6 @@ class AgentOrchestrator:
 
         # For vision: build a multimodal user message
         if image_paths:
-            # Simple approach: system + user message with images
             return [
                 ChatMessage(role="system", content=definition.system_prompt),
                 ChatMessage(role="user", content=user_input, images=[
@@ -259,15 +370,15 @@ class AgentOrchestrator:
         user_input: str,
         history: list[ChatMessage],
         callbacks: list[Any] | None = None,
+        thread_id: str | None = None,
     ) -> str:
-        """Chat using a LangGraph ReAct agent with tool-calling loop."""
+        """Chat using a LangGraph ReAct agent with tool-calling loop and checkpointing."""
         try:
             from langgraph.prebuilt import create_react_agent
         except ImportError:
             logger.warning("langgraph.prebuilt not available, falling back to direct chat")
             return self._chat_via_router(definition, user_input, history)
 
-        # Build LangChain LLM for the agent graph
         llm = self._build_langchain_llm(definition)
         tools = self._tools_for_agent(definition.name)
 
@@ -275,16 +386,25 @@ class AgentOrchestrator:
             return self._chat_via_router(definition, user_input, history)
 
         try:
-            agent = create_react_agent(model=llm, tools=tools)
+            agent = create_react_agent(
+                model=llm,
+                tools=tools,
+                prompt=definition.system_prompt,
+                checkpointer=self.checkpointer if thread_id else None,
+            )
 
-            # Convert history to LangChain format
-            lc_history = chat_messages_to_langchain(history)
-            lc_history.append(HumanMessage(content=user_input))
-
-            # Prepend system message
-            messages = [SystemMessage(content=definition.system_prompt)] + lc_history
+            # With checkpointer: only send new message (history replayed from checkpoint)
+            # Without: send full history
+            if thread_id:
+                messages = [HumanMessage(content=user_input)]
+            else:
+                lc_history = chat_messages_to_langchain(history)
+                lc_history.append(HumanMessage(content=user_input))
+                messages = lc_history
 
             cfg: dict[str, Any] = {}
+            if thread_id:
+                cfg["configurable"] = {"thread_id": thread_id}
             if callbacks:
                 cfg["callbacks"] = callbacks
 
@@ -329,8 +449,6 @@ class AgentOrchestrator:
             )
 
         if definition.provider == "huggingface":
-            # HF models: try ChatHuggingFace if available, else skip tool-calling
-            # (HuggingFace models don't support tools via ReAct natively)
             try:
                 from langchain_huggingface import ChatHuggingFace, HuggingFacePipeline
                 pipe = HuggingFacePipeline.from_model_id(
@@ -341,8 +459,6 @@ class AgentOrchestrator:
                 )
                 return ChatHuggingFace(llm=pipe)
             except Exception:
-                # Cannot build LangChain LLM for HF — tool-calling won't work,
-                # caller will fall back to direct chat via router
                 logger.debug("Cannot build ChatHuggingFace for %s, tool-calling unavailable", definition.model_name)
                 self._models_without_tool_support.add(definition.model_name)
                 return ChatOllama(
@@ -371,6 +487,7 @@ class AgentOrchestrator:
         run_id: str | None = None,
         use_tools: bool = True,
         settings_override: dict | None = None,
+        thread_id: str | None = None,
     ) -> str:
         definition = self.definitions[agent_name]
 
@@ -385,7 +502,9 @@ class AgentOrchestrator:
             output = self._chat_via_router(definition, user_input, history,
                                            image_paths=image_paths, settings_override=settings_override)
         elif use_tools and self._tools_for_agent(agent_name):
-            output = self._chat_with_react_agent(definition, user_input, history, callbacks=callbacks)
+            output = self._chat_with_react_agent(
+                definition, user_input, history, callbacks=callbacks, thread_id=thread_id,
+            )
         else:
             output = self._chat_via_router(definition, user_input, history,
                                            settings_override=settings_override)
@@ -431,7 +550,7 @@ class AgentOrchestrator:
         user_input: str,
         callbacks: list[Any] | None = None,
     ) -> Generator[str, None, None]:
-        """Streaming chat through provider router."""
+        """Streaming chat through provider router (sync, no tools)."""
         definition = self.definitions[agent_name]
         history = self.chat_histories.get(agent_name, [])
 
@@ -458,39 +577,142 @@ class AgentOrchestrator:
         user_input: str,
         history_override: list[ChatMessage] | None = None,
         settings_override: dict | None = None,
-    ) -> AsyncGenerator[str, None]:
-        """Async streaming chat.
+        thread_id: str | None = None,
+    ) -> AsyncGenerator[dict[str, Any], None]:
+        """Async streaming chat with typed events.
 
-        If *history_override* is provided (e.g. loaded from the database),
-        it is used instead of the in-memory chat history so that the model
-        sees the full conversation context.
+        Yields dicts with a "type" key:
+        - {"type": "token", "text": "..."}
+        - {"type": "tool_call", "name": "...", "args": {...}, "call_id": "..."}
+        - {"type": "tool_result", "name": "...", "content": "...", "call_id": "..."}
+        - {"type": "done", "content": "full response text"}
 
-        If *settings_override* is provided, those values override the agent's
-        default settings (temperature, max_tokens, etc.).
+        Falls back to direct streaming (token-only) for models without tool support.
         """
         definition = self.definitions[agent_name]
         history = history_override if history_override is not None else self.chat_histories.get(agent_name, [])
+        tools = self._tools_for_agent(agent_name)
+        has_tools = bool(tools) and definition.model_name not in self._models_without_tool_support
 
+        # ── Path A: LangGraph ReAct agent streaming (with tools) ──
+        if has_tools:
+            try:
+                from langgraph.prebuilt import create_react_agent
+
+                llm = self._build_langchain_llm(definition)
+                tid = thread_id or uuid.uuid4().hex
+
+                # Use interrupt_before for agents with dangerous tools
+                has_dangerous = self._has_dangerous_tools(agent_name)
+                agent = create_react_agent(
+                    model=llm,
+                    tools=tools,
+                    prompt=definition.system_prompt,
+                    checkpointer=self.checkpointer,
+                    interrupt_before=["tools"] if has_dangerous else None,
+                )
+
+                input_messages = [HumanMessage(content=user_input)]
+                cfg = {"configurable": {"thread_id": tid}}
+
+                full_text = ""
+                interrupted = False
+                async for event in agent.astream_events(
+                    {"messages": input_messages}, config=cfg, version="v2",
+                ):
+                    kind = event.get("event", "")
+                    data = event.get("data", {})
+
+                    if kind == "on_chat_model_stream":
+                        chunk = data.get("chunk")
+                        if chunk and isinstance(chunk, AIMessageChunk):
+                            # Text token
+                            text = self._stringify_content(chunk.content)
+                            if text:
+                                full_text += text
+                                yield {"type": "token", "text": text}
+                            # Tool call chunks
+                            if chunk.tool_call_chunks:
+                                for tc in chunk.tool_call_chunks:
+                                    if tc.get("name"):
+                                        yield {
+                                            "type": "tool_call",
+                                            "name": tc.get("name", ""),
+                                            "args": tc.get("args", ""),
+                                            "call_id": tc.get("id", ""),
+                                        }
+
+                    elif kind == "on_tool_end":
+                        output = data.get("output", "")
+                        tool_name = event.get("name", "")
+                        yield {
+                            "type": "tool_result",
+                            "name": tool_name,
+                            "content": str(output)[:2000],
+                            "call_id": event.get("run_id", ""),
+                        }
+
+                # Check if graph was interrupted (pending tool calls needing approval)
+                if has_dangerous:
+                    state = agent.get_state(cfg)
+                    if state and state.next:
+                        # Graph paused before tools node — needs human approval
+                        pending_calls = []
+                        for msg in reversed(state.values.get("messages", [])):
+                            if hasattr(msg, "tool_calls") and msg.tool_calls:
+                                pending_calls = msg.tool_calls
+                                break
+                        interrupted = True
+                        yield {
+                            "type": "interrupt",
+                            "interrupt_type": "tool_approval",
+                            "thread_id": tid,
+                            "tool_calls": [
+                                {"name": tc.get("name", ""), "args": tc.get("args", {}), "id": tc.get("id", "")}
+                                for tc in pending_calls
+                            ],
+                        }
+
+                yield {"type": "done", "content": full_text, "interrupted": interrupted}
+
+                # Persist to in-memory history
+                target = self.chat_histories.setdefault(agent_name, [])
+                target.append(ChatMessage(role="user", content=user_input))
+                target.append(ChatMessage(role="assistant", content=full_text))
+                if len(target) > self._max_in_memory_history:
+                    del target[:len(target) - self._max_in_memory_history]
+                return
+
+            except Exception as exc:
+                if "does not support tools" in str(exc).lower():
+                    self._models_without_tool_support.add(definition.model_name)
+                    logger.info("Model %s doesn't support tools, falling back to direct stream", definition.model_name)
+                    # Fall through to Path B
+                else:
+                    raise
+
+        # ── Path B: Direct streaming via provider router (no tools) ──
         model = self._resolve_model_string(definition)
         messages = self._build_messages(definition, user_input, history)
-        # Merge agent defaults with any user overrides
         base_settings = dict(definition.settings) if definition.settings else {}
         if settings_override:
             base_settings.update({k: v for k, v in settings_override.items() if v is not None})
         settings = GenerationSettings.from_dict(base_settings)
 
-        acc = ""
+        full_text = ""
         async for chunk in self.router.astream(model, messages, settings):
-            acc += chunk
-            yield acc
+            full_text += chunk
+            yield {"type": "token", "text": chunk}
 
-        if not acc:
-            acc = "No response returned."
-            yield acc
+        if not full_text:
+            full_text = "No response returned."
+            yield {"type": "token", "text": full_text}
+
+        yield {"type": "done", "content": full_text}
 
         target = self.chat_histories.setdefault(agent_name, [])
         target.append(ChatMessage(role="user", content=user_input))
-        target.append(ChatMessage(role="assistant", content=acc))
+        target.append(ChatMessage(role="assistant", content=full_text))
         if len(target) > self._max_in_memory_history:
             del target[:len(target) - self._max_in_memory_history]
 
@@ -503,35 +725,41 @@ class AgentOrchestrator:
         specialist_agents: list[str],
         provider: str = "ollama",
     ) -> None:
-        """Create a supervisor agent that routes tasks to specialists.
+        """Create a supervisor agent that uses specialist agents as tools.
 
-        The supervisor decides which agent handles each request based on
-        the task description and agent capabilities.
+        Each specialist becomes a callable tool that the supervisor LLM can
+        invoke via LangGraph's ReAct loop — no fragile string parsing needed.
         """
         agent_descriptions = []
+        delegation_tool_ids = []
+
         for agent_name in specialist_agents:
             defn = self.definitions.get(agent_name)
-            if defn:
-                agent_descriptions.append(
-                    f"- {agent_name}: {defn.system_prompt[:200]}"
-                )
+            if not defn:
+                continue
+            agent_descriptions.append(
+                f"- {agent_name}: {defn.system_prompt[:200]}"
+            )
+            # Create a delegation tool for each specialist
+            tool_name = f"delegate_to_{agent_name}"
+            delegation_tool_ids.append(tool_name)
 
-        system_prompt = f"""You are a supervisor agent that routes tasks to the best specialist agent.
+            # Check if tool already registered (avoid duplicates on re-create)
+            if not any(t.name == tool_name for t in self.tools):
+                self.add_agent_delegate_tool(tool_name, agent_name)
 
-Available specialists:
+        system_prompt = f"""You are a supervisor agent that coordinates specialist agents to handle tasks.
+
+You have access to the following specialist agents as tools. Call the appropriate tool to delegate work:
+
 {chr(10).join(agent_descriptions)}
 
-For each user request:
-1. Analyze what kind of task this is
-2. Choose the best specialist agent to handle it
-3. If no specialist fits, handle it yourself
-
-Respond with EXACTLY this format:
-ROUTE: <agent_name>
-TASK: <reformulated task for the specialist>
-
-Or if handling yourself:
-DIRECT: <your response>"""
+Guidelines:
+- Analyze the user's request and determine which specialist(s) to use
+- Call the delegation tool with a clear, specific task description
+- You can call multiple specialists sequentially if needed
+- Synthesize the specialists' responses into a final answer
+- If no specialist fits, answer directly yourself"""
 
         self.add_agent(
             name=name,
@@ -541,58 +769,38 @@ DIRECT: <your response>"""
             role="supervisor",
             delegatable_agents=specialist_agents,
         )
+        # Bind the delegation tools to the supervisor
+        self.set_agent_tools(name, delegation_tool_ids)
 
     def chat_with_supervisor(
         self,
         supervisor_name: str,
         user_input: str,
         max_rounds: int = 3,
+        thread_id: str | None = None,
     ) -> dict[str, Any]:
-        """Chat through a supervisor that delegates to specialists.
+        """Chat through a supervisor that delegates to specialists via tool calls.
 
-        Returns {"response": str, "agent_used": str, "rounds": int}
+        The supervisor uses LangGraph's ReAct loop to decide which specialist
+        agents to call. Each specialist is exposed as a tool.
         """
         supervisor = self.definitions.get(supervisor_name)
         if not supervisor or supervisor.role != "supervisor":
             return {
-                "response": self.chat_with_agent(supervisor_name, user_input),
+                "response": self.chat_with_agent(supervisor_name, user_input, thread_id=thread_id),
                 "agent_used": supervisor_name,
                 "rounds": 1,
             }
 
-        # Ask supervisor to route
-        routing_response = self.chat_with_agent(
-            supervisor_name, user_input, persist_history=False, use_tools=False,
+        # Use the regular tool-calling path — delegation tools handle routing
+        response = self.chat_with_agent(
+            supervisor_name, user_input, thread_id=thread_id,
         )
 
-        # Parse routing decision
-        if routing_response.strip().startswith("ROUTE:"):
-            lines = routing_response.strip().split("\n")
-            target_agent = lines[0].replace("ROUTE:", "").strip()
-            task = "\n".join(l.replace("TASK:", "").strip() for l in lines[1:] if l.strip())
-
-            if target_agent in self.definitions and target_agent in supervisor.delegatable_agents:
-                specialist_response = self.chat_with_agent(target_agent, task or user_input)
-                return {
-                    "response": specialist_response,
-                    "agent_used": target_agent,
-                    "routed_by": supervisor_name,
-                    "rounds": 2,
-                }
-
-        # Direct response from supervisor
-        if routing_response.strip().startswith("DIRECT:"):
-            content = routing_response.replace("DIRECT:", "", 1).strip()
-            return {
-                "response": content,
-                "agent_used": supervisor_name,
-                "rounds": 1,
-            }
-
-        # Fallback: use the raw response
         return {
-            "response": routing_response,
+            "response": response,
             "agent_used": supervisor_name,
+            "routed_by": supervisor_name,
             "rounds": 1,
         }
 

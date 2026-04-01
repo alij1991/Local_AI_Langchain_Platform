@@ -41,7 +41,7 @@ class _RunChatMessage {
   final List<Map<String, dynamic>> attachments;
 }
 
-enum _SystemsTab { designer, run }
+enum _SystemsTab { templates, designer, run }
 
 class SystemsPage extends StatefulWidget {
   const SystemsPage({super.key, required this.api});
@@ -68,7 +68,9 @@ class _SystemsPageState extends State<SystemsPage> {
   int? _selectedEdgeIndex;
   String? _connectFromNodeId;
 
-  _SystemsTab _tab = _SystemsTab.designer;
+  _SystemsTab _tab = _SystemsTab.templates;
+  List<Map<String, dynamic>> _templates = [];
+  List<String> _availableModels = [];
   bool _helpExpanded = true;
 
   bool _runInFlight = false;
@@ -101,9 +103,21 @@ class _SystemsPageState extends State<SystemsPage> {
     final items = ((systemsBody['items'] as List<dynamic>?) ?? const []).cast<Map<String, dynamic>>();
     final agents = ((agentsBody['agents'] as List<dynamic>?) ?? const []).map((e) => e.toString()).toList();
 
+    // Load templates
+    List<Map<String, dynamic>> templates = [];
+    List<String> models = [];
+    try {
+      final tplBody = await widget.api.get('/systems/templates') as Map<String, dynamic>;
+      templates = ((tplBody['templates'] as List<dynamic>?) ?? const []).cast<Map<String, dynamic>>();
+      final recBody = await widget.api.get('/systems/recommend') as Map<String, dynamic>;
+      models = ((recBody['available_models'] as List<dynamic>?) ?? const []).map((e) => e.toString()).toList();
+    } catch (_) {}
+
     setState(() {
       _systems = items;
       _agents = agents;
+      _templates = templates;
+      _availableModels = models;
       if (_selectedName == null && _systems.isNotEmpty) {
         _selectedName = _systems.first['name']?.toString();
       }
@@ -393,6 +407,7 @@ class _SystemsPageState extends State<SystemsPage> {
             const SizedBox(width: 8),
             SegmentedButton<_SystemsTab>(
               segments: const [
+                ButtonSegment(value: _SystemsTab.templates, icon: Icon(Icons.auto_awesome), label: Text('Templates')),
                 ButtonSegment(value: _SystemsTab.designer, icon: Icon(Icons.account_tree), label: Text('Designer')),
                 ButtonSegment(value: _SystemsTab.run, icon: Icon(Icons.chat_bubble_outline), label: Text('Run')),
               ],
@@ -420,6 +435,8 @@ class _SystemsPageState extends State<SystemsPage> {
             ),
           ),
         const SizedBox(height: 8),
+        if (_tab == _SystemsTab.templates)
+          Expanded(child: _buildTemplatesGallery()),
         if (_tab == _SystemsTab.designer)
           Expanded(
             child: Row(
@@ -776,6 +793,192 @@ class _SystemsPageState extends State<SystemsPage> {
           ),
       ],
     );
+  }
+
+  Widget _buildTemplatesGallery() {
+    final colors = Theme.of(context).colorScheme;
+    if (_templates.isEmpty) {
+      return Center(
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            Icon(Icons.auto_awesome, size: 48, color: colors.onSurfaceVariant.withValues(alpha: 0.3)),
+            const SizedBox(height: 12),
+            Text('Loading templates...', style: TextStyle(color: colors.onSurfaceVariant)),
+          ],
+        ),
+      );
+    }
+
+    return GridView.builder(
+      padding: const EdgeInsets.all(8),
+      gridDelegate: const SliverGridDelegateWithMaxCrossAxisExtent(
+        maxCrossAxisExtent: 380,
+        mainAxisSpacing: 12,
+        crossAxisSpacing: 12,
+        childAspectRatio: 1.3,
+      ),
+      itemCount: _templates.length,
+      itemBuilder: (_, i) {
+        final t = _templates[i];
+        final tools = ((t['tool_ids'] as List<dynamic>?) ?? const []).cast<String>();
+        final recModels = ((t['recommended_models'] as List<dynamic>?) ?? const []).cast<String>();
+        final hasLocal = recModels.any((m) => _availableModels.any((a) => a.contains(m.split(':').first)));
+
+        return Card(
+          clipBehavior: Clip.antiAlias,
+          child: InkWell(
+            onTap: () => _showDeployDialog(t),
+            child: Padding(
+              padding: const EdgeInsets.all(16),
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Row(
+                    children: [
+                      Container(
+                        width: 40, height: 40,
+                        decoration: BoxDecoration(color: colors.primaryContainer, borderRadius: BorderRadius.circular(10)),
+                        child: Icon(_templateIcon(t['icon']?.toString() ?? ''), size: 22, color: colors.onPrimaryContainer),
+                      ),
+                      const SizedBox(width: 12),
+                      Expanded(
+                        child: Column(
+                          crossAxisAlignment: CrossAxisAlignment.start,
+                          children: [
+                            Text(t['name']?.toString() ?? '', style: const TextStyle(fontWeight: FontWeight.w600, fontSize: 15)),
+                            Text(t['category']?.toString().toUpperCase() ?? '', style: TextStyle(fontSize: 10, color: colors.primary, fontWeight: FontWeight.w500, letterSpacing: 0.5)),
+                          ],
+                        ),
+                      ),
+                      if (hasLocal)
+                        Tooltip(
+                          message: 'Compatible model available',
+                          child: Icon(Icons.check_circle, size: 20, color: Colors.green.shade400),
+                        ),
+                    ],
+                  ),
+                  const SizedBox(height: 10),
+                  Expanded(
+                    child: Text(
+                      t['description']?.toString() ?? '',
+                      style: TextStyle(fontSize: 12, color: colors.onSurfaceVariant, height: 1.4),
+                      maxLines: 3, overflow: TextOverflow.ellipsis,
+                    ),
+                  ),
+                  const SizedBox(height: 8),
+                  Wrap(
+                    spacing: 4, runSpacing: 4,
+                    children: tools.take(5).map((tool) => Chip(
+                      label: Text(tool, style: const TextStyle(fontSize: 10)),
+                      padding: EdgeInsets.zero,
+                      materialTapTargetSize: MaterialTapTargetSize.shrinkWrap,
+                      visualDensity: VisualDensity.compact,
+                    )).toList(),
+                  ),
+                  const SizedBox(height: 8),
+                  SizedBox(
+                    width: double.infinity,
+                    child: FilledButton.icon(
+                      onPressed: () => _showDeployDialog(t),
+                      icon: const Icon(Icons.rocket_launch, size: 16),
+                      label: const Text('Deploy'),
+                    ),
+                  ),
+                ],
+              ),
+            ),
+          ),
+        );
+      },
+    );
+  }
+
+  Future<void> _showDeployDialog(Map<String, dynamic> template) async {
+    final nameCtrl = TextEditingController(text: template['id']?.toString() ?? '');
+    final recModels = ((template['recommended_models'] as List<dynamic>?) ?? const []).cast<String>();
+    String selectedModel = recModels.isNotEmpty ? recModels.first : 'gemma3:4b';
+
+    await showDialog(
+      context: context,
+      builder: (_) => StatefulBuilder(
+        builder: (ctx, setLocal) => AlertDialog(
+          title: Text('Deploy ${template['name']}'),
+          content: SizedBox(
+            width: 420,
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                TextField(
+                  controller: nameCtrl,
+                  decoration: InputDecoration(
+                    labelText: 'Agent name',
+                    border: OutlineInputBorder(borderRadius: BorderRadius.circular(8)),
+                  ),
+                ),
+                const SizedBox(height: 12),
+                DropdownButtonFormField<String>(
+                  value: selectedModel,
+                  decoration: InputDecoration(
+                    labelText: 'Model',
+                    border: OutlineInputBorder(borderRadius: BorderRadius.circular(8)),
+                  ),
+                  items: [
+                    ...recModels.map((m) => DropdownMenuItem(value: m, child: Text(m))),
+                    if (!recModels.contains(selectedModel))
+                      DropdownMenuItem(value: selectedModel, child: Text(selectedModel)),
+                  ],
+                  onChanged: (v) => setLocal(() => selectedModel = v ?? selectedModel),
+                ),
+                const SizedBox(height: 8),
+                Text(
+                  'Tools: ${((template['tool_ids'] as List<dynamic>?) ?? []).join(', ')}',
+                  style: TextStyle(fontSize: 12, color: Theme.of(ctx).colorScheme.onSurfaceVariant),
+                ),
+              ],
+            ),
+          ),
+          actions: [
+            TextButton(onPressed: () => Navigator.pop(ctx), child: const Text('Cancel')),
+            FilledButton(
+              onPressed: () async {
+                try {
+                  await widget.api.post('/systems/deploy/${template['id']}', {
+                    'name': nameCtrl.text.trim(),
+                    'model_name': selectedModel,
+                    'provider': 'ollama',
+                  });
+                  if (ctx.mounted) {
+                    Navigator.pop(ctx);
+                    ScaffoldMessenger.of(context).showSnackBar(
+                      SnackBar(content: Text('Deployed "${nameCtrl.text.trim()}" successfully!')),
+                    );
+                  }
+                  await _load();
+                } catch (e) {
+                  if (ctx.mounted) {
+                    ScaffoldMessenger.of(ctx).showSnackBar(SnackBar(content: Text('Deploy failed: $e')));
+                  }
+                }
+              },
+              child: const Text('Deploy'),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  IconData _templateIcon(String icon) {
+    switch (icon) {
+      case 'science': return Icons.science;
+      case 'code': return Icons.code;
+      case 'edit_note': return Icons.edit_note;
+      case 'smart_toy': return Icons.smart_toy;
+      case 'analytics': return Icons.analytics;
+      case 'palette': return Icons.palette;
+      default: return Icons.auto_awesome;
+    }
   }
 }
 
