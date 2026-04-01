@@ -57,6 +57,11 @@ class GenerationSettings:
     repetition_penalty: float = 1.05
     seed: int | None = None
     stop: list[str] | None = None
+    # Performance tuning (passed to provider as options)
+    num_ctx: int | None = None          # Context window size
+    num_thread: int | None = None       # CPU thread count
+    num_batch: int | None = None        # Batch size for prompt processing
+    num_gpu: int | None = None          # GPU layers to offload
 
     @classmethod
     def from_dict(cls, raw: dict[str, Any] | None) -> GenerationSettings:
@@ -70,6 +75,10 @@ class GenerationSettings:
             repetition_penalty=float(raw.get("repetition_penalty", 1.05)),
             seed=int(raw["seed"]) if raw.get("seed") is not None else None,
             stop=raw.get("stop"),
+            num_ctx=int(raw["num_ctx"]) if raw.get("num_ctx") is not None else None,
+            num_thread=int(raw["num_thread"]) if raw.get("num_thread") is not None else None,
+            num_batch=int(raw["num_batch"]) if raw.get("num_batch") is not None else None,
+            num_gpu=int(raw["num_gpu"]) if raw.get("num_gpu") is not None else None,
         )
 
 

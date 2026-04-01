@@ -25,6 +25,10 @@ class _AgentsPageState extends State<AgentsPage> {
   List<String> _toolIds = [];
   final _temperature = TextEditingController(text: '0.2');
   final _maxTokens = TextEditingController(text: '1024');
+  final _topP = TextEditingController(text: '0.9');
+  final _topK = TextEditingController(text: '50');
+  final _repeatPenalty = TextEditingController(text: '1.1');
+  final _contextLength = TextEditingController(text: '4096');
   bool _streaming = true;
   final _testMsg = TextEditingController(text: 'hello');
   String _testOut = '';
@@ -88,6 +92,10 @@ class _AgentsPageState extends State<AgentsPage> {
       final settings = (a['settings'] as Map<String, dynamic>? ?? {});
       _temperature.text = (settings['temperature'] ?? 0.2).toString();
       _maxTokens.text = (settings['max_tokens'] ?? 1024).toString();
+      _topP.text = (settings['top_p'] ?? 0.9).toString();
+      _topK.text = (settings['top_k'] ?? 50).toString();
+      _repeatPenalty.text = (settings['repetition_penalty'] ?? 1.1).toString();
+      _contextLength.text = (settings['num_ctx'] ?? 4096).toString();
       _streaming = settings['streaming'] != false;
       _definition = null;
       _testOut = '';
@@ -105,6 +113,10 @@ class _AgentsPageState extends State<AgentsPage> {
       _toolIds = [];
       _temperature.text = '0.2';
       _maxTokens.text = '1024';
+      _topP.text = '0.9';
+      _topK.text = '50';
+      _repeatPenalty.text = '1.1';
+      _contextLength.text = '4096';
       _streaming = true;
       _definition = null;
       _testOut = '';
@@ -137,6 +149,10 @@ class _AgentsPageState extends State<AgentsPage> {
         'settings': {
           'temperature': double.tryParse(_temperature.text) ?? 0.2,
           'max_tokens': int.tryParse(_maxTokens.text) ?? 1024,
+          'top_p': double.tryParse(_topP.text) ?? 0.9,
+          'top_k': int.tryParse(_topK.text) ?? 50,
+          'repetition_penalty': double.tryParse(_repeatPenalty.text) ?? 1.1,
+          'num_ctx': int.tryParse(_contextLength.text) ?? 4096,
           'streaming': _streaming,
         },
         'resource_limits': {'max_context_messages': 40},
@@ -195,6 +211,23 @@ class _AgentsPageState extends State<AgentsPage> {
     } finally {
       if (mounted) setState(() => _isTesting = false);
     }
+  }
+
+  Widget _agentField(TextEditingController ctrl, String label, String helperText, {String? hint}) {
+    return TextField(
+      controller: ctrl,
+      decoration: InputDecoration(
+        labelText: label,
+        helperText: helperText,
+        helperMaxLines: 2,
+        helperStyle: const TextStyle(fontSize: 10),
+        hintText: hint,
+        border: OutlineInputBorder(borderRadius: BorderRadius.circular(8)),
+        contentPadding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
+      ),
+      keyboardType: const TextInputType.numberWithOptions(decimal: true),
+      style: const TextStyle(fontSize: 13),
+    );
   }
 
   @override
@@ -458,33 +491,46 @@ class _AgentsPageState extends State<AgentsPage> {
 
         // Generation settings
         Text('Generation Settings', style: Theme.of(context).textTheme.titleSmall),
-        const SizedBox(height: 8),
+        const SizedBox(height: 4),
+        Text('Control how the model generates responses. Lower temperature = more deterministic.',
+          style: TextStyle(fontSize: 11, color: colors.onSurfaceVariant)),
+        const SizedBox(height: 10),
+        // Row 1: Main sampling parameters
         Row(
           children: [
-            SizedBox(
-              width: 140,
-              child: TextField(
-                controller: _temperature,
-                decoration: InputDecoration(
-                  labelText: 'Temperature',
-                  border: OutlineInputBorder(borderRadius: BorderRadius.circular(8)),
-                  contentPadding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
-                ),
-                keyboardType: TextInputType.number,
-              ),
+            Expanded(
+              child: _agentField(_temperature, 'Temperature', 'Randomness (0-2). Low=precise, high=creative',
+                hint: '0.0 - 2.0'),
             ),
-            const SizedBox(width: 12),
-            SizedBox(
-              width: 140,
-              child: TextField(
-                controller: _maxTokens,
-                decoration: InputDecoration(
-                  labelText: 'Max Tokens',
-                  border: OutlineInputBorder(borderRadius: BorderRadius.circular(8)),
-                  contentPadding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
-                ),
-                keyboardType: TextInputType.number,
-              ),
+            const SizedBox(width: 10),
+            Expanded(
+              child: _agentField(_topP, 'Top P', 'Nucleus sampling. Limits to top probability mass',
+                hint: '0.0 - 1.0'),
+            ),
+            const SizedBox(width: 10),
+            Expanded(
+              child: _agentField(_topK, 'Top K', 'Limits to top K most likely tokens',
+                hint: '1 - 100'),
+            ),
+            const SizedBox(width: 10),
+            Expanded(
+              child: _agentField(_repeatPenalty, 'Repeat Penalty', 'Penalizes repetition. 1.0=off, 1.1=mild',
+                hint: '1.0 - 2.0'),
+            ),
+          ],
+        ),
+        const SizedBox(height: 10),
+        // Row 2: Length & performance parameters
+        Row(
+          children: [
+            Expanded(
+              child: _agentField(_maxTokens, 'Max Tokens', 'Maximum response length in tokens',
+                hint: '128 - 8192'),
+            ),
+            const SizedBox(width: 10),
+            Expanded(
+              child: _agentField(_contextLength, 'Context Window', 'Memory size. Higher=more history but more RAM',
+                hint: '512 - 32768'),
             ),
             const SizedBox(width: 16),
             Row(

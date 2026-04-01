@@ -17,10 +17,10 @@ flutter_client/windows/flutter/generated_plugin_registrant.cc
 flutter_client/windows/flutter/generated_plugin_registrant.h
 
 # Local model/data artifacts (never commit weights)
-/models/
-/data/images/
-/data/uploads/
-/data/
+/models/*
+!/models/.gitkeep
+/data/*
+!/data/.gitkeep
 
 # Secrets / tokens
 .env

@@ -67,6 +67,15 @@ class OllamaProvider(BaseProvider):
             opts["seed"] = settings.seed
         if settings.stop:
             opts["stop"] = settings.stop
+        # Performance tuning options
+        if settings.num_ctx is not None:
+            opts["num_ctx"] = settings.num_ctx
+        if settings.num_thread is not None:
+            opts["num_thread"] = settings.num_thread
+        if settings.num_batch is not None:
+            opts["num_batch"] = settings.num_batch
+        if settings.num_gpu is not None:
+            opts["num_gpu"] = settings.num_gpu
         return opts
 
     def chat(

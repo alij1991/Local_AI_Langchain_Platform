@@ -10,6 +10,10 @@ readme = "README.md"
 requires-python = ">=3.10"
 authors = [{ name = "Local AI Team" }]
 dependencies = [
+  # ── PyTorch (required — for GPU, install FIRST with CUDA index URL) ──
+  "torch>=2.1.0",
+  "torchvision>=0.16.0",
+  "torchaudio>=2.1.0",
   # ── Core Framework ──
   "gradio>=5.0.0",
   "langchain>=0.3.27",
@@ -52,6 +56,42 @@ dev = [
   "pytest",
   "ruff",
 ]
+# ── High-performance GGUF inference (llama.cpp with CUDA) ──
+# NOTE: For GPU support, install with:
+#   pip install llama-cpp-python --extra-index-url https://abetlen.github.io/llama-cpp-python/whl/cu121
+llamacpp = [
+  "llama-cpp-python>=0.3.2",          # Direct GGUF inference: Q2-Q8, GPU offload, FlashAttention
+]
+# ── 4-bit quantized inference via bitsandbytes (NF4/GPTQ loading) ──
+quantized = [
+  "bitsandbytes>=0.44.0",             # NF4/INT8 quantization: 4x memory reduction
+  "auto-gptq>=0.7.0",                 # GPTQ quantized model loading
+  "autoawq>=0.2.0",                   # AWQ quantized model loading
+]
+# ── ExLlamaV2: fastest GPU-only quantized inference ──
+exllama = [
+  "exllamav2>=0.3.0",                 # EXL2/GPTQ inference: 2-8 bpw mixed quantization
+]
+# ── ONNX Runtime for CPU/DirectML inference (Windows-optimized) ──
+onnx = [
+  "onnxruntime-genai-directml>=0.12.0; sys_platform == 'win32'",  # DirectML GPU on Windows
+  "onnxruntime>=1.19.0",              # CPU optimized inference (AVX2/AVX-512 kernels)
+  "optimum>=1.21.0",                  # HuggingFace ONNX export + optimization
+]
+# ── FlashAttention-2 (NVIDIA GPU, compute capability 8.0+) ──
+# NOTE: Best installed via prebuilt wheel from https://flashattn.dev
+flash = [
+  "flash-attn>=2.6.0",                # Fused attention: 2-4x speedup, enables longer context
+]
+# ── TurboQuant KV cache compression (3-bit, ~6x memory reduction) ──
+turboquant = [
+  "turboquant-torch>=0.4.0",          # Google TurboQuant (ICLR 2026): 3-bit KV cache, zero calibration
+]
+# ── Speculative decoding support (draft model acceleration) ──
+speculative = [
+  "transformers>=4.45.0",             # Assisted generation / speculative decoding built-in
+  "accelerate>=0.34.0",               # device_map="auto" for hybrid CPU/GPU offload
+]
 # Image generation optimizations (all optional — graceful fallback if missing)
 images = [
   "tomesd>=0.1.3",                    # Token Merging: 1.3-1.8x UNet speedup
@@ -65,9 +105,13 @@ openvino = [
   "optimum-intel>=1.20.0",
   "openvino>=2024.0.0",
 ]
+# ── All performance packages combined ──
+perf = [
+  "local-ai-langchain-platform[llamacpp,quantized,flash,speculative,turboquant]",
+]
 # All optional packages combined
 all = [
-  "local-ai-langchain-platform[images,openvino]",
+  "local-ai-langchain-platform[perf,images,onnx,openvino]",
 ]
 
 [tool.setuptools.packages.find]

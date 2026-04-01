@@ -1,0 +1,46 @@
+# =============================================================================
+# Local AI Platform — Performance Optimizations
+# =============================================================================
+# Install AFTER requirements.txt:
+#   pip install -r requirements-perf.txt
+#
+# These are all OPTIONAL. The app runs fine without them, but each one
+# unlocks significant performance gains for specific use cases.
+# =============================================================================
+
+# ── llama-cpp-python: Direct GGUF model inference ──
+# For GPU (CUDA), install with:
+#   pip install llama-cpp-python --extra-index-url https://abetlen.github.io/llama-cpp-python/whl/cu121
+# For CPU only:
+#   pip install llama-cpp-python
+llama-cpp-python>=0.3.2
+
+# ── bitsandbytes: NF4/INT8 quantization (4x memory reduction) ──
+# Makes 7B models fit in 4 GB VRAM
+bitsandbytes>=0.44.0
+
+# ── GPTQ/AWQ: Pre-quantized model loading ──
+# Load GPTQ and AWQ models from HuggingFace at 4-bit precision
+auto-gptq>=0.7.0
+autoawq>=0.2.0
+
+# ── TurboQuant: KV cache compression (ICLR 2026) ──
+# Compresses KV cache to 3-4 bits — 6x memory reduction, longer context
+# Paper: "TurboQuant: Online Vector Quantization with Near-optimal Distortion Rate"
+turboquant-torch>=0.4.0
+
+# ── Image generation speedups ──
+tomesd>=0.1.3                                       # Token Merging: 1.3-1.8x UNet speedup
+DeepCache>=0.1.1                                    # Feature caching: 2.3x UNet speedup
+controlnet-aux>=0.0.9                               # ControlNet preprocessors
+triton-windows>=3.2.0; sys_platform == "win32"      # torch.compile on Windows
+
+# ── FlashAttention-2 (NVIDIA Ampere+ GPU required) ──
+# Best installed via prebuilt wheel: https://flashattn.dev
+# Uncomment if you have a compatible GPU:
+# flash-attn>=2.6.0
+
+# ── ONNX Runtime (Windows DirectML / CPU optimized) ──
+onnxruntime>=1.19.0
+onnxruntime-genai-directml>=0.12.0; sys_platform == "win32"
+optimum>=1.21.0

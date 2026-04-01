@@ -43,11 +43,31 @@ class LlamaCppProvider(BaseProvider):
         if not resolved:
             raise FileNotFoundError(f"GGUF model not found: {model_path}")
 
+        # Use system-detected optimal settings when available
+        n_gpu = self.n_gpu_layers
+        n_ctx = self.n_ctx
+        extra_kwargs: dict[str, Any] = {}
+        try:
+            from local_ai_platform.system_info import get_cached_hardware, get_model_recommendations
+            hw = get_cached_hardware()
+            recs = get_model_recommendations(hw)
+            if n_gpu == -1 and recs.get("num_gpu_layers") is not None:
+                n_gpu = recs["num_gpu_layers"]
+            if n_ctx == 4096 and recs.get("recommended_context"):
+                n_ctx = recs["recommended_context"]
+            if recs.get("optimal_threads"):
+                extra_kwargs["n_threads"] = recs["optimal_threads"]
+            if recs.get("num_batch"):
+                extra_kwargs["n_batch"] = 512
+        except Exception:
+            pass
+
         llm = Llama(
             model_path=str(resolved),
-            n_gpu_layers=self.n_gpu_layers,
-            n_ctx=self.n_ctx,
+            n_gpu_layers=n_gpu,
+            n_ctx=n_ctx,
             verbose=False,
+            **extra_kwargs,
         )
         self._model_cache[model_path] = llm
         return llm

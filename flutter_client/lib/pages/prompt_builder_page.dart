@@ -23,6 +23,10 @@ class _PromptBuilderPageState extends State<PromptBuilderPage> {
   bool _loading = false;
   List<Map<String, dynamic>> _history = [];
 
+  // Generation quality controls
+  double _creativity = 0.7; // maps to temperature for prompt generation
+  String _promptLength = 'medium'; // short, medium, long
+
   @override
   void initState() {
     super.initState();
@@ -49,6 +53,10 @@ class _PromptBuilderPageState extends State<PromptBuilderPage> {
         'constraints': _lines(_constraints.text),
         'target_stack': _targetStack,
         'output_format': _outputFormat,
+        'settings': {
+          'temperature': _creativity,
+          'max_tokens': _promptLength == 'short' ? 512 : _promptLength == 'long' ? 4096 : 2048,
+        },
       };
       final res = await widget.api.post('/agents/prompt-draft', req) as Map<String, dynamic>;
       setState(() {
@@ -178,6 +186,90 @@ class _PromptBuilderPageState extends State<PromptBuilderPage> {
                             DropdownMenuItem(value: 'markdown', child: Text('Markdown')),
                           ],
                           onChanged: (v) => setState(() => _outputFormat = v ?? 'markdown'),
+                        ),
+                      ),
+                    ],
+                  ),
+                  const SizedBox(height: 12),
+
+                  // Generation quality controls
+                  Row(
+                    children: [
+                      // Creativity slider
+                      Expanded(
+                        flex: 2,
+                        child: Column(
+                          crossAxisAlignment: CrossAxisAlignment.start,
+                          children: [
+                            Row(
+                              children: [
+                                Text('Creativity', style: TextStyle(fontSize: 11, fontWeight: FontWeight.w500, color: colors.onSurfaceVariant)),
+                                const Spacer(),
+                                Text(_creativity.toStringAsFixed(1), style: TextStyle(fontSize: 11, fontWeight: FontWeight.w600, color: colors.primary)),
+                              ],
+                            ),
+                            SizedBox(
+                              height: 24,
+                              child: SliderTheme(
+                                data: SliderThemeData(
+                                  trackHeight: 3,
+                                  thumbShape: const RoundSliderThumbShape(enabledThumbRadius: 6),
+                                  overlayShape: const RoundSliderOverlayShape(overlayRadius: 12),
+                                  activeTrackColor: colors.primary,
+                                  inactiveTrackColor: colors.outlineVariant.withValues(alpha: 0.3),
+                                  thumbColor: colors.primary,
+                                ),
+                                child: Slider(
+                                  value: _creativity,
+                                  min: 0.0,
+                                  max: 1.5,
+                                  divisions: 15,
+                                  onChanged: (v) => setState(() => _creativity = v),
+                                ),
+                              ),
+                            ),
+                            Text(
+                              _creativity <= 0.3
+                                  ? 'Focused — sticks closely to your requirements'
+                                  : _creativity <= 0.8
+                                      ? 'Balanced — follows requirements with some creative additions'
+                                      : 'Exploratory — may suggest novel approaches and structures',
+                              style: TextStyle(fontSize: 10, color: colors.onSurfaceVariant, fontStyle: FontStyle.italic),
+                            ),
+                          ],
+                        ),
+                      ),
+                      const SizedBox(width: 16),
+                      // Output length
+                      SizedBox(
+                        width: 200,
+                        child: Column(
+                          crossAxisAlignment: CrossAxisAlignment.start,
+                          children: [
+                            Text('Output Length', style: TextStyle(fontSize: 11, fontWeight: FontWeight.w500, color: colors.onSurfaceVariant)),
+                            const SizedBox(height: 4),
+                            SegmentedButton<String>(
+                              segments: const [
+                                ButtonSegment(value: 'short', label: Text('Short')),
+                                ButtonSegment(value: 'medium', label: Text('Medium')),
+                                ButtonSegment(value: 'long', label: Text('Long')),
+                              ],
+                              selected: {_promptLength},
+                              onSelectionChanged: (v) => setState(() => _promptLength = v.first),
+                              style: ButtonStyle(
+                                visualDensity: VisualDensity.compact,
+                                tapTargetSize: MaterialTapTargetSize.shrinkWrap,
+                                textStyle: WidgetStatePropertyAll(Theme.of(context).textTheme.labelSmall),
+                              ),
+                            ),
+                            const SizedBox(height: 2),
+                            Text(
+                              _promptLength == 'short' ? '~512 tokens — concise prompt'
+                                  : _promptLength == 'long' ? '~4K tokens — detailed with examples'
+                                  : '~2K tokens — balanced detail',
+                              style: TextStyle(fontSize: 10, color: colors.onSurfaceVariant, fontStyle: FontStyle.italic),
+                            ),
+                          ],
                         ),
                       ),
                     ],

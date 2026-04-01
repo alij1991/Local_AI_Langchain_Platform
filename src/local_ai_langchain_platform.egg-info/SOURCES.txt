@@ -14,6 +14,7 @@ src/local_ai_platform/formatting.py
 src/local_ai_platform/huggingface.py
 src/local_ai_platform/memory.py
 src/local_ai_platform/ollama.py
+src/local_ai_platform/system_info.py
 src/local_ai_platform/tools.py
 src/local_ai_platform/tracing.py
 src/local_ai_platform/images/__init__.py

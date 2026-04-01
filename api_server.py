@@ -9,6 +9,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import os
 from pathlib import Path
 import re
 import time
@@ -305,6 +306,71 @@ async def list_providers():
     }
 
 
+# ── System Info & Recommendations ────────────────────────────────
+
+@app.get("/system/info")
+async def system_info():
+    """Detect system hardware and return optimization recommendations."""
+    from local_ai_platform.system_info import get_cached_hardware, get_model_recommendations
+    hw = get_cached_hardware()
+    recs = get_model_recommendations(hw)
+    return {
+        "hardware": {
+            "os": f"{hw.os_name} {hw.os_version}",
+            "cpu": hw.cpu_name,
+            "cpu_cores_physical": hw.cpu_cores_physical,
+            "cpu_cores_logical": hw.cpu_cores_logical,
+            "ram_total_mb": hw.ram_total_mb,
+            "ram_available_mb": hw.ram_available_mb,
+            "ram_total_gb": round(hw.ram_total_mb / 1024, 1),
+            "ram_tier": hw.ram_tier,
+            "gpus": [
+                {
+                    "name": g.name,
+                    "vram_mb": g.vram_mb,
+                    "cuda": g.cuda_available,
+                    "directml": g.directml_available,
+                }
+                for g in hw.gpus
+            ],
+            "disk_free_gb": hw.disk_free_gb,
+        },
+        "recommendations": recs,
+    }
+
+
+@app.get("/models/optimal-settings")
+async def get_optimal_model_settings(
+    model: str = Query(..., description="Model name"),
+    provider: str = Query("ollama", description="Provider name"),
+):
+    """Return optimal inference settings for a specific model on this hardware."""
+    from local_ai_platform.system_info import get_cached_hardware, get_optimal_inference_settings, get_quant_info
+    hw = get_cached_hardware()
+    settings = get_optimal_inference_settings(model, hw, provider)
+
+    # Try to get quantization info from the model name
+    quant_info = None
+    name_upper = model.upper()
+    for q_level in ("Q8_0", "Q6_K", "Q5_K_M", "Q5_K_S", "Q4_K_M", "Q4_K_S", "Q4_0", "Q3_K_M", "Q3_K_S", "Q2_K"):
+        if q_level in name_upper:
+            quant_info = get_quant_info(q_level)
+            break
+
+    return {
+        "model": model,
+        "provider": provider,
+        "optimal_settings": settings,
+        "quant_info": quant_info,
+        "hardware_summary": {
+            "ram_tier": hw.ram_tier,
+            "ram_gb": round(hw.ram_total_mb / 1024, 1),
+            "gpu_vram_gb": round(hw.best_gpu_vram_mb / 1024, 1) if hw.best_gpu_vram_mb else 0,
+            "cpu_cores": hw.cpu_cores_physical,
+        },
+    }
+
+
 # ── Models ────────────────────────────────────────────────────────
 
 @app.get("/models")
@@ -413,12 +479,318 @@ async def get_available_models():
     return _set_cache("models:available", result, skip_empty=True)
 
 
+@app.get("/models/chat-capable")
+async def get_chat_capable_models():
+    """Return models that support chat, with rich metadata for the chat page."""
+    if not router:
+        raise HTTPException(503, "Not initialized")
+
+    cached = _cached("models:chat-capable")
+    if cached is not None:
+        return cached
+
+    # Non-chat family strings to exclude
+    _NON_CHAT_FAMILIES = {
+        "stable-diffusion", "sdxl", "sd15", "sd2", "sd3", "flux",
+        "controlnet", "vae", "lora", "unet", "clip", "t5",
+    }
+
+    # Substrings in model name that indicate non-chat models
+    _NON_CHAT_KEYWORDS = {
+        "controlnet", "control_", "control-", "lora", "vae",
+        "diffusion", "stable-diffusion", "sdxl", "sd15", "sd_",
+        "unet", "inpaint", "img2img", "text-to-image",
+        "image-to-image", "text-to-video", "embedding", "clip",
+        "openjourney", "dreamlike", "deliberate", "realvis",
+        "animagine", "waifu", "anything-v", "counterfeit",
+        "safetensor", "annotator", "preprocessor", "segmentor",
+        "depth-estimation", "image-classification",
+        "object-detection", "image-segmentation",
+        "text-to-speech", "speech-to-text", "whisper", "bark",
+        "musicgen", "audiogen", "wav2vec",
+        "ip_adapter", "ip-adapter", "t2i-adapter", "t2i_adapter",
+    }
+
+    # Known non-chat HuggingFace author namespaces (image/audio focused)
+    _NON_CHAT_AUTHORS = {
+        "lllyasviel", "stabilityai", "runwayml", "prompthero",
+        "segmind", "kandinsky-community", "openai/clip",
+        "CompVis",
+    }
+
+    def _format_size(b: int | None) -> str | None:
+        if not b:
+            return None
+        if b >= 1_073_741_824:
+            return f"{b / 1_073_741_824:.1f} GB"
+        if b >= 1_048_576:
+            return f"{b / 1_048_576:.0f} MB"
+        return f"{b / 1024:.0f} KB"
+
+    # Pipeline tags that are definitely NOT chat models
+    _NON_CHAT_PIPELINES = {
+        "text-to-image", "image-to-image", "image-to-video", "text-to-video",
+        "text-to-audio", "text-to-speech", "automatic-speech-recognition",
+        "audio-classification", "audio-to-audio",
+        "image-classification", "image-segmentation", "object-detection",
+        "depth-estimation", "image-feature-extraction",
+        "feature-extraction", "sentence-similarity",
+        "unconditional-image-generation", "controlnet",
+        "zero-shot-image-classification", "video-classification",
+    }
+
+    # Pipeline tags that ARE chat models
+    _CHAT_PIPELINES = {
+        "text-generation", "text2text-generation", "conversational",
+        "image-text-to-text",  # multimodal chat (e.g. LLaVA)
+    }
+
+    def _is_chat_model(m) -> bool:
+        """Heuristic: keep models that support chat and aren't image/audio/diffusion models."""
+        if not m.capabilities.supports_chat:
+            return False
+        if m.capabilities.supports_embeddings:
+            return False
+        name_low = m.name.lower()
+        fam_low = m.family.lower()
+
+        # Check pipeline_tag from metadata (most reliable signal for HF models)
+        pipeline_tag = (m.metadata.get("pipeline_tag") or "").lower() if m.metadata else ""
+        if pipeline_tag:
+            if pipeline_tag in _NON_CHAT_PIPELINES:
+                return False
+            if pipeline_tag in _CHAT_PIPELINES:
+                return True  # Trust pipeline_tag if it says chat
+
+        if fam_low in _NON_CHAT_FAMILIES:
+            return False
+        if any(kw in name_low for kw in _NON_CHAT_KEYWORDS):
+            return False
+        # Check author namespace (e.g. "lllyasviel/control_xxx")
+        author = name_low.split("/")[0] if "/" in name_low else ""
+        if author in _NON_CHAT_AUTHORS:
+            return False
+        return True
+
+    def _detect_use_case(m) -> str:
+        """Classify a model into a use-case category from its name/caps/family."""
+        name_low = m.name.lower()
+        caps = m.capabilities
+
+        # Coding models
+        if any(k in name_low for k in ("code", "coder", "codestral", "starcoder", "deepseek-coder",
+                                        "codellama", "codegemma", "qwen2.5-coder")):
+            return "coding"
+        # Vision / multimodal
+        if caps.supports_vision or any(k in name_low for k in ("llava", "vision", "minicpm-v")):
+            return "vision"
+        # Math / reasoning / thinking
+        if any(k in name_low for k in ("math", "deepseek-r1", "qwq", "reasoner", "thinking")):
+            return "reasoning"
+        # Embedding (shouldn't reach here normally, but just in case)
+        if caps.supports_embeddings:
+            return "embedding"
+        return "general"
+
+    # Use-case display order (lower = shown first)
+    _USE_CASE_ORDER = {
+        "general": 0, "coding": 1, "vision": 2, "reasoning": 3,
+        "image_generation": 4, "embedding": 5,
+    }
+
+    # ── Well-known model descriptions (fallback for when metadata is sparse)
+    _MODEL_DESCS: dict[str, str] = {
+        "gemma3": "Google's lightweight chat model",
+        "gemma2": "Google's efficient chat model",
+        "llama3": "Meta's open-weight LLM",
+        "llama2": "Meta's foundational LLM",
+        "mistral": "Fast, efficient general-purpose model",
+        "mixtral": "Mixture-of-experts model by Mistral AI",
+        "phi": "Microsoft's compact but capable model",
+        "qwen": "Alibaba's multilingual chat model",
+        "deepseek": "DeepSeek's versatile LLM",
+        "deepseek-r1": "DeepSeek reasoning model with chain-of-thought",
+        "deepseek-coder": "Code generation & understanding",
+        "codellama": "Meta's code-specialized LLM",
+        "starcoder": "BigCode's code generation model",
+        "llava": "Vision-language model for image understanding",
+        "qwq": "Alibaba's reasoning model",
+        "codestral": "Mistral AI's coding model",
+    }
+
+    def _model_description(m, use_case: str) -> str:
+        """Generate a helpful description from capabilities + known model info."""
+        caps = m.capabilities
+        name_low = m.name.lower().split(":")[0]  # strip tag for matching
+
+        # Try to find a well-known description
+        known_desc = ""
+        for key, desc in _MODEL_DESCS.items():
+            if key in name_low:
+                known_desc = desc
+                break
+
+        # Build technical specs
+        specs = []
+        if caps.parameter_size and caps.parameter_size != "unknown":
+            specs.append(caps.parameter_size)
+        if caps.quantization and caps.quantization != "unknown":
+            specs.append(caps.quantization)
+        if caps.supports_vision:
+            specs.append("Vision")
+        if caps.supports_tools:
+            specs.append("Tools")
+        if caps.context_length:
+            specs.append(f"{caps.context_length // 1024}K ctx" if caps.context_length >= 1024 else f"{caps.context_length} ctx")
+        spec_str = " · ".join(specs)
+
+        if known_desc and spec_str:
+            return f"{known_desc} — {spec_str}"
+        return known_desc or spec_str or ""
+
+    all_models: list[dict] = []
+    for name, prov in router._providers.items():
+        try:
+            if not prov.is_available():
+                continue
+            models = [m for m in prov.list_models() if _is_chat_model(m)]
+            for m in models:
+                uc = _detect_use_case(m)
+                all_models.append({
+                    "name": m.name,
+                    "provider": name,
+                    "family": m.family,
+                    "size": _format_size(m.size_bytes),
+                    "description": _model_description(m, uc),
+                    "use_case": uc,
+                    "supports_vision": m.capabilities.supports_vision,
+                    "supports_tools": m.capabilities.supports_tools,
+                    "supports_streaming": m.capabilities.supports_streaming,
+                    "parameter_size": m.capabilities.parameter_size,
+                    "context_length": m.capabilities.context_length,
+                    "quantization": m.capabilities.quantization,
+                })
+        except Exception:
+            pass
+
+    # ── Append image generation models from the image service ──
+    if image_service:
+        try:
+            img_models = image_service.list_models()
+            for im in img_models:
+                if not isinstance(im, dict):
+                    continue
+                mid = im.get("model_id") or im.get("id") or ""
+                if not mid:
+                    continue
+                family = (im.get("model_family") or "unknown").lower()
+                family_label = {
+                    "sdxl": "SDXL", "sd15": "SD 1.5", "flux": "Flux",
+                    "sd2": "SD 2", "sd3": "SD 3",
+                }.get(family, family.upper() if len(family) <= 4 else family.title())
+                size = im.get("size_human") or ""
+                desc_parts = []
+                if family_label and family_label != "Unknown":
+                    desc_parts.append(family_label)
+                if size:
+                    desc_parts.append(size)
+                cat = (im.get("category") or "").lower()
+                if cat and cat not in ("pipeline",):
+                    desc_parts.append(cat.replace("_", " ").title())
+                all_models.append({
+                    "name": mid,
+                    "provider": "images",
+                    "family": family,
+                    "size": size or None,
+                    "description": " · ".join(desc_parts) if desc_parts else "Image generation model",
+                    "use_case": "image_generation",
+                    "supports_vision": False,
+                    "supports_tools": False,
+                    "supports_streaming": False,
+                    "parameter_size": None,
+                    "context_length": None,
+                })
+        except Exception as exc:
+            logger.warning("Failed to list image models for chat picker: %s", exc)
+
+    # Sort by use_case order, then provider name, then model name
+    all_models.sort(key=lambda x: (
+        _USE_CASE_ORDER.get(x["use_case"], 99),
+        x["provider"],
+        x["name"],
+    ))
+
+    # ── Add quantization quality info to each model ──
+    from local_ai_platform.system_info import get_quant_info, get_cached_hardware, get_model_recommendations
+    for m in all_models:
+        qi = get_quant_info(m.get("quantization") or m.get("name", ""))
+        if qi:
+            m["quant_quality"] = qi.get("quality", "")
+            m["quant_rating"] = qi.get("rating", 0)
+            m["quant_note"] = qi.get("note", "")
+
+    # ── Add system-aware recommendations summary ──
+    try:
+        hw = get_cached_hardware()
+        recs = get_model_recommendations(hw)
+        rec_summary = {
+            "ram_tier": recs["ram_tier"],
+            "ram_gb": recs["ram_gb"],
+            "max_model_params": recs["max_model_params"],
+            "recommended_quant": recs["recommended_quant"],
+            "recommended_context": recs["recommended_context"],
+            "optimal_threads": recs["optimal_threads"],
+            "has_gpu": recs["has_gpu"],
+            "gpu_vram_gb": recs["gpu_vram_gb"],
+            "gpu_note": recs.get("gpu_note", ""),
+            "warnings": recs.get("warnings", []),
+            "recommended_models": recs.get("recommended_models", []),
+        }
+    except Exception:
+        rec_summary = None
+
+    result = {"models": all_models, "system_recommendations": rec_summary}
+    return _set_cache("models:chat-capable", result, skip_empty=True)
+
+
 @app.post("/models/refresh")
 async def refresh_models(provider: str | None = None):
     """Refresh model lists (clears caches)."""
     _invalidate_cache("models:")
     _invalidate_cache("providers:")
     return {"status": "ok"}
+
+
+@app.post("/models/unload")
+async def unload_model(model_name: str = "", provider: str = ""):
+    """Unload a model from memory to free GPU/CPU RAM.
+
+    Useful when switching between large models or before image generation
+    to reclaim VRAM on constrained hardware.
+    """
+    if not router:
+        raise HTTPException(503, "Not initialized")
+    unloaded = []
+    for name, prov in router._providers.items():
+        if provider and name != provider:
+            continue
+        if hasattr(prov, "unload_model") and model_name:
+            prov.unload_model(model_name)
+            unloaded.append(f"{name}:{model_name}")
+        elif hasattr(prov, "unload_all") and not model_name:
+            prov.unload_all()
+            unloaded.append(f"{name}:*")
+    _invalidate_cache("models:")
+    # Force GC
+    import gc
+    gc.collect()
+    try:
+        import torch
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+    except ImportError:
+        pass
+    return {"status": "ok", "unloaded": unloaded}
 
 
 @app.get("/models/ollama")
@@ -1733,6 +2105,253 @@ async def delete_hf_token():
     return {"configured": False}
 
 
+# ── Chat Prompt Enhancement ─────────────────────────────────────
+
+@app.post("/chat/enhance-prompt")
+async def enhance_chat_prompt(body: dict[str, Any]):
+    """Use a local LLM to reason about the user's request and generate a better prompt."""
+    user_prompt = (body.get("prompt") or "").strip()
+    if not user_prompt:
+        raise HTTPException(400, "prompt is required")
+    ollama_model = (body.get("ollama_model") or "").strip()
+    timeout_sec = int(body.get("timeout_sec") or 120)
+
+    # Find a working Ollama model
+    if not ollama_model:
+        try:
+            from local_ai_platform.providers.ollama_provider import OllamaProvider
+            prov = OllamaProvider()
+            models = prov.list_models()
+            if models:
+                small_kw = ["1b", "2b", "3b", "tiny", "mini", "small", "phi", "qwen2"]
+                names = [m.name for m in models if m.capabilities.supports_chat]
+                picked = None
+                for kw in small_kw:
+                    for n in names:
+                        if kw in n.lower():
+                            picked = n
+                            break
+                    if picked:
+                        break
+                ollama_model = picked or (names[0] if names else "")
+        except Exception:
+            pass
+    if not ollama_model:
+        raise HTTPException(503, "No Ollama model available. Install one with: ollama pull gemma3:1b")
+
+    system_prompt = """/no_think
+You are a prompt engineering expert. The user has a request they want to send to an AI assistant.
+Your job is to rewrite it into a clear, detailed, well-structured prompt that will get the best response.
+
+Rules:
+1. Preserve the user's intent exactly
+2. Add clarity, structure, and specificity
+3. If the request is vague, add reasonable context
+4. Break complex asks into numbered steps if helpful
+5. Keep it concise — don't pad with fluff
+6. Output ONLY the improved prompt text, nothing else (no explanations, no "Here is...", no quotes)
+
+User's original request:
+"""
+
+    try:
+        import urllib.request
+        import urllib.error
+        req_body = json.dumps({
+            "model": ollama_model,
+            "prompt": system_prompt + user_prompt,
+            "stream": False,
+            "options": {"temperature": 0.7, "num_predict": 1024},
+        }).encode()
+        req = urllib.request.Request(
+            "http://localhost:11434/api/generate",
+            data=req_body,
+            headers={"Content-Type": "application/json"},
+        )
+        with urllib.request.urlopen(req, timeout=timeout_sec) as resp:
+            data = json.loads(resp.read().decode())
+        content = (data.get("response", "") or "").strip()
+
+        if not content or len(content) < 5:
+            return {"prompt": user_prompt, "original_prompt": user_prompt,
+                    "error": "LLM response was empty", "model": ollama_model}
+
+        # Clean up common LLM wrapping
+        for prefix in ("Here is", "Here's", "Improved prompt:", "Enhanced prompt:", "```"):
+            if content.lower().startswith(prefix.lower()):
+                content = content[len(prefix):].strip().lstrip(":\n")
+        content = content.strip().strip("`").strip('"').strip("'").strip()
+
+        return {
+            "prompt": content,
+            "original_prompt": user_prompt,
+            "model": ollama_model,
+        }
+    except Exception as exc:
+        if "URLError" in str(type(exc).__name__) or "Connection refused" in str(exc):
+            raise HTTPException(503, "Cannot connect to Ollama. Is it running? Start with: ollama serve")
+        raise HTTPException(500, f"Prompt enhancement failed: {exc}")
+
+
+# ── Chat Image Generation ───────────────────────────────────────
+
+@app.post("/chat/generate-image")
+async def chat_generate_image(body: dict[str, Any]):
+    """Generate an image within a conversation and store it as a message.
+
+    Optionally uses conversation context + an LLM to build a better prompt.
+    Returns the image URL and message info.
+    """
+    if not image_service:
+        raise HTTPException(503, "Image generation service not available")
+
+    prompt = (body.get("prompt") or "").strip()
+    conversation_id = (body.get("conversation_id") or "").strip()
+    use_context = body.get("use_context", True)
+
+    if not prompt:
+        raise HTTPException(400, "prompt is required")
+
+    # Create conversation if needed
+    if not conversation_id:
+        conv = create_conversation(title=prompt[:50])
+        conversation_id = conv["id"]
+
+    # Save the user's image request as a message
+    add_message(conversation_id, "user", prompt)
+
+    # Optionally enhance the prompt using conversation context + LLM
+    enhanced_prompt = prompt
+    if use_context:
+        try:
+            # Load last few messages for context
+            db_msgs = list_messages(conversation_id)
+            context_lines = []
+            for msg in db_msgs[-6:-1]:  # last 5 messages excluding current
+                role = msg.get("role", "")
+                content = (msg.get("content") or "")[:200]
+                if content:
+                    context_lines.append(f"{role}: {content}")
+            context_str = "\n".join(context_lines)
+
+            # Use LLM to create an optimized image prompt from conversation context
+            if context_str:
+                from local_ai_platform.providers.ollama_provider import OllamaProvider
+                prov = OllamaProvider()
+                models = prov.list_models()
+                if models:
+                    small_kw = ["1b", "2b", "3b", "tiny", "mini", "phi", "qwen2"]
+                    names = [m.name for m in models if m.capabilities.supports_chat]
+                    picked = None
+                    for kw in small_kw:
+                        for n in names:
+                            if kw in n.lower():
+                                picked = n
+                                break
+                        if picked:
+                            break
+                    ollama_model = picked or (names[0] if names else "")
+                    if ollama_model:
+                        import urllib.request
+                        enhance_body = json.dumps({
+                            "model": ollama_model,
+                            "prompt": f"""/no_think
+Based on this conversation context and the user's image request, write a concise Stable Diffusion image prompt (max 50 words). Include quality tags. Output ONLY the prompt text, nothing else.
+
+Conversation:
+{context_str}
+
+Image request: {prompt}""",
+                            "stream": False,
+                            "options": {"temperature": 0.7, "num_predict": 200},
+                        }).encode()
+                        req = urllib.request.Request(
+                            "http://localhost:11434/api/generate",
+                            data=enhance_body,
+                            headers={"Content-Type": "application/json"},
+                        )
+                        with urllib.request.urlopen(req, timeout=30) as resp:
+                            data = json.loads(resp.read().decode())
+                        llm_prompt = (data.get("response") or "").strip()
+                        if llm_prompt and len(llm_prompt) > 10:
+                            enhanced_prompt = llm_prompt
+        except Exception as exc:
+            logger.warning("Chat image context enhancement failed, using raw prompt: %s", exc)
+
+    # Pick the first available image model
+    available_models = image_service.list_models()
+    if not available_models:
+        raise HTTPException(503, "No image generation models available. Install one via the Images page.")
+    # Prefer configured/loaded models
+    model_id = None
+    for m in available_models:
+        if isinstance(m, dict) and m.get("status") in ("ready", "loaded", "configured"):
+            model_id = m.get("model_id") or m.get("id")
+            break
+    if not model_id:
+        # Fall back to first available
+        m0 = available_models[0]
+        model_id = m0.get("model_id") or m0.get("id") or str(m0) if isinstance(m0, dict) else str(m0)
+
+    # Use conversation_id as session_id for image storage
+    session_id = f"chat-{conversation_id}"
+
+    try:
+        result = image_service.generate(
+            model_id=model_id,
+            prompt=enhanced_prompt,
+            negative_prompt="worst quality, low quality, blurry, deformed, ugly, bad anatomy, watermark, text",
+            steps=20,
+            width=768,
+            height=768,
+            timeout_sec=300,
+        )
+
+        # Handle result
+        if isinstance(result, list):
+            result = result[0]
+
+        # Save image to disk
+        image_id = str(uuid.uuid4())
+        from local_ai_platform.repositories.images_repo import image_output_path
+        out_path = image_output_path(session_id, image_id)
+        if hasattr(result, "image_bytes") and result.image_bytes:
+            out_path.write_bytes(result.image_bytes)
+        elif hasattr(result, "image") and result.image:
+            result.image.save(str(out_path))
+
+        image_url = f"/images/files/{session_id}/{image_id}.png"
+
+        # Save assistant message with image attachment
+        attachments = [{
+            "type": "generated_image",
+            "image_id": image_id,
+            "image_url": image_url,
+            "filename": f"{image_id}.png",
+            "prompt_used": enhanced_prompt,
+            "model_id": model_id,
+        }]
+        add_message(
+            conversation_id, "assistant",
+            f"Generated image for: {prompt}",
+            model=model_id,
+            attachments=attachments,
+        )
+
+        return {
+            "status": "ok",
+            "conversation_id": conversation_id,
+            "image_id": image_id,
+            "image_url": image_url,
+            "prompt_used": enhanced_prompt,
+            "model_id": model_id,
+        }
+    except Exception as exc:
+        # Save error as assistant message
+        add_message(conversation_id, "assistant", f"Image generation failed: {exc}", model=model_id)
+        raise HTTPException(500, f"Image generation failed: {exc}")
+
+
 # ── Direct Chat (no agent) ───────────────────────────────────────
 
 @app.post("/chat/direct")
@@ -1879,18 +2498,31 @@ async def agent_chat_stream(req: ChatRequest):
         orchestrator.definitions[agent_name].model_name,
     )
 
+    # Load conversation history from database (same as non-streaming endpoint)
+    from local_ai_platform.memory import db_messages_to_langchain, langchain_to_chat_messages
+    db_msgs = list_messages(conv_id)
+    lc_history = db_messages_to_langchain(db_msgs[:-1])  # exclude current user msg
+    chat_history = langchain_to_chat_messages(lc_history)
+
     async def stream_gen():
         # Send start event
         yield f"event: start\ndata: {json.dumps({'conversation_id': conv_id, 'run_id': run_id})}\n\n"
 
         full_response = ""
+        stream_start_time = time.monotonic()
+        first_token_time: float | None = None
+        token_count = 0
         try:
             prev_text = ""
-            async for accumulated in orchestrator.astream_chat_with_agent(agent_name, req.message):
+            async for accumulated in orchestrator.astream_chat_with_agent(agent_name, req.message, history_override=chat_history, settings_override=req.settings):
                 # astream_chat_with_agent yields accumulated text
                 new_text = accumulated[len(prev_text):]
                 prev_text = accumulated
                 if new_text:
+                    if first_token_time is None:
+                        first_token_time = time.monotonic()
+                    # Rough token count (words/subwords)
+                    token_count += max(1, len(new_text.split()))
                     full_response = accumulated
                     yield f"event: token\ndata: {json.dumps({'text': new_text})}\n\n"
 
@@ -1907,7 +2539,12 @@ async def agent_chat_stream(req: ChatRequest):
             if trace_store:
                 trace_store.save(trace_data)
 
-            yield f"event: end\ndata: {json.dumps({'conversation_id': conv_id, 'run_id': run_id})}\n\n"
+            # Performance metrics
+            total_time = time.monotonic() - stream_start_time
+            ttft = (first_token_time - stream_start_time) if first_token_time else 0
+            tokens_per_sec = token_count / total_time if total_time > 0 else 0
+
+            yield f"event: end\ndata: {json.dumps({'conversation_id': conv_id, 'run_id': run_id, 'perf': {'tokens': token_count, 'total_sec': round(total_time, 2), 'tokens_per_sec': round(tokens_per_sec, 1), 'ttft_sec': round(ttft, 3)}})}\n\n"
 
         except Exception as exc:
             trace_data = recorder.finalize(success=False, error=str(exc))

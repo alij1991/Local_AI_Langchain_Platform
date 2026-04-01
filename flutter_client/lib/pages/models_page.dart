@@ -54,6 +54,9 @@ class _ModelsPageState extends State<ModelsPage> with SingleTickerProviderStateM
   bool _hfTokenConfigured = false;
   String? _hfUsername;
 
+  // System info
+  Map<String, dynamic>? _systemInfo;
+
   // Shared
   Map<String, dynamic>? _selected;
   String _error = '';
@@ -67,6 +70,7 @@ class _ModelsPageState extends State<ModelsPage> with SingleTickerProviderStateM
     _tabCtrl.addListener(_onTabChanged);
     _loadLocal();
     _checkHfToken();
+    _loadSystemInfo();
   }
 
   @override
@@ -109,6 +113,14 @@ class _ModelsPageState extends State<ModelsPage> with SingleTickerProviderStateM
       _hfDetailCache[modelId] = {};
     }
     if (mounted) setState(() => _loadingReadme = null);
+  }
+
+  Future<void> _loadSystemInfo() async {
+    try {
+      final data = await widget.api.get('/system/info') as Map<String, dynamic>;
+      if (!mounted) return;
+      setState(() => _systemInfo = data);
+    } catch (_) {}
   }
 
   Future<void> _checkHfToken() async {
@@ -375,9 +387,20 @@ class _ModelsPageState extends State<ModelsPage> with SingleTickerProviderStateM
           _error = '';
         });
       } else {
+        // Build search query — category filter augments the query
+        String effectiveSearch = _discoverSearch;
+        String effectiveTask = _discoverTask;
+        if (_hfCategoryFilter != null && _hfCategoryFilter!.isNotEmpty) {
+          final catKeyword = _hfCategorySearchHint(_hfCategoryFilter!);
+          if (catKeyword.startsWith('task:')) {
+            effectiveTask = catKeyword.substring(5);
+          } else if (catKeyword.isNotEmpty) {
+            effectiveSearch = effectiveSearch.isEmpty ? catKeyword : '$effectiveSearch $catKeyword';
+          }
+        }
         final params = [
-          if (_discoverSearch.isNotEmpty) 'q=${Uri.encodeComponent(_discoverSearch)}',
-          if (_discoverTask.isNotEmpty) 'task=${Uri.encodeComponent(_discoverTask)}',
+          if (effectiveSearch.isNotEmpty) 'q=${Uri.encodeComponent(effectiveSearch)}',
+          if (effectiveTask.isNotEmpty) 'task=${Uri.encodeComponent(effectiveTask)}',
           'sort=${Uri.encodeComponent(_discoverSort)}',
           'limit=40',
         ].join('&');
@@ -403,9 +426,19 @@ class _ModelsPageState extends State<ModelsPage> with SingleTickerProviderStateM
     if (_hfLoadingMore || !_hfHasMore) return;
     setState(() => _hfLoadingMore = true);
     try {
+      String effectiveSearch = _discoverSearch;
+      String effectiveTask = _discoverTask;
+      if (_hfCategoryFilter != null && _hfCategoryFilter!.isNotEmpty) {
+        final catKeyword = _hfCategorySearchHint(_hfCategoryFilter!);
+        if (catKeyword.startsWith('task:')) {
+          effectiveTask = catKeyword.substring(5);
+        } else if (catKeyword.isNotEmpty) {
+          effectiveSearch = effectiveSearch.isEmpty ? catKeyword : '$effectiveSearch $catKeyword';
+        }
+      }
       final params = [
-        if (_discoverSearch.isNotEmpty) 'q=${Uri.encodeComponent(_discoverSearch)}',
-        if (_discoverTask.isNotEmpty) 'task=${Uri.encodeComponent(_discoverTask)}',
+        if (effectiveSearch.isNotEmpty) 'q=${Uri.encodeComponent(effectiveSearch)}',
+        if (effectiveTask.isNotEmpty) 'task=${Uri.encodeComponent(effectiveTask)}',
         'sort=${Uri.encodeComponent(_discoverSort)}',
         'limit=40',
         'offset=${_hfDiscover.length}',
@@ -691,9 +724,111 @@ class _ModelsPageState extends State<ModelsPage> with SingleTickerProviderStateM
 
   // ── LOCAL TAB ──────────────────────────────────────────────────
 
+  Widget _buildSystemInfoBanner(ColorScheme colors) {
+    if (_systemInfo == null) return const SizedBox.shrink();
+    final hw = _systemInfo!['hardware'] as Map<String, dynamic>? ?? {};
+    final recs = _systemInfo!['recommendations'] as Map<String, dynamic>? ?? {};
+    final ramGb = hw['ram_total_gb'];
+    final ramTier = hw['ram_tier'] ?? '';
+    final cpu = hw['cpu'] ?? '';
+    final gpus = (hw['gpus'] as List?) ?? [];
+    final diskFree = hw['disk_free_gb'];
+    final maxParams = recs['max_model_params'] ?? '?';
+    final recQuant = recs['recommended_quant'] ?? '?';
+    final recCtx = recs['recommended_context'] ?? '?';
+    final optThreads = recs['optimal_threads'] ?? '?';
+
+    return Container(
+      margin: const EdgeInsets.only(top: 8, bottom: 4),
+      padding: const EdgeInsets.all(12),
+      decoration: BoxDecoration(
+        gradient: LinearGradient(
+          colors: [
+            colors.primaryContainer.withValues(alpha: 0.3),
+            colors.tertiaryContainer.withValues(alpha: 0.15),
+          ],
+        ),
+        borderRadius: BorderRadius.circular(12),
+        border: Border.all(color: colors.outlineVariant.withValues(alpha: 0.3)),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Row(
+            children: [
+              Icon(Icons.computer, size: 16, color: colors.primary),
+              const SizedBox(width: 8),
+              Text('System Profile', style: TextStyle(fontSize: 13, fontWeight: FontWeight.w600, color: colors.primary)),
+              const Spacer(),
+              Container(
+                padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 3),
+                decoration: BoxDecoration(
+                  color: ramTier == 'high'
+                      ? colors.primaryContainer
+                      : ramTier == 'medium'
+                          ? colors.tertiaryContainer
+                          : colors.errorContainer,
+                  borderRadius: BorderRadius.circular(8),
+                ),
+                child: Text(
+                  '${ramTier == 'high' ? 'High' : ramTier == 'medium' ? 'Medium' : 'Low'} Tier',
+                  style: TextStyle(fontSize: 11, fontWeight: FontWeight.w600,
+                    color: ramTier == 'high'
+                        ? colors.onPrimaryContainer
+                        : ramTier == 'medium'
+                            ? colors.onTertiaryContainer
+                            : colors.onErrorContainer),
+                ),
+              ),
+            ],
+          ),
+          const SizedBox(height: 8),
+          Wrap(
+            spacing: 16,
+            runSpacing: 4,
+            children: [
+              _sysChip(colors, Icons.memory, '$ramGb GB RAM'),
+              _sysChip(colors, Icons.developer_board, cpu.toString().length > 30 ? '${cpu.toString().substring(0, 30)}...' : cpu.toString()),
+              if (gpus.isNotEmpty)
+                _sysChip(colors, Icons.videogame_asset,
+                  '${(gpus.first as Map)['name'] ?? 'GPU'} (${(gpus.first as Map)['vram_mb'] ?? 0} MB)'),
+              _sysChip(colors, Icons.storage, '${diskFree ?? '?'} GB free'),
+            ],
+          ),
+          const SizedBox(height: 8),
+          Row(
+            children: [
+              Icon(Icons.lightbulb_outline, size: 13, color: colors.tertiary),
+              const SizedBox(width: 6),
+              Expanded(
+                child: Text(
+                  'Best for $maxParams models at $recQuant · Context: $recCtx · Threads: $optThreads',
+                  style: TextStyle(fontSize: 11, color: colors.onSurfaceVariant, fontStyle: FontStyle.italic),
+                ),
+              ),
+            ],
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _sysChip(ColorScheme colors, IconData icon, String label) {
+    return Row(
+      mainAxisSize: MainAxisSize.min,
+      children: [
+        Icon(icon, size: 13, color: colors.onSurfaceVariant),
+        const SizedBox(width: 4),
+        Text(label, style: TextStyle(fontSize: 11, color: colors.onSurfaceVariant)),
+      ],
+    );
+  }
+
   Widget _buildLocalTab(ColorScheme colors) {
     return Column(
       children: [
+        // System info banner
+        _buildSystemInfoBanner(colors),
         // Toolbar
         Padding(
           padding: const EdgeInsets.only(top: 8, bottom: 4),
@@ -1224,9 +1359,7 @@ class _ModelsPageState extends State<ModelsPage> with SingleTickerProviderStateM
       'multimodal': 'Multimodal',
     };
 
-    final filtered = _hfCategoryFilter == null || _hfCategoryFilter!.isEmpty
-        ? _hfDiscover
-        : _hfDiscover.where((m) => m['category'] == _hfCategoryFilter).toList();
+    final filtered = _hfDiscover;
 
     return Column(
       children: [
@@ -1242,6 +1375,7 @@ class _ModelsPageState extends State<ModelsPage> with SingleTickerProviderStateM
                 selected: isSelected,
                 onSelected: (sel) {
                   setState(() => _hfCategoryFilter = sel ? e.key : null);
+                  _loadDiscover();
                 },
                 visualDensity: VisualDensity.compact,
                 showCheckmark: false,
@@ -2178,6 +2312,22 @@ class _ModelsPageState extends State<ModelsPage> with SingleTickerProviderStateM
       case 'multimodal': return Icons.visibility;
       case 'quantized': return Icons.compress;
       default: return Icons.extension;
+    }
+  }
+
+  /// Maps a category filter to HF API search hint.
+  /// Returns "task:xxx" to override the task parameter, or a keyword to append to search.
+  String _hfCategorySearchHint(String category) {
+    switch (category) {
+      case 'lora_adapter': return 'lora';
+      case 'controlnet': return 'controlnet';
+      case 'embedding': return 'task:feature-extraction';
+      case 'diffusion': return 'task:text-to-image';
+      case 'quantized': return 'gptq OR awq OR gguf';
+      case 'multimodal': return 'task:image-text-to-text';
+      case 'fine_tune': return 'instruct OR chat OR finetuned';
+      case 'base_model': return '';  // keep current task filter
+      default: return '';
     }
   }
 

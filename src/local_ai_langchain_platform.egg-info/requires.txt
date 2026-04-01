@@ -27,11 +27,17 @@ psutil>=5.9.0
 py-cpuinfo>=9.0.0
 
 [all]
-local-ai-langchain-platform[images,openvino]
+local-ai-langchain-platform[images,onnx,openvino,perf]
 
 [dev]
 pytest
 ruff
+
+[exllama]
+exllamav2>=0.3.0
+
+[flash]
+flash-attn>=2.6.0
 
 [images]
 tomesd>=0.1.3
@@ -42,6 +48,28 @@ mediapipe==0.10.14
 [images:sys_platform == "win32"]
 triton-windows>=3.2.0
 
+[llamacpp]
+llama-cpp-python>=0.3.2
+
+[onnx]
+onnxruntime>=1.19.0
+optimum>=1.21.0
+
+[onnx:sys_platform == "win32"]
+onnxruntime-genai-directml>=0.12.0
+
 [openvino]
 optimum-intel>=1.20.0
 openvino>=2024.0.0
+
+[perf]
+local-ai-langchain-platform[flash,llamacpp,quantized,speculative]
+
+[quantized]
+bitsandbytes>=0.44.0
+auto-gptq>=0.7.0
+autoawq>=0.2.0
+
+[speculative]
+transformers>=4.45.0
+accelerate>=0.34.0

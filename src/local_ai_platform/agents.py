@@ -66,6 +66,10 @@ class AgentOrchestrator:
         self._models_without_tool_support: set[str] = set()
         self._smart_memories: dict[str, SmartMemory] = {}
 
+        # Cap in-memory history to prevent unbounded growth.
+        # DB stores full history; this is just for session context.
+        self._max_in_memory_history = 100  # messages (50 turns)
+
     # ── Agent management ──────────────────────────────────────────
 
     def add_agent(
@@ -379,11 +383,13 @@ class AgentOrchestrator:
         else:
             output = self._chat_via_router(definition, user_input, history)
 
-        # Persist history
+        # Persist history (bounded to prevent unbounded memory growth)
         if persist_history:
             target = self.chat_histories.setdefault(agent_name, [])
             target.append(ChatMessage(role="user", content=user_input))
             target.append(ChatMessage(role="assistant", content=output))
+            if len(target) > self._max_in_memory_history:
+                del target[:len(target) - self._max_in_memory_history]
 
         return output
 
@@ -443,14 +449,28 @@ class AgentOrchestrator:
         self,
         agent_name: str,
         user_input: str,
+        history_override: list[ChatMessage] | None = None,
+        settings_override: dict | None = None,
     ) -> AsyncGenerator[str, None]:
-        """Async streaming chat."""
+        """Async streaming chat.
+
+        If *history_override* is provided (e.g. loaded from the database),
+        it is used instead of the in-memory chat history so that the model
+        sees the full conversation context.
+
+        If *settings_override* is provided, those values override the agent's
+        default settings (temperature, max_tokens, etc.).
+        """
         definition = self.definitions[agent_name]
-        history = self.chat_histories.get(agent_name, [])
+        history = history_override if history_override is not None else self.chat_histories.get(agent_name, [])
 
         model = self._resolve_model_string(definition)
         messages = self._build_messages(definition, user_input, history)
-        settings = GenerationSettings.from_dict(definition.settings)
+        # Merge agent defaults with any user overrides
+        base_settings = dict(definition.settings) if definition.settings else {}
+        if settings_override:
+            base_settings.update({k: v for k, v in settings_override.items() if v is not None})
+        settings = GenerationSettings.from_dict(base_settings)
 
         acc = ""
         async for chunk in self.router.astream(model, messages, settings):
@@ -464,6 +484,8 @@ class AgentOrchestrator:
         target = self.chat_histories.setdefault(agent_name, [])
         target.append(ChatMessage(role="user", content=user_input))
         target.append(ChatMessage(role="assistant", content=acc))
+        if len(target) > self._max_in_memory_history:
+            del target[:len(target) - self._max_in_memory_history]
 
     # ── Supervisor agent (multi-agent routing) ────────────────────
 
