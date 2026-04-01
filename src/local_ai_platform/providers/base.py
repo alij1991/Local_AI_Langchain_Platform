@@ -62,6 +62,11 @@ class GenerationSettings:
     num_thread: int | None = None       # CPU thread count
     num_batch: int | None = None        # Batch size for prompt processing
     num_gpu: int | None = None          # GPU layers to offload
+    # KV cache compression
+    # Ollama: "q4_0" | "q8_0" | "f16" (passed as options.kv_cache_type)
+    # HuggingFace: turboquant bit width derived from this (3-bit for q4_0, 4-bit for q8_0)
+    # None = provider default (usually f16 / no compression)
+    kv_cache_quant: str | None = None
 
     @classmethod
     def from_dict(cls, raw: dict[str, Any] | None) -> GenerationSettings:
@@ -79,6 +84,7 @@ class GenerationSettings:
             num_thread=int(raw["num_thread"]) if raw.get("num_thread") is not None else None,
             num_batch=int(raw["num_batch"]) if raw.get("num_batch") is not None else None,
             num_gpu=int(raw["num_gpu"]) if raw.get("num_gpu") is not None else None,
+            kv_cache_quant=raw.get("kv_cache_quant"),
         )
 
 

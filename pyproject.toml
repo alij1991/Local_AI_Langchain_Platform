@@ -65,6 +65,10 @@ llamacpp = [
 # ── 4-bit quantized inference via bitsandbytes (NF4/GPTQ loading) ──
 quantized = [
   "bitsandbytes>=0.44.0",             # NF4/INT8 quantization: 4x memory reduction
+]
+# ── GPTQ/AWQ quantized model loading (Linux only — require CUDA build) ──
+quantized-build = [
+  "local-ai-langchain-platform[quantized]",
   "auto-gptq>=0.7.0",                 # GPTQ quantized model loading
   "autoawq>=0.2.0",                   # AWQ quantized model loading
 ]
@@ -99,7 +103,10 @@ images = [
   "controlnet-aux>=0.0.9",            # ControlNet preprocessors (canny, depth, pose, etc.)
   "mediapipe==0.10.14",               # Required by controlnet-aux (pinned: 0.10.33 breaks it)
   "triton-windows>=3.2.0; sys_platform == 'win32'",  # torch.compile on CUDA (Windows)
+  "sageattention>=1.0.0; sys_platform != 'win32'",   # SageAttention (ICLR 2025): 2-3x faster attention on Ada/Ampere
 ]
+# SageAttention on Windows: install manually via community wheel from
+# https://github.com/thu-ml/SageAttention/releases (prebuilt for CUDA 12.x + sm89)
 # Intel CPU acceleration (2-4x faster inference on Intel CPUs)
 openvino = [
   "optimum-intel>=1.20.0",
@@ -107,7 +114,11 @@ openvino = [
 ]
 # ── All performance packages combined ──
 perf = [
-  "local-ai-langchain-platform[llamacpp,quantized,flash,speculative,turboquant]",
+  "local-ai-langchain-platform[llamacpp,quantized,speculative,turboquant]",
+]
+# perf + flash-attn (Linux only — flash-attn cannot build on Windows)
+perf-flash = [
+  "local-ai-langchain-platform[perf,flash]",
 ]
 # All optional packages combined
 all = [

@@ -241,11 +241,15 @@ class AgentOrchestrator:
         user_input: str,
         history: list[ChatMessage],
         image_paths: list[str] | None = None,
+        settings_override: dict | None = None,
     ) -> str:
         """Direct chat through the provider router (no tool calling)."""
         model = self._resolve_model_string(definition)
         messages = self._build_messages(definition, user_input, history, image_paths)
-        settings = GenerationSettings.from_dict(definition.settings)
+        base_settings = dict(definition.settings) if definition.settings else {}
+        if settings_override:
+            base_settings.update({k: v for k, v in settings_override.items() if v is not None})
+        settings = GenerationSettings.from_dict(base_settings)
         response = self.router.chat(model, messages, settings)
         return response.content
 
@@ -366,6 +370,7 @@ class AgentOrchestrator:
         callbacks: list[Any] | None = None,
         run_id: str | None = None,
         use_tools: bool = True,
+        settings_override: dict | None = None,
     ) -> str:
         definition = self.definitions[agent_name]
 
@@ -377,11 +382,13 @@ class AgentOrchestrator:
 
         # Route to the right execution path
         if image_paths:
-            output = self._chat_via_router(definition, user_input, history, image_paths=image_paths)
+            output = self._chat_via_router(definition, user_input, history,
+                                           image_paths=image_paths, settings_override=settings_override)
         elif use_tools and self._tools_for_agent(agent_name):
             output = self._chat_with_react_agent(definition, user_input, history, callbacks=callbacks)
         else:
-            output = self._chat_via_router(definition, user_input, history)
+            output = self._chat_via_router(definition, user_input, history,
+                                           settings_override=settings_override)
 
         # Persist history (bounded to prevent unbounded memory growth)
         if persist_history:

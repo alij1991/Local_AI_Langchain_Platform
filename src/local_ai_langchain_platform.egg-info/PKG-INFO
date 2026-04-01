@@ -5,6 +5,9 @@ Summary: Starter UI + backend for LangChain agents powered by Ollama.
 Author: Local AI Team
 Requires-Python: >=3.10
 Description-Content-Type: text/markdown
+Requires-Dist: torch>=2.1.0
+Requires-Dist: torchvision>=0.16.0
+Requires-Dist: torchaudio>=2.1.0
 Requires-Dist: gradio>=5.0.0
 Requires-Dist: langchain>=0.3.27
 Requires-Dist: langchain-core>=0.3.66
@@ -39,8 +42,10 @@ Provides-Extra: llamacpp
 Requires-Dist: llama-cpp-python>=0.3.2; extra == "llamacpp"
 Provides-Extra: quantized
 Requires-Dist: bitsandbytes>=0.44.0; extra == "quantized"
-Requires-Dist: auto-gptq>=0.7.0; extra == "quantized"
-Requires-Dist: autoawq>=0.2.0; extra == "quantized"
+Provides-Extra: quantized-build
+Requires-Dist: local-ai-langchain-platform[quantized]; extra == "quantized-build"
+Requires-Dist: auto-gptq>=0.7.0; extra == "quantized-build"
+Requires-Dist: autoawq>=0.2.0; extra == "quantized-build"
 Provides-Extra: exllama
 Requires-Dist: exllamav2>=0.3.0; extra == "exllama"
 Provides-Extra: onnx
@@ -49,6 +54,8 @@ Requires-Dist: onnxruntime>=1.19.0; extra == "onnx"
 Requires-Dist: optimum>=1.21.0; extra == "onnx"
 Provides-Extra: flash
 Requires-Dist: flash-attn>=2.6.0; extra == "flash"
+Provides-Extra: turboquant
+Requires-Dist: turboquant-torch>=0.4.0; extra == "turboquant"
 Provides-Extra: speculative
 Requires-Dist: transformers>=4.45.0; extra == "speculative"
 Requires-Dist: accelerate>=0.34.0; extra == "speculative"
@@ -62,7 +69,9 @@ Provides-Extra: openvino
 Requires-Dist: optimum-intel>=1.20.0; extra == "openvino"
 Requires-Dist: openvino>=2024.0.0; extra == "openvino"
 Provides-Extra: perf
-Requires-Dist: local-ai-langchain-platform[flash,llamacpp,quantized,speculative]; extra == "perf"
+Requires-Dist: local-ai-langchain-platform[llamacpp,quantized,speculative,turboquant]; extra == "perf"
+Provides-Extra: perf-flash
+Requires-Dist: local-ai-langchain-platform[flash,perf]; extra == "perf-flash"
 Provides-Extra: all
 Requires-Dist: local-ai-langchain-platform[images,onnx,openvino,perf]; extra == "all"
 

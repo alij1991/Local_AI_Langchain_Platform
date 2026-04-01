@@ -218,46 +218,51 @@ class HuggingFaceProvider(BaseProvider):
         # ── TurboQuant KV cache compression (ICLR 2026) ──
         # Compresses KV cache to 3-4 bits via PolarQuant + QJL residual.
         # ~6x KV memory reduction, zero calibration needed, works on any model.
-        # Paper: "TurboQuant: Online Vector Quantization with Near-optimal Distortion Rate"
-        #        (Zandieh et al., 2026; arXiv:2504.19874)
-        pipe = self._apply_turboquant(pipe, model)
+        kv_quant = settings.kv_cache_quant if settings else None
+        pipe = self._apply_turboquant(pipe, model, kv_cache_quant=kv_quant)
+        self._turboquant_applied[model] = kv_quant
 
         self._pipeline_cache[model] = pipe
         return pipe
 
-    def _apply_turboquant(self, pipe_or_model: Any, model_name: str) -> Any:
-        """Apply TurboQuant KV cache compression if available and beneficial.
+    def _apply_turboquant(self, pipe_or_model: Any, model_name: str,
+                          kv_cache_quant: str | None = None) -> Any:
+        """Apply TurboQuant KV cache compression if available and requested.
 
         TurboQuant (Google, ICLR 2026) compresses KV cache to 3-4 bits using
         PolarQuant (Walsh-Hadamard rotation) + QJL (1-bit residual correction).
         This gives ~6x KV memory reduction with near-zero quality loss.
 
-        Benefits for this app:
-        - Longer context windows without OOM (KV cache is the #1 memory bottleneck)
-        - On 8 GB VRAM: 7B model can handle 8K+ context instead of 2-4K
-        - On 16 GB: 13B model becomes practical with reasonable context
-        - Zero calibration — works on any model out of the box
+        Args:
+            kv_cache_quant: "q4_0" → 3-bit, "q8_0" → 4-bit, "f16"/None → disabled
         """
+        # If explicitly disabled
+        if kv_cache_quant == "f16":
+            return pipe_or_model
+
         try:
             import turboquant
         except ImportError:
             return pipe_or_model  # Not installed, skip silently
 
         try:
-            # Determine optimal bit width based on system RAM tier
-            bit_width = 3  # Default: 3-bit (best compression/quality balance)
-            try:
-                from local_ai_platform.system_info import get_cached_hardware
-                hw = get_cached_hardware()
-                gpu_vram_gb = hw.best_gpu_vram_mb / 1024 if hw.best_gpu_vram_mb else 0
-                ram_gb = hw.ram_total_mb / 1024
-
-                if gpu_vram_gb >= 8 or ram_gb >= 24:
-                    bit_width = 4  # More VRAM → higher quality 4-bit
-                elif gpu_vram_gb <= 4 or ram_gb <= 10:
-                    bit_width = 3  # Tight memory → aggressive 3-bit
-            except Exception:
-                pass
+            # Map Ollama-style quant names to TurboQuant bit widths
+            if kv_cache_quant == "q4_0":
+                bit_width = 3
+            elif kv_cache_quant == "q8_0":
+                bit_width = 4
+            else:
+                # Auto-detect based on hardware
+                bit_width = 3  # Default
+                try:
+                    from local_ai_platform.system_info import get_cached_hardware
+                    hw = get_cached_hardware()
+                    gpu_vram_gb = hw.best_gpu_vram_mb / 1024 if hw.best_gpu_vram_mb else 0
+                    ram_gb = hw.ram_total_mb / 1024
+                    if gpu_vram_gb >= 8 or ram_gb >= 24:
+                        bit_width = 4
+                except Exception:
+                    pass
 
             # For pipeline objects, wrap the underlying model
             target = pipe_or_model
@@ -289,7 +294,11 @@ class HuggingFaceProvider(BaseProvider):
 
         return pipe_or_model
 
-    def _get_model_for_streaming(self, model: str) -> Any:
+    # Track whether TurboQuant was applied so we know if we need to re-wrap
+    _turboquant_applied: dict[str, str | None] = {}
+
+    def _get_model_for_streaming(self, model: str,
+                                  kv_cache_quant: str | None = None) -> Any:
         """Get or load model for streaming generation. Reuses pipeline model if available."""
         if model in self._model_cache:
             return self._model_cache[model]
@@ -317,7 +326,8 @@ class HuggingFaceProvider(BaseProvider):
 
         gen_model = AutoModelForCausalLM.from_pretrained(model, **model_kwargs)
         # Apply TurboQuant KV cache compression for streaming path too
-        gen_model = self._apply_turboquant(gen_model, model)
+        gen_model = self._apply_turboquant(gen_model, model, kv_cache_quant=kv_cache_quant)
+        self._turboquant_applied[model] = kv_cache_quant
         self._model_cache[model] = gen_model
         return gen_model
 
@@ -504,7 +514,7 @@ class HuggingFaceProvider(BaseProvider):
             inputs = tokenizer(prompt, return_tensors="pt")
 
             # Reuse model from pipeline/model cache (FIXED: no duplicate loading)
-            gen_model = self._get_model_for_streaming(model)
+            gen_model = self._get_model_for_streaming(model, kv_cache_quant=settings.kv_cache_quant)
 
             if hasattr(gen_model, "device"):
                 inputs = {k: v.to(gen_model.device) for k, v in inputs.items()}

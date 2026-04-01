@@ -2109,7 +2109,7 @@ async def delete_hf_token():
 
 @app.post("/chat/enhance-prompt")
 async def enhance_chat_prompt(body: dict[str, Any]):
-    """Use a local LLM to reason about the user's request and generate a better prompt."""
+    """Use a local LLM to detect prompt type (text/image/code) and enhance accordingly."""
     user_prompt = (body.get("prompt") or "").strip()
     if not user_prompt:
         raise HTTPException(400, "prompt is required")
@@ -2139,7 +2139,107 @@ async def enhance_chat_prompt(body: dict[str, Any]):
     if not ollama_model:
         raise HTTPException(503, "No Ollama model available. Install one with: ollama pull gemma3:1b")
 
-    system_prompt = """/no_think
+    # ── Step 1: Classify prompt intent ──
+    # Heuristic first — fast, no LLM call needed for obvious cases
+    _lower = user_prompt.lower()
+    _image_keywords = [
+        "photo of", "picture of", "image of", "portrait of", "painting of",
+        "illustration of", "render of", "scene of", "landscape of",
+        "generate an image", "generate a photo", "create an image", "draw ",
+        "realistic photo", "cinematic", "4k", "8k", "masterpiece",
+        "best quality", "highly detailed", "a man ", "a woman ",
+        "a girl ", "a boy ", "a cat ", "a dog ", "beautiful ",
+        "photorealistic", "digital art", "concept art", "anime ",
+        "studio lighting", "bokeh", "depth of field",
+    ]
+    _code_keywords = [
+        "write a function", "write code", "implement", "create a class",
+        "write a script", "python code", "javascript code", "fix this code",
+        "debug this", "refactor", "write a program", "api endpoint",
+        "def ", "function(", "class ", "import ", "```",
+    ]
+
+    # Count keyword matches
+    _img_score = sum(1 for kw in _image_keywords if kw in _lower)
+    _code_score = sum(1 for kw in _code_keywords if kw in _lower)
+
+    # Determine type from heuristics
+    if _img_score >= 2 or (_img_score >= 1 and _code_score == 0 and len(user_prompt.split()) <= 30):
+        prompt_type = "image"
+    elif _code_score >= 1:
+        prompt_type = "code"
+    else:
+        # Ambiguous — ask the LLM to classify
+        prompt_type = "text"  # default
+        try:
+            import urllib.request
+            classify_body = json.dumps({
+                "model": ollama_model,
+                "prompt": f"""/no_think
+Classify this user prompt into exactly one category. Reply with ONLY the category word, nothing else.
+
+Categories:
+- IMAGE: if the user wants to generate/create/describe a visual image, photo, illustration, artwork, or scene
+- CODE: if the user wants code, programming, debugging, or technical implementation
+- TEXT: if the user wants text writing, questions answered, explanations, emails, essays, or general conversation
+
+User prompt: {user_prompt}
+
+Category:""",
+                "stream": False,
+                "options": {"temperature": 0.1, "num_predict": 10},
+            }).encode()
+            req = urllib.request.Request(
+                "http://localhost:11434/api/generate",
+                data=classify_body,
+                headers={"Content-Type": "application/json"},
+            )
+            with urllib.request.urlopen(req, timeout=15) as resp:
+                cdata = json.loads(resp.read().decode())
+            _cls = (cdata.get("response") or "").strip().upper()
+            if "IMAGE" in _cls:
+                prompt_type = "image"
+            elif "CODE" in _cls:
+                prompt_type = "code"
+        except Exception:
+            pass  # fall back to "text"
+
+    # ── Step 2: Enhance with type-specific system prompt ──
+    if prompt_type == "image":
+        system_prompt = """/no_think
+You are an expert Stable Diffusion / Flux prompt engineer.
+Rewrite the user's request into an optimized image generation prompt.
+
+Rules:
+1. Output a vivid, descriptive prompt (max 60 words) with subject, setting, lighting, style, and quality tags
+2. Use comma-separated descriptive phrases (not sentences)
+3. Include quality boosters: masterpiece, best quality, highly detailed, sharp focus
+4. Include style/mood: cinematic lighting, golden hour, studio lighting, etc.
+5. If the subject is a person, describe pose, expression, clothing, and hair
+6. Output ONLY the prompt text, nothing else (no explanations, no "Here is...", no quotes)
+7. Do NOT include negative prompt — only the positive prompt
+
+User's request:
+"""
+        max_tokens = 200
+    elif prompt_type == "code":
+        system_prompt = """/no_think
+You are a senior software engineer and prompt engineer.
+Rewrite the user's coding request into a clear, specific technical prompt that will get the best code output.
+
+Rules:
+1. Clarify the programming language, framework, and version if inferable
+2. Specify input/output types, edge cases, and error handling expectations
+3. Mention coding standards (type hints, docstrings, clean code) if appropriate
+4. Add "include example usage" or "include tests" if the request is for a function/class
+5. Keep it structured and concise — use numbered requirements if helpful
+6. Output ONLY the improved prompt text, nothing else (no explanations, no quotes)
+
+User's request:
+"""
+        max_tokens = 512
+    else:
+        system_prompt = """/no_think
 You are a prompt engineering expert. The user has a request they want to send to an AI assistant.
 Your job is to rewrite it into a clear, detailed, well-structured prompt that will get the best response.
 
@@ -2153,6 +2253,7 @@ Rules:
 
 User's original request:
 """
+        max_tokens = 1024
 
     try:
         import urllib.request
@@ -2161,7 +2262,7 @@ User's original request:
             "model": ollama_model,
             "prompt": system_prompt + user_prompt,
             "stream": False,
-            "options": {"temperature": 0.7, "num_predict": 1024},
+            "options": {"temperature": 0.7, "num_predict": max_tokens},
         }).encode()
         req = urllib.request.Request(
             "http://localhost:11434/api/generate",
@@ -2174,10 +2275,12 @@ User's original request:
 
         if not content or len(content) < 5:
             return {"prompt": user_prompt, "original_prompt": user_prompt,
-                    "error": "LLM response was empty", "model": ollama_model}
+                    "error": "LLM response was empty", "model": ollama_model,
+                    "prompt_type": prompt_type}
 
         # Clean up common LLM wrapping
-        for prefix in ("Here is", "Here's", "Improved prompt:", "Enhanced prompt:", "```"):
+        for prefix in ("Here is", "Here's", "Improved prompt:", "Enhanced prompt:",
+                        "Image prompt:", "Prompt:", "```"):
             if content.lower().startswith(prefix.lower()):
                 content = content[len(prefix):].strip().lstrip(":\n")
         content = content.strip().strip("`").strip('"').strip("'").strip()
@@ -2186,6 +2289,7 @@ User's original request:
             "prompt": content,
             "original_prompt": user_prompt,
             "model": ollama_model,
+            "prompt_type": prompt_type,
         }
     except Exception as exc:
         if "URLError" in str(type(exc).__name__) or "Connection refused" in str(exc):
@@ -2208,6 +2312,11 @@ async def chat_generate_image(body: dict[str, Any]):
     prompt = (body.get("prompt") or "").strip()
     conversation_id = (body.get("conversation_id") or "").strip()
     use_context = body.get("use_context", True)
+    img_steps = int(body.get("steps") or 20)
+    img_guidance = float(body.get("guidance_scale") or 7.5)
+    img_width = int(body.get("width") or 768)
+    img_height = int(body.get("height") or 768)
+    img_negative = (body.get("negative_prompt") or "worst quality, low quality, blurry, deformed, ugly, bad anatomy, watermark, text").strip()
 
     if not prompt:
         raise HTTPException(400, "prompt is required")
@@ -2300,10 +2409,11 @@ Image request: {prompt}""",
         result = image_service.generate(
             model_id=model_id,
             prompt=enhanced_prompt,
-            negative_prompt="worst quality, low quality, blurry, deformed, ugly, bad anatomy, watermark, text",
-            steps=20,
-            width=768,
-            height=768,
+            negative_prompt=img_negative,
+            steps=img_steps,
+            guidance_scale=img_guidance,
+            width=img_width,
+            height=img_height,
             timeout_sec=300,
         )
 
@@ -2344,6 +2454,8 @@ Image request: {prompt}""",
             "image_id": image_id,
             "image_url": image_url,
             "prompt_used": enhanced_prompt,
+            "original_prompt": prompt,
+            "was_enhanced": enhanced_prompt != prompt,
             "model_id": model_id,
         }
     except Exception as exc:
@@ -2433,6 +2545,7 @@ async def agent_chat(req: ChatRequest):
             history_override=chat_history,
             callbacks=callbacks,
             run_id=run_id,
+            settings_override=req.settings,
         )
 
         add_message(

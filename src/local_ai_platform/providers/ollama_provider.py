@@ -76,6 +76,10 @@ class OllamaProvider(BaseProvider):
             opts["num_batch"] = settings.num_batch
         if settings.num_gpu is not None:
             opts["num_gpu"] = settings.num_gpu
+        # KV cache quantization — reduces memory usage for long contexts.
+        # Ollama supports: "q4_0" (~4x savings), "q8_0" (~2x), "f16" (none).
+        if settings.kv_cache_quant is not None:
+            opts["kv_cache_type"] = settings.kv_cache_quant
         return opts
 
     def chat(

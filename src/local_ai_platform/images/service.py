@@ -20,9 +20,11 @@ from local_ai_platform.formatting import format_bytes_human
 
 logger = logging.getLogger("local_ai_platform.images")
 
-# ── Suppress noisy third-party FutureWarnings (bitsandbytes, etc.) ──
+# ── Suppress noisy third-party warnings ──
 import warnings
 warnings.filterwarnings("ignore", message=".*_check_is_size.*", category=FutureWarning)
+warnings.filterwarnings("ignore", message=".*torch_dtype.*is deprecated.*", category=FutureWarning)
+warnings.filterwarnings("ignore", message=".*add_prefix_space.*", category=FutureWarning)
 
 # ── Fix Triton MSVC discovery on Windows ──────────────────────────
 # Triton's get_cc() uses find_msvc(env_only=True) which only checks env vars.
@@ -1615,6 +1617,12 @@ def _controlnet_worker(payload: dict[str, Any], out_q: Any) -> None:
 
 
 def _diffusers_worker(payload: dict[str, Any], out_q: Any) -> None:
+    # Suppress noisy deprecation warnings in the worker subprocess
+    import warnings as _w
+    _w.filterwarnings("ignore", message=".*torch_dtype.*is deprecated.*")
+    _w.filterwarnings("ignore", message=".*add_prefix_space.*")
+    _w.filterwarnings("ignore", message=".*_check_is_size.*", category=FutureWarning)
+
     started = time.time()
     stage = "bootstrap"
     stage_file = str(payload.get("stage_file") or "") or None
@@ -1679,6 +1687,25 @@ def _diffusers_worker(payload: dict[str, Any], out_q: Any) -> None:
             torch.set_num_interop_threads(max(cpu_count // 2, 1))
         except RuntimeError:
             pass  # Already set or called too late in this process
+
+        # ── TF32 Matmul Precision (Ampere+ free 10-15% speedup) ──
+        # TF32 uses 19-bit precision (vs 32-bit FP32) on tensor cores.
+        # Zero quality impact for inference, significant speed gain.
+        if torch.cuda.is_available():
+            torch.set_float32_matmul_precision("high")
+            torch.backends.cuda.matmul.allow_tf32 = True
+            torch.backends.cudnn.allow_tf32 = True
+            torch.backends.cudnn.benchmark = True
+            _log("Enabled TF32 matmul + cuDNN benchmark")
+
+        # ── SageAttention detection (2-3x faster attention on Ada GPUs) ──
+        _has_sage_attn = False
+        try:
+            from sageattention import sageattn  # noqa: F401
+            _has_sage_attn = True
+            _log("SageAttention available — will use for transformer attention")
+        except ImportError:
+            pass
 
         model_id_or_path = str(payload["model_id_or_path"])
         mode = str(payload["mode"])
@@ -1860,21 +1887,42 @@ def _diffusers_worker(payload: dict[str, Any], out_q: Any) -> None:
         if hasattr(pipe, "feature_extractor") and pipe.feature_extractor is not None:
             pipe.feature_extractor = None
         # ── Attention backend selection (universal) ──
-        # Priority: xformers > SDPA (PyTorch 2.0+) > sliced (memory-friendly)
+        # Priority: SageAttention > xformers > SDPA (PyTorch 2.0+) > sliced
+        # SageAttention (ICLR 2025): 2-3x faster than SDPA on Ada GPUs (FP8/INT8 kernels)
         # SDPA is PyTorch's native fused attention — works on CPU, CUDA, MPS.
-        # On CUDA Ampere+, SDPA auto-dispatches to FlashAttention or efficient kernels.
         _attn_backend = str(payload.get("attention_backend", "auto"))
         if _attn_backend == "auto":
             _dev_fam = _get_device_family(device)
             if _dev_fam in ("cuda", "mps", "xpu"):
                 _attn_set = False
-                # Try xformers first (fastest on CUDA when available)
-                try:
-                    pipe.enable_xformers_memory_efficient_attention()
-                    _attn_backend = "xformers"
-                    _attn_set = True
-                except Exception:
-                    pass
+                # Try SageAttention first (2-3x faster on Ada/Ampere CUDA)
+                if _has_sage_attn and _dev_fam == "cuda":
+                    try:
+                        # Use INT8 QK + FP16 PV (safe on Ada sm89, FP8 PV is Hopper-only)
+                        _transformer = getattr(pipe, "transformer", None)
+                        if _transformer is not None and hasattr(_transformer, "set_attention_backend"):
+                            _transformer.set_attention_backend("sage")
+                            _attn_backend = "sage"
+                            _attn_set = True
+                            _log("SageAttention enabled via diffusers backend")
+                        elif _transformer is not None or getattr(pipe, "unet", None) is not None:
+                            # Monkey-patch SDPA → SageAttention for all attention ops
+                            import torch.nn.functional as _F
+                            from sageattention import sageattn
+                            _F.scaled_dot_product_attention = sageattn
+                            _attn_backend = "sage"
+                            _attn_set = True
+                            _log("SageAttention enabled via SDPA monkey-patch")
+                    except Exception as _sage_err:
+                        _log(f"SageAttention failed, falling back: {_sage_err}")
+                # Try xformers next (fast on CUDA when available)
+                if not _attn_set:
+                    try:
+                        pipe.enable_xformers_memory_efficient_attention()
+                        _attn_backend = "xformers"
+                        _attn_set = True
+                    except Exception:
+                        pass
                 # SDPA fallback — apply to both pipe-level AND UNet/transformer directly
                 if not _attn_set and hasattr(torch.nn.functional, "scaled_dot_product_attention"):
                     try:
@@ -2349,20 +2397,21 @@ def _diffusers_worker(payload: dict[str, Any], out_q: Any) -> None:
             except Exception as e:
                 _log(f"DeepCache failed: {e}")
 
-        # ── FasterCache — attention caching for transformer models ──
-        # Caches similar attention states between timesteps — ~1.5-2x speedup
-        # Only for transformer-based pipelines (Flux, Z-Image, PixArt, DiT, SD3)
+        # ── Transformer caching (mutually exclusive: FasterCache OR FirstBlockCache) ──
+        # Only one caching strategy can be active on the transformer at a time.
+        # FasterCache: caches attention states — good when explicitly requested.
+        # FirstBlockCache (TeaCache successor): skips entire blocks when residuals
+        # are similar between timesteps — enabled by default for transformers.
+        _transformer_cache_active = False
         if payload.get("use_faster_cache") and hasattr(pipe, "transformer"):
             try:
                 from diffusers.hooks import FasterCacheConfig, apply_faster_cache
-                # Flux uses MMDiT with joint text-image attention — use a
-                # narrower caching window to preserve text-image alignment.
                 _fc_ep = payload.get("execution_plan") or {}
                 _fc_family = str((_fc_ep.get("model_hints") or {}).get("model_family", "")).lower()
                 if _fc_family == "flux":
                     _fc_config = FasterCacheConfig(
-                        spatial_attention_block_skip_range=3,        # less aggressive (every 3rd block)
-                        spatial_attention_timestep_skip_range=(-1, 400),  # only cache last ~40% of timesteps
+                        spatial_attention_block_skip_range=3,
+                        spatial_attention_timestep_skip_range=(-1, 400),
                     )
                 else:
                     _fc_config = FasterCacheConfig(
@@ -2370,12 +2419,27 @@ def _diffusers_worker(payload: dict[str, Any], out_q: Any) -> None:
                         spatial_attention_timestep_skip_range=(-1, 681),
                     )
                 apply_faster_cache(pipe.transformer, _fc_config)
+                _transformer_cache_active = True
                 _log(f"FasterCache enabled for transformer ({_fc_family}, skip_range={'3/400' if _fc_family == 'flux' else '2/681'})")
                 _log_stage("faster_cache_enabled", family=_fc_family)
             except ImportError:
                 _log("FasterCache not available in this diffusers version")
             except Exception as e:
                 _log(f"FasterCache failed: {e}")
+
+        if not _transformer_cache_active and payload.get("use_first_block_cache", True) and hasattr(pipe, "transformer"):
+            try:
+                from diffusers.hooks import FirstBlockCacheConfig, apply_first_block_cache
+                _fbc_threshold = float(payload.get("first_block_cache_threshold", 0.05))
+                _fbc_config = FirstBlockCacheConfig(threshold=_fbc_threshold)
+                apply_first_block_cache(pipe.transformer, _fbc_config)
+                _transformer_cache_active = True
+                _log(f"FirstBlockCache (TeaCache) enabled (threshold={_fbc_threshold})")
+                _log_stage("first_block_cache_enabled", threshold=_fbc_threshold)
+            except ImportError:
+                _log("FirstBlockCache not available in this diffusers version")
+            except Exception as e:
+                _log(f"FirstBlockCache failed: {e}")
 
         # ── Pyramid Attention Broadcast (PAB) ──
         # Skips redundant attention computation between similar timesteps

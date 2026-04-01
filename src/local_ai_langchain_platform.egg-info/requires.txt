@@ -1,3 +1,6 @@
+torch>=2.1.0
+torchvision>=0.16.0
+torchaudio>=2.1.0
 gradio>=5.0.0
 langchain>=0.3.27
 langchain-core>=0.3.66
@@ -63,13 +66,22 @@ optimum-intel>=1.20.0
 openvino>=2024.0.0
 
 [perf]
-local-ai-langchain-platform[flash,llamacpp,quantized,speculative]
+local-ai-langchain-platform[llamacpp,quantized,speculative,turboquant]
+
+[perf-flash]
+local-ai-langchain-platform[flash,perf]
 
 [quantized]
 bitsandbytes>=0.44.0
+
+[quantized-build]
+local-ai-langchain-platform[quantized]
 auto-gptq>=0.7.0
 autoawq>=0.2.0
 
 [speculative]
 transformers>=4.45.0
 accelerate>=0.34.0
+
+[turboquant]
+turboquant-torch>=0.4.0

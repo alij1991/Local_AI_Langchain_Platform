@@ -143,6 +143,10 @@ class _ChatPageState extends State<ChatPage> {
   bool _enhancingPrompt = false;
   /// Whether image generation is running
   bool _generatingImage = false;
+  /// Image generation progress label + percent
+  String _imageGenStatus = '';
+  double _imageGenPercent = 0.0;
+  Timer? _imageProgressPoller;
 
   /// Inference parameter overrides (null = use defaults)
   double _temperature = 0.7;
@@ -155,6 +159,14 @@ class _ChatPageState extends State<ChatPage> {
   bool _turboQuantEnabled = true; // TurboQuant KV cache compression (auto-detected)
   String _settingsPreset = 'balanced'; // 'precise', 'balanced', 'creative', 'custom'
 
+  /// Image generation settings (shown when an image model is selected)
+  int _imgSteps = 20;
+  double _imgGuidance = 7.5;
+  int _imgWidth = 1024;
+  int _imgHeight = 1024;
+  String _imgNegativePrompt = '';
+  String _imgPreset = 'balanced'; // 'fast', 'balanced', 'quality'
+
   /// Last streaming performance metrics
   Map<String, dynamic>? _lastPerf;
 
@@ -162,6 +174,7 @@ class _ChatPageState extends State<ChatPage> {
   Map<String, dynamic>? _systemRecs;
 
   final _messageController = TextEditingController();
+  final _negPromptController = TextEditingController();
   final ScrollController _scrollController = ScrollController();
   final FocusNode _inputFocusNode = FocusNode();
   final AttachmentController _attachments = AttachmentController();
@@ -186,8 +199,10 @@ class _ChatPageState extends State<ChatPage> {
   @override
   void dispose() {
     _streamSub?.cancel();
+    _imageProgressPoller?.cancel();
     _scrollController.dispose();
     _messageController.dispose();
+    _negPromptController.dispose();
     _inputFocusNode.dispose();
     _attachments.dispose();
     super.dispose();
@@ -394,6 +409,7 @@ class _ChatPageState extends State<ChatPage> {
                   'top_p': _topP,
                   'max_tokens': _maxTokens,
                   'num_ctx': _contextLength,
+                  if (_turboQuantEnabled) 'kv_cache_quant': 'q8_0',
                 },
               })
             : await widget.api.postMultipart(
@@ -463,6 +479,7 @@ class _ChatPageState extends State<ChatPage> {
         'max_tokens': _maxTokens,
         'num_ctx': _contextLength,
         'repetition_penalty': _repeatPenalty,
+        if (_turboQuantEnabled) 'kv_cache_quant': 'q8_0',
       },
     });
 
@@ -560,7 +577,24 @@ class _ChatPageState extends State<ChatPage> {
       _autoScroll = true;
       _showJumpToLatest = false;
     });
-    _scheduleAutoScroll(force: true);
+    // Use a double post-frame callback to ensure layout is complete
+    // before scrolling to the new maxScrollExtent
+    if (_scrollController.hasClients) {
+      _scrollController.animateTo(
+        _scrollController.position.maxScrollExtent,
+        duration: const Duration(milliseconds: 200),
+        curve: Curves.easeOut,
+      );
+    }
+    // Also schedule a second scroll after layout in case extent changed
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (!_scrollController.hasClients) return;
+      _scrollController.animateTo(
+        _scrollController.position.maxScrollExtent,
+        duration: const Duration(milliseconds: 150),
+        curve: Curves.easeOut,
+      );
+    });
   }
 
   // ─── Prompt Enhancement ────────────────────────────────────
@@ -576,6 +610,7 @@ class _ChatPageState extends State<ChatPage> {
       if (!mounted) return;
       final enhanced = (data['prompt'] ?? original).toString();
       final model = (data['model'] ?? '').toString();
+      final promptType = (data['prompt_type'] ?? 'text').toString();
 
       if (enhanced == original || (data['error'] != null)) {
         ScaffoldMessenger.of(context).showSnackBar(
@@ -584,6 +619,12 @@ class _ChatPageState extends State<ChatPage> {
         );
         return;
       }
+
+      // Type badge config
+      final typeLabels = {'image': 'Image Prompt', 'code': 'Code Prompt', 'text': 'Text Prompt'};
+      final typeIcons = {'image': Icons.image, 'code': Icons.code, 'text': Icons.text_fields};
+      final typeLabel = typeLabels[promptType] ?? 'Enhanced';
+      final typeIcon = typeIcons[promptType] ?? Icons.auto_awesome;
 
       final accepted = await showDialog<bool>(
         context: context,
@@ -604,6 +645,35 @@ class _ChatPageState extends State<ChatPage> {
                         Icon(Icons.auto_awesome, size: 20, color: colors.primary),
                         const SizedBox(width: 8),
                         Text('Enhanced Prompt', style: Theme.of(ctx).textTheme.titleMedium?.copyWith(fontWeight: FontWeight.w600)),
+                        const Spacer(),
+                        Container(
+                          padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 3),
+                          decoration: BoxDecoration(
+                            color: promptType == 'image'
+                                ? colors.tertiaryContainer
+                                : promptType == 'code'
+                                    ? colors.secondaryContainer
+                                    : colors.primaryContainer,
+                            borderRadius: BorderRadius.circular(12),
+                          ),
+                          child: Row(
+                            mainAxisSize: MainAxisSize.min,
+                            children: [
+                              Icon(typeIcon, size: 13, color: promptType == 'image'
+                                  ? colors.onTertiaryContainer
+                                  : promptType == 'code'
+                                      ? colors.onSecondaryContainer
+                                      : colors.onPrimaryContainer),
+                              const SizedBox(width: 4),
+                              Text(typeLabel, style: TextStyle(fontSize: 11, fontWeight: FontWeight.w600,
+                                color: promptType == 'image'
+                                    ? colors.onTertiaryContainer
+                                    : promptType == 'code'
+                                        ? colors.onSecondaryContainer
+                                        : colors.onPrimaryContainer)),
+                            ],
+                          ),
+                        ),
                       ],
                     ),
                     const SizedBox(height: 16),
@@ -694,6 +764,47 @@ class _ChatPageState extends State<ChatPage> {
     return info != null && info['use_case'] == 'image_generation';
   }
 
+  void _startImageProgressPolling(String assistantMsgId) {
+    _imageProgressPoller?.cancel();
+    _imageGenStatus = 'Loading model...';
+    _imageGenPercent = 0.0;
+    _imageProgressPoller = Timer.periodic(const Duration(seconds: 2), (_) async {
+      if (!mounted || !_generatingImage) {
+        _stopImageProgressPolling();
+        return;
+      }
+      try {
+        final data = await widget.api.get('/images/generate/progress') as Map<String, dynamic>;
+        if (!mounted || !_generatingImage) return;
+        final active = data['active'] == true;
+        if (!active) return;
+        final label = (data['label'] ?? '').toString();
+        final elapsed = (data['elapsed_sec'] as num?)?.toDouble() ?? 0.0;
+        final percent = (data['percent'] as num?)?.toDouble() ?? 0.0;
+        final elapsedStr = elapsed > 60
+            ? '${(elapsed / 60).toStringAsFixed(0)}m ${(elapsed % 60).toStringAsFixed(0)}s'
+            : '${elapsed.toStringAsFixed(0)}s';
+        final statusText = '$label  ($elapsedStr)';
+        setState(() {
+          _imageGenStatus = statusText;
+          _imageGenPercent = percent / 100.0;
+          // Update the assistant placeholder message with live progress
+          final idx = _messages.indexWhere((m) => m.localId == assistantMsgId);
+          if (idx >= 0 && _messages[idx].status == ChatMessageStatus.streaming) {
+            _messages[idx].content = '🎨 $statusText';
+          }
+        });
+      } catch (_) {}
+    });
+  }
+
+  void _stopImageProgressPolling() {
+    _imageProgressPoller?.cancel();
+    _imageProgressPoller = null;
+    _imageGenStatus = '';
+    _imageGenPercent = 0.0;
+  }
+
   Future<void> _generateChatImage() async {
     final prompt = _messageController.text.trim();
     if (prompt.isEmpty || _generatingImage) return;
@@ -713,7 +824,7 @@ class _ChatPageState extends State<ChatPage> {
     final assistantMsg = ChatUiMessage(
       localId: '${userMsg.localId}-img',
       role: 'assistant',
-      content: 'Generating image...',
+      content: '',
       status: ChatMessageStatus.streaming,
       createdAt: DateTime.now(),
     );
@@ -722,24 +833,37 @@ class _ChatPageState extends State<ChatPage> {
       _messageController.clear();
     });
     _scheduleAutoScroll(force: true);
+    _startImageProgressPolling(assistantMsg.localId);
 
     try {
       final data = await widget.api.post('/chat/generate-image', {
         'prompt': prompt,
         'conversation_id': _conversationId,
         'use_context': true,
+        'steps': _imgSteps,
+        'guidance_scale': _imgGuidance,
+        'width': _imgWidth,
+        'height': _imgHeight,
+        if (_imgNegativePrompt.isNotEmpty) 'negative_prompt': _imgNegativePrompt,
       }) as Map<String, dynamic>;
       if (!mounted) return;
 
       final imageUrl = (data['image_url'] ?? '').toString();
       final promptUsed = (data['prompt_used'] ?? prompt).toString();
       final convId = (data['conversation_id'] ?? '').toString();
+      final wasEnhanced = promptUsed.isNotEmpty && promptUsed != prompt;
 
       setState(() {
         if (convId.isNotEmpty) _conversationId = convId;
         final idx = _messages.indexWhere((m) => m.localId == assistantMsg.localId);
         if (idx >= 0) {
-          _messages[idx].content = 'Generated image for: $prompt';
+          // Show what happened: original prompt, whether enhanced, and the image
+          final contentParts = <String>[];
+          if (wasEnhanced) {
+            contentParts.add('**Prompt enhanced by AI**');
+            contentParts.add('> *$promptUsed*');
+          }
+          _messages[idx].content = contentParts.isEmpty ? '' : contentParts.join('\n\n');
           _messages[idx].status = ChatMessageStatus.complete;
           _messages[idx].attachments = [{
             'type': 'generated_image',
@@ -757,12 +881,13 @@ class _ChatPageState extends State<ChatPage> {
       setState(() {
         final idx = _messages.indexWhere((m) => m.localId == assistantMsg.localId);
         if (idx >= 0) {
-          _messages[idx].content = 'Image generation failed: $e';
+          _messages[idx].content = '**Image generation failed**\n\n$e';
           _messages[idx].status = ChatMessageStatus.failed;
         }
         _error = '$e';
       });
     } finally {
+      _stopImageProgressPolling();
       if (mounted) setState(() => _generatingImage = false);
     }
   }
@@ -1141,6 +1266,294 @@ class _ChatPageState extends State<ChatPage> {
   }
 
   Widget _buildSettingsPanel(ColorScheme colors) {
+    final isImageModel = _isImageModelSelected;
+    return isImageModel ? _buildImageSettingsPanel(colors) : _buildTextSettingsPanel(colors);
+  }
+
+  // ── Image generation settings panel ──
+  Widget _buildImageSettingsPanel(ColorScheme colors) {
+    final modelInfo = _findSelectedModelInfo();
+    final modelName = (modelInfo?['name'] ?? '').toString().toLowerCase();
+    final isTurbo = modelName.contains('turbo') || modelName.contains('lightning') || modelName.contains('hyper');
+    final isFlux = modelName.contains('flux');
+
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 12),
+      decoration: BoxDecoration(
+        color: colors.surfaceContainerLow,
+        border: Border(bottom: BorderSide(color: colors.outlineVariant.withValues(alpha: 0.3))),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          // ── Header row: model type + presets ──
+          Row(
+            children: [
+              Icon(Icons.image, size: 14, color: colors.tertiary),
+              const SizedBox(width: 6),
+              Text('Image Generation Settings',
+                style: TextStyle(fontSize: 11, fontWeight: FontWeight.w600, color: colors.onSurfaceVariant)),
+              const SizedBox(width: 12),
+              Container(width: 1, height: 16, color: colors.outlineVariant.withValues(alpha: 0.4)),
+              const SizedBox(width: 12),
+              Text('Presets:', style: TextStyle(fontSize: 11, color: colors.onSurfaceVariant)),
+              const SizedBox(width: 8),
+              _imgPresetChip(colors, 'fast', Icons.bolt, 'Fast',
+                'Fewer steps, speed priority'),
+              const SizedBox(width: 4),
+              _imgPresetChip(colors, 'balanced', Icons.balance, 'Balanced',
+                'Good quality/speed balance'),
+              const SizedBox(width: 4),
+              _imgPresetChip(colors, 'quality', Icons.hd, 'Quality',
+                'More steps, best quality'),
+              const Spacer(),
+              Tooltip(
+                message: 'Reset to balanced defaults',
+                child: IconButton(
+                  icon: Icon(Icons.restart_alt, size: 16, color: colors.onSurfaceVariant),
+                  onPressed: () => _applyImgPreset('balanced'),
+                  visualDensity: VisualDensity.compact,
+                  style: IconButton.styleFrom(padding: const EdgeInsets.all(4)),
+                ),
+              ),
+            ],
+          ),
+          const SizedBox(height: 10),
+          // ── Row 1: Steps, Guidance Scale, Dimensions ──
+          Row(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Expanded(
+                child: _buildSlider(
+                  colors: colors,
+                  label: 'Steps',
+                  value: _imgSteps.toDouble(),
+                  min: 1,
+                  max: 50,
+                  divisions: 49,
+                  displayValue: _imgSteps.toString(),
+                  onChanged: (v) => setState(() { _imgSteps = v.round(); _imgPreset = 'custom'; }),
+                  tooltip: isTurbo
+                      ? 'Turbo/distilled models work best with 4-9 steps. More steps = worse results for distilled models.'
+                      : 'Number of denoising steps. More steps = better quality but slower. 20-30 is typical.',
+                ),
+              ),
+              const SizedBox(width: 14),
+              Expanded(
+                child: _buildSlider(
+                  colors: colors,
+                  label: 'Guidance Scale',
+                  value: _imgGuidance,
+                  min: 0.0,
+                  max: 20.0,
+                  divisions: 40,
+                  displayValue: _imgGuidance.toStringAsFixed(1),
+                  onChanged: (v) => setState(() { _imgGuidance = v; _imgPreset = 'custom'; }),
+                  tooltip: isTurbo
+                      ? 'Turbo/distilled models typically use 0.0 guidance. Higher values = worse results.'
+                      : isFlux
+                          ? 'Flux models use 3.5 guidance by default. Controls how closely the image follows the prompt.'
+                          : 'How closely the image follows the prompt. 7-8 is standard. Higher = more literal but less creative.',
+                ),
+              ),
+              const SizedBox(width: 14),
+              Expanded(
+                child: _buildSlider(
+                  colors: colors,
+                  label: 'Width',
+                  value: _imgWidth.toDouble(),
+                  min: 512,
+                  max: 2048,
+                  divisions: 12,
+                  displayValue: _imgWidth.toString(),
+                  onChanged: (v) {
+                    // Snap to multiples of 128
+                    final snapped = ((v / 128).round() * 128).clamp(512, 2048);
+                    setState(() { _imgWidth = snapped; _imgPreset = 'custom'; });
+                  },
+                  tooltip: 'Image width in pixels. Must be a multiple of 128. 1024 is standard for SDXL/Flux.',
+                ),
+              ),
+              const SizedBox(width: 14),
+              Expanded(
+                child: _buildSlider(
+                  colors: colors,
+                  label: 'Height',
+                  value: _imgHeight.toDouble(),
+                  min: 512,
+                  max: 2048,
+                  divisions: 12,
+                  displayValue: _imgHeight.toString(),
+                  onChanged: (v) {
+                    final snapped = ((v / 128).round() * 128).clamp(512, 2048);
+                    setState(() { _imgHeight = snapped; _imgPreset = 'custom'; });
+                  },
+                  tooltip: 'Image height in pixels. Must be a multiple of 128. 1024 is standard for SDXL/Flux.',
+                ),
+              ),
+            ],
+          ),
+          const SizedBox(height: 6),
+          // ── Row 2: Negative prompt ──
+          Row(
+            children: [
+              Expanded(
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Text('Negative Prompt', style: TextStyle(fontSize: 11, fontWeight: FontWeight.w500, color: colors.onSurfaceVariant)),
+                    const SizedBox(height: 4),
+                    TextField(
+                      style: TextStyle(fontSize: 12, color: colors.onSurface),
+                      decoration: InputDecoration(
+                        hintText: 'worst quality, low quality, blurry, deformed...',
+                        hintStyle: TextStyle(fontSize: 11, color: colors.onSurfaceVariant.withValues(alpha: 0.4)),
+                        isDense: true,
+                        contentPadding: const EdgeInsets.symmetric(horizontal: 10, vertical: 8),
+                        filled: true,
+                        fillColor: colors.surfaceContainerHighest.withValues(alpha: 0.3),
+                        border: OutlineInputBorder(
+                          borderRadius: BorderRadius.circular(8),
+                          borderSide: BorderSide(color: colors.outlineVariant.withValues(alpha: 0.3)),
+                        ),
+                        enabledBorder: OutlineInputBorder(
+                          borderRadius: BorderRadius.circular(8),
+                          borderSide: BorderSide(color: colors.outlineVariant.withValues(alpha: 0.3)),
+                        ),
+                      ),
+                      onChanged: (v) => _imgNegativePrompt = v,
+                      controller: _negPromptController,
+                    ),
+                  ],
+                ),
+              ),
+              const SizedBox(width: 14),
+              // Aspect ratio quick buttons
+              Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Text('Aspect Ratio', style: TextStyle(fontSize: 11, fontWeight: FontWeight.w500, color: colors.onSurfaceVariant)),
+                  const SizedBox(height: 4),
+                  Row(
+                    children: [
+                      _aspectChip(colors, '1:1', 1024, 1024),
+                      const SizedBox(width: 4),
+                      _aspectChip(colors, '16:9', 1344, 768),
+                      const SizedBox(width: 4),
+                      _aspectChip(colors, '9:16', 768, 1344),
+                      const SizedBox(width: 4),
+                      _aspectChip(colors, '3:2', 1216, 832),
+                      const SizedBox(width: 4),
+                      _aspectChip(colors, '2:3', 832, 1216),
+                    ],
+                  ),
+                ],
+              ),
+            ],
+          ),
+          // ── Hint text ──
+          Padding(
+            padding: const EdgeInsets.only(top: 8),
+            child: Row(
+              children: [
+                Icon(Icons.lightbulb_outline, size: 13, color: colors.tertiary),
+                const SizedBox(width: 6),
+                Expanded(
+                  child: Text(
+                    isTurbo
+                        ? 'Turbo/distilled model — use few steps (4-9) and low guidance (0.0) for best results'
+                        : isFlux
+                            ? 'Flux model — uses T5 text encoder for long detailed prompts (up to 512 tokens)'
+                            : 'Use the Enhance button to optimize your prompt for image generation',
+                    style: TextStyle(fontSize: 11, color: colors.onSurfaceVariant, fontStyle: FontStyle.italic),
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis,
+                  ),
+                ),
+                const SizedBox(width: 8),
+                Text(
+                  'Image generation settings',
+                  style: TextStyle(fontSize: 10, color: colors.onSurfaceVariant.withValues(alpha: 0.5)),
+                ),
+              ],
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _aspectChip(ColorScheme colors, String label, int w, int h) {
+    final isActive = _imgWidth == w && _imgHeight == h;
+    return InkWell(
+      borderRadius: BorderRadius.circular(6),
+      onTap: () => setState(() { _imgWidth = w; _imgHeight = h; _imgPreset = 'custom'; }),
+      child: Container(
+        padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
+        decoration: BoxDecoration(
+          color: isActive ? colors.primaryContainer : colors.surfaceContainerHighest.withValues(alpha: 0.5),
+          borderRadius: BorderRadius.circular(6),
+          border: isActive ? Border.all(color: colors.primary.withValues(alpha: 0.5)) : null,
+        ),
+        child: Text(label, style: TextStyle(fontSize: 10, fontWeight: isActive ? FontWeight.w600 : FontWeight.normal,
+          color: isActive ? colors.onPrimaryContainer : colors.onSurfaceVariant)),
+      ),
+    );
+  }
+
+  Widget _imgPresetChip(ColorScheme colors, String key, IconData icon, String label, String tooltip) {
+    final isActive = _imgPreset == key;
+    return Tooltip(
+      message: tooltip,
+      child: InkWell(
+        borderRadius: BorderRadius.circular(8),
+        onTap: () => _applyImgPreset(key),
+        child: Container(
+          padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 4),
+          decoration: BoxDecoration(
+            color: isActive ? colors.primaryContainer : colors.surfaceContainerHighest.withValues(alpha: 0.5),
+            borderRadius: BorderRadius.circular(8),
+            border: isActive ? Border.all(color: colors.primary.withValues(alpha: 0.5)) : null,
+          ),
+          child: Row(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              Icon(icon, size: 13, color: isActive ? colors.onPrimaryContainer : colors.onSurfaceVariant),
+              const SizedBox(width: 4),
+              Text(label, style: TextStyle(fontSize: 11, fontWeight: isActive ? FontWeight.w600 : FontWeight.normal,
+                color: isActive ? colors.onPrimaryContainer : colors.onSurfaceVariant)),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+
+  void _applyImgPreset(String key) {
+    setState(() {
+      _imgPreset = key;
+      switch (key) {
+        case 'fast':
+          _imgSteps = 8;
+          _imgGuidance = 3.5;
+          _imgWidth = 1024;
+          _imgHeight = 1024;
+        case 'balanced':
+          _imgSteps = 20;
+          _imgGuidance = 7.5;
+          _imgWidth = 1024;
+          _imgHeight = 1024;
+        case 'quality':
+          _imgSteps = 35;
+          _imgGuidance = 7.5;
+          _imgWidth = 1024;
+          _imgHeight = 1024;
+      }
+    });
+  }
+
+  // ── Text model settings panel (original) ──
+  Widget _buildTextSettingsPanel(ColorScheme colors) {
     final ramTier = _systemRecs?['ram_tier'] as String? ?? '';
     final ramGb = _systemRecs?['ram_gb'];
     final hasGpu = _systemRecs?['has_gpu'] == true;
@@ -1849,10 +2262,14 @@ class _ChatPageState extends State<ChatPage> {
         NotificationListener<ScrollNotification>(
           onNotification: (notification) {
             if (!_scrollController.hasClients) return false;
-            final atBottom = _scrollController.position.pixels >= _scrollController.position.maxScrollExtent - 36;
-            if (notification is UserScrollNotification) {
+            final atBottom = _scrollController.position.pixels >= _scrollController.position.maxScrollExtent - 50;
+            if (notification is ScrollUpdateNotification || notification is UserScrollNotification) {
               _autoScroll = atBottom;
-              if (!atBottom && !_showJumpToLatest) setState(() => _showJumpToLatest = true);
+              if (atBottom && _showJumpToLatest) {
+                setState(() => _showJumpToLatest = false);
+              } else if (!atBottom && !_showJumpToLatest && notification is UserScrollNotification) {
+                setState(() => _showJumpToLatest = true);
+              }
             }
             return false;
           },
@@ -1959,7 +2376,10 @@ class _ChatPageState extends State<ChatPage> {
                         crossAxisAlignment: isUser ? CrossAxisAlignment.end : CrossAxisAlignment.start,
                         children: [
                           if (!isUser)
-                            (m.content.isEmpty && m.status == ChatMessageStatus.streaming)
+                            // Image generation progress card
+                            (m.status == ChatMessageStatus.streaming && _generatingImage && m.localId.endsWith('-img'))
+                                ? _buildImageProgressCard(colors)
+                            : (m.content.isEmpty && m.status == ChatMessageStatus.streaming)
                                 ? _buildTypingIndicator()
                                 : SelectionArea(
                                     child: MarkdownBody(
@@ -2151,6 +2571,59 @@ class _ChatPageState extends State<ChatPage> {
           SizedBox(width: 16, height: 16, child: CircularProgressIndicator(strokeWidth: 2, color: colors.primary)),
           const SizedBox(width: 10),
           Text('Thinking...', style: TextStyle(color: colors.onSurfaceVariant, fontSize: 13)),
+        ],
+      ),
+    );
+  }
+
+  Widget _buildImageProgressCard(ColorScheme colors) {
+    final hasPercent = _imageGenPercent > 0;
+    return Container(
+      width: 360,
+      padding: const EdgeInsets.all(16),
+      decoration: BoxDecoration(
+        color: colors.surfaceContainerHighest.withValues(alpha: 0.5),
+        borderRadius: BorderRadius.circular(12),
+        border: Border.all(color: colors.outlineVariant.withValues(alpha: 0.3)),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          Row(
+            children: [
+              Icon(Icons.brush, size: 18, color: colors.tertiary),
+              const SizedBox(width: 8),
+              Text('Generating Image', style: TextStyle(
+                fontSize: 13, fontWeight: FontWeight.w600, color: colors.onSurface)),
+            ],
+          ),
+          const SizedBox(height: 12),
+          // Progress bar
+          ClipRRect(
+            borderRadius: BorderRadius.circular(4),
+            child: LinearProgressIndicator(
+              value: hasPercent ? _imageGenPercent : null,
+              minHeight: 6,
+              backgroundColor: colors.surfaceContainerLow,
+              valueColor: AlwaysStoppedAnimation(colors.tertiary),
+            ),
+          ),
+          const SizedBox(height: 8),
+          // Status text
+          Text(
+            _imageGenStatus.isNotEmpty ? _imageGenStatus : 'Preparing...',
+            style: TextStyle(fontSize: 12, color: colors.onSurfaceVariant),
+            maxLines: 1,
+            overflow: TextOverflow.ellipsis,
+          ),
+          if (hasPercent) ...[
+            const SizedBox(height: 2),
+            Text(
+              '${(_imageGenPercent * 100).toStringAsFixed(0)}% complete',
+              style: TextStyle(fontSize: 11, fontWeight: FontWeight.w500, color: colors.tertiary),
+            ),
+          ],
         ],
       ),
     );
