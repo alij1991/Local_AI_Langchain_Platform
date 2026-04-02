@@ -17,17 +17,20 @@ class ChatUiMessage {
     required this.role,
     required this.content,
     this.attachments = const [],
+    List<Map<String, dynamic>>? toolEvents,
     this.status = ChatMessageStatus.complete,
     this.createdAt,
     this.retryMessage,
     this.retryAttachments = const [],
     this.runId,
-  });
+  }) : toolEvents = toolEvents ?? [];
 
   final String localId;
   final String role;
   String content;
   List<Map<String, dynamic>> attachments;
+  List<Map<String, dynamic>> toolEvents;
+  Map<String, dynamic>? perf; // Per-message performance metrics (tok/s, TTFT, etc.)
   ChatMessageStatus status;
   final DateTime? createdAt;
   final String? retryMessage;
@@ -267,7 +270,7 @@ class _ChatPageState extends State<ChatPage> {
   }
 
   ChatUiMessage _fromServerMessage(Map<String, dynamic> m) {
-    return ChatUiMessage(
+    final msg = ChatUiMessage(
       localId: (m['id'] ?? DateTime.now().microsecondsSinceEpoch.toString()).toString(),
       role: (m['role'] ?? 'assistant').toString(),
       content: (m['content'] ?? '').toString(),
@@ -275,6 +278,11 @@ class _ChatPageState extends State<ChatPage> {
       status: ChatMessageStatus.complete,
       runId: m['run_id']?.toString(),
     );
+    // Load stored perf data from database
+    if (m['perf'] is Map<String, dynamic>) {
+      msg.perf = m['perf'] as Map<String, dynamic>;
+    }
+    return msg;
   }
 
   Future<void> _refreshCapabilities() async {
@@ -428,15 +436,26 @@ class _ChatPageState extends State<ChatPage> {
           _scheduleAutoScroll();
         } else if (type == 'tool_call') {
           final toolName = event['name']?.toString() ?? '';
+          final toolArgs = event['args']?.toString() ?? '';
           setState(() {
-            if (idx >= 0) _messages[idx].content = '${_messages[idx].content}\n\n> **Using tool:** `$toolName`\n';
+            if (idx >= 0) {
+              _messages[idx].toolEvents.add({'type': 'tool_call', 'name': toolName, 'args': toolArgs, 'status': 'running'});
+            }
           });
         } else if (type == 'tool_result') {
           final toolName = event['name']?.toString() ?? '';
           final content = event['content']?.toString() ?? '';
-          final preview = content.length > 300 ? '${content.substring(0, 300)}...' : content;
           setState(() {
-            if (idx >= 0) _messages[idx].content = '${_messages[idx].content}> **Result from** `$toolName`:\n> ```\n> $preview\n> ```\n\n';
+            if (idx >= 0) {
+              final events = _messages[idx].toolEvents;
+              final callIdx = events.lastIndexWhere((e) => e['name'] == toolName && e['status'] == 'running');
+              if (callIdx >= 0) {
+                events[callIdx]['status'] = 'done';
+                events[callIdx]['result'] = content;
+              } else {
+                events.add({'type': 'tool_result', 'name': toolName, 'result': content, 'status': 'done'});
+              }
+            }
           });
         } else if (type == 'end') {
           setState(() {
@@ -619,8 +638,12 @@ class _ChatPageState extends State<ChatPage> {
         if (toolName.isNotEmpty) {
           setState(() {
             if (assistantIndex >= 0) {
-              _messages[assistantIndex].content =
-                  '${_messages[assistantIndex].content}\n\n> **Using tool:** `$toolName`${toolArgs.length > 2 ? ' — $toolArgs' : ''}\n';
+              _messages[assistantIndex].toolEvents.add({
+                'type': 'tool_call',
+                'name': toolName,
+                'args': toolArgs,
+                'status': 'running',
+              });
               _messages[assistantIndex].status = ChatMessageStatus.streaming;
             }
           });
@@ -631,9 +654,20 @@ class _ChatPageState extends State<ChatPage> {
         final toolContent = event['content']?.toString() ?? '';
         setState(() {
           if (assistantIndex >= 0) {
-            final preview = toolContent.length > 300 ? '${toolContent.substring(0, 300)}...' : toolContent;
-            _messages[assistantIndex].content =
-                '${_messages[assistantIndex].content}> **Result from** `$toolName`:\n> ```\n> $preview\n> ```\n\n';
+            // Find the matching tool_call and mark it done
+            final events = _messages[assistantIndex].toolEvents;
+            final callIdx = events.lastIndexWhere((e) => e['name'] == toolName && e['status'] == 'running');
+            if (callIdx >= 0) {
+              events[callIdx]['status'] = 'done';
+              events[callIdx]['result'] = toolContent;
+            } else {
+              events.add({
+                'type': 'tool_result',
+                'name': toolName,
+                'result': toolContent,
+                'status': 'done',
+              });
+            }
           }
         });
         _scheduleAutoScroll();
@@ -664,18 +698,30 @@ class _ChatPageState extends State<ChatPage> {
             _messages[assistantIndex].runId = currentRunId;
           }
           _isStreaming = false;
-          // Capture performance metrics
+          // Capture performance metrics on the message AND globally
           final perf = event['perf'];
           if (perf is Map<String, dynamic>) {
             _lastPerf = perf;
+            if (assistantIndex >= 0) {
+              _messages[assistantIndex].perf = perf;
+            }
           }
         });
       } else if (type == 'error') {
+        final errorMsg = event['error']?.toString() ?? 'Stream error';
         setState(() {
-          _error = event['error']?.toString() ?? 'Stream error';
+          _error = errorMsg;
           _isStreaming = false;
           if (assistantIndex >= 0) _messages[assistantIndex].status = ChatMessageStatus.failed;
         });
+        if (mounted) {
+          ScaffoldMessenger.of(context).showSnackBar(SnackBar(
+            content: Text('Error: ${errorMsg.length > 80 ? '${errorMsg.substring(0, 80)}...' : errorMsg}'),
+            backgroundColor: Theme.of(context).colorScheme.error,
+            duration: const Duration(seconds: 4),
+            behavior: SnackBarBehavior.floating,
+          ));
+        }
       }
     }, onError: (e) async {
       if (!mounted) return;
@@ -2263,6 +2309,11 @@ class _ChatPageState extends State<ChatPage> {
           onTap: () {
             setState(() => _selectedModel = modelId);
             Navigator.of(ctx).pop();
+            ScaffoldMessenger.of(context).showSnackBar(SnackBar(
+              content: Text('Switched to $modelId'),
+              duration: const Duration(seconds: 2),
+              behavior: SnackBarBehavior.floating,
+            ));
           },
           child: Padding(
             padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 9),
@@ -2523,11 +2574,16 @@ class _ChatPageState extends State<ChatPage> {
                       child: Column(
                         crossAxisAlignment: isUser ? CrossAxisAlignment.end : CrossAxisAlignment.start,
                         children: [
+                          // Tool event cards (collapsible)
+                          if (!isUser && m.toolEvents.isNotEmpty) ...[
+                            ...m.toolEvents.map((te) => _buildToolEventCard(te, colors)),
+                            if (m.content.isNotEmpty) const SizedBox(height: 8),
+                          ],
                           if (!isUser)
                             // Image generation progress card
                             (m.status == ChatMessageStatus.streaming && _generatingImage && m.localId.endsWith('-img'))
                                 ? _buildImageProgressCard(colors)
-                            : (m.content.isEmpty && m.status == ChatMessageStatus.streaming)
+                            : (m.content.isEmpty && m.toolEvents.isEmpty && m.status == ChatMessageStatus.streaming)
                                 ? _buildTypingIndicator()
                                 : SelectionArea(
                                     child: MarkdownBody(
@@ -2665,6 +2721,21 @@ class _ChatPageState extends State<ChatPage> {
                               if (m.runId != null)
                                 _actionIcon(Icons.timeline, 'View trace', () => _openTrace(m.runId!), colors),
                             ],
+                            // Per-message performance metrics
+                            if (!isUser && m.perf != null) ...[
+                              const SizedBox(width: 8),
+                              Container(
+                                padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
+                                decoration: BoxDecoration(
+                                  color: colors.surfaceContainerHighest.withValues(alpha: 0.5),
+                                  borderRadius: BorderRadius.circular(4),
+                                ),
+                                child: Text(
+                                  '${m.perf!['tokens_per_sec'] ?? '?'} tok/s · ${m.perf!['ttft_sec'] ?? '?'}s TTFT · ${m.perf!['total_sec'] ?? '?'}s',
+                                  style: TextStyle(fontSize: 10, color: colors.onSurfaceVariant),
+                                ),
+                              ),
+                            ],
                             if (m.status == ChatMessageStatus.failed && m.retryMessage != null) ...[
                               const SizedBox(width: 4),
                               TextButton.icon(
@@ -2704,6 +2775,98 @@ class _ChatPageState extends State<ChatPage> {
         child: Padding(
           padding: const EdgeInsets.all(6),
           child: Icon(icon, size: 15, color: colors.onSurfaceVariant.withValues(alpha: 0.5)),
+        ),
+      ),
+    );
+  }
+
+  Widget _buildToolEventCard(Map<String, dynamic> te, ColorScheme colors) {
+    final name = (te['name'] ?? '').toString();
+    final args = (te['args'] ?? '').toString();
+    final result = (te['result'] ?? '').toString();
+    final status = (te['status'] ?? 'running').toString();
+    final isDone = status == 'done';
+
+    return Padding(
+      padding: const EdgeInsets.only(bottom: 4),
+      child: Theme(
+        data: Theme.of(context).copyWith(dividerColor: Colors.transparent),
+        child: ExpansionTile(
+          tilePadding: const EdgeInsets.symmetric(horizontal: 12),
+          childrenPadding: const EdgeInsets.fromLTRB(12, 0, 12, 8),
+          dense: true,
+          leading: isDone
+              ? Icon(Icons.check_circle, size: 18, color: colors.primary)
+              : SizedBox(width: 18, height: 18, child: CircularProgressIndicator(strokeWidth: 2, color: colors.tertiary)),
+          title: Row(
+            children: [
+              Icon(Icons.build_outlined, size: 14, color: colors.onSurfaceVariant),
+              const SizedBox(width: 6),
+              Text(name, style: TextStyle(fontSize: 12, fontWeight: FontWeight.w600, color: colors.onSurface)),
+              const SizedBox(width: 8),
+              Container(
+                padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 1),
+                decoration: BoxDecoration(
+                  color: isDone ? colors.primaryContainer : colors.tertiaryContainer,
+                  borderRadius: BorderRadius.circular(4),
+                ),
+                child: Text(isDone ? 'Done' : 'Running',
+                  style: TextStyle(fontSize: 9, fontWeight: FontWeight.w600,
+                    color: isDone ? colors.onPrimaryContainer : colors.onTertiaryContainer)),
+              ),
+            ],
+          ),
+          shape: RoundedRectangleBorder(
+            borderRadius: BorderRadius.circular(8),
+            side: BorderSide(color: colors.outlineVariant.withValues(alpha: 0.3)),
+          ),
+          collapsedShape: RoundedRectangleBorder(
+            borderRadius: BorderRadius.circular(8),
+            side: BorderSide(color: colors.outlineVariant.withValues(alpha: 0.3)),
+          ),
+          backgroundColor: colors.surfaceContainerLow,
+          collapsedBackgroundColor: colors.surfaceContainerLow,
+          children: [
+            if (args.isNotEmpty && args != '{}') ...[
+              Align(
+                alignment: Alignment.centerLeft,
+                child: Text('Arguments:', style: TextStyle(fontSize: 10, fontWeight: FontWeight.w600, color: colors.onSurfaceVariant)),
+              ),
+              const SizedBox(height: 2),
+              Container(
+                width: double.infinity,
+                padding: const EdgeInsets.all(8),
+                decoration: BoxDecoration(
+                  color: colors.surfaceContainerHighest,
+                  borderRadius: BorderRadius.circular(6),
+                ),
+                child: SelectableText(args, style: TextStyle(fontSize: 11, fontFamily: 'Consolas', color: colors.onSurface)),
+              ),
+            ],
+            if (result.isNotEmpty) ...[
+              const SizedBox(height: 6),
+              Align(
+                alignment: Alignment.centerLeft,
+                child: Text('Result:', style: TextStyle(fontSize: 10, fontWeight: FontWeight.w600, color: colors.onSurfaceVariant)),
+              ),
+              const SizedBox(height: 2),
+              Container(
+                width: double.infinity,
+                padding: const EdgeInsets.all(8),
+                constraints: const BoxConstraints(maxHeight: 200),
+                decoration: BoxDecoration(
+                  color: colors.surfaceContainerHighest,
+                  borderRadius: BorderRadius.circular(6),
+                ),
+                child: SingleChildScrollView(
+                  child: SelectableText(
+                    result.length > 500 ? '${result.substring(0, 500)}...' : result,
+                    style: TextStyle(fontSize: 11, fontFamily: 'Consolas', color: colors.onSurface),
+                  ),
+                ),
+              ),
+            ],
+          ],
         ),
       ),
     );

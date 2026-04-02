@@ -16,6 +16,7 @@ class _ToolsPageState extends State<ToolsPage> {
   List<Map<String, dynamic>> _tools = [];
   List<String> _agents = [];
   List<Map<String, dynamic>> _categories = [];
+  List<Map<String, dynamic>> _mcpServers = [];
   bool _loading = false;
   String _error = '';
   String _search = '';
@@ -34,13 +35,15 @@ class _ToolsPageState extends State<ToolsPage> {
       final toolsFuture = widget.api.get('/tools');
       final agentsFuture = widget.api.get('/agents');
       final catsFuture = widget.api.get('/tools/categories').catchError((_) => <String, dynamic>{'categories': []});
+      final mcpFuture = widget.api.get('/mcp/servers').catchError((_) => <String, dynamic>{'items': []});
 
-      final results = await Future.wait([toolsFuture, agentsFuture, catsFuture]);
+      final results = await Future.wait([toolsFuture, agentsFuture, catsFuture, mcpFuture]);
       if (!mounted) return;
 
       final tools = results[0] as Map<String, dynamic>;
       final agents = results[1] as Map<String, dynamic>;
       final cats = results[2] as Map<String, dynamic>;
+      final mcp = results[3] as Map<String, dynamic>;
 
       final items = ((tools['items'] as List<dynamic>?) ?? const []).cast<Map<String, dynamic>>();
       setState(() {
@@ -48,6 +51,7 @@ class _ToolsPageState extends State<ToolsPage> {
         _tools = items.where((t) => t['tool_id'] != 'tavily_web_search').toList();
         _agents = ((agents['agents'] as List<dynamic>?) ?? const []).cast<String>();
         _categories = ((cats['categories'] as List<dynamic>?) ?? const []).cast<Map<String, dynamic>>();
+        _mcpServers = ((mcp['items'] as List<dynamic>?) ?? const []).cast<Map<String, dynamic>>();
       });
     } catch (e) {
       if (!mounted) return;
@@ -422,6 +426,10 @@ class _ToolsPageState extends State<ToolsPage> {
             ),
           ),
 
+        // MCP Servers section
+        if (_mcpServers.isNotEmpty)
+          _buildMcpServersSection(colors),
+
         // Tool list (categorized or flat)
         Expanded(
           child: _showCategories && _categories.isNotEmpty
@@ -532,6 +540,117 @@ class _ToolsPageState extends State<ToolsPage> {
     );
   }
 
+  Widget _buildMcpServersSection(ColorScheme colors) {
+    return Card(
+      margin: const EdgeInsets.only(bottom: 8),
+      child: ExpansionTile(
+        initiallyExpanded: false,
+        leading: Container(
+          width: 36, height: 36,
+          decoration: BoxDecoration(color: colors.tertiaryContainer, borderRadius: BorderRadius.circular(8)),
+          child: Icon(Icons.dns, size: 18, color: colors.onTertiaryContainer),
+        ),
+        title: const Text('MCP Servers', style: TextStyle(fontWeight: FontWeight.w600)),
+        subtitle: Text('${_mcpServers.length} configured', style: TextStyle(fontSize: 12, color: colors.onSurfaceVariant)),
+        children: _mcpServers.map((s) {
+          final sid = (s['id'] ?? '').toString();
+          final sname = (s['name'] ?? 'Unnamed').toString();
+          final transport = (s['transport'] ?? 'stdio').toString();
+          final discoveredTools = ((s['discovered_tools'] as List<dynamic>?) ?? []);
+          return ListTile(
+            dense: true,
+            leading: Icon(transport == 'sse' ? Icons.cloud_outlined : Icons.terminal, size: 18, color: colors.onSurfaceVariant),
+            title: Text(sname, style: const TextStyle(fontSize: 13, fontWeight: FontWeight.w500)),
+            subtitle: Text('$transport \u2022 ${discoveredTools.length} tools',
+              style: TextStyle(fontSize: 11, color: colors.onSurfaceVariant)),
+            trailing: Row(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                IconButton(
+                  icon: Icon(Icons.refresh, size: 16, color: colors.primary),
+                  onPressed: () async {
+                    try { await widget.api.post('/mcp/servers/$sid/discover', {}); await _load(); }
+                    catch (e) { if (mounted) setState(() => _error = '$e'); }
+                  },
+                  tooltip: 'Discover tools',
+                  visualDensity: VisualDensity.compact,
+                ),
+                IconButton(
+                  icon: Icon(Icons.edit_outlined, size: 16, color: colors.onSurfaceVariant),
+                  onPressed: () => _editMcpServer(s),
+                  tooltip: 'Edit',
+                  visualDensity: VisualDensity.compact,
+                ),
+                IconButton(
+                  icon: Icon(Icons.delete_outline, size: 16, color: colors.error),
+                  onPressed: () async {
+                    final confirm = await showDialog<bool>(
+                      context: context,
+                      builder: (ctx) => AlertDialog(
+                        title: const Text('Delete MCP Server'),
+                        content: Text('Delete "$sname"?'),
+                        actions: [
+                          TextButton(onPressed: () => Navigator.of(ctx).pop(false), child: const Text('Cancel')),
+                          FilledButton(onPressed: () => Navigator.of(ctx).pop(true), child: const Text('Delete')),
+                        ],
+                      ),
+                    );
+                    if (confirm == true) { await widget.api.delete('/mcp/servers/$sid'); await _load(); }
+                  },
+                  tooltip: 'Delete',
+                  visualDensity: VisualDensity.compact,
+                ),
+              ],
+            ),
+          );
+        }).toList(),
+      ),
+    );
+  }
+
+  Future<void> _editMcpServer(Map<String, dynamic> server) async {
+    final nameCtrl = TextEditingController(text: (server['name'] ?? '').toString());
+    final commandCtrl = TextEditingController(text: (server['command'] ?? '').toString());
+    final endpointCtrl = TextEditingController(text: (server['endpoint'] ?? '').toString());
+    final transport = (server['transport'] ?? 'stdio').toString();
+    final sid = (server['id'] ?? '').toString();
+
+    final result = await showDialog<bool>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: const Text('Edit MCP Server'),
+        content: SizedBox(
+          width: 400,
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              TextField(controller: nameCtrl, decoration: const InputDecoration(labelText: 'Name')),
+              const SizedBox(height: 12),
+              if (transport == 'stdio')
+                TextField(controller: commandCtrl, decoration: const InputDecoration(labelText: 'Command'))
+              else
+                TextField(controller: endpointCtrl, decoration: const InputDecoration(labelText: 'Endpoint URL')),
+            ],
+          ),
+        ),
+        actions: [
+          TextButton(onPressed: () => Navigator.of(ctx).pop(false), child: const Text('Cancel')),
+          FilledButton(onPressed: () => Navigator.of(ctx).pop(true), child: const Text('Save')),
+        ],
+      ),
+    );
+
+    if (result == true) {
+      await widget.api.put('/mcp/servers/$sid', {
+        'name': nameCtrl.text,
+        'transport': transport,
+        if (transport == 'stdio') 'command': commandCtrl.text,
+        if (transport != 'stdio') 'endpoint': endpointCtrl.text,
+      });
+      await _load();
+    }
+  }
+
   Widget _buildCategorizedView(ColorScheme colors) {
     final q = _search.toLowerCase();
     return ListView(
@@ -591,6 +710,14 @@ class _ToolsPageState extends State<ToolsPage> {
       case 'search': return Icons.search;
       case 'image': return Icons.image;
       case 'hub': return Icons.hub;
+      case 'psychology': return Icons.psychology;
+      case 'memory': case 'save': return Icons.bookmark;
+      case 'book': case 'library_books': return Icons.library_books;
+      case 'code': return Icons.code;
+      case 'calculate': return Icons.calculate;
+      case 'web': case 'language': return Icons.language;
+      case 'smart_toy': return Icons.smart_toy;
+      case 'dns': return Icons.dns;
       default: return Icons.extension;
     }
   }

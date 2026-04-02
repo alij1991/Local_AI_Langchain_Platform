@@ -76,6 +76,47 @@ async def discover_mcp_server_tools(server_config: dict) -> list[dict]:
         return [{"error": str(exc)}]
 
 
+async def invoke_mcp_tool(server_config: dict, tool_name: str, arguments: dict) -> dict:
+    """Invoke a specific tool on an MCP server.
+
+    Uses the same MultiServerMCPClient as discovery but calls the named tool.
+    """
+    try:
+        from langchain_mcp_adapters.client import MultiServerMCPClient
+
+        transport = server_config.get("transport", "stdio")
+        name = server_config.get("name", "server")
+
+        if transport == "stdio":
+            config = {
+                name: {
+                    "transport": "stdio",
+                    "command": server_config.get("command", ""),
+                    "args": server_config.get("args", []),
+                    "env": server_config.get("env"),
+                }
+            }
+        else:
+            config = {
+                name: {
+                    "transport": "sse",
+                    "url": server_config.get("endpoint", ""),
+                }
+            }
+
+        async with MultiServerMCPClient(config) as client:
+            tools = client.get_tools()
+            target = next((t for t in tools if t.name == tool_name), None)
+            if target is None:
+                return {"error": f"Tool '{tool_name}' not found on server '{name}'"}
+            result = await target.ainvoke(arguments)
+            return {"result": str(result)}
+    except ImportError:
+        return {"error": "langchain-mcp-adapters not installed"}
+    except Exception as exc:
+        return {"error": str(exc)}
+
+
 def get_mcp_tools() -> list[StructuredTool]:
     return [
         StructuredTool.from_function(

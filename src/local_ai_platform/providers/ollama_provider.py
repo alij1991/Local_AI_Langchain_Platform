@@ -89,19 +89,27 @@ class OllamaProvider(BaseProvider):
         settings: GenerationSettings | None = None,
         tools: list[dict[str, Any]] | None = None,
     ) -> ChatResponse:
+        import time as _time
         client = self._get_client()
         settings = settings or GenerationSettings()
+        opts = self._settings_to_options(settings)
         kwargs: dict[str, Any] = {
             "model": model,
             "messages": self._messages_to_dicts(messages),
-            "options": self._settings_to_options(settings),
+            "options": opts,
         }
         if tools:
             kwargs["tools"] = tools
 
+        logger.info("Ollama chat: model=%s msgs=%d temp=%.1f ctx=%s tools=%d",
+                     model, len(messages), settings.temperature,
+                     opts.get("num_ctx", "default"), len(tools or []))
+        t0 = _time.monotonic()
         response = client.chat(**kwargs)
+        elapsed = _time.monotonic() - t0
         resp_dict = response if isinstance(response, dict) else (response.model_dump() if hasattr(response, "model_dump") else {})
         msg = resp_dict.get("message", {})
+        logger.info("Ollama chat done: model=%s %.2fs content_len=%d", model, elapsed, len(msg.get("content", "")))
 
         tool_calls = None
         raw_tool_calls = msg.get("tool_calls")
@@ -135,6 +143,7 @@ class OllamaProvider(BaseProvider):
     ) -> Generator[str, None, None]:
         client = self._get_client()
         settings = settings or GenerationSettings()
+        logger.info("Ollama stream: model=%s msgs=%d", model, len(messages))
         response = client.chat(
             model=model,
             messages=self._messages_to_dicts(messages),

@@ -125,10 +125,18 @@ async def lifespan(app: FastAPI):
     init_db()
     router = build_router_from_config(config)
     orchestrator = AgentOrchestrator(config, router=router)
+    await orchestrator.ainit()  # Upgrade to SQLite checkpointer for persistent conversations
     ollama_ctrl = OllamaController(config)
     hf_ctrl = HuggingFaceController(config)
     trace_store = TraceStore(load_trace_config())
     image_service = ImageGenerationService(config)
+
+    # Wire image service directly to tools (avoids circular HTTP calls)
+    try:
+        from local_ai_platform.tools.image_tools import set_image_service
+        set_image_service(image_service)
+    except Exception:
+        pass
 
     # Eager model scan so first request is fast
     try:
@@ -156,6 +164,37 @@ async def lifespan(app: FastAPI):
         )
         agents_loaded += 1
 
+    # Ensure default agents exist (used by Model mode and first-time users)
+    from datetime import datetime, timezone
+    today = datetime.now(timezone.utc).strftime("%B %d, %Y")
+    default_system_prompt = (
+        f"You are a helpful AI assistant. Today's date is {today}. "
+        "You have access to tools including web search, file operations, and code execution. "
+        "Use web_search when the user asks for current information, prices, availability, or anything that requires up-to-date data. "
+        "Always provide accurate, current information."
+    )
+    for default_name in ("assistant", "chat"):
+        if default_name not in orchestrator.definitions:
+            orchestrator.add_agent(
+                name=default_name,
+                model_name=config.default_model,
+                system_prompt=default_system_prompt,
+                provider="ollama",
+                settings={"temperature": 0.7, "max_tokens": 2048},
+                role="general",
+            )
+            # Give default agents web search + utility tools
+            try:
+                all_tools = orchestrator.tools
+                web_tool_ids = [t.name for t in all_tools if t.name in ("web_search", "fetch_webpage", "calculator", "utc_now")]
+                if web_tool_ids:
+                    orchestrator.set_agent_tools(default_name, web_tool_ids)
+                    logger.info("Default agent '%s' created with tools: %s", default_name, web_tool_ids)
+                else:
+                    logger.info("Default agent '%s' created (no web tools available)", default_name)
+            except Exception:
+                logger.info("Default agent '%s' created (tool binding failed)", default_name)
+
     logger.info("Startup complete — %d agents loaded", agents_loaded)
     yield
     logger.info("Shutting down Local AI Platform")
@@ -169,6 +208,33 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+
+# ── Request logging middleware ───────────────────────────────────
+
+from starlette.middleware.base import BaseHTTPMiddleware
+
+
+class RequestLoggingMiddleware(BaseHTTPMiddleware):
+    """Log slow requests and errors for observability."""
+
+    async def dispatch(self, request, call_next):
+        t0 = time.monotonic()
+        response = await call_next(request)
+        elapsed = time.monotonic() - t0
+        status = response.status_code
+        path = request.url.path
+        # Log errors always, slow requests (>2s) at INFO, normal at DEBUG
+        if status >= 500:
+            logger.error("API %s %s → %d (%.2fs)", request.method, path, status, elapsed)
+        elif status >= 400:
+            logger.warning("API %s %s → %d (%.2fs)", request.method, path, status, elapsed)
+        elif elapsed > 2.0:
+            logger.info("API SLOW %s %s → %d (%.2fs)", request.method, path, status, elapsed)
+        return response
+
+
+app.add_middleware(RequestLoggingMiddleware)
 
 
 # ── Request/Response models ───────────────────────────────────────
@@ -369,6 +435,95 @@ async def get_optimal_model_settings(
             "gpu_vram_gb": round(hw.best_gpu_vram_mb / 1024, 1) if hw.best_gpu_vram_mb else 0,
             "cpu_cores": hw.cpu_cores_physical,
         },
+    }
+
+
+@app.post("/benchmark/quick")
+async def quick_benchmark(
+    model: str = Query(..., description="Model name"),
+    provider: str = Query("ollama", description="Provider name"),
+    prompt: str = Query("Explain the concept of recursion in programming.", description="Test prompt"),
+    max_tokens: int = Query(128, description="Max tokens to generate"),
+):
+    """Run a quick benchmark: TTFT, decode tok/s, peak memory.
+
+    Based on the reproducible benchmark protocol from
+    "Local AI on consumer laptops 2024-2026" research.
+    """
+    if not router:
+        raise HTTPException(503, "Not initialized")
+
+    import gc
+    from local_ai_platform.providers.base import ChatMessage as CM, GenerationSettings as GS
+
+    messages = [CM(role="user", content=prompt)]
+    settings = GS(max_tokens=max_tokens)
+
+    # Measure peak memory before
+    ram_before = 0
+    vram_before = 0
+    try:
+        import psutil
+        ram_before = psutil.Process().memory_info().rss // (1024 * 1024)
+    except Exception:
+        pass
+    try:
+        import torch
+        if torch.cuda.is_available():
+            torch.cuda.reset_peak_memory_stats()
+            vram_before = torch.cuda.memory_allocated() // (1024 * 1024)
+    except Exception:
+        pass
+
+    # Stream and measure
+    t_start = time.monotonic()
+    first_token_time = None
+    token_count = 0
+    full_text = ""
+
+    try:
+        async for chunk in router.astream(model, messages, settings):
+            if first_token_time is None:
+                first_token_time = time.monotonic()
+            token_count += max(1, len(chunk.split()))
+            full_text += chunk
+    except Exception as exc:
+        return {"error": str(exc)}
+
+    t_end = time.monotonic()
+
+    # Measure peak memory after
+    ram_after = 0
+    vram_peak = 0
+    try:
+        import psutil
+        ram_after = psutil.Process().memory_info().rss // (1024 * 1024)
+    except Exception:
+        pass
+    try:
+        import torch
+        if torch.cuda.is_available():
+            vram_peak = torch.cuda.max_memory_allocated() // (1024 * 1024)
+    except Exception:
+        pass
+
+    ttft = (first_token_time - t_start) if first_token_time else 0
+    total = t_end - t_start
+    decode_tps = token_count / (t_end - first_token_time) if first_token_time and t_end > first_token_time else 0
+
+    gc.collect()
+
+    return {
+        "model": model,
+        "provider": provider,
+        "prompt_length": len(prompt.split()),
+        "output_tokens": token_count,
+        "ttft_sec": round(ttft, 3),
+        "decode_tokens_per_sec": round(decode_tps, 1),
+        "total_sec": round(total, 2),
+        "peak_ram_mb": max(ram_before, ram_after),
+        "peak_vram_mb": vram_peak,
+        "output_preview": full_text[:200],
     }
 
 
@@ -2655,22 +2810,32 @@ async def agent_chat_stream(req: ChatRequest):
                     if not full_response:
                         full_response = event.get("content", "") or "No response returned."
 
+            # Performance metrics
+            total_time = time.monotonic() - stream_start_time
+            ttft = (first_token_time - stream_start_time) if first_token_time else 0
+            tokens_per_sec = token_count / total_time if total_time > 0 else 0
+            perf_data = {
+                "tokens": token_count,
+                "total_sec": round(total_time, 2),
+                "tokens_per_sec": round(tokens_per_sec, 1),
+                "ttft_sec": round(ttft, 3),
+            }
+
             add_message(
                 conv_id, "assistant", full_response,
                 agent=agent_name,
                 model=orchestrator.definitions[agent_name].model_name,
                 run_id=run_id,
+                perf=perf_data,
             )
             trace_data = recorder.finalize(success=True)
             if trace_store:
                 trace_store.save(trace_data)
 
-            # Performance metrics
-            total_time = time.monotonic() - stream_start_time
-            ttft = (first_token_time - stream_start_time) if first_token_time else 0
-            tokens_per_sec = token_count / total_time if total_time > 0 else 0
+            logger.info("Stream complete: %d tokens, %.1f tok/s, TTFT=%.3fs, total=%.2fs",
+                         token_count, tokens_per_sec, ttft, total_time)
 
-            yield f"event: end\ndata: {json.dumps({'conversation_id': conv_id, 'run_id': run_id, 'thread_id': thread_id, 'perf': {'tokens': token_count, 'total_sec': round(total_time, 2), 'tokens_per_sec': round(tokens_per_sec, 1), 'ttft_sec': round(ttft, 3)}})}\n\n"
+            yield f"event: end\ndata: {json.dumps({'conversation_id': conv_id, 'run_id': run_id, 'thread_id': thread_id, 'perf': perf_data})}\n\n"
 
         except Exception as exc:
             trace_data = recorder.finalize(success=False, error=str(exc))
@@ -2988,6 +3153,81 @@ async def get_messages(cid: str, limit: int = 100):
     return list_messages(cid, limit=limit)
 
 
+@app.get("/conversations/{cid}/metrics")
+async def get_conversation_metrics(cid: str):
+    """Return per-message performance metrics for a conversation.
+
+    Useful for comparing model performance across messages and over time.
+    """
+    msgs = list_messages(cid, limit=500)
+    metrics = []
+    for m in msgs:
+        perf = m.get("perf")
+        if perf:
+            metrics.append({
+                "message_id": m.get("id"),
+                "role": m.get("role"),
+                "model": m.get("model"),
+                "agent": m.get("agent"),
+                "created_at": m.get("created_at"),
+                "tokens": perf.get("tokens"),
+                "tokens_per_sec": perf.get("tokens_per_sec"),
+                "ttft_sec": perf.get("ttft_sec"),
+                "total_sec": perf.get("total_sec"),
+            })
+    # Summary stats
+    if metrics:
+        tps_values = [m["tokens_per_sec"] for m in metrics if m.get("tokens_per_sec")]
+        ttft_values = [m["ttft_sec"] for m in metrics if m.get("ttft_sec")]
+        total_tokens = sum(m.get("tokens", 0) for m in metrics)
+        summary = {
+            "message_count": len(metrics),
+            "total_tokens": total_tokens,
+            "avg_tokens_per_sec": round(sum(tps_values) / len(tps_values), 1) if tps_values else 0,
+            "min_tokens_per_sec": round(min(tps_values), 1) if tps_values else 0,
+            "max_tokens_per_sec": round(max(tps_values), 1) if tps_values else 0,
+            "avg_ttft_sec": round(sum(ttft_values) / len(ttft_values), 3) if ttft_values else 0,
+            "models_used": list({m.get("model") for m in metrics if m.get("model")}),
+        }
+    else:
+        summary = {"message_count": 0}
+    return {"metrics": metrics, "summary": summary}
+
+
+@app.get("/runs/compare")
+async def compare_runs(run_ids: str = Query(..., description="Comma-separated run IDs")):
+    """Compare performance metrics between two runs."""
+    ids = [r.strip() for r in run_ids.split(",") if r.strip()]
+    if len(ids) < 2:
+        raise HTTPException(400, "Provide at least 2 run IDs separated by commas")
+
+    results = {}
+    for rid in ids[:2]:
+        trace = trace_store.get(rid) if trace_store else None
+        if trace:
+            results[rid] = {
+                "run_id": rid,
+                "agent": trace.get("agent_name"),
+                "model": trace.get("model_id"),
+                "provider": trace.get("model_provider"),
+                "duration_ms": trace.get("duration_ms"),
+                "success": trace.get("success"),
+            }
+        else:
+            results[rid] = {"run_id": rid, "error": "Trace not found"}
+
+    # Compute diff if both have duration
+    ids_list = list(results.keys())
+    r1, r2 = results.get(ids_list[0], {}), results.get(ids_list[1], {})
+    diff = {}
+    if r1.get("duration_ms") and r2.get("duration_ms"):
+        d1, d2 = r1["duration_ms"], r2["duration_ms"]
+        diff["duration_ms"] = d2 - d1
+        diff["speedup_pct"] = round((d1 - d2) / d1 * 100, 1) if d1 else 0
+
+    return {"runs": results, "diff": diff}
+
+
 @app.put("/conversations/{cid}/title")
 async def update_title(cid: str, title: str):
     result = rename_conversation(cid, title)
@@ -3119,9 +3359,51 @@ async def discover_mcp_tools(server_id: str):
 
 
 @app.post("/mcp/servers/{server_id}/tools/{tool_name}/invoke")
-async def invoke_mcp_tool(server_id: str, tool_name: str, body: dict[str, Any]):
-    """Invoke a specific MCP tool (stub)."""
-    return {"result": f"MCP tool invocation not yet implemented: {tool_name}"}
+async def invoke_mcp_tool_endpoint(server_id: str, tool_name: str, body: dict[str, Any]):
+    """Invoke a specific MCP tool."""
+    from local_ai_platform.repositories.tools_repo import list_mcp_servers
+    servers = list_mcp_servers()
+    server = next((s for s in servers if s["id"] == server_id), None)
+    if not server:
+        raise HTTPException(404, f"MCP server '{server_id}' not found")
+    from local_ai_platform.tools.mcp_tools import invoke_mcp_tool
+    result = await invoke_mcp_tool(server, tool_name, body.get("arguments", body))
+    if "error" in result:
+        raise HTTPException(500, result["error"])
+    return result
+
+
+@app.get("/mcp/servers")
+async def list_mcp_servers_endpoint():
+    """List all configured MCP servers."""
+    from local_ai_platform.repositories.tools_repo import list_mcp_servers as _list, list_mcp_discovered_tools
+    servers = _list()
+    for s in servers:
+        s["discovered_tools"] = list_mcp_discovered_tools(s["id"])
+    return {"items": servers}
+
+
+@app.put("/mcp/servers/{server_id}")
+async def update_mcp_server(server_id: str, body: dict[str, Any]):
+    """Update an MCP server configuration."""
+    return upsert_mcp_server(
+        server_id=server_id,
+        name=body.get("name", ""),
+        transport=body.get("transport", "stdio"),
+        endpoint=body.get("endpoint") or "",
+        command=body.get("command") or "",
+        args=body.get("args"),
+        env=body.get("env"),
+    )
+
+
+@app.delete("/mcp/servers/{server_id}")
+async def delete_mcp_server_endpoint(server_id: str):
+    """Delete an MCP server and its discovered tools."""
+    from local_ai_platform.repositories.tools_repo import delete_mcp_discovered_tools
+    delete_mcp_discovered_tools(server_id)
+    delete_mcp_server(server_id)
+    return {"status": "deleted"}
 
 
 # ── Threads (conversation threads with LangGraph checkpointing) ───
@@ -3260,15 +3542,26 @@ async def save_system(name: str, definition: dict):
 
 @app.post("/systems/{name}/chat")
 async def chat_with_system(name: str, request: Request):
-    """Chat using a system prompt template (stub)."""
+    """Execute a system's agent graph with a user message."""
+    if not orchestrator:
+        raise HTTPException(503, "Not initialized")
     body = await request.json()
     message = body.get("message", "")
-    return {
-        "final_text": f"System chat not yet implemented for '{name}'. Message: {message}",
-        "node_outputs": {},
-        "conversation_id": None,
-        "run_id": None,
-    }
+    conv_id = body.get("conversation_id")
+
+    system = get_system(name)
+    if not system:
+        raise HTTPException(404, f"System '{name}' not found")
+
+    definition = system.get("definition_json", system.get("definition", {}))
+    if isinstance(definition, str):
+        definition = json.loads(definition)
+
+    try:
+        result = await orchestrator.execute_system_graph(definition, message, conv_id)
+        return result
+    except Exception as exc:
+        raise HTTPException(500, f"System execution failed: {exc}")
 
 
 @app.delete("/systems/{name}")

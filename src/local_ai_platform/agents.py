@@ -75,9 +75,11 @@ class AgentOrchestrator:
         self._models_without_tool_support: set[str] = set()
         self._smart_memories: dict[str, SmartMemory] = {}
 
-        # LangGraph checkpointer — keeps conversation state per thread_id
+        # LangGraph checkpointer — keeps conversation state per thread_id.
+        # Initialized as InMemorySaver; upgraded to SqliteSaver by ainit().
         from langgraph.checkpoint.memory import InMemorySaver
         self.checkpointer = InMemorySaver()
+        self._checkpointer_persistent = False
 
         # Cap in-memory history to prevent unbounded growth.
         # DB stores full history; this is just for session context.
@@ -93,6 +95,28 @@ class AgentOrchestrator:
             self._agent_tool_ids.update(all_bindings)
         except Exception:
             logger.debug("Could not load agent-tool bindings from DB (table may not exist yet)")
+
+    async def ainit(self) -> None:
+        """Upgrade checkpointer to SQLite for persistent conversations.
+
+        Call this during server startup (in the lifespan handler).
+        Uses sync SqliteSaver (works in both sync invoke and async astream contexts).
+        Falls back to InMemorySaver if langgraph-checkpoint-sqlite is not installed.
+        """
+        try:
+            from langgraph.checkpoint.sqlite import SqliteSaver
+            import os
+            os.makedirs("data", exist_ok=True)
+            conn = __import__("sqlite3").connect("data/checkpoints.db", check_same_thread=False)
+            saver = SqliteSaver(conn)
+            saver.setup()
+            self.checkpointer = saver
+            self._checkpointer_persistent = True
+            logger.info("SQLite checkpointer initialized (data/checkpoints.db) — conversations persist across restarts")
+        except ImportError:
+            logger.info("langgraph-checkpoint-sqlite not installed — using InMemorySaver (conversations lost on restart)")
+        except Exception as exc:
+            logger.warning("Failed to initialize SQLite checkpointer: %s — using InMemorySaver", exc)
 
     # ── Agent management ──────────────────────────────────────────
 
@@ -181,7 +205,7 @@ class AgentOrchestrator:
         agent = create_react_agent(
             model=llm,
             tools=tools,
-            prompt=definition.system_prompt,
+            prompt=self._inject_date(definition.system_prompt),
             checkpointer=self.checkpointer,
             interrupt_before=["tools"],
         )
@@ -321,6 +345,16 @@ class AgentOrchestrator:
         encoded = base64.b64encode(raw).decode("utf-8")
         return f"data:{mime};base64,{encoded}"
 
+    @staticmethod
+    def _inject_date(system_prompt: str) -> str:
+        """Inject current date into system prompt so the model knows today's date."""
+        from datetime import datetime, timezone
+        today = datetime.now(timezone.utc).strftime("%B %d, %Y")
+        # Only inject if the prompt doesn't already mention a date
+        if "today" not in system_prompt.lower() or "date is" not in system_prompt.lower():
+            return f"{system_prompt}\n\nCurrent date: {today}."
+        return system_prompt
+
     def _build_messages(
         self,
         definition: AgentDefinition,
@@ -330,18 +364,19 @@ class AgentOrchestrator:
     ) -> list[ChatMessage]:
         """Build token-budgeted message list using smart memory."""
         memory = self._get_smart_memory(definition.name)
+        system_prompt = self._inject_date(definition.system_prompt)
 
         # For vision: build a multimodal user message
         if image_paths:
             return [
-                ChatMessage(role="system", content=definition.system_prompt),
+                ChatMessage(role="system", content=system_prompt),
                 ChatMessage(role="user", content=user_input, images=[
                     self._to_data_url(p) for p in image_paths
                 ]),
             ]
 
         return memory.prepare_messages(
-            system_prompt=definition.system_prompt,
+            system_prompt=system_prompt,
             history=history,
             user_input=user_input,
         )
@@ -371,6 +406,7 @@ class AgentOrchestrator:
         history: list[ChatMessage],
         callbacks: list[Any] | None = None,
         thread_id: str | None = None,
+        settings_override: dict | None = None,
     ) -> str:
         """Chat using a LangGraph ReAct agent with tool-calling loop and checkpointing."""
         try:
@@ -379,7 +415,7 @@ class AgentOrchestrator:
             logger.warning("langgraph.prebuilt not available, falling back to direct chat")
             return self._chat_via_router(definition, user_input, history)
 
-        llm = self._build_langchain_llm(definition)
+        llm = self._build_langchain_llm(definition, settings_override=settings_override)
         tools = self._tools_for_agent(definition.name)
 
         if not tools or definition.model_name in self._models_without_tool_support:
@@ -389,7 +425,7 @@ class AgentOrchestrator:
             agent = create_react_agent(
                 model=llm,
                 tools=tools,
-                prompt=definition.system_prompt,
+                prompt=self._inject_date(definition.system_prompt),
                 checkpointer=self.checkpointer if thread_id else None,
             )
 
@@ -425,14 +461,28 @@ class AgentOrchestrator:
                 return self._chat_via_router(definition, user_input, history)
             raise
 
-    def _build_langchain_llm(self, definition: AgentDefinition) -> Any:
-        """Build a LangChain-compatible LLM for agent graphs."""
+    def _build_langchain_llm(self, definition: AgentDefinition, settings_override: dict | None = None) -> Any:
+        """Build a LangChain-compatible LLM for agent graphs.
+
+        If settings_override is provided (from user's UI controls), those values
+        take precedence over the agent's default settings.
+        """
+        # Merge: agent defaults ← user overrides
+        merged = dict(definition.settings) if definition.settings else {}
+        if settings_override:
+            merged.update({k: v for k, v in settings_override.items() if v is not None})
+        temp = float(merged.get("temperature", 0.2))
+        num_ctx = merged.get("num_ctx")
+
         if definition.provider == "ollama":
-            return ChatOllama(
-                model=definition.model_name,
-                base_url=self.config.ollama_base_url,
-                temperature=float(definition.settings.get("temperature", 0.2)),
-            )
+            kwargs: dict[str, Any] = {
+                "model": definition.model_name,
+                "base_url": self.config.ollama_base_url,
+                "temperature": temp,
+            }
+            if num_ctx:
+                kwargs["num_ctx"] = int(num_ctx)
+            return ChatOllama(**kwargs)
 
         if definition.provider in ("lmstudio", "vllm", "openai_compatible"):
             from langchain_openai import ChatOpenAI
@@ -445,7 +495,7 @@ class AgentOrchestrator:
                 model=definition.model_name,
                 base_url=base_urls.get(definition.provider, "http://127.0.0.1:1234/v1"),
                 api_key="not-needed",
-                temperature=float(definition.settings.get("temperature", 0.2)),
+                temperature=temp,
             )
 
         if definition.provider == "huggingface":
@@ -464,14 +514,14 @@ class AgentOrchestrator:
                 return ChatOllama(
                     model=self.config.default_model,
                     base_url=self.config.ollama_base_url,
-                    temperature=0.2,
+                    temperature=temp,
                 )
 
         # Default: Ollama
         return ChatOllama(
             model=definition.model_name,
             base_url=self.config.ollama_base_url,
-            temperature=0.2,
+            temperature=temp,
         )
 
     # ── Public chat API ───────────────────────────────────────────
@@ -504,6 +554,7 @@ class AgentOrchestrator:
         elif use_tools and self._tools_for_agent(agent_name):
             output = self._chat_with_react_agent(
                 definition, user_input, history, callbacks=callbacks, thread_id=thread_id,
+                settings_override=settings_override,
             )
         else:
             output = self._chat_via_router(definition, user_input, history,
@@ -599,7 +650,7 @@ class AgentOrchestrator:
             try:
                 from langgraph.prebuilt import create_react_agent
 
-                llm = self._build_langchain_llm(definition)
+                llm = self._build_langchain_llm(definition, settings_override=settings_override)
                 tid = thread_id or uuid.uuid4().hex
 
                 # Use interrupt_before for agents with dangerous tools
@@ -607,7 +658,7 @@ class AgentOrchestrator:
                 agent = create_react_agent(
                     model=llm,
                     tools=tools,
-                    prompt=definition.system_prompt,
+                    prompt=self._inject_date(definition.system_prompt),
                     checkpointer=self.checkpointer,
                     interrupt_before=["tools"] if has_dangerous else None,
                 )
@@ -635,6 +686,7 @@ class AgentOrchestrator:
                             if chunk.tool_call_chunks:
                                 for tc in chunk.tool_call_chunks:
                                     if tc.get("name"):
+                                        logger.info("Tool call: %s args=%s", tc.get("name"), str(tc.get("args", ""))[:200])
                                         yield {
                                             "type": "tool_call",
                                             "name": tc.get("name", ""),
@@ -645,6 +697,7 @@ class AgentOrchestrator:
                     elif kind == "on_tool_end":
                         output = data.get("output", "")
                         tool_name = event.get("name", "")
+                        logger.info("Tool result: %s len=%d", tool_name, len(str(output)))
                         yield {
                             "type": "tool_result",
                             "name": tool_name,
@@ -844,6 +897,93 @@ Guidelines:
 
         result = builder.compile().invoke({"user_input": user_input, "outputs": {}})
         return result.get("outputs", {})
+
+    async def execute_system_graph(
+        self,
+        system_definition: dict,
+        user_input: str,
+        conversation_id: str | None = None,
+    ) -> dict[str, Any]:
+        """Execute a system graph designed in the visual graph editor.
+
+        Parses the nodes/edges from the system definition, topologically sorts
+        them, and executes each agent sequentially, passing prior outputs as context.
+        """
+        nodes = system_definition.get("nodes", [])
+        edges = system_definition.get("edges", [])
+        start_node_id = system_definition.get("startNodeId")
+
+        if not nodes:
+            return {"final_text": "System has no agent nodes.", "node_outputs": []}
+
+        # Build adjacency list and find start node
+        node_map = {n["id"]: n for n in nodes}
+        adj: dict[str, list[str]] = {n["id"]: [] for n in nodes}
+        in_degree: dict[str, int] = {n["id"]: 0 for n in nodes}
+        for e in edges:
+            src, tgt = e.get("source"), e.get("target")
+            if src in adj and tgt in adj:
+                adj[src].append(tgt)
+                in_degree[tgt] = in_degree.get(tgt, 0) + 1
+
+        # Topological sort (BFS / Kahn's)
+        if start_node_id and start_node_id in node_map:
+            queue = [start_node_id]
+        else:
+            queue = [nid for nid, deg in in_degree.items() if deg == 0]
+        order: list[str] = []
+        visited = set()
+        while queue:
+            nid = queue.pop(0)
+            if nid in visited:
+                continue
+            visited.add(nid)
+            order.append(nid)
+            for child in adj.get(nid, []):
+                in_degree[child] -= 1
+                if in_degree[child] <= 0 and child not in visited:
+                    queue.append(child)
+        # Add any unvisited nodes (disconnected)
+        for n in nodes:
+            if n["id"] not in visited:
+                order.append(n["id"])
+
+        # Execute each node's agent sequentially
+        run_id = str(uuid.uuid4())
+        node_outputs: list[dict[str, Any]] = []
+        accumulated_context = ""
+
+        for nid in order:
+            node_def = node_map.get(nid)
+            if not node_def:
+                continue
+            agent_name = node_def.get("agent", "")
+            if not agent_name or agent_name not in self.definitions:
+                node_outputs.append({"node": nid, "agent": agent_name, "text": f"(agent '{agent_name}' not found)", "status": "skipped"})
+                continue
+
+            # Build prompt with accumulated context from prior nodes
+            if accumulated_context:
+                prompt = f"{user_input}\n\nContext from prior agents:\n{accumulated_context}"
+            else:
+                prompt = user_input
+
+            try:
+                output = self.chat_with_agent(agent_name, prompt)
+                node_outputs.append({"node": nid, "agent": agent_name, "text": output, "status": "ok"})
+                role = node_def.get("role", "")
+                accumulated_context += f"\n[{agent_name} ({role})]: {output}\n"
+            except Exception as exc:
+                node_outputs.append({"node": nid, "agent": agent_name, "text": str(exc), "status": "error"})
+
+        final_text = node_outputs[-1]["text"] if node_outputs else "No output produced."
+
+        return {
+            "final_text": final_text,
+            "node_outputs": node_outputs,
+            "conversation_id": conversation_id,
+            "run_id": run_id,
+        }
 
     # ── Helpers ────────────────────────────────────────────────────
 

@@ -78,6 +78,7 @@ class _SystemsPageState extends State<SystemsPage> {
   int? _lastDurationMs;
   String? _activeConversationId;
   List<_RunChatMessage> _runMessages = [];
+  List<Map<String, dynamic>> _traceEntries = []; // Per-node execution trace
 
   final ScrollController _runScroll = ScrollController();
   final AttachmentController _attachments = AttachmentController();
@@ -273,11 +274,14 @@ class _SystemsPageState extends State<SystemsPage> {
 
       final outputs = ((body['node_outputs'] as List<dynamic>?) ?? const []).cast<Map<String, dynamic>>();
       final messages = <_RunChatMessage>[];
+      final traceItems = <Map<String, dynamic>>[];
       for (final item in outputs) {
         final nodeName = (item['node'] ?? 'node').toString();
+        final agentName = (item['agent'] ?? nodeName).toString();
         final nodeText = (item['text'] ?? '').toString();
-        messages.add(_RunChatMessage(role: 'system', content: '$nodeName started…', isActivity: true));
-        messages.add(_RunChatMessage(role: 'system', content: '$nodeName finished.', isActivity: true));
+        final status = (item['status'] ?? 'ok').toString();
+        messages.add(_RunChatMessage(role: 'system', content: '$agentName finished.', isActivity: true));
+        traceItems.add({'node': nodeName, 'agent': agentName, 'text': nodeText, 'status': status});
         if (nodeText.isNotEmpty && nodeName == (outputs.isNotEmpty ? outputs.last['node']?.toString() : null)) {
           messages.add(_RunChatMessage(role: 'assistant', content: nodeText, runId: body['run_id']?.toString()));
         }
@@ -291,6 +295,7 @@ class _SystemsPageState extends State<SystemsPage> {
         _activeConversationId = body['conversation_id']?.toString() ?? _activeConversationId;
         _runMessages.removeWhere((m) => m.isTyping);
         _runMessages.addAll(messages);
+        _traceEntries = traceItems;
         _runInFlight = false;
         _lastDurationMs = duration;
         _runStatus = 'Completed';
@@ -734,16 +739,28 @@ class _SystemsPageState extends State<SystemsPage> {
                   ),
                 ),
                 const SizedBox(width: 8),
+                // Chat area (60%)
                 Expanded(
+                  flex: 3,
                   child: Card(
                     child: Column(
                       children: [
                         Expanded(
                           child: _runMessages.isEmpty
-                              ? const Center(
+                              ? Center(
                                   child: Padding(
-                                    padding: EdgeInsets.all(24),
-                                    child: Text('Run mode: send a message to execute this system like a conversation.\nYou will see node-by-node activity here.'),
+                                    padding: const EdgeInsets.all(24),
+                                    child: Column(
+                                      mainAxisSize: MainAxisSize.min,
+                                      children: [
+                                        Icon(Icons.play_circle_outline, size: 48, color: Theme.of(context).colorScheme.onSurfaceVariant.withValues(alpha: 0.3)),
+                                        const SizedBox(height: 12),
+                                        Text('Send a message to execute this system.', style: TextStyle(color: Theme.of(context).colorScheme.onSurfaceVariant)),
+                                        const SizedBox(height: 4),
+                                        Text('Node-by-node activity will appear here and in the trace panel.',
+                                          style: TextStyle(fontSize: 12, color: Theme.of(context).colorScheme.onSurfaceVariant.withValues(alpha: 0.6))),
+                                      ],
+                                    ),
                                   ),
                                 )
                               : ListView.builder(
@@ -783,6 +800,107 @@ class _SystemsPageState extends State<SystemsPage> {
                               ),
                             ],
                           ),
+                        ),
+                      ],
+                    ),
+                  ),
+                ),
+                // Trace panel (40%)
+                const SizedBox(width: 8),
+                Expanded(
+                  flex: 2,
+                  child: Card(
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        Padding(
+                          padding: const EdgeInsets.fromLTRB(16, 12, 16, 8),
+                          child: Row(
+                            children: [
+                              Icon(Icons.timeline, size: 18, color: Theme.of(context).colorScheme.primary),
+                              const SizedBox(width: 8),
+                              Text('Execution Trace', style: TextStyle(fontWeight: FontWeight.w600, fontSize: 14, color: Theme.of(context).colorScheme.onSurface)),
+                            ],
+                          ),
+                        ),
+                        const Divider(height: 1),
+                        Expanded(
+                          child: _traceEntries.isEmpty
+                              ? Center(
+                                  child: Text('No trace data yet.',
+                                    style: TextStyle(color: Theme.of(context).colorScheme.onSurfaceVariant.withValues(alpha: 0.5), fontSize: 13)),
+                                )
+                              : ListView.builder(
+                                  padding: const EdgeInsets.all(8),
+                                  itemCount: _traceEntries.length,
+                                  itemBuilder: (_, i) {
+                                    final entry = _traceEntries[i];
+                                    final agent = (entry['agent'] ?? '').toString();
+                                    final text = (entry['text'] ?? '').toString();
+                                    final status = (entry['status'] ?? 'ok').toString();
+                                    final isOk = status == 'ok';
+                                    final colors = Theme.of(context).colorScheme;
+                                    return Padding(
+                                      padding: const EdgeInsets.only(bottom: 4),
+                                      child: Theme(
+                                        data: Theme.of(context).copyWith(dividerColor: Colors.transparent),
+                                        child: ExpansionTile(
+                                          tilePadding: const EdgeInsets.symmetric(horizontal: 12),
+                                          childrenPadding: const EdgeInsets.fromLTRB(12, 0, 12, 8),
+                                          dense: true,
+                                          leading: Icon(
+                                            isOk ? Icons.check_circle : status == 'skipped' ? Icons.skip_next : Icons.error,
+                                            size: 16,
+                                            color: isOk ? colors.primary : status == 'skipped' ? colors.onSurfaceVariant : colors.error,
+                                          ),
+                                          title: Row(
+                                            children: [
+                                              Text('${i + 1}. ', style: TextStyle(fontSize: 11, color: colors.onSurfaceVariant)),
+                                              Expanded(child: Text(agent, style: const TextStyle(fontSize: 12, fontWeight: FontWeight.w600), overflow: TextOverflow.ellipsis)),
+                                              Container(
+                                                padding: const EdgeInsets.symmetric(horizontal: 5, vertical: 1),
+                                                decoration: BoxDecoration(
+                                                  color: isOk ? colors.primaryContainer : colors.errorContainer,
+                                                  borderRadius: BorderRadius.circular(4),
+                                                ),
+                                                child: Text(status, style: TextStyle(fontSize: 9, fontWeight: FontWeight.w600,
+                                                  color: isOk ? colors.onPrimaryContainer : colors.onErrorContainer)),
+                                              ),
+                                            ],
+                                          ),
+                                          shape: RoundedRectangleBorder(
+                                            borderRadius: BorderRadius.circular(8),
+                                            side: BorderSide(color: colors.outlineVariant.withValues(alpha: 0.3)),
+                                          ),
+                                          collapsedShape: RoundedRectangleBorder(
+                                            borderRadius: BorderRadius.circular(8),
+                                            side: BorderSide(color: colors.outlineVariant.withValues(alpha: 0.3)),
+                                          ),
+                                          backgroundColor: colors.surfaceContainerLow,
+                                          collapsedBackgroundColor: colors.surfaceContainerLow,
+                                          children: [
+                                            if (text.isNotEmpty)
+                                              Container(
+                                                width: double.infinity,
+                                                padding: const EdgeInsets.all(8),
+                                                constraints: const BoxConstraints(maxHeight: 200),
+                                                decoration: BoxDecoration(
+                                                  color: colors.surfaceContainerHighest,
+                                                  borderRadius: BorderRadius.circular(6),
+                                                ),
+                                                child: SingleChildScrollView(
+                                                  child: SelectableText(
+                                                    text.length > 500 ? '${text.substring(0, 500)}...' : text,
+                                                    style: TextStyle(fontSize: 11, color: colors.onSurface),
+                                                  ),
+                                                ),
+                                              ),
+                                          ],
+                                        ),
+                                      ),
+                                    );
+                                  },
+                                ),
                         ),
                       ],
                     ),

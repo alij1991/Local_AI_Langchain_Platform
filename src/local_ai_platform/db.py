@@ -172,6 +172,8 @@ def init_db() -> None:
         cols = [r[1] for r in conn.execute("PRAGMA table_info(messages)").fetchall()]
         if "run_id" not in cols:
             conn.execute("ALTER TABLE messages ADD COLUMN run_id TEXT")
+        if "perf_json" not in cols:
+            conn.execute("ALTER TABLE messages ADD COLUMN perf_json TEXT")
 
         conn.commit()
     finally:
@@ -237,6 +239,8 @@ class AsyncDB:
                 cols = [r[1] for r in await cursor.fetchall()]
                 if "run_id" not in cols:
                     await conn.execute("ALTER TABLE messages ADD COLUMN run_id TEXT")
+                if "perf_json" not in cols:
+                    await conn.execute("ALTER TABLE messages ADD COLUMN perf_json TEXT")
 
                 await conn.commit()
         except ImportError:

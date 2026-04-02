@@ -80,14 +80,17 @@ def add_message(
     model: str | None = None,
     attachments: list[dict] | None = None,
     run_id: str | None = None,
+    perf: dict | None = None,
 ) -> dict:
     mid = str(uuid.uuid4())
     now = _now()
     conn = get_conn()
     try:
         conn.execute(
-            "INSERT INTO messages (id, conversation_id, role, agent, model, content, created_at, attachments_json, run_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
-            (mid, conversation_id, role, agent, model, content, now, json.dumps(attachments or []), run_id),
+            "INSERT INTO messages (id, conversation_id, role, agent, model, content, created_at, attachments_json, run_id, perf_json) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            (mid, conversation_id, role, agent, model, content, now,
+             json.dumps(attachments or []), run_id,
+             json.dumps(perf) if perf else None),
         )
         conn.execute(
             "UPDATE conversations SET updated_at = ?, last_agent = COALESCE(?, last_agent), last_model = COALESCE(?, last_model) WHERE id = ?",
@@ -113,7 +116,18 @@ def list_messages(conversation_id: str, limit: int = 100, before: str | None = N
                 "SELECT * FROM messages WHERE conversation_id = ? ORDER BY created_at DESC LIMIT ?",
                 (conversation_id, limit),
             ).fetchall()
-        out = [dict(r) for r in rows]
+        out = []
+        for r in rows:
+            d = dict(r)
+            # Parse perf_json for client consumption
+            if d.get("perf_json"):
+                try:
+                    d["perf"] = json.loads(d["perf_json"])
+                except (json.JSONDecodeError, TypeError):
+                    d["perf"] = None
+            else:
+                d["perf"] = None
+            out.append(d)
         out.reverse()
         return out
     finally:

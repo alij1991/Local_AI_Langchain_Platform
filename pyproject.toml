@@ -22,6 +22,7 @@ dependencies = [
   "langchain-community>=0.3.27",
   "langchain-text-splitters>=0.3.8",
   "langgraph>=0.2.74",
+  "langgraph-checkpoint-sqlite>=2.0.0",
   "duckduckgo-search>=6.0.0",
   "pydantic>=2.7.0",
   "ollama>=0.4.0",
@@ -88,6 +89,10 @@ onnx = [
 flash = [
   "flash-attn>=2.6.0",                # Fused attention: 2-4x speedup, enables longer context
 ]
+# ── TorchAO (PyTorch-native INT4 quantization, composable with torch.compile) ──
+torchao = [
+  "torchao>=0.7.0",                   # INT4 weight-only: ~1.7x speedup, 65% less memory
+]
 # ── TurboQuant KV cache compression (3-bit, ~6x memory reduction) ──
 turboquant = [
   "turboquant-torch>=0.4.0",          # Google TurboQuant (ICLR 2026): 3-bit KV cache, zero calibration
@@ -115,7 +120,7 @@ openvino = [
 ]
 # ── All performance packages combined ──
 perf = [
-  "local-ai-langchain-platform[llamacpp,quantized,speculative,turboquant]",
+  "local-ai-langchain-platform[llamacpp,quantized,torchao,speculative,turboquant]",
 ]
 # perf + flash-attn (Linux only — flash-attn cannot build on Windows)
 perf-flash = [

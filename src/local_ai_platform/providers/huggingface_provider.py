@@ -62,6 +62,7 @@ class HuggingFaceProvider(BaseProvider):
         self._tokenizer_cache: dict[str, Any] = {}
         self._metadata_cache: dict[str, dict[str, Any]] = {}
         self._draft_model_cache: dict[str, Any] = {}  # For speculative decoding
+        self._turboquant_applied: dict[str, bool] = {}  # Track TurboQuant state per model
 
     def configured_models(self) -> list[str]:
         models = [p.strip() for p in self.model_catalog_str.split(",") if p.strip()]
@@ -72,7 +73,14 @@ class HuggingFaceProvider(BaseProvider):
     # ── Model Loading with Optimizations ──────────────────────────
 
     def _detect_quantization_config(self, model: str) -> dict[str, Any] | None:
-        """Auto-detect if a model needs quantized loading (GPTQ/AWQ/NF4)."""
+        """Auto-detect optimal quantization for model loading.
+
+        Priority chain (tries best → falls back):
+        1. Pre-quantized GPTQ models → GPTQConfig
+        2. Pre-quantized AWQ models → AwqConfig
+        3. TorchAO INT4 (PyTorch-native, composable with torch.compile) → TorchAoConfig
+        4. bitsandbytes NF4 (widest compatibility) → BitsAndBytesConfig
+        """
         model_lower = model.lower()
 
         # Pre-quantized GPTQ models
@@ -93,33 +101,48 @@ class HuggingFaceProvider(BaseProvider):
                 logger.info("autoawq not installed — loading AWQ model without optimization")
                 return None
 
-        # For large models on constrained hardware: apply NF4 auto-quantization
+        # For large models on constrained hardware: auto-quantize to INT4
         try:
             from local_ai_platform.system_info import get_cached_hardware
             hw = get_cached_hardware()
             gpu_vram_gb = hw.best_gpu_vram_mb / 1024 if hw.best_gpu_vram_mb else 0
-
-            # Only quantize if we have a GPU but limited VRAM
-            if gpu_vram_gb > 0 and gpu_vram_gb <= 8:
-                # Check if model is large enough to need quantization
-                meta = self.model_metadata(model)
-                params_str = meta.get("parameters", "") or ""
-                if any(s in model_lower for s in ("7b", "8b", "13b", "14b", "70b")):
-                    try:
-                        import bitsandbytes  # noqa: F401
-                        from transformers import BitsAndBytesConfig
-                        logger.info("Applying NF4 quantization for %s (%.1f GB VRAM)", model, gpu_vram_gb)
-                        return {
-                            "quantization_config": BitsAndBytesConfig(
-                                load_in_4bit=True,
-                                bnb_4bit_quant_type="nf4",
-                                bnb_4bit_compute_dtype=self._best_compute_dtype(),
-                                bnb_4bit_use_double_quant=True,  # Extra 0.4 bits/param saving
-                            )
-                        }
-                    except ImportError:
-                        pass
         except Exception:
+            gpu_vram_gb = 0
+
+        if gpu_vram_gb <= 0 or gpu_vram_gb > 8:
+            return None  # No GPU or plenty of VRAM — no quantization needed
+
+        # Check if model is large enough to benefit from quantization
+        if not any(s in model_lower for s in ("7b", "8b", "13b", "14b", "70b")):
+            return None
+
+        # Try TorchAO INT4 first (PyTorch-native, ~1.7x speedup, composable with torch.compile)
+        try:
+            from transformers import TorchAoConfig
+            from torchao.quantization import Int4WeightOnlyConfig
+            logger.info("Applying TorchAO INT4 quantization for %s (%.1f GB VRAM)", model, gpu_vram_gb)
+            return {
+                "quantization_config": TorchAoConfig(
+                    quant_type=Int4WeightOnlyConfig(group_size=128),
+                )
+            }
+        except ImportError:
+            pass
+
+        # Fallback: bitsandbytes NF4 (widest compatibility)
+        try:
+            import bitsandbytes  # noqa: F401
+            from transformers import BitsAndBytesConfig
+            logger.info("Applying NF4 quantization for %s (%.1f GB VRAM)", model, gpu_vram_gb)
+            return {
+                "quantization_config": BitsAndBytesConfig(
+                    load_in_4bit=True,
+                    bnb_4bit_quant_type="nf4",
+                    bnb_4bit_compute_dtype=self._best_compute_dtype(),
+                    bnb_4bit_use_double_quant=True,
+                )
+            }
+        except ImportError:
             pass
 
         return None
@@ -172,9 +195,23 @@ class HuggingFaceProvider(BaseProvider):
         FIXED: Cache key is model ID only — different settings reuse same model.
         """
         if model in self._pipeline_cache:
+            logger.debug("HF pipeline cache hit: %s", model)
             return self._pipeline_cache[model]
 
+        import time as _time
         from transformers import pipeline, AutoTokenizer
+
+        logger.info("Loading HF model: %s (device=%s, low_memory=%s)", model, self.device, self.low_memory)
+        t_load_start = _time.monotonic()
+
+        # Measure VRAM before load
+        vram_before = 0
+        try:
+            import torch
+            if torch.cuda.is_available():
+                vram_before = torch.cuda.memory_allocated() // (1024 * 1024)
+        except Exception:
+            pass
 
         tokenizer = AutoTokenizer.from_pretrained(model, trust_remote_code=True)
         self._tokenizer_cache[model] = tokenizer
@@ -190,15 +227,17 @@ class HuggingFaceProvider(BaseProvider):
         if self.low_memory:
             model_kwargs["low_cpu_mem_usage"] = True
 
-        # ── Quantization (GPTQ/AWQ/NF4) ──
+        # ── Quantization (GPTQ/AWQ/TorchAO/NF4) ──
         quant_config = self._detect_quantization_config(model)
         if quant_config:
             model_kwargs.update(quant_config)
+            logger.info("HF quantization: %s", type(quant_config.get("quantization_config")).__name__)
 
         # ── Attention implementation (FlashAttention-2 / SDPA) ──
         attn_impl = self._select_attn_implementation(model)
         if attn_impl:
             model_kwargs["attn_implementation"] = attn_impl
+            logger.info("HF attention: %s", attn_impl)
 
         for task in task_order:
             try:
@@ -215,54 +254,56 @@ class HuggingFaceProvider(BaseProvider):
         if pipe is None:
             raise RuntimeError(f"Cannot load HF model `{model}`: {last_error}")
 
+        # Log load metrics
+        t_load_elapsed = _time.monotonic() - t_load_start
+        vram_after = 0
+        try:
+            import torch
+            if torch.cuda.is_available():
+                vram_after = torch.cuda.memory_allocated() // (1024 * 1024)
+        except Exception:
+            pass
+        logger.info("HF model loaded: %s in %.1fs (VRAM: %d→%d MB, +%d MB)",
+                     model, t_load_elapsed, vram_before, vram_after, vram_after - vram_before)
+
         # ── TurboQuant KV cache compression (ICLR 2026) ──
         # Compresses KV cache to 3-4 bits via PolarQuant + QJL residual.
         # ~6x KV memory reduction, zero calibration needed, works on any model.
-        kv_quant = settings.kv_cache_quant if settings else None
-        pipe = self._apply_turboquant(pipe, model, kv_cache_quant=kv_quant)
-        self._turboquant_applied[model] = kv_quant
+        # Applied once at model load time based on system hardware detection.
+        pipe = self._apply_turboquant(pipe, model)
+        self._turboquant_applied[model] = True
 
         self._pipeline_cache[model] = pipe
         return pipe
 
-    def _apply_turboquant(self, pipe_or_model: Any, model_name: str,
-                          kv_cache_quant: str | None = None) -> Any:
-        """Apply TurboQuant KV cache compression if available and requested.
+    def _apply_turboquant(self, pipe_or_model: Any, model_name: str) -> Any:
+        """Apply TurboQuant KV cache compression if available.
 
         TurboQuant (Google, ICLR 2026) compresses KV cache to 3-4 bits using
         PolarQuant (Walsh-Hadamard rotation) + QJL (1-bit residual correction).
-        This gives ~6x KV memory reduction with near-zero quality loss.
+        ~6x KV memory reduction with near-zero quality loss.
 
-        Args:
-            kv_cache_quant: "q4_0" → 3-bit, "q8_0" → 4-bit, "f16"/None → disabled
+        Bit width is auto-detected from system hardware:
+        - ≤8 GB VRAM or ≤12 GB RAM → 3-bit (max compression)
+        - ≥8 GB VRAM or ≥24 GB RAM → 4-bit (best quality)
         """
-        # If explicitly disabled
-        if kv_cache_quant == "f16":
-            return pipe_or_model
-
         try:
             import turboquant
         except ImportError:
             return pipe_or_model  # Not installed, skip silently
 
         try:
-            # Map Ollama-style quant names to TurboQuant bit widths
-            if kv_cache_quant == "q4_0":
-                bit_width = 3
-            elif kv_cache_quant == "q8_0":
-                bit_width = 4
-            else:
-                # Auto-detect based on hardware
-                bit_width = 3  # Default
-                try:
-                    from local_ai_platform.system_info import get_cached_hardware
-                    hw = get_cached_hardware()
-                    gpu_vram_gb = hw.best_gpu_vram_mb / 1024 if hw.best_gpu_vram_mb else 0
-                    ram_gb = hw.ram_total_mb / 1024
-                    if gpu_vram_gb >= 8 or ram_gb >= 24:
-                        bit_width = 4
-                except Exception:
-                    pass
+            # Auto-detect optimal bit width from hardware
+            bit_width = 3  # Default: aggressive compression
+            try:
+                from local_ai_platform.system_info import get_cached_hardware
+                hw = get_cached_hardware()
+                gpu_vram_gb = hw.best_gpu_vram_mb / 1024 if hw.best_gpu_vram_mb else 0
+                ram_gb = hw.ram_total_mb / 1024
+                if gpu_vram_gb >= 8 or ram_gb >= 24:
+                    bit_width = 4  # More VRAM → higher quality 4-bit
+            except Exception:
+                pass
 
             # For pipeline objects, wrap the underlying model
             target = pipe_or_model
@@ -294,16 +335,14 @@ class HuggingFaceProvider(BaseProvider):
 
         return pipe_or_model
 
-    # Track whether TurboQuant was applied so we know if we need to re-wrap
-    _turboquant_applied: dict[str, str | None] = {}
+    # (instance-level _turboquant_applied is set in __init__)
 
-    def _get_model_for_streaming(self, model: str,
-                                  kv_cache_quant: str | None = None) -> Any:
+    def _get_model_for_streaming(self, model: str) -> Any:
         """Get or load model for streaming generation. Reuses pipeline model if available."""
         if model in self._model_cache:
             return self._model_cache[model]
 
-        # Reuse from pipeline cache if already loaded
+        # Reuse from pipeline cache if already loaded (TurboQuant already applied)
         if model in self._pipeline_cache:
             gen_model = self._pipeline_cache[model].model
             self._model_cache[model] = gen_model
@@ -326,8 +365,8 @@ class HuggingFaceProvider(BaseProvider):
 
         gen_model = AutoModelForCausalLM.from_pretrained(model, **model_kwargs)
         # Apply TurboQuant KV cache compression for streaming path too
-        gen_model = self._apply_turboquant(gen_model, model, kv_cache_quant=kv_cache_quant)
-        self._turboquant_applied[model] = kv_cache_quant
+        gen_model = self._apply_turboquant(gen_model, model)
+        self._turboquant_applied[model] = True
         self._model_cache[model] = gen_model
         return gen_model
 
@@ -514,7 +553,7 @@ class HuggingFaceProvider(BaseProvider):
             inputs = tokenizer(prompt, return_tensors="pt")
 
             # Reuse model from pipeline/model cache (FIXED: no duplicate loading)
-            gen_model = self._get_model_for_streaming(model, kv_cache_quant=settings.kv_cache_quant)
+            gen_model = self._get_model_for_streaming(model)
 
             if hasattr(gen_model, "device"):
                 inputs = {k: v.to(gen_model.device) for k, v in inputs.items()}

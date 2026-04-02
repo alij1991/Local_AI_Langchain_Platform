@@ -37,6 +37,7 @@ class _AgentsPageState extends State<AgentsPage> {
   bool _isLoading = false;
   bool _isSaving = false;
   bool _isTesting = false;
+  bool _gridView = false;  // Toggle between list+editor and grid card view
   int _loadVersion = 0;
   int _tab = 0;
   Map<String, dynamic>? _definition;
@@ -234,6 +235,8 @@ class _AgentsPageState extends State<AgentsPage> {
   Widget build(BuildContext context) {
     final colors = Theme.of(context).colorScheme;
 
+    if (_gridView) return _buildGridView(colors);
+
     return Row(
       children: [
         // Agent list sidebar
@@ -253,6 +256,11 @@ class _AgentsPageState extends State<AgentsPage> {
                       ),
                     ),
                     const SizedBox(width: 4),
+                    IconButton(
+                      onPressed: () => setState(() => _gridView = true),
+                      icon: const Icon(Icons.grid_view, size: 20),
+                      tooltip: 'Grid view',
+                    ),
                     IconButton(
                       onPressed: _isLoading ? null : _load,
                       icon: const Icon(Icons.refresh, size: 20),
@@ -368,6 +376,149 @@ class _AgentsPageState extends State<AgentsPage> {
               ),
             ),
           ),
+        ),
+      ],
+    );
+  }
+
+  Widget _buildGridView(ColorScheme colors) {
+    return Column(
+      children: [
+        // Toolbar
+        Padding(
+          padding: const EdgeInsets.only(bottom: 12),
+          child: Row(
+            children: [
+              Text('Agents', style: Theme.of(context).textTheme.titleLarge),
+              const Spacer(),
+              IconButton(
+                onPressed: () => setState(() => _gridView = false),
+                icon: const Icon(Icons.view_list, size: 20),
+                tooltip: 'List view',
+              ),
+              const SizedBox(width: 4),
+              FilledButton.icon(
+                onPressed: _isLoading ? null : () { _newAgent(); setState(() => _gridView = false); },
+                icon: const Icon(Icons.add, size: 18),
+                label: const Text('New Agent'),
+              ),
+              const SizedBox(width: 4),
+              IconButton(
+                onPressed: _isLoading ? null : _load,
+                icon: const Icon(Icons.refresh, size: 20),
+                tooltip: 'Refresh',
+              ),
+            ],
+          ),
+        ),
+        // Grid
+        Expanded(
+          child: _agents.isEmpty && !_isLoading
+              ? Center(
+                  child: Column(
+                    mainAxisSize: MainAxisSize.min,
+                    children: [
+                      Icon(Icons.smart_toy_outlined, size: 56, color: colors.onSurfaceVariant.withValues(alpha: 0.3)),
+                      const SizedBox(height: 12),
+                      Text('No agents yet', style: Theme.of(context).textTheme.titleMedium?.copyWith(color: colors.onSurfaceVariant)),
+                      const SizedBox(height: 8),
+                      FilledButton.icon(
+                        onPressed: () { _newAgent(); setState(() => _gridView = false); },
+                        icon: const Icon(Icons.add),
+                        label: const Text('Create your first agent'),
+                      ),
+                    ],
+                  ),
+                )
+              : GridView.builder(
+                  gridDelegate: const SliverGridDelegateWithMaxCrossAxisExtent(
+                    maxCrossAxisExtent: 340,
+                    mainAxisExtent: 180,
+                    crossAxisSpacing: 12,
+                    mainAxisSpacing: 12,
+                  ),
+                  itemCount: _agents.length,
+                  itemBuilder: (_, i) {
+                    final a = _agents[i];
+                    final name = (a['name'] ?? '').toString();
+                    final provider = (a['provider'] ?? 'ollama').toString();
+                    final model = (a['model_id'] ?? '').toString();
+                    final desc = (a['description'] ?? '').toString();
+                    final toolCount = ((a['tool_ids'] as List?)?.length ?? 0);
+
+                    return _HoverCard(
+                      child: InkWell(
+                        borderRadius: BorderRadius.circular(12),
+                        onTap: () { _apply(a); setState(() => _gridView = false); },
+                        child: Padding(
+                          padding: const EdgeInsets.all(16),
+                          child: Column(
+                            crossAxisAlignment: CrossAxisAlignment.start,
+                            children: [
+                              Row(
+                                children: [
+                                  CircleAvatar(
+                                    radius: 18,
+                                    backgroundColor: colors.primaryContainer,
+                                    child: Icon(Icons.smart_toy, size: 18, color: colors.onPrimaryContainer),
+                                  ),
+                                  const SizedBox(width: 12),
+                                  Expanded(
+                                    child: Column(
+                                      crossAxisAlignment: CrossAxisAlignment.start,
+                                      children: [
+                                        Text(name, style: const TextStyle(fontWeight: FontWeight.w600, fontSize: 14),
+                                          overflow: TextOverflow.ellipsis),
+                                        Text('$provider:$model',
+                                          style: TextStyle(fontSize: 11, color: colors.onSurfaceVariant),
+                                          overflow: TextOverflow.ellipsis),
+                                      ],
+                                    ),
+                                  ),
+                                ],
+                              ),
+                              if (desc.isNotEmpty) ...[
+                                const SizedBox(height: 8),
+                                Text(desc, style: TextStyle(fontSize: 12, color: colors.onSurfaceVariant),
+                                  maxLines: 2, overflow: TextOverflow.ellipsis),
+                              ],
+                              const Spacer(),
+                              Row(
+                                children: [
+                                  if (toolCount > 0)
+                                    Container(
+                                      padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
+                                      decoration: BoxDecoration(
+                                        color: colors.tertiaryContainer,
+                                        borderRadius: BorderRadius.circular(4),
+                                      ),
+                                      child: Text('$toolCount tools',
+                                        style: TextStyle(fontSize: 10, fontWeight: FontWeight.w600, color: colors.onTertiaryContainer)),
+                                    ),
+                                  const Spacer(),
+                                  IconButton(
+                                    icon: Icon(Icons.edit_outlined, size: 18, color: colors.onSurfaceVariant),
+                                    onPressed: () { _apply(a); setState(() => _gridView = false); },
+                                    tooltip: 'Edit',
+                                    visualDensity: VisualDensity.compact,
+                                    style: IconButton.styleFrom(padding: const EdgeInsets.all(4)),
+                                  ),
+                                  IconButton(
+                                    icon: Icon(Icons.delete_outline, size: 18, color: colors.error),
+                                    onPressed: () { _apply(a); _remove(); },
+                                    tooltip: 'Delete',
+                                    visualDensity: VisualDensity.compact,
+                                    style: IconButton.styleFrom(padding: const EdgeInsets.all(4)),
+                                  ),
+                                ],
+                              ),
+                            ],
+                          ),
+                        ),
+                      ),
+                    );
+                  },
+                ),
         ),
       ],
     );
@@ -710,5 +861,47 @@ class _AgentsPageState extends State<AgentsPage> {
       default:
         return Icons.build;
     }
+  }
+}
+
+
+/// Card with hover elevation animation for grid views.
+class _HoverCard extends StatefulWidget {
+  const _HoverCard({required this.child});
+  final Widget child;
+
+  @override
+  State<_HoverCard> createState() => _HoverCardState();
+}
+
+class _HoverCardState extends State<_HoverCard> {
+  bool _hovered = false;
+
+  @override
+  Widget build(BuildContext context) {
+    return MouseRegion(
+      onEnter: (_) => setState(() => _hovered = true),
+      onExit: (_) => setState(() => _hovered = false),
+      child: AnimatedContainer(
+        duration: const Duration(milliseconds: 150),
+        decoration: BoxDecoration(
+          borderRadius: BorderRadius.circular(12),
+          color: Theme.of(context).colorScheme.surfaceContainerLow,
+          border: Border.all(
+            color: _hovered
+                ? Theme.of(context).colorScheme.primary.withValues(alpha: 0.3)
+                : Theme.of(context).colorScheme.outlineVariant.withValues(alpha: 0.3),
+          ),
+          boxShadow: [
+            BoxShadow(
+              color: Colors.black.withValues(alpha: _hovered ? 0.08 : 0.02),
+              blurRadius: _hovered ? 12 : 4,
+              offset: Offset(0, _hovered ? 4 : 1),
+            ),
+          ],
+        ),
+        child: widget.child,
+      ),
+    );
   }
 }

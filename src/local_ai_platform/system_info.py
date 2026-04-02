@@ -355,6 +355,34 @@ def get_model_recommendations(hw: SystemHardware) -> dict[str, Any]:
         recs["gpu_offload"] = "none"
         recs["gpu_note"] = "No GPU detected — CPU-only inference"
 
+    # ── Use-case specific advice (from research report) ────
+    recs["use_case_advice"] = {
+        "coding": {
+            "quant": "INT4 weight-only (conservative — avoid ultra-low-bit for code accuracy)",
+            "context": min(recs.get("max_context", 4096), 8192),
+            "models": ["qwen2.5-coder:7b", "deepseek-coder:6.7b", "codellama:7b"],
+            "tip": "Keep quantization conservative for code correctness. Prefer GQA models (Mistral, Qwen) for faster inference.",
+        },
+        "reasoning": {
+            "quant": f"{recs.get('recommended_quant', 'Q4_K_M')} + KV4 quantization for longer chains",
+            "context": recs.get("max_context", 4096),
+            "models": ["deepseek-r1:7b", "qwq:7b", "gemma3:12b"],
+            "tip": "Reasoning needs long context for chain-of-thought. Enable KV cache quantization (TurboQuant) to avoid OOM.",
+        },
+        "vision": {
+            "quant": "INT4 weight-only for language backbone",
+            "context": min(recs.get("max_context", 4096), 4096),
+            "models": ["llava:7b", "phi-3.5-vision", "qwen2-vl:2b"],
+            "tip": "Visual tokens dominate memory. Prefer models with dynamic resolution (Qwen2-VL) to reduce token waste.",
+        },
+        "chat": {
+            "quant": recs.get("recommended_quant", "Q4_K_M"),
+            "context": recs.get("recommended_context", 4096),
+            "models": recs.get("recommended_models", []),
+            "tip": "General chat is the most flexible. Use Ollama for ease, llama.cpp for speed.",
+        },
+    }
+
     return recs
 
 

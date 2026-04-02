@@ -28,6 +28,24 @@ def _now() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
+def _get_vector_memory():
+    """Lazy-init VectorMemory for semantic search (requires chromadb)."""
+    global _vector_memory
+    if _vector_memory is not None:
+        return _vector_memory
+    try:
+        from local_ai_platform.memory import VectorMemory
+        _vector_memory = VectorMemory(collection_name="memory_vectors", persist_dir="./data/vectorstore")
+        # Verify it works
+        _vector_memory._get_collection()
+        return _vector_memory
+    except Exception:
+        _vector_memory = False  # Mark as unavailable, don't retry
+        return None
+
+_vector_memory = None
+
+
 def save_memory(key: str, value: str, namespace: str = "default") -> str:
     """Save a piece of information to long-term memory."""
     from local_ai_platform.db import get_conn
@@ -42,6 +60,16 @@ def save_memory(key: str, value: str, namespace: str = "default") -> str:
             (namespace, key, json.dumps({"text": value}), now, now),
         )
         conn.commit()
+
+        # Also store in vector memory for semantic recall
+        vm = _get_vector_memory()
+        if vm:
+            try:
+                from local_ai_platform.providers.base import ChatMessage
+                vm.store(namespace, [ChatMessage(role="user", content=f"{key}: {value}")], {"key": key})
+            except Exception:
+                pass
+
         return f"Saved to memory: [{namespace}] {key}"
     except Exception as e:
         return f"Failed to save memory: {e}"
@@ -50,7 +78,29 @@ def save_memory(key: str, value: str, namespace: str = "default") -> str:
 
 
 def recall_memory(query: str, namespace: str = "default", max_results: int = 5) -> str:
-    """Search long-term memory for relevant information."""
+    """Search long-term memory for relevant information.
+
+    Uses semantic vector search if chromadb is available, falls back to keyword matching.
+    """
+    # Try semantic search first (much better recall quality)
+    vm = _get_vector_memory()
+    if vm:
+        try:
+            results = vm.search(query, n_results=max_results)
+            if results:
+                lines = []
+                for r in results:
+                    meta = r.get("metadata", {})
+                    content = r.get("content", "")
+                    key = meta.get("key", "")
+                    ns = meta.get("conversation_id", namespace)
+                    relevance = r.get("relevance", 0)
+                    lines.append(f"[{ns}] {key}: {content} (relevance: {relevance:.2f})")
+                return "Found memories (semantic search):\n" + "\n".join(lines)
+        except Exception:
+            pass  # Fall through to keyword matching
+
+    # Fallback: keyword matching
     from local_ai_platform.db import get_conn
 
     conn = get_conn()
@@ -66,12 +116,10 @@ def recall_memory(query: str, namespace: str = "default", max_results: int = 5) 
                 (namespace,),
             ).fetchall()
 
-        # Simple keyword matching (semantic search would require embeddings)
         scored = []
         for r in rows:
             val = json.loads(r["value_json"]).get("text", "")
             key = r["key"]
-            # Score by keyword overlap
             score = sum(1 for word in query_lower.split() if word in key.lower() or word in val.lower())
             if score > 0 or not query.strip():
                 scored.append((score, r, val))
