@@ -116,10 +116,18 @@ images = [
 # ── Image Editor AI enhancements (optional — graceful fallback if missing) ──
 editor = [
   "rembg>=2.0.50",                    # Background removal (u2net/BiRefNet, ~170-973MB models)
-  "gfpgan>=1.3.8",                    # Face restoration (~350MB model)
+  "gfpgan>=1.3.8",                    # Face restoration GFPGAN (~350MB model)
   "realesrgan>=0.3.0",               # AI super-resolution (~65MB model)
-  "basicsr>=1.4.2",                   # Required by gfpgan/realesrgan
-  "timm>=0.9.0",                      # Required by MiDaS (portrait bokeh depth estimation)
+  "basicsr>=1.4.2",                   # Required by gfpgan/realesrgan/codeformer
+  "facexlib>=0.3.0",                  # Face detection/restoration utilities (CodeFormer support)
+  "onnxruntime>=1.19.0",             # ONNX inference for style transfer, depth, colorization
+  "scikit-image>=0.22.0",            # Wavelet/TV denoising, Richardson-Lucy deconvolution
+  "simple-lama-inpainting>=0.1.0",   # LaMa inpainting for object removal (~208MB ONNX)
+]
+# ── Optional high-quality editor extras ──
+editor-extras = [
+  "bm3d>=4.0.0",                     # BM3D denoising (gold standard for Gaussian noise)
+  "xformers>=0.0.23",                # Memory-efficient attention for InstructPix2Pix
 ]
 # ── AI Partner / Companion (voice + memory) ──
 partner = [

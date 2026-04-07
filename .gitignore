@@ -1,10 +1,15 @@
+# ── Python ──
 .venv/
 .venv_chatterbox/
 .ruff_cache/
 __pycache__/
 *.pyc
+*.pyo
+*.egg-info/
+dist/
+build/
 
-# Flutter / Dart artifacts
+# ── Flutter / Dart ──
 flutter_client/.dart_tool/
 flutter_client/.flutter-plugins
 flutter_client/.flutter-plugins-dependencies
@@ -17,14 +22,45 @@ flutter_client/windows/flutter/generated_config.cmake
 flutter_client/windows/flutter/generated_plugins.cmake
 flutter_client/windows/flutter/generated_plugin_registrant.cc
 flutter_client/windows/flutter/generated_plugin_registrant.h
+flutter_client/linux/flutter/generated_plugin_registrant.cc
+flutter_client/linux/flutter/generated_plugins.cmake
 
-# Local model/data artifacts (never commit weights)
-/models/*
-!/models/.gitkeep
-/data/*
-!/data/.gitkeep
+# ── Model weights & large binaries (download on demand) ──
+*.pth
+*.onnx
+*.bin
+*.safetensors
+*.ckpt
+*.pt
+*.gguf
+*.whl
+gfpgan/weights/
+data/models/
 
-# Secrets / tokens
+# ── Data artifacts (regenerated at runtime) ──
+data/app.db
+data/uploads/
+data/images/editor/
+data/traces/
+
+# ── Keep directory structure ──
+!data/.gitkeep
+!data/luts/
+!data/luts/*.cube
+!data/models/.gitkeep
+
+# ── Secrets / tokens ──
 .env
 *.env.local
 hf_token*
+
+# ── IDE / OS ──
+.idea/
+.vscode/
+*.swp
+*.swo
+Thumbs.db
+.DS_Store
+
+# ── Lock files (large, regenerated) ──
+uv.lock
