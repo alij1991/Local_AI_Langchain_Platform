@@ -113,6 +113,23 @@ images = [
 ]
 # SageAttention on Windows: install manually via community wheel from
 # https://github.com/thu-ml/SageAttention/releases (prebuilt for CUDA 12.x + sm89)
+# ── Image Editor AI enhancements (optional — graceful fallback if missing) ──
+editor = [
+  "rembg>=2.0.50",                    # Background removal (u2net/BiRefNet, ~170-973MB models)
+  "gfpgan>=1.3.8",                    # Face restoration (~350MB model)
+  "realesrgan>=0.3.0",               # AI super-resolution (~65MB model)
+  "basicsr>=1.4.2",                   # Required by gfpgan/realesrgan
+  "timm>=0.9.0",                      # Required by MiDaS (portrait bokeh depth estimation)
+]
+# ── AI Partner / Companion (voice + memory) ──
+partner = [
+  "mem0ai>=0.1.0",                    # Persistent memory with fact extraction
+  "chromadb>=0.5.0",                  # Vector store for semantic memory search
+  "faster-whisper>=1.0.0",           # Speech-to-text (Whisper on CPU/GPU)
+  "kokoro-onnx>=0.4.0",             # Text-to-speech: fast, CPU (82M, sub-300ms)
+  # chatterbox-tts pins torch==2.6 — MUST run in separate venv via scripts/chatterbox_server.py
+  "sounddevice>=0.4.6",             # Audio I/O
+]
 # Intel CPU acceleration (2-4x faster inference on Intel CPUs)
 openvino = [
   "optimum-intel>=1.20.0",

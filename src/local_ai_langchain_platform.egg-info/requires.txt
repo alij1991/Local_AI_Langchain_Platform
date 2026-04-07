@@ -8,6 +8,8 @@ langchain-ollama>=0.2.3
 langchain-community>=0.3.27
 langchain-text-splitters>=0.3.8
 langgraph>=0.2.74
+langgraph-checkpoint-sqlite>=2.0.0
+duckduckgo-search>=6.0.0
 pydantic>=2.7.0
 ollama>=0.4.0
 fastapi>=0.115.12
@@ -48,6 +50,9 @@ DeepCache>=0.1.1
 controlnet-aux>=0.0.9
 mediapipe==0.10.14
 
+[images:sys_platform != "win32"]
+sageattention>=1.0.0
+
 [images:sys_platform == "win32"]
 triton-windows>=3.2.0
 
@@ -66,7 +71,7 @@ optimum-intel>=1.20.0
 openvino>=2024.0.0
 
 [perf]
-local-ai-langchain-platform[llamacpp,quantized,speculative,turboquant]
+local-ai-langchain-platform[llamacpp,quantized,speculative,torchao,turboquant]
 
 [perf-flash]
 local-ai-langchain-platform[flash,perf]
@@ -82,6 +87,9 @@ autoawq>=0.2.0
 [speculative]
 transformers>=4.45.0
 accelerate>=0.34.0
+
+[torchao]
+torchao>=0.7.0
 
 [turboquant]
 turboquant-torch>=0.4.0

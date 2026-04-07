@@ -399,50 +399,62 @@ class _SystemsPageState extends State<SystemsPage> {
     final selectedNode = _nodes.where((n) => n.id == _selectedNodeId).cast<_SystemNode?>().firstOrNull;
     final selectedEdge = (_selectedEdgeIndex != null && _selectedEdgeIndex! >= 0 && _selectedEdgeIndex! < _edges.length) ? _edges[_selectedEdgeIndex!] : null;
 
+    final colors = Theme.of(context).colorScheme;
+
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
+        // ── Top: Tab selector (always visible) ──
         Row(
           children: [
-            Expanded(child: TextField(controller: _nameController, decoration: const InputDecoration(labelText: 'System name'))),
-            const SizedBox(width: 8),
-            FilledButton(onPressed: _saveSystem, child: const Text('Save')),
-            const SizedBox(width: 8),
-            FilledButton.tonal(onPressed: _newSystem, child: const Text('New')),
-            const SizedBox(width: 8),
             SegmentedButton<_SystemsTab>(
               segments: const [
-                ButtonSegment(value: _SystemsTab.templates, icon: Icon(Icons.auto_awesome), label: Text('Templates')),
-                ButtonSegment(value: _SystemsTab.designer, icon: Icon(Icons.account_tree), label: Text('Designer')),
-                ButtonSegment(value: _SystemsTab.run, icon: Icon(Icons.chat_bubble_outline), label: Text('Run')),
+                ButtonSegment(value: _SystemsTab.templates, icon: Icon(Icons.auto_awesome, size: 16), label: Text('Templates')),
+                ButtonSegment(value: _SystemsTab.designer, icon: Icon(Icons.account_tree, size: 16), label: Text('Designer')),
+                ButtonSegment(value: _SystemsTab.run, icon: Icon(Icons.play_arrow, size: 16), label: Text('Run')),
               ],
               selected: {_tab},
               onSelectionChanged: (s) => setState(() => _tab = s.first),
             ),
+            if (_tab != _SystemsTab.templates) ...[
+              const SizedBox(width: 12),
+              SizedBox(
+                width: 200,
+                child: TextField(
+                  controller: _nameController,
+                  decoration: InputDecoration(
+                    labelText: 'System name',
+                    isDense: true,
+                    border: OutlineInputBorder(borderRadius: BorderRadius.circular(8)),
+                    contentPadding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
+                  ),
+                ),
+              ),
+              const SizedBox(width: 8),
+              FilledButton.icon(onPressed: _saveSystem, icon: const Icon(Icons.save, size: 16), label: const Text('Save')),
+              const SizedBox(width: 4),
+              FilledButton.tonalIcon(onPressed: _newSystem, icon: const Icon(Icons.add, size: 16), label: const Text('New')),
+            ],
+            const Spacer(),
+            if (_tab == _SystemsTab.run && _selectedName != null)
+              Chip(
+                avatar: Icon(_runInFlight ? Icons.sync : Icons.check_circle,
+                    size: 14, color: _runInFlight ? colors.primary : Colors.green),
+                label: Text(_selectedName ?? '', style: const TextStyle(fontSize: 12)),
+              ),
+            if (_tab == _SystemsTab.run && _runStatus.isNotEmpty && !_runInFlight)
+              Padding(
+                padding: const EdgeInsets.only(left: 8),
+                child: Text('$_runStatus${_lastDurationMs != null ? ' • ${_lastDurationMs}ms' : ''}',
+                    style: TextStyle(fontSize: 12, color: colors.onSurfaceVariant)),
+              ),
           ],
         ),
-        const SizedBox(height: 8),
         if (_tab == _SystemsTab.run && _runInFlight) const LinearProgressIndicator(),
-        if (_tab == _SystemsTab.run)
-          Padding(
-            padding: const EdgeInsets.only(top: 6),
-            child: Row(
-              children: [
-                Text('Active System: ${_selectedName ?? 'none'}'),
-                const SizedBox(width: 12),
-                if (_runInFlight) const Icon(Icons.sync, size: 16),
-                if (_runStatus.isNotEmpty) Text(_runInFlight ? _runStatus : '$_runStatus${_lastDurationMs != null ? ' • $_lastDurationMs ms' : ''}'),
-                if (!_runInFlight && _runStatus == 'Completed') ...[
-                  const SizedBox(width: 6),
-                  const Icon(Icons.check_circle, color: Colors.green, size: 16),
-                ],
-              ],
-            ),
-          ),
         const SizedBox(height: 8),
         if (_tab == _SystemsTab.templates)
-          Expanded(child: _buildTemplatesGallery()),
-        if (_tab == _SystemsTab.designer)
+          Expanded(child: _buildTemplatesGallery())
+        else if (_tab == _SystemsTab.designer)
           Expanded(
             child: Row(
               children: [
@@ -464,7 +476,34 @@ class _SystemsPageState extends State<SystemsPage> {
                           child: ListView(
                             children: _systems.map((s) {
                               final n = (s['name'] ?? '').toString();
-                              return ListTile(title: Text(n), selected: _selectedName == n, onTap: () => _loadSystem(n));
+                              return ListTile(
+                                title: Text(n, style: const TextStyle(fontSize: 13)),
+                                selected: _selectedName == n,
+                                onTap: () => _loadSystem(n),
+                                trailing: PopupMenuButton<String>(
+                                  iconSize: 18,
+                                  onSelected: (action) async {
+                                    if (action == 'clone') {
+                                      await widget.api.post('/systems/$n/clone', {'new_name': '${n}_copy'});
+                                      await _load();
+                                    } else if (action == 'export') {
+                                      final data = await widget.api.get('/systems/$n/export');
+                                      if (context.mounted) {
+                                        ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('Exported $n (copy JSON from browser)')));
+                                      }
+                                    } else if (action == 'delete') {
+                                      await widget.api.delete('/systems/$n');
+                                      if (_selectedName == n) _newSystem();
+                                      await _load();
+                                    }
+                                  },
+                                  itemBuilder: (_) => const [
+                                    PopupMenuItem(value: 'clone', child: Row(children: [Icon(Icons.copy, size: 16), SizedBox(width: 8), Text('Clone')])),
+                                    PopupMenuItem(value: 'export', child: Row(children: [Icon(Icons.download, size: 16), SizedBox(width: 8), Text('Export')])),
+                                    PopupMenuItem(value: 'delete', child: Row(children: [Icon(Icons.delete, size: 16, color: Colors.red), SizedBox(width: 8), Text('Delete', style: TextStyle(color: Colors.red))])),
+                                  ],
+                                ),
+                              );
                             }).toList(),
                           ),
                         ),
@@ -673,17 +712,21 @@ class _SystemsPageState extends State<SystemsPage> {
                               initialValue: selectedEdge.ruleType,
                               decoration: const InputDecoration(labelText: 'Routing rule'),
                               items: const [
-                                DropdownMenuItem(value: 'always', child: Text('always')),
-                                DropdownMenuItem(value: 'on_tool_result', child: Text('on tool result (metadata)')),
-                                DropdownMenuItem(value: 'on_keyword_match', child: Text('on keyword match (metadata)')),
-                                DropdownMenuItem(value: 'manual_next', child: Text('manual next (metadata)')),
+                                DropdownMenuItem(value: 'always', child: Text('Always follow')),
+                                DropdownMenuItem(value: 'on_tool_result', child: Text('If tool was used')),
+                                DropdownMenuItem(value: 'on_keyword_match', child: Text('If output has keywords')),
+                                DropdownMenuItem(value: 'manual_next', child: Text('Manual (always)')),
                               ],
                               onChanged: (v) => setState(() => selectedEdge.ruleType = v ?? 'always'),
                             ),
                             const SizedBox(height: 8),
                             TextFormField(
                               initialValue: selectedEdge.notes,
-                              decoration: const InputDecoration(labelText: 'Edge notes'),
+                              decoration: InputDecoration(
+                                labelText: selectedEdge.ruleType == 'on_keyword_match' ? 'Keywords (comma separated)' : 'Notes',
+                                helperText: selectedEdge.ruleType == 'on_keyword_match' ? 'e.g., error, failed, bug' : null,
+                                border: OutlineInputBorder(borderRadius: BorderRadius.circular(8)),
+                              ),
                               maxLines: 2,
                               onChanged: (v) => selectedEdge.notes = v,
                             ),
@@ -838,6 +881,8 @@ class _SystemsPageState extends State<SystemsPage> {
                                     final agent = (entry['agent'] ?? '').toString();
                                     final text = (entry['text'] ?? '').toString();
                                     final status = (entry['status'] ?? 'ok').toString();
+                                    final role = (entry['role'] ?? '').toString();
+                                    final durationMs = (entry['duration_ms'] as num?)?.toInt();
                                     final isOk = status == 'ok';
                                     final colors = Theme.of(context).colorScheme;
                                     return Padding(
@@ -856,7 +901,17 @@ class _SystemsPageState extends State<SystemsPage> {
                                           title: Row(
                                             children: [
                                               Text('${i + 1}. ', style: TextStyle(fontSize: 11, color: colors.onSurfaceVariant)),
-                                              Expanded(child: Text(agent, style: const TextStyle(fontSize: 12, fontWeight: FontWeight.w600), overflow: TextOverflow.ellipsis)),
+                                              Expanded(child: Column(
+                                                crossAxisAlignment: CrossAxisAlignment.start,
+                                                children: [
+                                                  Text(agent, style: const TextStyle(fontSize: 12, fontWeight: FontWeight.w600), overflow: TextOverflow.ellipsis),
+                                                  if (role.isNotEmpty || durationMs != null)
+                                                    Text(
+                                                      '${role.isNotEmpty ? role : ''}${role.isNotEmpty && durationMs != null ? ' • ' : ''}${durationMs != null ? '${durationMs}ms' : ''}',
+                                                      style: TextStyle(fontSize: 10, color: colors.onSurfaceVariant),
+                                                    ),
+                                                ],
+                                              )),
                                               Container(
                                                 padding: const EdgeInsets.symmetric(horizontal: 5, vertical: 1),
                                                 decoration: BoxDecoration(
@@ -1068,7 +1123,7 @@ class _SystemsPageState extends State<SystemsPage> {
                   });
                   if (ctx.mounted) {
                     Navigator.pop(ctx);
-                    ScaffoldMessenger.of(context).showSnackBar(
+                    ScaffoldMessenger.of(ctx).showSnackBar(
                       SnackBar(content: Text('Deployed "${nameCtrl.text.trim()}" successfully!')),
                     );
                   }

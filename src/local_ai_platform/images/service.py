@@ -23,8 +23,40 @@ logger = logging.getLogger("local_ai_platform.images")
 # ── Suppress noisy third-party warnings ──
 import warnings
 warnings.filterwarnings("ignore", message=".*_check_is_size.*", category=FutureWarning)
-warnings.filterwarnings("ignore", message=".*torch_dtype.*is deprecated.*", category=FutureWarning)
-warnings.filterwarnings("ignore", message=".*add_prefix_space.*", category=FutureWarning)
+warnings.filterwarnings("ignore", message=".*torch_dtype.*is deprecated.*")
+warnings.filterwarnings("ignore", message=".*add_prefix_space.*")
+warnings.filterwarnings("ignore", message=".*torch.jit.script.*is deprecated.*", category=DeprecationWarning)
+warnings.filterwarnings("ignore", message=".*__array__.*copy keyword.*", category=DeprecationWarning)
+warnings.filterwarnings("ignore", message=".*Attention backends are an experimental.*")
+warnings.filterwarnings("ignore", message=".*not expected by.*and will be ignored.*")
+warnings.filterwarnings("ignore", message=".*torchao.*")
+
+# Suppress the torchao "Unable to import" message which is a print() at import time.
+# Must be done BEFORE diffusers is imported since diffusers triggers it.
+import io as _io, sys as _sys, os as _os, logging as _logging
+_os.environ.setdefault("TRANSFORMERS_VERBOSITY", "error")
+_os.environ.setdefault("DIFFUSERS_VERBOSITY", "error")
+# Suppress torch.distributed "Redirects not supported" warning (fires at torch import time)
+for _td in ("torch", "torch.distributed", "torch.distributed.elastic",
+            "torch.distributed.elastic.multiprocessing",
+            "torch.distributed.elastic.multiprocessing.redirects"):
+    _logging.getLogger(_td).setLevel(_logging.ERROR)
+
+# Suppress torchao "Unable to import" print() by redirecting stderr during import
+_real_stderr = _sys.stderr
+_sys.stderr = _io.StringIO()
+try:
+    import torchao  # noqa: F401 — triggers torch import + torchao print
+except ImportError:
+    pass
+_sys.stderr = _real_stderr
+for _noisy_logger in (
+    "diffusers", "diffusers.loaders.single_file_utils",
+    "diffusers.models.attention_processor", "diffusers.models.modeling_utils",
+    "transformers.tokenization_utils_base", "transformers.convert_slow_tokenizer",
+    "torchao", "torch.distributed", "torch.distributed.elastic",
+):
+    _logging.getLogger(_noisy_logger).setLevel(_logging.ERROR)
 
 # ── Fix Triton MSVC discovery on Windows ──────────────────────────
 # Triton's get_cc() uses find_msvc(env_only=True) which only checks env vars.
@@ -1617,11 +1649,23 @@ def _controlnet_worker(payload: dict[str, Any], out_q: Any) -> None:
 
 
 def _diffusers_worker(payload: dict[str, Any], out_q: Any) -> None:
-    # Suppress noisy deprecation warnings in the worker subprocess
+    # ── Suppress ALL noisy warnings in the worker subprocess ──
+    # These come from diffusers, transformers, torchao via both warnings.warn() AND logger/print
     import warnings as _w
     _w.filterwarnings("ignore", message=".*torch_dtype.*is deprecated.*")
     _w.filterwarnings("ignore", message=".*add_prefix_space.*")
     _w.filterwarnings("ignore", message=".*_check_is_size.*", category=FutureWarning)
+    _w.filterwarnings("ignore", message=".*Attention backends are an experimental.*")
+    _w.filterwarnings("ignore", message=".*not expected by.*and will be ignored.*")
+    _w.filterwarnings("ignore", message=".*torchao.*")
+    _w.filterwarnings("ignore", message=".*Redirects are currently not supported.*")
+
+    import logging as _logging
+    # Suppress logger-based warnings (these bypass warnings module)
+    _logging.getLogger("diffusers").setLevel(_logging.ERROR)
+    _logging.getLogger("transformers").setLevel(_logging.ERROR)
+    _logging.getLogger("torchao").setLevel(_logging.ERROR)
+    _logging.getLogger("torch.distributed").setLevel(_logging.ERROR)
 
     started = time.time()
     stage = "bootstrap"
@@ -1656,6 +1700,22 @@ def _diffusers_worker(payload: dict[str, Any], out_q: Any) -> None:
     try:
         import os
 
+        # Suppress import-time messages from torch/diffusers/torchao BEFORE importing them.
+        # These use print() or logging at import time, so env vars are the only way.
+        os.environ["TRANSFORMERS_VERBOSITY"] = "error"
+        os.environ["DIFFUSERS_VERBOSITY"] = "error"
+        os.environ["TOKENIZERS_PARALLELISM"] = "false"
+        os.environ["TORCH_DISTRIBUTED_DEBUG"] = "OFF"
+        # Suppress the torchao "Unable to import" message (printed at import time)
+        import io as _io, sys as _sys
+        _real_stderr = _sys.stderr
+        _sys.stderr = _io.StringIO()
+        try:
+            import torchao  # noqa: F401 — trigger the import so the message is swallowed
+        except ImportError:
+            pass
+        _sys.stderr = _real_stderr
+
         # Set thread-count env vars BEFORE importing torch/numpy.
         # These control OpenMP / MKL / oneDNN thread pools that torch
         # uses for CPU inference.  torch.set_num_threads() alone is not
@@ -1677,6 +1737,12 @@ def _diffusers_worker(payload: dict[str, Any], out_q: Any) -> None:
             if _msvc_env:
                 for _k, _v in _msvc_env.items():
                     os.environ[_k] = _v
+
+        # Suppress torch.distributed redirects warning on Windows
+        for _td_name in ("torch.distributed", "torch.distributed.elastic",
+                         "torch.distributed.elastic.multiprocessing",
+                         "torch.distributed.elastic.multiprocessing.redirects"):
+            _logging.getLogger(_td_name).setLevel(_logging.ERROR)
 
         import torch
         from diffusers import AutoPipelineForImage2Image, AutoPipelineForText2Image, AutoPipelineForInpainting
@@ -4633,6 +4699,11 @@ class ImageGenerationService:
             if size is not None and size < 50 * 1024 * 1024:  # < 50 MB = metadata only
                 continue
 
+            # Skip models that are only for the editor (not for generation)
+            _editor_only_ids = {"timbrooks/instruct-pix2pix", "diffusers/sdxl-instructpix2pix-768"}
+            if model_id.lower() in _editor_only_ids:
+                continue
+
             # Check if this is a diffusers image model or component
             det = self._detect_local_model_type(snapshot)
             is_standalone = bool(det.get("loadable_for_images"))
@@ -4656,6 +4727,13 @@ class ImageGenerationService:
                 "loadable_for_images": is_standalone,
                 "explanation": det.get("explanation"),
             }
+            # Skip single-file repos without model_index.json (can't use AutoPipeline)
+            if is_standalone and not (snapshot / "model_index.json").exists():
+                # Check if it's a single .safetensors — needs special handling
+                safetensors = list(snapshot.glob("*.safetensors"))
+                if safetensors and not (snapshot / "model_index.json").exists():
+                    continue  # Can't auto-load, skip
+
             if is_standalone:
                 entry["supported_features"] = {"text2img": True, "img2img": True, "inpaint": False}
                 # Enrich with model family hints for categorization

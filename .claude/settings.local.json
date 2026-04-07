@@ -87,7 +87,10 @@
       "Bash(ls C:/AI/Local_AI_Langchain_Platform/data/*.log)",
       "Bash(.venv/Scripts/python.exe -c \"import ast; ast.parse\\(open\\(''src/local_ai_platform/images/service.py'', encoding=''utf-8''\\).read\\(\\)\\); print\\(''Syntax OK''\\)\")",
       "Bash(mv tools.py tools_old.py)",
-      "Bash(mkdir -p tools)"
+      "Bash(mkdir -p tools)",
+      "Bash(grep -c \"import ''dart:async''\" lib/pages/editor_page.dart)",
+      "Bash(grep -c \"import ''dart:convert''\" lib/pages/editor_page.dart)",
+      "Bash(grep -c \"import ''dart:typed_data''\" lib/pages/editor_page.dart)"
     ]
   }
 }

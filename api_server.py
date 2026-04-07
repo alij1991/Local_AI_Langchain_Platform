@@ -20,6 +20,7 @@ from typing import Any
 from fastapi import FastAPI, HTTPException, Query, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, StreamingResponse
+from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
 from local_ai_platform.config import load_config
@@ -208,6 +209,12 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+# Serve static files (avatar HTML, etc.)
+from pathlib import Path as _StaticPath
+_static_dir = _StaticPath("static")
+if _static_dir.exists():
+    app.mount("/static", StaticFiles(directory="static"), name="static")
 
 
 # ── Request logging middleware ───────────────────────────────────
@@ -3440,10 +3447,12 @@ async def get_system_templates():
 
 
 @app.post("/systems/deploy/{template_id}")
-async def deploy_system_template(template_id: str, body: dict[str, Any] = {}):
+async def deploy_system_template(template_id: str, body: dict[str, Any] | None = None):
     """Deploy a system template as a new agent."""
     if not orchestrator:
         raise HTTPException(503, "Not initialized")
+    if body is None:
+        body = {}
 
     from local_ai_platform.system_templates import get_template
     template = get_template(template_id)
@@ -3535,9 +3544,17 @@ async def create_system(body: dict[str, Any]):
     return upsert_system(name, definition)
 
 
-@app.post("/systems/{name}")
-async def save_system(name: str, definition: dict):
-    return upsert_system(name, definition)
+@app.put("/systems/{name}")
+async def save_system(name: str, body: dict[str, Any]):
+    return upsert_system(name, body.get("definition", body))
+
+
+@app.get("/systems/{name}")
+async def get_single_system(name: str):
+    system = get_system(name)
+    if not system:
+        raise HTTPException(404, f"System '{name}' not found")
+    return system
 
 
 @app.post("/systems/{name}/chat")
@@ -3545,9 +3562,20 @@ async def chat_with_system(name: str, request: Request):
     """Execute a system's agent graph with a user message."""
     if not orchestrator:
         raise HTTPException(503, "Not initialized")
-    body = await request.json()
-    message = body.get("message", "")
-    conv_id = body.get("conversation_id")
+
+    # Handle both JSON and multipart form data
+    content_type = request.headers.get("content-type", "")
+    if "multipart" in content_type:
+        form = await request.form()
+        message = form.get("message", "")
+        conv_id = form.get("conversation_id")
+    else:
+        body = await request.json()
+        message = body.get("message", "")
+        conv_id = body.get("conversation_id")
+
+    if not message:
+        raise HTTPException(400, "message is required")
 
     system = get_system(name)
     if not system:
@@ -3564,22 +3592,487 @@ async def chat_with_system(name: str, request: Request):
         raise HTTPException(500, f"System execution failed: {exc}")
 
 
+@app.post("/systems/{name}/clone")
+async def clone_system(name: str, body: dict[str, Any] = None):
+    """Clone a system with a new name."""
+    system = get_system(name)
+    if not system:
+        raise HTTPException(404, f"System '{name}' not found")
+    new_name = (body or {}).get("new_name", f"{name}_copy")
+    definition = system.get("definition_json", system.get("definition", {}))
+    if isinstance(definition, str):
+        definition = json.loads(definition)
+    return upsert_system(new_name, definition)
+
+
+@app.get("/systems/{name}/export")
+async def export_system(name: str):
+    """Export a system as a JSON download."""
+    system = get_system(name)
+    if not system:
+        raise HTTPException(404, f"System '{name}' not found")
+    definition = system.get("definition_json", system.get("definition", {}))
+    if isinstance(definition, str):
+        definition = json.loads(definition)
+    export = {"name": name, "definition": definition, "exported_at": system.get("updated_at")}
+    from fastapi.responses import Response
+    return Response(
+        content=json.dumps(export, indent=2),
+        media_type="application/json",
+        headers={"Content-Disposition": f'attachment; filename="{name}.json"'},
+    )
+
+
+@app.post("/systems/import")
+async def import_system(body: dict[str, Any]):
+    """Import a system from exported JSON."""
+    name = body.get("name", "")
+    definition = body.get("definition", {})
+    if not name:
+        raise HTTPException(400, "name is required in import data")
+    return upsert_system(name, definition)
+
+
 @app.delete("/systems/{name}")
 async def remove_system(name: str):
     delete_system(name)
     return {"status": "deleted"}
 
 
-# ── Prompt Drafts ─────────────────────────────────────────────────
+# ── AI Partner ────────────────────────────────────────────────────
 
-@app.get("/prompt_drafts")
-async def get_prompt_drafts(limit: int = 50):
-    """Return saved prompt drafts."""
+_partner_engine = None
+
+def _get_partner():
+    global _partner_engine
+    if _partner_engine is None:
+        from local_ai_platform.partner.engine import PartnerEngine
+        _partner_engine = PartnerEngine(router, config)
+    return _partner_engine
+
+
+@app.get("/partner/profile")
+async def partner_get_profile():
+    return _get_partner().get_profile()
+
+
+@app.put("/partner/profile")
+async def partner_update_profile(body: dict[str, Any]):
+    return _get_partner().update_profile(body)
+
+
+@app.get("/partner/stats")
+async def partner_stats():
+    return _get_partner().get_stats()
+
+
+@app.get("/partner/memories")
+async def partner_memories():
+    return _get_partner().get_memories()
+
+
+@app.post("/partner/memories/facts")
+async def partner_add_fact(body: dict[str, Any]):
+    _get_partner().add_fact(body.get("key", ""), body.get("value", ""), body.get("category", "general"))
+    return {"status": "ok"}
+
+
+@app.delete("/partner/memories/facts/{key}")
+async def partner_remove_fact(key: str):
+    _get_partner().remove_fact(key)
+    return {"status": "ok"}
+
+
+@app.post("/partner/memories/key")
+async def partner_add_memory(body: dict[str, Any]):
+    mid = _get_partner().add_memory(body.get("content", ""), body.get("tone", "neutral"), body.get("importance", 5))
+    return {"id": mid}
+
+
+@app.delete("/partner/memories/key/{memory_id}")
+async def partner_remove_memory(memory_id: int):
+    _get_partner().remove_memory(memory_id)
+    return {"status": "ok"}
+
+
+@app.post("/partner/chat")
+async def partner_chat_sync(body: dict[str, Any]):
+    message = body.get("message", "")
+    model = body.get("model")
+    if not message:
+        raise HTTPException(400, "message is required")
+    reply = _get_partner().chat(message, model)
+    return {"reply": reply}
+
+
+@app.post("/partner/chat/stream")
+async def partner_chat_stream(body: dict[str, Any]):
+    """SSE streaming partner chat with typed events.
+
+    Events: thinking_pause, token, sentence_complete, done, error
+    """
+    partner = _get_partner()
+    message = body.get("message", "")
+    model = body.get("model")
+    enable_pause = body.get("thinking_pause", True)
+    if not message:
+        raise HTTPException(400, "message is required")
+
+    async def stream_gen():
+        yield f"event: start\ndata: {json.dumps({'partner': partner.profile.name})}\n\n"
+        try:
+            async for event in partner.astream_chat(message, model, enable_thinking_pause=enable_pause):
+                etype = event.get("type", "")
+                if etype == "thinking_pause":
+                    yield f"event: thinking\ndata: {json.dumps({'duration_ms': event.get('duration_ms', 0)})}\n\n"
+                elif etype == "emotion":
+                    yield f"event: emotion\ndata: {json.dumps({'emotion': event.get('emotion', 'neutral')})}\n\n"
+                elif etype == "token":
+                    yield f"event: token\ndata: {json.dumps({'text': event.get('text', '')})}\n\n"
+                elif etype == "sentence_complete":
+                    yield f"event: sentence\ndata: {json.dumps({'sentence': event.get('sentence', '')})}\n\n"
+                elif etype == "done":
+                    yield f"event: end\ndata: {json.dumps({'full_reply': event.get('full_reply', '')[:200]})}\n\n"
+        except Exception as exc:
+            yield f"event: error\ndata: {json.dumps({'error': str(exc)})}\n\n"
+
+    return StreamingResponse(stream_gen(), media_type="text/event-stream")
+
+
+@app.get("/partner/history")
+async def partner_history(limit: int = 50):
+    from local_ai_platform.partner.memory import get_recent_messages
+    return {"messages": get_recent_messages(limit)}
+
+
+@app.get("/partner/user-profile")
+async def partner_user_profile():
+    """Return the full user profile (profile dashboard)."""
+    return _get_partner().get_user_profile()
+
+
+@app.delete("/partner/user-profile")
+async def partner_reset_user_profile():
+    """One-click profile reset (ethical requirement from research)."""
+    return _get_partner().reset_user_profile()
+
+
+@app.post("/partner/voice/init")
+async def partner_voice_init():
+    """Initialize voice pipeline (ASR + TTS + VAD)."""
+    return _get_partner().init_voice()
+
+
+@app.get("/partner/voice/status")
+async def partner_voice_status():
+    return _get_partner().get_voice_status()
+
+
+@app.post("/partner/voice/synthesize-sentence")
+async def partner_voice_synthesize_sentence(body: dict[str, Any]):
+    """Synthesize a single sentence — for streaming TTS during chat."""
+    sentence = body.get("sentence", body.get("text", ""))
+    emotion = body.get("emotion", "neutral")
+    if not sentence:
+        raise HTTPException(400, "sentence is required")
+    wav_bytes = await asyncio.get_event_loop().run_in_executor(
+        None, _get_partner().synthesize_sentence, sentence, emotion
+    )
+    if wav_bytes is None:
+        raise HTTPException(422, "TTS not available")
+    from fastapi.responses import Response
+    return Response(content=wav_bytes, media_type="audio/wav")
+
+
+@app.post("/partner/voice/mode")
+async def partner_voice_mode(body: dict[str, Any]):
+    """Switch TTS mode: 'kokoro' (fast, CPU) or 'chatterbox' (emotional, GPU/CPU)."""
+    mode = body.get("mode", "kokoro")
+    result = _get_partner().set_tts_mode(mode)
+    return {"status": result, "mode": _get_partner()._tts_mode}
+
+
+@app.post("/partner/voice/transcribe")
+async def partner_voice_transcribe(body: dict[str, Any]):
+    """Transcribe audio to text via faster-whisper."""
+    audio_path = body.get("audio_path", "")
+    if not audio_path:
+        raise HTTPException(400, "audio_path is required")
     try:
-        from local_ai_platform.repositories.prompt_drafts import list_prompt_drafts
-        return {"items": list_prompt_drafts(limit=limit)}
-    except Exception:
-        return {"items": []}
+        text = _get_partner().transcribe(audio_path)
+        return {"text": text}
+    except RuntimeError as e:
+        raise HTTPException(422, str(e))
+
+
+@app.post("/partner/voice/synthesize")
+async def partner_voice_synthesize(body: dict[str, Any]):
+    """Synthesize text to speech via Kokoro TTS. Returns WAV audio."""
+    text = body.get("text", "")
+    voice = body.get("voice")
+    emotion = body.get("emotion", "neutral")
+    if not text:
+        raise HTTPException(400, "text is required")
+    wav_bytes = _get_partner().synthesize(text, voice=voice, emotion=emotion)
+    if wav_bytes is None:
+        raise HTTPException(422, "TTS not available. Call /partner/voice/init first.")
+    from fastapi.responses import Response
+    return Response(content=wav_bytes, media_type="audio/wav")
+
+
+@app.post("/partner/voice/chat")
+async def partner_voice_chat(body: dict[str, Any]):
+    """Full voice loop: text message → LLM reply → TTS audio.
+
+    Accepts text (already transcribed by client) and returns both
+    the text reply and the synthesized audio as base64 WAV.
+    """
+    partner = _get_partner()
+    message = body.get("message", "")
+    voice = body.get("voice", "af_heart")
+    model = body.get("model")
+    if not message:
+        raise HTTPException(400, "message is required")
+
+    # Get text reply from LLM (emotion tag extracted internally)
+    reply = partner.chat(message, model)
+
+    # Use the emotion extracted from the LLM's [HAPPY]/[SAD] tag (most accurate)
+    emotion = partner._last_detected_emotion
+
+    # Synthesize reply with emotion-matched voice
+    audio_b64 = None
+    used_voice = voice
+    if partner._tts is not None or partner._tts_emotional is not None:
+        wav_bytes = partner.synthesize(reply, voice=None, emotion=emotion)
+        used_voice = partner._get_voice_for_emotion(emotion)
+        if wav_bytes:
+            import base64
+            audio_b64 = base64.b64encode(wav_bytes).decode("ascii")
+
+    return {
+        "reply": reply,
+        "audio_base64": audio_b64,
+        "voice": used_voice,
+        "emotion": emotion,
+        "has_audio": audio_b64 is not None,
+    }
+
+
+@app.post("/partner/voice/upload")
+async def partner_voice_upload(request: Request):
+    """Upload audio file for transcription + chat + TTS response.
+
+    Full pipeline: audio upload → ASR → LLM → TTS → audio response.
+    """
+    partner = _get_partner()
+
+    # Read raw audio bytes from request body
+    body = await request.body()
+    if not body:
+        raise HTTPException(400, "No audio data")
+
+    # Save to temp file for faster-whisper
+    import tempfile, os
+    with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as f:
+        f.write(body)
+        temp_path = f.name
+
+    try:
+        # ASR: transcribe
+        if partner._asr is None:
+            partner.init_voice()
+        if partner._asr is None:
+            raise HTTPException(422, "ASR not available. Install faster-whisper.")
+
+        user_text = partner.transcribe(temp_path)
+        if not user_text.strip():
+            return {"user_text": "", "reply": "", "has_audio": False}
+
+        # LLM: generate reply (emotion tag extracted internally)
+        reply = partner.chat(user_text)
+        emotion = partner._last_detected_emotion
+
+        # TTS: synthesize with emotion-matched voice
+        audio_b64 = None
+        if partner._tts is not None or partner._tts_emotional is not None:
+            wav_bytes = partner.synthesize(reply, voice=None, emotion=emotion)
+            if wav_bytes:
+                import base64
+                audio_b64 = base64.b64encode(wav_bytes).decode("ascii")
+
+        return {
+            "user_text": user_text,
+            "reply": reply,
+            "audio_base64": audio_b64,
+            "has_audio": audio_b64 is not None,
+        }
+    finally:
+        os.unlink(temp_path)
+
+
+# ── Image Editor ──────────────────────────────────────────────────
+
+_editor_service = None
+
+def _get_editor():
+    global _editor_service
+    if _editor_service is None:
+        from local_ai_platform.images.editor import ImageEditorService
+        _editor_service = ImageEditorService()
+    return _editor_service
+
+
+@app.post("/editor/enhance-prompt")
+async def editor_enhance_prompt(body: dict[str, Any]):
+    """Enhance an image editing instruction for better InstructPix2Pix results."""
+    instruction = body.get("instruction", "")
+    if not instruction:
+        raise HTTPException(400, "instruction is required")
+    from local_ai_platform.images.ai_enhance import enhance_edit_prompt
+    import asyncio
+    loop = asyncio.get_event_loop()
+    try:
+        enhanced = await loop.run_in_executor(
+            None, lambda: enhance_edit_prompt(instruction, router=router, config=config)
+        )
+    except Exception as e:
+        logger.error("enhance-prompt failed: %s", e)
+        raise HTTPException(500, f"Prompt enhancement failed: {e}")
+    return {"original": instruction, "enhanced": enhanced}
+
+
+@app.get("/editor/operations/list")
+async def editor_list_operations():
+    """List all available edit operations (classical + AI + CV composite) with status."""
+    return {"operations": _get_editor().get_available_operations()}
+
+
+@app.post("/editor/{session_id}/analyze")
+async def editor_analyze(session_id: str):
+    """Analyze image quality and get AI-powered tool suggestions."""
+    editor = _get_editor()
+    session = editor.get_session(session_id)
+    if not session:
+        raise HTTPException(404, "Session not found")
+    from local_ai_platform.images.ai_models import analyze_image_quality
+    from PIL import Image
+    image = Image.open(session["current_path"])
+    return analyze_image_quality(image)
+
+
+@app.post("/editor/open")
+async def editor_open(body: dict[str, Any]):
+    """Open an image for editing. Accepts image_path, or session_id + image_id from generation."""
+    editor = _get_editor()
+    image_path = body.get("image_path", "")
+    source_type = body.get("source_type", "file")
+    source_session_id = body.get("source_session_id")
+    source_image_id = body.get("source_image_id")
+
+    if not image_path:
+        raise HTTPException(400, "image_path is required")
+
+    try:
+        return editor.open_image(image_path, source_type, source_session_id, source_image_id)
+    except FileNotFoundError as e:
+        raise HTTPException(404, str(e))
+
+
+@app.get("/editor/files/{session_id}/{filename}")
+async def editor_serve_file(session_id: str, filename: str):
+    """Serve editor image files."""
+    # Security: prevent path traversal
+    if ".." in session_id or "/" in session_id or "\\" in session_id:
+        raise HTTPException(400, "Invalid session ID")
+    if ".." in filename or "/" in filename or "\\" in filename:
+        raise HTTPException(400, "Invalid filename")
+    file_path = Path(f"data/images/editor/{session_id}/{filename}")
+    # Double-check resolved path is within editor directory
+    editor_root = Path("data/images/editor").resolve()
+    if not file_path.resolve().is_relative_to(editor_root):
+        raise HTTPException(400, "Invalid path")
+    if not file_path.exists():
+        raise HTTPException(404, "File not found")
+    # Detect media type from extension
+    suffix = file_path.suffix.lower()
+    media_types = {".png": "image/png", ".jpg": "image/jpeg", ".jpeg": "image/jpeg", ".webp": "image/webp"}
+    media_type = media_types.get(suffix, "image/png")
+    return FileResponse(str(file_path), media_type=media_type)
+
+
+@app.get("/editor/{session_id}")
+async def editor_get_session(session_id: str):
+    editor = _get_editor()
+    session = editor.get_session(session_id)
+    if not session:
+        raise HTTPException(404, f"Editor session '{session_id}' not found")
+    return session
+
+
+@app.delete("/editor/{session_id}")
+async def editor_close(session_id: str):
+    _get_editor().close_session(session_id)
+    return {"status": "closed"}
+
+
+@app.post("/editor/{session_id}/edit")
+async def editor_apply_edit(session_id: str, body: dict[str, Any]):
+    """Apply an edit operation. Body: {operation: str, params: {}}"""
+    editor = _get_editor()
+    operation = body.get("operation", "")
+    params = body.get("params", {})
+
+    if not operation:
+        raise HTTPException(400, "operation is required")
+
+    try:
+        return await asyncio.get_event_loop().run_in_executor(
+            None, editor.apply_edit, session_id, operation, params
+        )
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+    except RuntimeError as e:
+        raise HTTPException(422, str(e))
+
+
+@app.post("/editor/{session_id}/undo")
+async def editor_undo(session_id: str):
+    try:
+        return _get_editor().undo(session_id)
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+
+
+@app.post("/editor/{session_id}/redo")
+async def editor_redo(session_id: str):
+    try:
+        return _get_editor().redo(session_id)
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+
+
+@app.get("/editor/{session_id}/history")
+async def editor_history(session_id: str):
+    return {"steps": _get_editor().get_history(session_id)}
+
+
+@app.get("/editor/{session_id}/compare")
+async def editor_compare(session_id: str, a: int = -1, b: int = -1):
+    try:
+        return _get_editor().compare(session_id, a, b)
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+
+
+@app.post("/editor/{session_id}/export")
+async def editor_export(session_id: str, body: dict[str, Any]):
+    fmt = body.get("format", "PNG")
+    quality = body.get("quality", 95)
+    try:
+        return _get_editor().export(session_id, fmt, quality)
+    except ValueError as e:
+        raise HTTPException(400, str(e))
 
 
 # ── Images ────────────────────────────────────────────────────────

@@ -28,6 +28,7 @@ def run_python(code: str, timeout: int = 30) -> str:
     """Execute Python code in a sandboxed subprocess."""
     timeout = min(timeout, 60)
     WORKSPACE_ROOT.mkdir(parents=True, exist_ok=True)
+    tmp_path = None
 
     try:
         with tempfile.NamedTemporaryFile(
@@ -62,10 +63,11 @@ def run_python(code: str, timeout: int = 30) -> str:
     except Exception as e:
         return f"Error executing Python code: {e}"
     finally:
-        try:
-            os.unlink(tmp_path)
-        except Exception:
-            pass
+        if tmp_path:
+            try:
+                os.unlink(tmp_path)
+            except Exception:
+                pass
 
 
 def run_shell(command: str, timeout: int = 15) -> str:

@@ -906,76 +906,129 @@ Guidelines:
     ) -> dict[str, Any]:
         """Execute a system graph designed in the visual graph editor.
 
-        Parses the nodes/edges from the system definition, topologically sorts
-        them, and executes each agent sequentially, passing prior outputs as context.
+        Supports edge routing rules:
+        - "always": always follow this edge
+        - "on_keyword_match": follow if output contains a keyword (from edge notes)
+        - "on_tool_result": follow if a tool was called (checks for tool markers)
+        - "manual_next": always follow (same as always, user controls via graph)
+
+        Returns timing data and tool call info in trace.
         """
+        import time as _time
+
         nodes = system_definition.get("nodes", [])
         edges = system_definition.get("edges", [])
-        start_node_id = system_definition.get("startNodeId")
+        start_node_id = system_definition.get("start_node_id") or system_definition.get("startNodeId")
 
         if not nodes:
             return {"final_text": "System has no agent nodes.", "node_outputs": []}
 
-        # Build adjacency list and find start node
+        # Build graph structures
         node_map = {n["id"]: n for n in nodes}
-        adj: dict[str, list[str]] = {n["id"]: [] for n in nodes}
+        # Edges with routing rules: {source: [(target, rule_type, notes)]}
+        edge_map: dict[str, list[tuple[str, str, str]]] = {n["id"]: [] for n in nodes}
         in_degree: dict[str, int] = {n["id"]: 0 for n in nodes}
         for e in edges:
             src, tgt = e.get("source"), e.get("target")
-            if src in adj and tgt in adj:
-                adj[src].append(tgt)
+            rule = e.get("rule", {}) if isinstance(e.get("rule"), dict) else {}
+            rule_type = rule.get("type", e.get("ruleType", "always"))
+            rule_notes = rule.get("notes", e.get("notes", ""))
+            if src in edge_map and tgt in node_map:
+                edge_map[src].append((tgt, rule_type, rule_notes))
                 in_degree[tgt] = in_degree.get(tgt, 0) + 1
 
-        # Topological sort (BFS / Kahn's)
+        # Find start node
         if start_node_id and start_node_id in node_map:
-            queue = [start_node_id]
+            current_nodes = [start_node_id]
         else:
-            queue = [nid for nid, deg in in_degree.items() if deg == 0]
-        order: list[str] = []
-        visited = set()
-        while queue:
-            nid = queue.pop(0)
-            if nid in visited:
-                continue
-            visited.add(nid)
-            order.append(nid)
-            for child in adj.get(nid, []):
-                in_degree[child] -= 1
-                if in_degree[child] <= 0 and child not in visited:
-                    queue.append(child)
-        # Add any unvisited nodes (disconnected)
-        for n in nodes:
-            if n["id"] not in visited:
-                order.append(n["id"])
+            current_nodes = [nid for nid, deg in in_degree.items() if deg == 0]
+            if not current_nodes:
+                current_nodes = [nodes[0]["id"]]
 
-        # Execute each node's agent sequentially
+        # Execute graph with routing
         run_id = str(uuid.uuid4())
+        total_start = _time.monotonic()
         node_outputs: list[dict[str, Any]] = []
         accumulated_context = ""
+        visited: set[str] = set()
+        max_steps = len(nodes) * 2  # prevent infinite loops
 
-        for nid in order:
-            node_def = node_map.get(nid)
-            if not node_def:
-                continue
-            agent_name = node_def.get("agent", "")
-            if not agent_name or agent_name not in self.definitions:
-                node_outputs.append({"node": nid, "agent": agent_name, "text": f"(agent '{agent_name}' not found)", "status": "skipped"})
-                continue
+        step = 0
+        while current_nodes and step < max_steps:
+            step += 1
+            next_nodes: list[str] = []
 
-            # Build prompt with accumulated context from prior nodes
-            if accumulated_context:
-                prompt = f"{user_input}\n\nContext from prior agents:\n{accumulated_context}"
-            else:
-                prompt = user_input
+            for nid in current_nodes:
+                if nid in visited:
+                    continue
+                visited.add(nid)
 
-            try:
-                output = self.chat_with_agent(agent_name, prompt)
-                node_outputs.append({"node": nid, "agent": agent_name, "text": output, "status": "ok"})
-                role = node_def.get("role", "")
-                accumulated_context += f"\n[{agent_name} ({role})]: {output}\n"
-            except Exception as exc:
-                node_outputs.append({"node": nid, "agent": agent_name, "text": str(exc), "status": "error"})
+                node_def = node_map.get(nid)
+                if not node_def:
+                    continue
 
+                agent_name = node_def.get("agent", "")
+                role = (node_def.get("config") or {}).get("role", node_def.get("role", ""))
+
+                if not agent_name or agent_name not in self.definitions:
+                    node_outputs.append({
+                        "node": nid, "agent": agent_name, "role": role,
+                        "text": f"(agent '{agent_name}' not found)", "status": "skipped",
+                        "duration_ms": 0,
+                    })
+                    continue
+
+                # Build prompt
+                if accumulated_context:
+                    prompt = f"{user_input}\n\nContext from prior agents:\n{accumulated_context}"
+                else:
+                    prompt = user_input
+
+                # Execute
+                node_start = _time.monotonic()
+                try:
+                    output = self.chat_with_agent(agent_name, prompt)
+                    duration_ms = int((_time.monotonic() - node_start) * 1000)
+                    node_outputs.append({
+                        "node": nid, "agent": agent_name, "role": role,
+                        "text": output, "status": "ok",
+                        "duration_ms": duration_ms,
+                    })
+                    accumulated_context += f"\n[{agent_name} ({role})]: {output}\n"
+                except Exception as exc:
+                    duration_ms = int((_time.monotonic() - node_start) * 1000)
+                    node_outputs.append({
+                        "node": nid, "agent": agent_name, "role": role,
+                        "text": str(exc), "status": "error",
+                        "duration_ms": duration_ms,
+                    })
+                    output = str(exc)
+
+                # Evaluate edge routing rules to determine next nodes
+                for target, rule_type, rule_notes in edge_map.get(nid, []):
+                    if target in visited:
+                        continue
+
+                    should_follow = False
+                    if rule_type in ("always", "manual_next"):
+                        should_follow = True
+                    elif rule_type == "on_keyword_match":
+                        # Follow if output contains any keyword from the edge notes
+                        keywords = [k.strip().lower() for k in rule_notes.split(",") if k.strip()]
+                        output_lower = output.lower()
+                        should_follow = any(kw in output_lower for kw in keywords) if keywords else True
+                    elif rule_type == "on_tool_result":
+                        # Follow if output suggests a tool was used
+                        should_follow = any(marker in output for marker in ["Tool", "tool", "Result:", "```"])
+                    else:
+                        should_follow = True  # unknown rule = always follow
+
+                    if should_follow and target not in next_nodes:
+                        next_nodes.append(target)
+
+            current_nodes = next_nodes
+
+        total_ms = int((_time.monotonic() - total_start) * 1000)
         final_text = node_outputs[-1]["text"] if node_outputs else "No output produced."
 
         return {
@@ -983,6 +1036,8 @@ Guidelines:
             "node_outputs": node_outputs,
             "conversation_id": conversation_id,
             "run_id": run_id,
+            "total_duration_ms": total_ms,
+            "nodes_executed": len(node_outputs),
         }
 
     # ── Helpers ────────────────────────────────────────────────────

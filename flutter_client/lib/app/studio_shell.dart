@@ -2,11 +2,12 @@ import 'package:flutter/material.dart';
 import 'package:local_ai_flutter_client/pages/agents_page.dart';
 import 'package:local_ai_flutter_client/pages/chat_page.dart';
 import 'package:local_ai_flutter_client/pages/models_page.dart';
-import 'package:local_ai_flutter_client/pages/prompt_builder_page.dart';
 import 'package:local_ai_flutter_client/pages/tools_page.dart';
 import 'package:local_ai_flutter_client/pages/systems_page.dart';
 import 'package:local_ai_flutter_client/pages/images_page.dart';
 import 'package:local_ai_flutter_client/pages/runs_page.dart';
+import 'package:local_ai_flutter_client/pages/editor_page.dart';
+import 'package:local_ai_flutter_client/pages/partner_page.dart';
 import 'package:local_ai_flutter_client/services/api_client.dart';
 
 class StudioShell extends StatefulWidget {
@@ -26,13 +27,14 @@ class _StudioShellState extends State<StudioShell> {
   void initState() {
     super.initState();
     _pages = [
+      PartnerPage(api: api),
       ChatPage(api: api),
       ModelsPage(api: api),
       AgentsPage(api: api),
-      PromptBuilderPage(api: api),
       ToolsPage(api: api),
       SystemsPage(api: api),
       ImagesPage(api: api),
+      EditorPage(api: api),
       RunsPage(api: api),
     ];
   }
@@ -47,13 +49,14 @@ class _StudioShellState extends State<StudioShell> {
             onDestinationSelected: (i) => setState(() => _selectedIndex = i),
             labelType: NavigationRailLabelType.all,
             destinations: const [
+              NavigationRailDestination(icon: Icon(Icons.favorite), label: Text('Partner')),
               NavigationRailDestination(icon: Icon(Icons.chat), label: Text('Chat')),
               NavigationRailDestination(icon: Icon(Icons.memory), label: Text('Models')),
               NavigationRailDestination(icon: Icon(Icons.smart_toy), label: Text('Agents')),
-              NavigationRailDestination(icon: Icon(Icons.edit_note), label: Text('Prompt')),
               NavigationRailDestination(icon: Icon(Icons.handyman), label: Text('Tools')),
               NavigationRailDestination(icon: Icon(Icons.account_tree), label: Text('Systems')),
               NavigationRailDestination(icon: Icon(Icons.image), label: Text('Images')),
+              NavigationRailDestination(icon: Icon(Icons.photo_filter), label: Text('Editor')),
               NavigationRailDestination(icon: Icon(Icons.receipt_long), label: Text('Runs')),
             ],
           ),

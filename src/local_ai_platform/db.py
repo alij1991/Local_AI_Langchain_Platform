@@ -160,6 +160,29 @@ CREATE TABLE IF NOT EXISTS memory_store (
     updated_at TEXT NOT NULL,
     PRIMARY KEY (namespace, key)
 );
+
+CREATE TABLE IF NOT EXISTS editor_sessions (
+    id TEXT PRIMARY KEY,
+    source_image_path TEXT NOT NULL,
+    current_image_path TEXT NOT NULL,
+    source_type TEXT,
+    source_session_id TEXT,
+    source_image_id TEXT,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS edit_history (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    session_id TEXT NOT NULL,
+    step_number INTEGER NOT NULL,
+    operation TEXT NOT NULL,
+    params_json TEXT,
+    result_image_path TEXT NOT NULL,
+    duration_ms INTEGER,
+    created_at TEXT NOT NULL,
+    FOREIGN KEY (session_id) REFERENCES editor_sessions(id) ON DELETE CASCADE
+);
 """
 
 
