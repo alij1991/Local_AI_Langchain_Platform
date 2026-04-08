@@ -45,6 +45,10 @@ class _EditorPageState extends State<EditorPage> {
   // Crop
   bool _cropMode = false;
   int _cropX = 0, _cropY = 0, _cropW = 0, _cropH = 0;
+  final _cropXCtrl = TextEditingController(text: '0');
+  final _cropYCtrl = TextEditingController(text: '0');
+  final _cropWCtrl = TextEditingController(text: '0');
+  final _cropHCtrl = TextEditingController(text: '0');
 
   // Track whether the current slider drag has already applied a preview edit
   // so we can undo it before applying the new value (live preview on base image)
@@ -59,6 +63,7 @@ class _EditorPageState extends State<EditorPage> {
   final _instructController = TextEditingController();
   String _instructModel = 'kontext';
   String _bgColor = '#FFFFFF';
+  final _bgColorCtrl = TextEditingController(text: '#FFFFFF');
   // AI Edit advanced controls — model-adaptive defaults
   double _editGuidance = 2.5;
   double _editImageGuidance = 1.5;
@@ -92,6 +97,40 @@ class _EditorPageState extends State<EditorPage> {
   // Debounce for sliders
   DateTime _lastSliderApply = DateTime.now();
 
+  // Descriptive labels for each slider tool
+  static const _toolDescriptions = {
+    'brightness': '1.0 = original. Lower = darker, higher = brighter.',
+    'contrast': '1.0 = original. Lower = flatter, higher = punchier.',
+    'saturation': '0 = grayscale, 1.0 = original, higher = more vivid.',
+    'sharpness': '1.0 = original. Higher = crisper edges.',
+    'color_temperature': '2000K = warm candlelight, 6500K = daylight, 12000K = cool blue.',
+    'hue': 'Shifts all colors around the color wheel. 0 = no change.',
+    'gamma': 'Midtone curve. Lower = brighter midtones, higher = darker.',
+    'blur': 'Gaussian blur radius in pixels. Higher = softer.',
+    'vignette': 'Darkens edges to draw focus to center.',
+    'grain': 'Adds film-like noise texture.',
+    'clarity': 'Positive = punchier local contrast, negative = softer/dreamy.',
+    'vibrance': 'Boosts muted colors more than already-vivid ones.',
+    'skin_smooth': 'Smooths skin while preserving edges. 0 = off, 1.0 = max.',
+    'straighten': 'Rotates to fix tilted horizons. Negative = counter-clockwise.',
+    'portrait_bokeh': 'Blurs background behind detected faces.',
+    'hdr_tone_map': 'Compresses dynamic range to reveal shadow/highlight detail.',
+    'wavelet_denoise': 'Multi-scale noise removal. Preserves edges well.',
+    'tv_denoise': 'Total variation denoising. Good for grain removal.',
+    'deconvolve': 'Reverses slight blur. Higher = stronger correction.',
+    'chromatic_aberration': 'Color fringing at edges. 1.0 = no change.',
+    'lens_distortion': 'Negative = barrel, 0 = none, positive = pincushion.',
+    'median_filter': 'Removes salt-and-pepper noise. Odd kernel sizes only.',
+    'guided_filter': 'Edge-preserving smooth. Lower epsilon = more detail kept.',
+    'laplacian_sharpen': 'Edge enhancement via Laplacian. Stronger than standard sharpen.',
+    'drago_tone_map': 'HDR-to-SDR. Bias controls shadow vs highlight emphasis.',
+    'dehaze': 'Removes atmospheric haze. Higher = more aggressive.',
+    'aces_tone_map': 'Film-industry tone curve. Controls highlight rolloff.',
+    'mantiuk_tone_map': 'Perceptual tone mapping. Saturation controls color intensity.',
+    'denoise': 'Noise reduction strength. Higher = smoother but less detail.',
+    'shadows_highlights': 'Independently adjust shadow and highlight brightness.',
+  };
+
   @override
   void initState() {
     super.initState();
@@ -102,6 +141,11 @@ class _EditorPageState extends State<EditorPage> {
   void dispose() {
     _instructController.dispose();
     _negPromptController.dispose();
+    _cropXCtrl.dispose();
+    _cropYCtrl.dispose();
+    _cropWCtrl.dispose();
+    _cropHCtrl.dispose();
+    _bgColorCtrl.dispose();
     super.dispose();
   }
 
@@ -302,7 +346,10 @@ class _EditorPageState extends State<EditorPage> {
         case 'dehaze': _adjustValue = 0.5; _adjustDefault = 0.5; _adjustMin = 0.0; _adjustMax = 1.0; _adjustLabel = 'Dehaze Strength'; _adjustParam = 'strength';
         case 'aces_tone_map': _adjustValue = 0.6; _adjustDefault = 0.6; _adjustMin = 0.1; _adjustMax = 2.0; _adjustLabel = 'ACES Exposure'; _adjustParam = 'exposure';
         case 'mantiuk_tone_map': _adjustValue = 1.2; _adjustDefault = 1.2; _adjustMin = 0.5; _adjustMax = 2.0; _adjustLabel = 'Mantiuk Saturation'; _adjustParam = 'saturation';
-        case 'crop': _cropMode = true; _cropX = 0; _cropY = 0; _cropW = _imageWidth; _cropH = _imageHeight;
+        case 'crop':
+          _cropMode = true; _cropX = 0; _cropY = 0; _cropW = _imageWidth; _cropH = _imageHeight;
+          _cropXCtrl.text = '0'; _cropYCtrl.text = '0';
+          _cropWCtrl.text = '$_imageWidth'; _cropHCtrl.text = '$_imageHeight';
         default: break;
       }
     });
@@ -706,18 +753,27 @@ class _EditorPageState extends State<EditorPage> {
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
         Text(title, style: const TextStyle(fontWeight: FontWeight.w600)),
+        const SizedBox(height: 4),
+        Text(
+          'Independently adjust shadow and highlight brightness. 0 = no change.',
+          style: TextStyle(fontSize: 11, color: colors.onSurfaceVariant),
+        ),
         const SizedBox(height: 8),
-        Text('Shadows', style: TextStyle(fontSize: 12, color: colors.onSurfaceVariant)),
+        Text('Shadows (${_shadowsValue.round()})', style: TextStyle(fontSize: 12, color: colors.onSurfaceVariant)),
         Slider(
           value: _shadowsValue, min: -100, max: 100, divisions: 200,
           label: _shadowsValue.round().toString(),
           onChanged: (v) => setState(() => _shadowsValue = v),
         ),
-        Text('Highlights', style: TextStyle(fontSize: 12, color: colors.onSurfaceVariant)),
+        Text('Highlights (${_highlightsValue.round()})', style: TextStyle(fontSize: 12, color: colors.onSurfaceVariant)),
         Slider(
           value: _highlightsValue, min: -100, max: 100, divisions: 200,
           label: _highlightsValue.round().toString(),
           onChanged: (v) => setState(() => _highlightsValue = v),
+        ),
+        Text(
+          'Adjust both sliders, then press Apply to preview',
+          style: TextStyle(fontSize: 10, color: colors.onSurfaceVariant, fontStyle: FontStyle.italic),
         ),
         const SizedBox(height: 8),
         Row(children: [
@@ -757,18 +813,12 @@ class _EditorPageState extends State<EditorPage> {
           Text(_adjustLabel, style: const TextStyle(fontWeight: FontWeight.w600)),
           const SizedBox(height: 4),
           Text(
-            _selectedTool == 'portrait_bokeh'
-                ? 'AI depth blur (Depth Anything v2). First run downloads model.'
-                : _selectedTool == 'skin_smooth'
-                    ? 'Guided filter smoothing. Preserves pore detail, 4x faster.'
-                    : _selectedTool == 'clarity'
-                        ? 'Boosts mid-tone contrast for punch and detail.'
-                        : _selectedTool == 'aces_tone_map'
-                            ? 'ACES filmic curve — industry standard (Unreal Engine, VFX).'
-                            : _selectedTool == 'mantiuk_tone_map'
-                                ? 'Perceptual contrast — best for extreme dynamic range.'
-                                : 'Drag to adjust — always relative to base image',
+            _toolDescriptions[_selectedTool] ?? 'Drag to adjust — always relative to base image',
             style: TextStyle(fontSize: 11, color: Theme.of(context).colorScheme.onSurfaceVariant),
+          ),
+          Text(
+            'Default: ${_adjustDefault.toStringAsFixed(1)} (no change)',
+            style: TextStyle(fontSize: 10, color: Theme.of(context).colorScheme.onSurfaceVariant.withValues(alpha: 0.6)),
           ),
           const SizedBox(height: 12),
           Row(children: [
@@ -812,9 +862,15 @@ class _EditorPageState extends State<EditorPage> {
             )),
             const SizedBox(width: 8),
             Expanded(child: FilledButton(
-              onPressed: _busy ? null : () {
-                // Commit: keep the current value and stop previewing
-                _sliderPreviewing = false;
+              onPressed: _busy || !_sliderPreviewing ? null : () {
+                setState(() {
+                  _sliderPreviewing = false;
+                  _adjustValue = _adjustDefault;
+                });
+                ScaffoldMessenger.of(context).showSnackBar(SnackBar(
+                  content: Text('${_adjustLabel.isNotEmpty ? _adjustLabel : _selectedTool ?? 'Adjustment'} committed'),
+                  duration: const Duration(seconds: 1),
+                ));
               },
               child: const Text('Commit'),
             )),
@@ -826,18 +882,46 @@ class _EditorPageState extends State<EditorPage> {
 
     // Crop
     if (_selectedTool == 'crop') {
+      final colors = Theme.of(context).colorScheme;
       return Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
           const Text('Crop', style: TextStyle(fontWeight: FontWeight.w600)),
+          const SizedBox(height: 4),
+          Text('Image: $_imageWidth x $_imageHeight px',
+              style: TextStyle(fontSize: 11, color: colors.onSurfaceVariant)),
           const SizedBox(height: 8),
-          _cropField('X', _cropX, (v) => _cropX = v),
-          _cropField('Y', _cropY, (v) => _cropY = v),
-          _cropField('Width', _cropW, (v) => _cropW = v),
-          _cropField('Height', _cropH, (v) => _cropH = v),
+          // Aspect ratio presets
+          Wrap(spacing: 6, runSpacing: 4, children: [
+            _aspectChip('Free', null),
+            _aspectChip('1:1', 1.0),
+            _aspectChip('4:3', 4 / 3),
+            _aspectChip('3:2', 3 / 2),
+            _aspectChip('16:9', 16 / 9),
+            _aspectChip('2:3', 2 / 3),
+          ]),
+          const SizedBox(height: 8),
+          _cropField('X', _cropXCtrl, (v) { _cropX = v; }),
+          _cropField('Y', _cropYCtrl, (v) { _cropY = v; }),
+          _cropField('Width', _cropWCtrl, (v) { _cropW = v; }),
+          _cropField('Height', _cropHCtrl, (v) { _cropH = v; }),
           const SizedBox(height: 12),
           SizedBox(width: double.infinity, child: FilledButton(
-            onPressed: _busy ? null : () => _applyEdit('crop', {'x': _cropX, 'y': _cropY, 'width': _cropW, 'height': _cropH}),
+            onPressed: _busy ? null : () {
+              if (_cropW <= 0 || _cropH <= 0) {
+                ScaffoldMessenger.of(context).showSnackBar(
+                  const SnackBar(content: Text('Width and height must be positive')),
+                );
+                return;
+              }
+              if (_cropX < 0 || _cropY < 0 || _cropX + _cropW > _imageWidth || _cropY + _cropH > _imageHeight) {
+                ScaffoldMessenger.of(context).showSnackBar(
+                  const SnackBar(content: Text('Crop area exceeds image dimensions')),
+                );
+                return;
+              }
+              _applyEdit('crop', {'x': _cropX, 'y': _cropY, 'width': _cropW, 'height': _cropH});
+            },
             child: const Text('Crop'),
           )),
         ],
@@ -883,7 +967,7 @@ class _EditorPageState extends State<EditorPage> {
           const SizedBox(height: 8),
           TextField(
             decoration: InputDecoration(labelText: 'Background color (hex)', hintText: '#FFFFFF', border: OutlineInputBorder(borderRadius: BorderRadius.circular(8))),
-            controller: TextEditingController(text: _bgColor),
+            controller: _bgColorCtrl,
             onChanged: (v) => _bgColor = v,
           ),
           const SizedBox(height: 8),
@@ -996,7 +1080,16 @@ class _EditorPageState extends State<EditorPage> {
             )),
             const SizedBox(width: 8),
             Expanded(child: FilledButton(
-              onPressed: _busy ? null : () => setState(() => _sliderPreviewing = false),
+              onPressed: _busy || !_sliderPreviewing ? null : () {
+                setState(() {
+                  _sliderPreviewing = false;
+                  _adjustValue = _adjustDefault;
+                });
+                ScaffoldMessenger.of(context).showSnackBar(const SnackBar(
+                  content: Text('Denoise committed'),
+                  duration: Duration(seconds: 1),
+                ));
+              },
               child: const Text('Commit'),
             )),
           ]),
@@ -1374,10 +1467,11 @@ class _EditorPageState extends State<EditorPage> {
             onChanged: (v) => setState(() => _morphOp = v ?? 'open'),
           ),
           const SizedBox(height: 8),
-          Text('Kernel Size: $_morphKsize', style: const TextStyle(fontSize: 12)),
+          Text('Kernel Size: $_morphKsize (odd numbers only)', style: const TextStyle(fontSize: 12)),
           Slider(
             value: _morphKsize.toDouble(), min: 3, max: 15, divisions: 6,
             label: '$_morphKsize',
+            // Bitwise OR with 1 ensures odd kernel sizes (required for morphological ops)
             onChanged: (v) => setState(() => _morphKsize = (v.round() | 1).clamp(3, 15)),
           ),
           const SizedBox(height: 8),
@@ -1467,15 +1561,46 @@ class _EditorPageState extends State<EditorPage> {
     );
   }
 
-  Widget _cropField(String label, int value, void Function(int) onChanged) {
+  Widget _cropField(String label, TextEditingController controller, void Function(int) onChanged) {
     return Padding(
       padding: const EdgeInsets.only(bottom: 6),
       child: TextField(
         decoration: InputDecoration(labelText: label, isDense: true, border: OutlineInputBorder(borderRadius: BorderRadius.circular(8))),
         keyboardType: TextInputType.number,
-        controller: TextEditingController(text: '$value'),
-        onChanged: (v) => onChanged(int.tryParse(v) ?? value),
+        controller: controller,
+        onChanged: (v) => onChanged(int.tryParse(v) ?? 0),
       ),
+    );
+  }
+
+  Widget _aspectChip(String label, double? ratio) {
+    return ActionChip(
+      label: Text(label, style: const TextStyle(fontSize: 11)),
+      onPressed: () {
+        if (ratio == null) {
+          // Free mode — reset to full image
+          setState(() {
+            _cropX = 0; _cropY = 0; _cropW = _imageWidth; _cropH = _imageHeight;
+            _cropXCtrl.text = '0'; _cropYCtrl.text = '0';
+            _cropWCtrl.text = '$_imageWidth'; _cropHCtrl.text = '$_imageHeight';
+          });
+          return;
+        }
+        setState(() {
+          _cropX = 0; _cropY = 0;
+          if (_imageWidth / _imageHeight > ratio) {
+            _cropH = _imageHeight;
+            _cropW = (_imageHeight * ratio).round();
+            _cropX = ((_imageWidth - _cropW) / 2).round();
+          } else {
+            _cropW = _imageWidth;
+            _cropH = (_imageWidth / ratio).round();
+            _cropY = ((_imageHeight - _cropH) / 2).round();
+          }
+          _cropXCtrl.text = '$_cropX'; _cropYCtrl.text = '$_cropY';
+          _cropWCtrl.text = '$_cropW'; _cropHCtrl.text = '$_cropH';
+        });
+      },
     );
   }
 

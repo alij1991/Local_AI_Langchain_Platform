@@ -46,6 +46,7 @@ class PartnerEngine:
         self._tts_emotional = None # Chatterbox-Turbo (emotional, GPU or CPU)
         self._vad = None           # Silero VAD
         self._tts_mode = "kokoro"  # "kokoro" (fast) | "chatterbox" (emotional)
+        self._voice_gender = "female"  # "female" | "male"
         self._last_detected_emotion = "neutral"  # emotion from last LLM response tag
 
         # Best model detection (research: Qwen3-8B Q4_K_M recommended)
@@ -292,6 +293,7 @@ class PartnerEngine:
         full_reply = ""
         visible_reply = ""  # what the user sees (tags stripped)
         current_sentence = ""
+        first_sentence_sent = False  # Use shorter threshold for first sentence (faster TTFA)
         emotion_detected = False
         _tag_buffer = ""  # buffer initial tokens to catch the tag
         _buffering = True  # buffer first ~50 chars to find tag
@@ -342,11 +344,14 @@ class PartnerEngine:
 
             # Sentence boundary detection for TTS streaming
             # Research: "begin TTS on the first complete sentence while LLM continues"
+            # First sentence uses shorter threshold (20 chars) for faster time-to-first-audio
             if any(current_sentence.rstrip().endswith(p) for p in ('.', '!', '?', '...', '.\n')):
                 sentence = current_sentence.strip()
-                if len(sentence) > 10:
+                min_chars = 20 if not first_sentence_sent else 10
+                if len(sentence) >= min_chars:
                     yield {"type": "sentence_complete", "sentence": sentence}
                     current_sentence = ""
+                    first_sentence_sent = True
 
         # Final partial sentence
         if current_sentence.strip():
@@ -619,6 +624,12 @@ class PartnerEngine:
             self._tts = Kokoro("kokoro-v1.0.onnx", "voices-v1.0.bin")
             status["tts"] = True
             logger.info("TTS initialized: Kokoro-82M ONNX (CPU)")
+            # Warmup: pre-initialize ONNX runtime to eliminate cold-start latency (~500ms)
+            try:
+                _ = self._tts.create("Hello.", voice="af_heart")
+                logger.info("Kokoro ONNX warmup complete")
+            except Exception as e:
+                logger.debug("Kokoro warmup failed (non-fatal): %s", e)
         except ImportError:
             logger.info("kokoro-onnx not installed — voice output disabled")
         except FileNotFoundError:
@@ -849,7 +860,7 @@ class PartnerEngine:
                 headers={"Content-Type": "application/json"},
                 method="POST",
             )
-            with urllib.request.urlopen(req, timeout=120) as resp:
+            with urllib.request.urlopen(req, timeout=60) as resp:
                 return resp.read()
 
         except Exception as e:
@@ -887,7 +898,7 @@ class PartnerEngine:
                     headers={"Content-Type": "application/json"},
                     method="POST",
                 )
-                with urllib.request.urlopen(req, timeout=120) as resp:
+                with urllib.request.urlopen(req, timeout=30) as resp:
                     return resp.read()
             except Exception as e:
                 logger.debug("Chatterbox sentence synthesis failed: %s", e)
@@ -924,6 +935,56 @@ class PartnerEngine:
         except Exception as e:
             logger.warning("Kokoro synthesis failed: %s", e)
             return None
+
+    async def stream_synthesize(
+        self, text: str, emotion: str = "neutral"
+    ) -> AsyncGenerator[bytes, None]:
+        """Yield PCM16 audio chunks as they're synthesized.
+
+        For Kokoro: synthesize full sentence (fast, <300ms) then yield in ~100ms chunks.
+        For Chatterbox: synthesize via external server, strip WAV header, yield in chunks.
+
+        Yields raw PCM16 bytes (no WAV header) — client must wrap in WAV for playback.
+        """
+        import numpy as np
+        import struct
+
+        text = self._preprocess_text_for_tts(text, emotion)
+        if not text:
+            return
+
+        # ── Path A: Chatterbox (emotional TTS) ──
+        if self._tts_emotional is not None and self._tts_mode == "chatterbox":
+            wav_bytes = await asyncio.get_event_loop().run_in_executor(
+                None, lambda: self._synthesize_chatterbox(text, emotion)
+            )
+            if wav_bytes and len(wav_bytes) > 44:
+                # Parse sample rate from WAV header (bytes 24-28)
+                sample_rate = struct.unpack_from('<I', wav_bytes, 24)[0]
+                # Strip WAV header, yield raw PCM in ~100ms chunks
+                pcm_data = wav_bytes[44:]
+                chunk_size = (sample_rate // 10) * 2  # 100ms of 16-bit samples
+                for i in range(0, len(pcm_data), chunk_size):
+                    yield pcm_data[i:i + chunk_size]
+                    await asyncio.sleep(0)
+                return
+
+        # ── Path B: Kokoro (fast, CPU) ──
+        if self._tts is not None:
+            voice = self._get_voice_for_emotion(emotion)
+            try:
+                samples, sample_rate = await asyncio.get_event_loop().run_in_executor(
+                    None, lambda: self._tts.create(text, voice=voice)
+                )
+                # Convert float32 samples to PCM16
+                pcm = (np.clip(samples, -1, 1) * 32767).astype(np.int16)
+                # Yield in ~100ms chunks
+                chunk_samples = sample_rate // 10  # 2400 samples at 24kHz
+                for i in range(0, len(pcm), chunk_samples):
+                    yield pcm[i:i + chunk_samples].tobytes()
+                    await asyncio.sleep(0)
+            except Exception as e:
+                logger.warning("stream_synthesize Kokoro failed: %s", e)
 
     def set_tts_mode(self, mode: str) -> str:
         """Switch between TTS engines: 'kokoro' (fast) or 'chatterbox' (emotional)."""

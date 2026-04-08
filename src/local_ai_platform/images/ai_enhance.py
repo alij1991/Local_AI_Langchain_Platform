@@ -499,7 +499,12 @@ def _download_kontext_gguf() -> str:
 
 
 def _load_kontext_pipeline() -> Any:
-    """Load FLUX.1 Kontext dev with Q4 GGUF quantization."""
+    """Load FLUX.1 Kontext dev with Q4 GGUF quantization.
+
+    Requires diffusers >= 0.35.0 (FluxKontextPipeline) and pip install gguf.
+    GGUF quantization must be applied to the transformer separately, then
+    passed to the pipeline — the pipeline itself does not accept quantization_config.
+    """
     global _instruct_pipes
     if "kontext" in _instruct_pipes:
         return _instruct_pipes["kontext"]
@@ -507,21 +512,43 @@ def _load_kontext_pipeline() -> Any:
     import torch
     _unload_other_pipelines("kontext")
 
-    from diffusers import FluxKontextPipeline
-    from diffusers import GGUFQuantizationConfig
+    # Version check: FluxKontextPipeline requires diffusers >= 0.35.0
+    try:
+        import diffusers
+        from packaging import version
+        if version.parse(diffusers.__version__) < version.parse("0.35.0"):
+            raise RuntimeError(
+                f"FLUX Kontext requires diffusers >= 0.35.0 (installed: {diffusers.__version__}). "
+                "Upgrade with: pip install -U diffusers"
+            )
+    except ImportError:
+        pass  # packaging not installed, skip check
+
+    from diffusers import FluxKontextPipeline, FluxTransformer2DModel, GGUFQuantizationConfig
 
     gguf_path = _download_kontext_gguf()
     token = _get_hf_token()
 
-    logger.info("Loading FLUX Kontext pipeline with GGUF quantization...")
+    # Step 1: Load the quantized transformer separately
+    # (FluxKontextPipeline.from_pretrained does NOT accept transformer_path or quantization_config)
+    logger.info("Loading FLUX Kontext transformer with GGUF Q4 quantization...")
     quantization_config = GGUFQuantizationConfig(compute_dtype=torch.bfloat16)
+    transformer = FluxTransformer2DModel.from_single_file(
+        gguf_path,
+        quantization_config=quantization_config,
+        torch_dtype=torch.bfloat16,
+    )
+
+    # Step 2: Load the pipeline with the pre-loaded transformer
+    logger.info("Loading FLUX Kontext pipeline...")
     pipe = FluxKontextPipeline.from_pretrained(
         "black-forest-labs/FLUX.1-Kontext-dev",
-        transformer_path=gguf_path,
-        quantization_config=quantization_config,
+        transformer=transformer,
         torch_dtype=torch.bfloat16,
         token=token,
     )
+    # IMPORTANT: Use enable_model_cpu_offload(), NOT enable_sequential_cpu_offload()
+    # (sequential is incompatible with GGUF quantized models — causes KeyError: None)
     pipe.enable_model_cpu_offload()
     pipe.set_progress_bar_config(disable=True)
 
@@ -540,8 +567,14 @@ def _download_cosxl_model() -> Path:
 
     from huggingface_hub import hf_hub_download
 
-    model_path.parent.mkdir(parents=True, exist_ok=True)
     token = _get_hf_token()
+    if not token:
+        raise RuntimeError(
+            "CosXL Edit requires a HuggingFace token (gated model). "
+            "Set HF_TOKEN in .env or run `huggingface-cli login`."
+        )
+
+    model_path.parent.mkdir(parents=True, exist_ok=True)
     logger.info("Downloading CosXL Edit model (~6.5GB, first use only)...")
     downloaded = hf_hub_download(
         repo_id="stabilityai/cosxl",
@@ -573,9 +606,11 @@ def _load_cosxl_pipeline() -> Any:
     vae = AutoencoderKL.from_pretrained("madebyollin/sdxl-vae-fp16-fix", torch_dtype=torch.float16)
     pipe = StableDiffusionXLInstructPix2PixPipeline.from_single_file(
         str(model_path),
+        config="diffusers/sdxl-instructpix2pix-768",
         vae=vae,
         torch_dtype=torch.float16,
         is_cosxl_edit=True,
+        num_in_channels=8,
     )
     pipe.scheduler = EulerDiscreteScheduler.from_config(pipe.scheduler.config)
     pipe.enable_model_cpu_offload()
@@ -608,15 +643,21 @@ def _load_controlnet_pipeline(control_type: str = "depth") -> Any:
         controlnet_repo = "lllyasviel/control_v11f1p_sd15_depth"
 
     logger.info("Loading ControlNet (%s) + SD 1.5 pipeline...", control_type)
-    controlnet = ControlNetModel.from_pretrained(
-        controlnet_repo, torch_dtype=torch.float16,
-    )
-    pipe = StableDiffusionControlNetImg2ImgPipeline.from_pretrained(
-        "runwayml/stable-diffusion-v1-5",
-        controlnet=controlnet,
-        torch_dtype=torch.float16,
-        safety_checker=None,
-    )
+    try:
+        controlnet = ControlNetModel.from_pretrained(
+            controlnet_repo, torch_dtype=torch.float16,
+        )
+        pipe = StableDiffusionControlNetImg2ImgPipeline.from_pretrained(
+            "runwayml/stable-diffusion-v1-5",
+            controlnet=controlnet,
+            torch_dtype=torch.float16,
+            safety_checker=None,
+        )
+    except Exception as e:
+        raise RuntimeError(
+            f"Failed to load ControlNet ({control_type}) pipeline: {e}. "
+            "Check your internet connection and disk space."
+        )
     pipe.enable_model_cpu_offload()
     pipe.set_progress_bar_config(disable=True)
     try:
@@ -650,7 +691,11 @@ def _get_depth_image(image: Image.Image) -> Image.Image:
     h, w = arr.shape[:2]
     depth = _get_depth_map(arr, h, w)
     if depth is None:
-        raise RuntimeError("Could not generate depth map — no depth model available")
+        raise RuntimeError(
+            "Could not generate depth map — no depth model available. "
+            "The Depth Anything v2 ONNX model will be downloaded on first use. "
+            "Alternatively, use control_type='canny' which has no extra dependencies."
+        )
     # Convert to 3-channel image (ControlNet expects RGB)
     depth_uint8 = (depth * 255).astype(np.uint8)
     depth_rgb = cv2.cvtColor(depth_uint8, cv2.COLOR_GRAY2RGB)
@@ -774,6 +819,9 @@ def instruct_edit(
     - control_type: "depth" or "canny" (ControlNet only)
     - conditioning_scale: ControlNet conditioning weight (ControlNet only, default 0.9)
     """
+    if not instruction or not instruction.strip():
+        raise ValueError("Edit instruction cannot be empty. Describe what you want to change.")
+
     spec = INSTRUCT_MODELS.get(model, INSTRUCT_MODELS["pix2pix"])
     actual_steps = steps if steps > 0 else spec["default_steps"]
     actual_guidance = guidance if guidance > 0 else spec["default_guidance"]
@@ -781,84 +829,107 @@ def instruct_edit(
     logger.info("instruct_edit: model=%s instruction='%s', guidance=%.1f, steps=%d",
                 model, instruction, actual_guidance, actual_steps)
 
+    # Model-specific error hints for better user messages
+    _MODEL_HINTS = {
+        "kontext": "Requires: diffusers>=0.35.0, pip install gguf, HF_TOKEN set, ~7GB VRAM",
+        "cosxl": "Requires: HF_TOKEN set, ~8GB VRAM, first use downloads ~6.5GB",
+        "pix2pix": "Requires: ~4GB VRAM, first use downloads ~4GB",
+        "controlnet": "Requires: ~4GB VRAM, depth model for depth mode",
+    }
+
     # ── FLUX Kontext ──────────────────────────────────────────────
     if model == "kontext":
-        with _kontext_lock:
-            pipe = _load_kontext_pipeline()
+        try:
+            with _kontext_lock:
+                pipe = _load_kontext_pipeline()
 
-        original_rgb = image.convert("RGB")
-        result = pipe(
-            image=original_rgb,
-            prompt=instruction,
-            guidance_scale=actual_guidance,
-            num_inference_steps=actual_steps,
-            max_sequence_length=256,
-        ).images[0]
+            original_rgb = image.convert("RGB")
+            result = pipe(
+                image=original_rgb,
+                prompt=instruction,
+                guidance_scale=actual_guidance,
+                num_inference_steps=actual_steps,
+                max_sequence_length=256,
+            ).images[0]
 
-        logger.info("Kontext edit complete: %s", instruction[:60])
-        return result
+            logger.info("Kontext edit complete: %s", instruction[:60])
+            return result
+        except (ValueError, RuntimeError):
+            raise  # Re-raise our own validation/runtime errors
+        except Exception as e:
+            raise RuntimeError(f"Kontext edit failed: {e}. {_MODEL_HINTS['kontext']}")
 
     # ── CosXL Edit ────────────────────────────────────────────────
     if model == "cosxl":
-        with _cosxl_lock:
-            pipe = _load_cosxl_pipeline()
+        try:
+            with _cosxl_lock:
+                pipe = _load_cosxl_pipeline()
 
-        actual_img_guidance = image_guidance if image_guidance > 0 else spec.get("default_image_guidance", 1.5)
-        original_rgb = image.convert("RGB")
+            actual_img_guidance = image_guidance if image_guidance > 0 else spec.get("default_image_guidance", 1.5)
+            original_rgb = image.convert("RGB")
 
-        if not negative_prompt:
-            negative_prompt = (
-                "lowres, bad anatomy, bad hands, cropped, worst quality, low quality, "
-                "blurry, deformed, disfigured, watermark, text, jpeg artifacts"
-            )
+            if not negative_prompt:
+                negative_prompt = (
+                    "lowres, bad anatomy, bad hands, cropped, worst quality, low quality, "
+                    "blurry, deformed, disfigured, watermark, text, jpeg artifacts"
+                )
 
-        result = pipe(
-            prompt=instruction,
-            image=original_rgb,
-            guidance_scale=actual_guidance,
-            image_guidance_scale=actual_img_guidance,
-            num_inference_steps=actual_steps,
-            negative_prompt=negative_prompt,
-        ).images[0]
+            result = pipe(
+                prompt=instruction,
+                image=original_rgb,
+                guidance_scale=actual_guidance,
+                image_guidance_scale=actual_img_guidance,
+                num_inference_steps=actual_steps,
+                negative_prompt=negative_prompt,
+            ).images[0]
 
-        logger.info("CosXL edit complete: %s (guidance=%.1f, img_guidance=%.1f)",
-                    instruction[:60], actual_guidance, actual_img_guidance)
-        return result
+            logger.info("CosXL edit complete: %s (guidance=%.1f, img_guidance=%.1f)",
+                        instruction[:60], actual_guidance, actual_img_guidance)
+            return result
+        except (ValueError, RuntimeError):
+            raise
+        except Exception as e:
+            raise RuntimeError(f"CosXL edit failed: {e}. {_MODEL_HINTS['cosxl']}")
 
     # ── ControlNet img2img ────────────────────────────────────────
     if model == "controlnet":
-        with _controlnet_lock:
-            pipe = _load_controlnet_pipeline(control_type)
+        try:
+            with _controlnet_lock:
+                pipe = _load_controlnet_pipeline(control_type)
 
-        actual_strength = strength if strength > 0 else spec.get("default_strength", 0.5)
-        original_rgb = image.convert("RGB")
+            actual_strength = strength if strength > 0 else spec.get("default_strength", 0.5)
+            original_rgb = image.convert("RGB")
 
-        # Generate control image (depth or canny)
-        if control_type == "canny":
-            control_image = _get_canny_edges(original_rgb)
-        else:
-            control_image = _get_depth_image(original_rgb)
+            # Generate control image (depth or canny)
+            if control_type == "canny":
+                control_image = _get_canny_edges(original_rgb)
+            else:
+                control_image = _get_depth_image(original_rgb)
 
-        if not negative_prompt:
-            negative_prompt = (
-                "lowres, bad anatomy, bad hands, cropped, worst quality, low quality, "
-                "blurry, deformed, disfigured, watermark, text, jpeg artifacts"
-            )
+            if not negative_prompt:
+                negative_prompt = (
+                    "lowres, bad anatomy, bad hands, cropped, worst quality, low quality, "
+                    "blurry, deformed, disfigured, watermark, text, jpeg artifacts"
+                )
 
-        result = pipe(
-            prompt=instruction,
-            image=original_rgb,
-            control_image=control_image,
-            strength=actual_strength,
-            guidance_scale=actual_guidance,
-            num_inference_steps=actual_steps,
-            negative_prompt=negative_prompt,
-            controlnet_conditioning_scale=conditioning_scale,
-        ).images[0]
+            result = pipe(
+                prompt=instruction,
+                image=original_rgb,
+                control_image=control_image,
+                strength=actual_strength,
+                guidance_scale=actual_guidance,
+                num_inference_steps=actual_steps,
+                negative_prompt=negative_prompt,
+                controlnet_conditioning_scale=conditioning_scale,
+            ).images[0]
 
-        logger.info("ControlNet %s edit complete: strength=%.2f, guidance=%.1f",
-                    control_type, actual_strength, actual_guidance)
-        return result
+            logger.info("ControlNet %s edit complete: strength=%.2f, guidance=%.1f",
+                        control_type, actual_strength, actual_guidance)
+            return result
+        except (ValueError, RuntimeError):
+            raise
+        except Exception as e:
+            raise RuntimeError(f"ControlNet ({control_type}) edit failed: {e}. {_MODEL_HINTS['controlnet']}")
 
     # ── InstructPix2Pix (legacy) ──────────────────────────────────
     with _instruct_lock:
@@ -1035,7 +1106,8 @@ def enhance_edit_prompt(instruction: str, router=None, config=None) -> str:
             logger.warning("enhance_edit_prompt: LLM failed: %s", e)
 
     # Direct Ollama fallback (doesn't need router)
-    if not router or True:  # Always try Ollama as fallback
+    # Ollama direct fallback — try when router LLM was unavailable or failed above
+    if True:
         try:
             import json
             import urllib.request
@@ -1052,7 +1124,7 @@ def enhance_edit_prompt(instruction: str, router=None, config=None) -> str:
                 logger.info("enhance_edit_prompt: direct Ollama with model '%s'", model)
                 req_body = json.dumps({
                     "model": model,
-                    "prompt": f"/no_think\n{_LLM_SYSTEM}{_LLM_EXAMPLES}\n\nOriginal: '{instruction}'\nImproved:",
+                    "prompt": f"{'/no_think' + chr(10) if 'qwen' in model.lower() else ''}{_LLM_SYSTEM}{_LLM_EXAMPLES}\n\nOriginal: '{instruction}'\nImproved:",
                     "stream": False,
                     "options": {"temperature": 0.3, "num_predict": 150},
                 }).encode()
@@ -1063,7 +1135,11 @@ def enhance_edit_prompt(instruction: str, router=None, config=None) -> str:
                 )
                 with urllib.request.urlopen(req, timeout=30) as resp:
                     data = json.loads(resp.read().decode())
-                enhanced = (data.get("response", "") or "").strip().strip('"').strip("'")
+                enhanced = (data.get("response", "") or "").strip()
+                # Strip thinking tags and /no_think echoes
+                enhanced = re.sub(r'<think>.*?</think>', '', enhanced, flags=re.DOTALL).strip()
+                enhanced = enhanced.replace('/no_think', '').strip()
+                enhanced = enhanced.strip('"').strip("'")
                 reject_words = ["generate ", "create a ", "photograph of", "image of a"]
                 if enhanced and len(enhanced) > len(instruction) and not any(w in enhanced.lower() for w in reject_words):
                     logger.info("enhance_edit_prompt: Ollama direct enhanced to: '%s'", enhanced[:100])

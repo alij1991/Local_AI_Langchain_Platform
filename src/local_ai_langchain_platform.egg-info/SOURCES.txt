@@ -18,7 +18,16 @@ src/local_ai_platform/system_info.py
 src/local_ai_platform/system_templates.py
 src/local_ai_platform/tracing.py
 src/local_ai_platform/images/__init__.py
+src/local_ai_platform/images/ai_enhance.py
+src/local_ai_platform/images/ai_models.py
+src/local_ai_platform/images/editor.py
+src/local_ai_platform/images/processors.py
 src/local_ai_platform/images/service.py
+src/local_ai_platform/partner/__init__.py
+src/local_ai_platform/partner/engine.py
+src/local_ai_platform/partner/memory.py
+src/local_ai_platform/partner/profile.py
+src/local_ai_platform/partner/user_profile.py
 src/local_ai_platform/providers/__init__.py
 src/local_ai_platform/providers/base.py
 src/local_ai_platform/providers/huggingface_provider.py

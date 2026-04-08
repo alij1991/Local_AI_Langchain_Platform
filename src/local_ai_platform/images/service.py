@@ -2091,6 +2091,25 @@ def _diffusers_worker(payload: dict[str, Any], out_q: Any) -> None:
             except Exception as e:
                 _log(f"ToMe failed to apply: {e}")
 
+        # ── FreeU v2 — UNet backbone/skip-connection rebalancing ──
+        # Improves detail and coherence with zero additional computation or memory.
+        # Works with UNet-based models only (SDXL, SD1.5, SD2) — not transformers.
+        if payload.get("use_freeu"):
+            try:
+                _fu_params = payload.get("freeu_params", {})
+                pipe.enable_freeu(
+                    b1=float(_fu_params.get("b1", 1.3)),
+                    b2=float(_fu_params.get("b2", 1.4)),
+                    s1=float(_fu_params.get("s1", 0.9)),
+                    s2=float(_fu_params.get("s2", 0.2)),
+                )
+                _log(f"FreeU v2 enabled (b1={_fu_params.get('b1', 1.3)}, b2={_fu_params.get('b2', 1.4)}, s1={_fu_params.get('s1', 0.9)}, s2={_fu_params.get('s2', 0.2)})")
+                _log_stage("freeu_enabled")
+            except AttributeError:
+                _log("FreeU not available for this pipeline (no enable_freeu method)")
+            except Exception as e:
+                _log(f"FreeU failed to apply: {e}")
+
         # ── Hyper-SD LoRA — auto-apply step-distillation for SDXL/SD1.5 on weak hw ──
         # Replaces the older Lightning LoRA with ByteDance Hyper-SD for better quality.
         # Reuses the same payload keys (use_lightning_lora, lightning_lora_repo, etc.)
@@ -2495,6 +2514,26 @@ def _diffusers_worker(payload: dict[str, Any], out_q: Any) -> None:
             except Exception as e:
                 _log(f"FasterCache failed: {e}")
 
+        # ── TaylorSeer Cache (Taylor series feature prediction, ICCV 2025) ──
+        # Predicts transformer features using Taylor expansion from cached past features.
+        # Better quality than FirstBlockCache at same speedup. Requires diffusers >= 0.36.0.
+        if not _transformer_cache_active and payload.get("use_taylorseer") and hasattr(pipe, "transformer"):
+            try:
+                from diffusers import TaylorSeerCacheConfig
+                _ts_interval = int(payload.get("taylorseer_cache_interval", 5))
+                _ts_order = int(payload.get("taylorseer_max_order", 1))
+                pipe.transformer.enable_cache(TaylorSeerCacheConfig(
+                    cache_interval=_ts_interval,
+                    max_order=_ts_order,
+                ))
+                _transformer_cache_active = True
+                _log(f"TaylorSeer cache enabled (interval={_ts_interval}, order={_ts_order})")
+                _log_stage("taylorseer_enabled", interval=_ts_interval, order=_ts_order)
+            except ImportError:
+                _log("TaylorSeer not available (requires diffusers >= 0.36.0)")
+            except Exception as e:
+                _log(f"TaylorSeer failed: {e}")
+
         if not _transformer_cache_active and payload.get("use_first_block_cache", True) and hasattr(pipe, "transformer"):
             try:
                 from diffusers.hooks import FirstBlockCacheConfig, apply_first_block_cache
@@ -2696,6 +2735,8 @@ def _diffusers_worker(payload: dict[str, Any], out_q: Any) -> None:
         if payload.get("use_faster_cache"): optimizations_used.append("FasterCache (transformer attention caching)")
         if payload.get("use_pab"): optimizations_used.append("PAB (Pyramid Attention Broadcast)")
         if payload.get("use_tome"): optimizations_used.append(f"ToMe (ratio={payload.get('tome_ratio', 0.5)})")
+        if payload.get("use_freeu"): optimizations_used.append("FreeU v2 (UNet backbone/skip rebalancing)")
+        if payload.get("use_taylorseer"): optimizations_used.append(f"TaylorSeer (interval={payload.get('taylorseer_cache_interval', 5)})")
         if payload.get("use_lightning_lora"): optimizations_used.append(f"Hyper-SD LoRA ({payload.get('lightning_steps', 4)}-step)")
         if payload.get("use_attention_slicing"): optimizations_used.append("Attention Slicing")
         if payload.get("use_vae_tiling"): optimizations_used.append("VAE Tiling")
@@ -3044,6 +3085,21 @@ class ImageGenerationService:
                 opts["tome_ratio"] = 0.4 if is_sdxl_class else 0.5
             quality_notes.append(f"ToMe: merging {int(opts['tome_ratio']*100)}% of attention tokens")
 
+        # ── 3b. FreeU v2 (UNet backbone/skip-connection rebalancing) ──
+        # Quality impact: POSITIVE (better detail and coherence, no quality loss)
+        # Speed impact:  None (zero additional computation or memory)
+        # Works with UNet-based models ONLY (SDXL, SD1.5, SD2) — NOT transformers.
+        # Not enabled for performance tier (Hyper-SD LoRA changes UNet behavior).
+        _FREEU_FAMILIES = {"sd15", "sd1.5", "sdxl", "sd2"}
+        if (backend.startswith("diffusers") and family in _FREEU_FAMILIES
+                and quality_tier in ("balanced", "max_quality") and not is_few_step):
+            opts["use_freeu"] = True
+            if family in ("sdxl",):
+                opts["freeu_params"] = {"b1": 1.3, "b2": 1.4, "s1": 0.9, "s2": 0.2}
+            else:  # SD1.5, SD2
+                opts["freeu_params"] = {"b1": 1.4, "b2": 1.6, "s1": 0.9, "s2": 0.2}
+            quality_notes.append("FreeU v2: backbone/skip rebalancing for better detail (free)")
+
         # ── 4. Hyper-SD LoRA (step-distillation, better than Lightning) ──
         # Quality impact: Moderate (changes model behavior but +0.68 CLIP, +0.51 Aesthetic vs Lightning)
         # Speed impact:  ~6x (25 steps → 4 steps) for SDXL, also available for SD1.5
@@ -3095,6 +3151,23 @@ class ImageGenerationService:
             opts["use_pab"] = True
             opts["pab_spatial_skip"] = 2
             quality_notes.append("PAB: pyramid attention broadcast for additional speedup")
+
+        # ── 4d. TaylorSeer Cache (Taylor series feature prediction for transformers) ──
+        # Quality impact: Negligible (ICCV 2025 — Taylor expansion predicts features)
+        # Speed impact:  Up to 3x speedup on transformer models
+        # Better than FirstBlockCache: predicts features instead of just skipping blocks.
+        # Mutually exclusive with FasterCache (both modify transformer attention behavior).
+        # TaylorSeer for balanced tier; FasterCache for performance tier.
+        # Requires diffusers >= 0.36.0 with TaylorSeerCacheConfig.
+        _TAYLORSEER_FAMILIES = {"z-image", "flux", "dit", "pixart", "sd3"}
+        if (backend.startswith("diffusers") and family in _TAYLORSEER_FAMILIES
+                and not is_few_step and steps >= 12
+                and quality_tier == "balanced"
+                and not opts.get("use_faster_cache")):  # Don't stack with FasterCache
+            opts["use_taylorseer"] = True
+            opts["taylorseer_cache_interval"] = 5  # Recompute every 5th step, predict others
+            opts["taylorseer_max_order"] = 1  # First-order Taylor (best quality/speed)
+            quality_notes.append("TaylorSeer: Taylor-series feature prediction (up to 3x, balanced tier)")
 
         # ── 5. Quantization / compression strategy ──
         # Strategy selection (best to worst for Ada GPUs on tight VRAM):
@@ -3282,7 +3355,6 @@ class ImageGenerationService:
                 pass
         self._current_stage_file = None
         self._current_job_started = 0.0
-        self._current_worker_proc = None
         self._current_worker_proc = None
         return True
 
@@ -6164,10 +6236,12 @@ class ImageGenerationService:
             # NaN / corrupt output detection
             img_arr = np.array(image)
             pixel_range = int(img_arr.max()) - int(img_arr.min()) if img_arr.size > 0 else 0
-            logger.info("[IMG] Output image: size=%s, pixel_range=[%d..%d] (range=%d)",
-                        image.size, int(img_arr.min()), int(img_arr.max()), pixel_range)
+            has_nan = bool(np.isnan(img_arr.astype(np.float32)).any()) if img_arr.size > 0 else False
+            unique_count = np.unique(img_arr).size if img_arr.size > 0 else 0
+            logger.info("[IMG] Output image: size=%s, pixel_range=[%d..%d] (range=%d), unique=%d, nan=%s",
+                        image.size, int(img_arr.min()), int(img_arr.max()), pixel_range, unique_count, has_nan)
 
-            if pixel_range <= 2:
+            if has_nan or (pixel_range <= 2 and unique_count < 4):
                 dtype_used = str(execution_plan.get("torch_dtype") or "unknown")
                 self._current_stage_file = None
                 self._current_job_started = 0.0
@@ -6205,6 +6279,8 @@ class ImageGenerationService:
             if ep.get("use_fp8_layerwise"): optimizations_used.append("FP8 Layerwise Casting (Ada native)")
             if ep.get("use_group_offloading"): optimizations_used.append("Group Offloading (CUDA streams)")
             if ep.get("use_tome"): optimizations_used.append(f"ToMe (ratio={ep.get('tome_ratio', 0.5)})")
+            if ep.get("use_freeu"): optimizations_used.append("FreeU v2 (UNet backbone/skip rebalancing)")
+            if ep.get("use_taylorseer"): optimizations_used.append(f"TaylorSeer (interval={ep.get('taylorseer_cache_interval', 5)})")
             if ep.get("use_lightning_lora"): optimizations_used.append(f"Hyper-SD LoRA ({ep.get('lightning_steps', 4)}-step)")
             if ep.get("use_attention_slicing"): optimizations_used.append("Attention Slicing")
             if ep.get("use_vae_tiling"): optimizations_used.append("VAE Tiling")
@@ -6246,6 +6322,17 @@ class ImageGenerationService:
         except RuntimeError as exc:
             self._current_stage_file = None
             self._current_job_started = 0.0
+            # Clean up temp files leaked by error path
+            try:
+                Path(stage_file_path).unlink(missing_ok=True)
+            except Exception:
+                pass
+            if _step_previews_dir and Path(_step_previews_dir).exists():
+                try:
+                    import shutil
+                    shutil.rmtree(_step_previews_dir, ignore_errors=True)
+                except Exception:
+                    pass
             txt = str(exc).lower()
             mem_err, mem_code = _is_memory_error(exc)
             logger.error("[IMG] RuntimeError during generation: %s", exc)
@@ -6261,6 +6348,17 @@ class ImageGenerationService:
         except Exception as exc:  # noqa: BLE001
             self._current_stage_file = None
             self._current_job_started = 0.0
+            # Clean up temp files leaked by error path
+            try:
+                Path(stage_file_path).unlink(missing_ok=True)
+            except Exception:
+                pass
+            if _step_previews_dir and Path(_step_previews_dir).exists():
+                try:
+                    import shutil
+                    shutil.rmtree(_step_previews_dir, ignore_errors=True)
+                except Exception:
+                    pass
             logger.error("[IMG] Exception during generation: %s", exc, exc_info=True)
             return ImageRuntimeResult(ok=False, error_code="provider_unavailable", error_message=str(exc), metadata={"device_used": device})
 
@@ -6561,8 +6659,14 @@ class ImageGenerationService:
             )
 
         stages_run: list[str] = ["base_generation"]
-        logger.info("[IMG] === BASE GENERATION (in-process, cached) === device=%s, dtype=%s, size=%dx%d, steps=%d, guidance=%.1f, model=%s",
-                     preferred, execution_plan.get("torch_dtype"), width, height, steps, guidance_scale, resolved_model)
+
+        # Inject mask into execution_plan so _run_diffusers can detect inpaint mode
+        if mask_image_path:
+            execution_plan["_mask_image_path"] = mask_image_path
+
+        logger.info("[IMG] === BASE GENERATION (in-process, cached) === device=%s, dtype=%s, size=%dx%d, steps=%d, guidance=%.1f, model=%s, mode=%s",
+                     preferred, execution_plan.get("torch_dtype"), width, height, steps, guidance_scale, resolved_model,
+                     "inpaint" if mask_image_path else ("img2img" if init_image_path else "txt2img"))
         result = self._run_diffusers(
             model_id_or_path=resolved_model,
             model_source=model_source,

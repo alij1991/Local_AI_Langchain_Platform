@@ -58,6 +58,14 @@ class _PartnerPageState extends State<PartnerPage> {
   final AudioPlayer _audioPlayer = AudioPlayer();
   final AudioRecorder _recorder = AudioRecorder();
 
+  // TTS WebSocket streaming state
+  WebSocket? _ttsSocket;
+  bool _ttsSocketConnecting = false;
+  int _ttsSampleRate = 24000;
+  Completer<Uint8List>? _currentTTSCompleter;
+  List<Uint8List> _currentPcmChunks = [];
+  int _currentPcmBytes = 0;
+
   @override
   void initState() {
     super.initState();
@@ -71,6 +79,7 @@ class _PartnerPageState extends State<PartnerPage> {
     _streamSub?.cancel();
     _audioPlayer.dispose();
     _recorder.dispose();
+    try { _ttsSocket?.close(); } catch (_) {}
     super.dispose();
   }
 
@@ -118,6 +127,13 @@ class _PartnerPageState extends State<PartnerPage> {
         } catch (_) {}
       }
 
+      // Connect TTS WebSocket for streaming audio
+      if (_ttsAvailable) {
+        _connectTTSSocket().then((ok) {
+          if (ok) _setupTTSSocketListener();
+        });
+      }
+
       if (mounted) {
         final ttsLabel = _chatterboxAvailable ? 'Emotional (Chatterbox)' : _ttsAvailable ? 'Fast (Kokoro)' : 'OFF';
         ScaffoldMessenger.of(context).showSnackBar(SnackBar(
@@ -129,6 +145,124 @@ class _PartnerPageState extends State<PartnerPage> {
     } finally {
       if (mounted) setState(() => _voiceInitializing = false);
     }
+  }
+
+  // ── TTS WebSocket Streaming ────────────────────────────────────
+
+  /// Connect persistent WebSocket for streaming TTS synthesis.
+  Future<bool> _connectTTSSocket() async {
+    if (_ttsSocket != null) return true;
+    if (_ttsSocketConnecting) return false;
+    _ttsSocketConnecting = true;
+    try {
+      final wsUrl = widget.api.baseUrl.replaceFirst('http', 'ws');
+      _ttsSocket = await WebSocket.connect(
+        '$wsUrl/partner/voice/tts-stream',
+      ).timeout(const Duration(seconds: 5));
+      debugPrint('[TTS-WS] Connected');
+      return true;
+    } catch (e) {
+      debugPrint('[TTS-WS] Connection failed: $e');
+      _ttsSocket = null;
+      return false;
+    } finally {
+      _ttsSocketConnecting = false;
+    }
+  }
+
+  /// Listen for TTS WebSocket responses: binary PCM chunks + JSON control messages.
+  void _setupTTSSocketListener() {
+    if (_ttsSocket == null) return;
+    _ttsSocket!.listen(
+      (data) {
+        if (data is List<int>) {
+          // Binary frame: PCM16 audio chunk from server
+          final chunk = Uint8List.fromList(data);
+          _currentPcmChunks.add(chunk);
+          _currentPcmBytes += chunk.length;
+        } else if (data is String) {
+          try {
+            final msg = jsonDecode(data) as Map<String, dynamic>;
+            final type = msg['type']?.toString() ?? '';
+            if (type == 'start') {
+              // New sentence starting — reset chunk accumulator
+              _ttsSampleRate = (msg['sample_rate'] as num?)?.toInt() ?? 24000;
+              _currentPcmChunks = [];
+              _currentPcmBytes = 0;
+            } else if (type == 'done') {
+              // Sentence complete — build WAV from accumulated PCM and resolve
+              if (_currentTTSCompleter != null && !_currentTTSCompleter!.isCompleted) {
+                final wav = _currentPcmChunks.isEmpty
+                    ? Uint8List(0)
+                    : _buildWav(_currentPcmChunks, _currentPcmBytes, _ttsSampleRate);
+                _currentTTSCompleter!.complete(wav);
+              }
+            } else if (type == 'error') {
+              debugPrint('[TTS-WS] Server error: ${msg['error']}');
+              if (_currentTTSCompleter != null && !_currentTTSCompleter!.isCompleted) {
+                _currentTTSCompleter!.complete(Uint8List(0));
+              }
+            }
+          } catch (_) {}
+        }
+      },
+      onError: (e) {
+        debugPrint('[TTS-WS] Error: $e');
+        _ttsSocket = null;
+        if (_currentTTSCompleter != null && !_currentTTSCompleter!.isCompleted) {
+          _currentTTSCompleter!.complete(Uint8List(0));
+        }
+      },
+      onDone: () {
+        debugPrint('[TTS-WS] Closed');
+        _ttsSocket = null;
+        if (_currentTTSCompleter != null && !_currentTTSCompleter!.isCompleted) {
+          _currentTTSCompleter!.complete(Uint8List(0));
+        }
+      },
+    );
+  }
+
+  /// Build a WAV file from raw PCM16 chunks (no WAV header) for audioplayers.
+  Uint8List _buildWav(List<Uint8List> pcmChunks, int totalPcmBytes, int sampleRate) {
+    final result = ByteData(44 + totalPcmBytes);
+    // RIFF header
+    result.setUint8(0, 0x52); // R
+    result.setUint8(1, 0x49); // I
+    result.setUint8(2, 0x46); // F
+    result.setUint8(3, 0x46); // F
+    result.setUint32(4, 36 + totalPcmBytes, Endian.little);
+    result.setUint8(8, 0x57);  // W
+    result.setUint8(9, 0x41);  // A
+    result.setUint8(10, 0x56); // V
+    result.setUint8(11, 0x45); // E
+    // fmt subchunk
+    result.setUint8(12, 0x66); // f
+    result.setUint8(13, 0x6D); // m
+    result.setUint8(14, 0x74); // t
+    result.setUint8(15, 0x20); // (space)
+    result.setUint32(16, 16, Endian.little);              // subchunk1 size
+    result.setUint16(20, 1, Endian.little);               // PCM format
+    result.setUint16(22, 1, Endian.little);               // mono
+    result.setUint32(24, sampleRate, Endian.little);      // sample rate
+    result.setUint32(28, sampleRate * 2, Endian.little);  // byte rate (sampleRate * channels * bitsPerSample/8)
+    result.setUint16(32, 2, Endian.little);               // block align (channels * bitsPerSample/8)
+    result.setUint16(34, 16, Endian.little);              // bits per sample
+    // data subchunk
+    result.setUint8(36, 0x64); // d
+    result.setUint8(37, 0x61); // a
+    result.setUint8(38, 0x74); // t
+    result.setUint8(39, 0x61); // a
+    result.setUint32(40, totalPcmBytes, Endian.little);
+    // Copy PCM data
+    int offset = 44;
+    for (final chunk in pcmChunks) {
+      for (int i = 0; i < chunk.length; i++) {
+        result.setUint8(offset + i, chunk[i]);
+      }
+      offset += chunk.length;
+    }
+    return result.buffer.asUint8List();
   }
 
   /// Send text with streaming LLM + sentence-by-sentence TTS.
@@ -181,6 +315,8 @@ class _PartnerPageState extends State<PartnerPage> {
             _isStreaming = false;
           });
           _loadStats();
+          _loadMemories();
+          _loadUserProfile();
 
           // Only synthesize full reply if no sentences were already queued
           if (_ttsAvailable && fullReply.isNotEmpty && _ttsQueue.isEmpty && !_ttsProcessing) {
@@ -188,7 +324,10 @@ class _PartnerPageState extends State<PartnerPage> {
           }
         }
       }, onError: (_) {
-        if (mounted) setState(() => _isStreaming = false);
+        if (mounted) setState(() {
+          _isStreaming = false;
+          _playingAudio = false;
+        });
       });
     } catch (e) {
       setState(() {
@@ -198,6 +337,7 @@ class _PartnerPageState extends State<PartnerPage> {
           _messages[idx].remove('_streaming');
         }
         _isStreaming = false;
+        _playingAudio = false;
       });
     }
   }
@@ -278,6 +418,40 @@ class _PartnerPageState extends State<PartnerPage> {
     }
   }
 
+  /// Normalize PCM16 audio volume (peak normalization to 80% max).
+  /// Improves STT accuracy by ensuring consistent volume levels.
+  Uint8List _normalizePcm16(Uint8List rawPcm16) {
+    if (rawPcm16.length < 4) return rawPcm16;
+    // View as 16-bit signed samples
+    final byteData = ByteData.sublistView(rawPcm16);
+    final sampleCount = rawPcm16.length ~/ 2;
+
+    // Find peak amplitude
+    int peak = 0;
+    for (int i = 0; i < sampleCount; i++) {
+      final sample = byteData.getInt16(i * 2, Endian.little);
+      final abs = sample < 0 ? -sample : sample;
+      if (abs > peak) peak = abs;
+    }
+
+    // Skip normalization for near-silence or already loud audio
+    if (peak < 328) return rawPcm16; // < 1% of max, likely silence
+    const targetPeak = 26213; // 80% of 32767
+    if (peak >= targetPeak) return rawPcm16; // Already loud enough
+
+    // Scale samples
+    final scale = targetPeak / peak;
+    final result = ByteData(rawPcm16.length);
+    for (int i = 0; i < sampleCount; i++) {
+      final sample = byteData.getInt16(i * 2, Endian.little);
+      int scaled = (sample * scale).round();
+      if (scaled > 32767) scaled = 32767;
+      if (scaled < -32768) scaled = -32768;
+      result.setInt16(i * 2, scaled, Endian.little);
+    }
+    return result.buffer.asUint8List();
+  }
+
   Timer? _audioStreamTimer;
 
   void _startAudioStreaming(String filePath) {
@@ -292,9 +466,10 @@ class _PartnerPageState extends State<PartnerPage> {
         if (!file.existsSync()) return;
         final bytes = await file.readAsBytes();
         if (bytes.length > lastReadPos) {
-          // Send new audio data (raw PCM16 after WAV header)
-          final newData = bytes.sublist(lastReadPos);
-          _sttSocket!.add(newData);
+          // Send normalized audio data (raw PCM16 after WAV header)
+          final rawData = Uint8List.sublistView(bytes, lastReadPos);
+          final normalized = _normalizePcm16(rawData);
+          _sttSocket!.add(normalized);
           lastReadPos = bytes.length;
         }
       } catch (_) {}
@@ -403,6 +578,8 @@ class _PartnerPageState extends State<PartnerPage> {
             _isStreaming = false;
           });
           _loadStats();
+          _loadMemories();
+          _loadUserProfile();
 
           // ── Stage 3: Only synthesize full reply if no sentences were already queued ──
           if (_ttsAvailable && fullReply.isNotEmpty && _ttsQueue.isEmpty && !_ttsProcessing) {
@@ -410,7 +587,10 @@ class _PartnerPageState extends State<PartnerPage> {
           }
         }
       }, onError: (_) {
-        if (mounted) setState(() => _isStreaming = false);
+        if (mounted) setState(() {
+          _isStreaming = false;
+          _playingAudio = false;
+        });
       });
     } catch (e) {
       setState(() {
@@ -436,8 +616,41 @@ class _PartnerPageState extends State<PartnerPage> {
     if (!_ttsProcessing) _processTTSQueue();
   }
 
-  /// Synthesize one sentence (returns WAV bytes or empty).
+  /// Synthesize one sentence via WebSocket (persistent connection, no HTTP overhead).
+  /// Falls back to HTTP POST if WebSocket is unavailable.
   Future<Uint8List> _synthesizeSentence(String sentence) async {
+    // Try WebSocket first (persistent connection, ~5ms vs ~100ms per-sentence)
+    if (_ttsSocket != null) {
+      try {
+        _currentTTSCompleter = Completer<Uint8List>();
+        _ttsSocket!.add(jsonEncode({
+          'text': sentence,
+          'emotion': _currentEmotion,
+        }));
+        final wav = await _currentTTSCompleter!.future
+            .timeout(const Duration(seconds: 30));
+        if (wav.isNotEmpty) {
+          debugPrint('[TTS-WS] Got ${wav.length} bytes for sentence');
+          return wav;
+        }
+      } catch (e) {
+        debugPrint('[TTS-WS] Synthesis failed: $e — falling back to HTTP');
+        // Force reconnect on next attempt
+        try { _ttsSocket?.close(); } catch (_) {}
+        _ttsSocket = null;
+        // Try reconnecting in background for next sentence
+        _connectTTSSocket().then((ok) {
+          if (ok) _setupTTSSocketListener();
+        });
+      }
+    }
+
+    // Fallback: HTTP POST (original method)
+    return _synthesizeSentenceHttp(sentence);
+  }
+
+  /// HTTP fallback for TTS synthesis (used when WebSocket is unavailable).
+  Future<Uint8List> _synthesizeSentenceHttp(String sentence) async {
     try {
       final uri = Uri.parse('${widget.api.baseUrl}/partner/voice/synthesize-sentence');
       final request = http_pkg.Request('POST', uri);
@@ -454,7 +667,7 @@ class _PartnerPageState extends State<PartnerPage> {
         client.close();
       }
     } catch (e) {
-      debugPrint('TTS synthesis failed: $e');
+      debugPrint('TTS HTTP synthesis failed: $e');
     }
     return Uint8List(0);
   }
@@ -647,7 +860,6 @@ class _PartnerPageState extends State<PartnerPage> {
       } else if (type == 'emotion') {
         setState(() {
           _currentEmotion = event['emotion']?.toString() ?? 'neutral';
-          _playingAudio = true;
         });
       } else if (type == 'sentence') {
         // Sentence complete — synthesize audio in background while LLM continues
@@ -681,10 +893,21 @@ class _PartnerPageState extends State<PartnerPage> {
         _loadMemories();
         _loadUserProfile();
       } else if (type == 'error') {
-        setState(() => _isStreaming = false);
+        setState(() {
+          _isStreaming = false;
+          _playingAudio = false;
+          final idx = _messages.lastIndexWhere((m) => m['_streaming'] == true);
+          if (idx >= 0) {
+            _messages[idx].remove('_streaming');
+            _messages[idx].remove('_thinking');
+          }
+        });
       }
     }, onError: (_) {
-      if (mounted) setState(() => _isStreaming = false);
+      if (mounted) setState(() {
+        _isStreaming = false;
+        _playingAudio = false;
+      });
     });
   }
 

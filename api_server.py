@@ -3816,13 +3816,77 @@ async def partner_voice_synthesize_sentence(body: dict[str, Any]):
     emotion = body.get("emotion", "neutral")
     if not sentence:
         raise HTTPException(400, "sentence is required")
+    partner = _get_partner()
     wav_bytes = await asyncio.get_event_loop().run_in_executor(
-        None, _get_partner().synthesize_sentence, sentence, emotion
+        None, lambda: partner.synthesize_sentence(sentence, emotion)
     )
     if wav_bytes is None:
         raise HTTPException(422, "TTS not available")
     from fastapi.responses import Response
     return Response(content=wav_bytes, media_type="audio/wav")
+
+
+@app.websocket("/partner/voice/tts-stream")
+async def partner_voice_tts_stream(websocket):
+    """WebSocket streaming TTS: client sends text, server streams PCM16 audio chunks.
+
+    Replaces per-sentence HTTP POST with a persistent connection.
+    Protocol:
+    - Client sends: JSON {"text": "...", "emotion": "..."}
+    - Server sends: JSON {"type": "start", "sample_rate": 24000}
+    - Server sends: binary PCM16 chunks (24kHz mono 16-bit)
+    - Server sends: JSON {"type": "done"}
+    - Client sends: JSON {"action": "close"} to disconnect
+    """
+    from fastapi.websockets import WebSocketDisconnect
+    await websocket.accept()
+
+    partner = _get_partner()
+    if partner._tts is None and partner._tts_emotional is None:
+        await websocket.send_json({"error": "TTS not initialized. Call /partner/voice/init first."})
+        await websocket.close()
+        return
+
+    try:
+        while True:
+            message = await websocket.receive()
+
+            if "text" in message:
+                data = json.loads(message["text"])
+
+                if data.get("action") == "close":
+                    break
+
+                text = data.get("text", "")
+                emotion = data.get("emotion", "neutral")
+
+                if not text or len(text.strip()) < 3:
+                    await websocket.send_json({"type": "done"})
+                    continue
+
+                try:
+                    # Send start marker with audio params
+                    await websocket.send_json({"type": "start", "sample_rate": 24000})
+
+                    # Stream PCM16 chunks
+                    async for chunk in partner.stream_synthesize(text, emotion):
+                        await websocket.send_bytes(chunk)
+
+                    # Signal sentence complete
+                    await websocket.send_json({"type": "done"})
+                except Exception as e:
+                    logger.error("TTS stream synthesis error: %s", e)
+                    await websocket.send_json({"type": "error", "error": str(e)})
+
+    except WebSocketDisconnect:
+        pass
+    except Exception as e:
+        logger.error("TTS stream WebSocket error: %s", e)
+    finally:
+        try:
+            await websocket.close()
+        except Exception:
+            pass
 
 
 @app.post("/partner/voice/mode")
@@ -3882,6 +3946,7 @@ async def partner_voice_stream_transcribe(websocket):
     audio_buffer = bytearray()
     full_text = ""
     last_transcribe_len = 0  # Track how much audio we've already transcribed
+    MAX_AUDIO_BUFFER = 5 * 1024 * 1024  # 5MB (~5 minutes at 16kHz 16-bit)
 
     try:
         while True:
@@ -3889,6 +3954,9 @@ async def partner_voice_stream_transcribe(websocket):
 
             if "bytes" in message:
                 # Received audio chunk (PCM16, 16kHz, mono)
+                if len(audio_buffer) + len(message["bytes"]) > MAX_AUDIO_BUFFER:
+                    await websocket.send_json({"error": "Audio buffer limit exceeded (5MB)"})
+                    break
                 audio_buffer.extend(message["bytes"])
 
                 # Transcribe every ~1.5 seconds of new audio (24000 bytes = 1.5s at 16kHz 16-bit)
@@ -3928,8 +3996,8 @@ async def partner_voice_stream_transcribe(websocket):
                     await websocket.send_json({"final": full_text, "done": True})
                     break
 
-    except Exception:
-        pass
+    except Exception as e:
+        logger.error("WebSocket stream-transcribe error: %s", e)
     finally:
         try:
             await websocket.close()
@@ -3945,7 +4013,10 @@ async def partner_voice_synthesize(body: dict[str, Any]):
     emotion = body.get("emotion", "neutral")
     if not text:
         raise HTTPException(400, "text is required")
-    wav_bytes = _get_partner().synthesize(text, voice=voice, emotion=emotion)
+    partner = _get_partner()
+    wav_bytes = await asyncio.get_event_loop().run_in_executor(
+        None, lambda: partner.synthesize(text, voice=voice, emotion=emotion)
+    )
     if wav_bytes is None:
         raise HTTPException(422, "TTS not available. Call /partner/voice/init first.")
     from fastapi.responses import Response
@@ -4473,6 +4544,8 @@ def _extract_json_from_llm(text: str) -> dict | None:
     """Try hard to extract a JSON object from messy LLM output."""
     if not text:
         return None
+    # Strip thinking tags that some models emit
+    text = _re.sub(r'<think>.*?</think>', '', text, flags=_re.DOTALL).strip()
     # 1. Direct parse
     try:
         obj = json.loads(text)
@@ -4487,14 +4560,28 @@ def _extract_json_from_llm(text: str) -> dict | None:
             return json.loads(fence_match.group(1))
         except json.JSONDecodeError:
             pass
-    # 3. Find first { ... } substring
+    # 3. Find first { ... } substring (no nesting)
     brace_match = _re.search(r"\{[^{}]*\}", text, _re.DOTALL)
     if brace_match:
         try:
             return json.loads(brace_match.group(0))
         except json.JSONDecodeError:
             pass
-    # 4. Find outermost { ... } (greedy)
+    # 4. Balanced brace extraction (handles nested objects)
+    start = text.find('{')
+    if start >= 0:
+        depth = 0
+        for i in range(start, len(text)):
+            if text[i] == '{':
+                depth += 1
+            elif text[i] == '}':
+                depth -= 1
+                if depth == 0:
+                    try:
+                        return json.loads(text[start:i + 1])
+                    except json.JSONDecodeError:
+                        break
+    # 5. Find outermost { ... } (greedy, last resort)
     brace_match2 = _re.search(r"\{.*\}", text, _re.DOTALL)
     if brace_match2:
         try:
@@ -4628,9 +4715,11 @@ async def enhance_image_prompt(body: dict[str, Any]):
         raise HTTPException(503, "No Ollama model available. Install one with: ollama pull gemma3:1b")
 
     # Use /api/generate (simpler, works better with thinking models via /no_think)
+    # Only prepend /no_think for Qwen models (other models output it as literal text)
+    no_think = "/no_think\n" if "qwen" in ollama_model.lower() else ""
+
     if use_prompt_weighting:
-        generate_prompt = f"""/no_think
-Write a Stable Diffusion {model_family} prompt for: {user_prompt}
+        generate_prompt = f"""{no_think}Write a Stable Diffusion {model_family} prompt for: {user_prompt}
 
 RULES:
 1. MAX 60 words (CLIP truncates at 77 tokens)
@@ -4644,10 +4733,18 @@ EXAMPLE output format:
 
 Now output ONLY the JSON for: {user_prompt}"""
     else:
-        generate_prompt = f"""/no_think
-IMPORTANT: Keep the prompt UNDER 60 words. CLIP only accepts 77 tokens — longer prompts get silently truncated.
-Output ONLY this JSON object, nothing else:
-{{"prompt": "[concise Stable Diffusion {model_family} prompt for: {user_prompt}. Include key quality tags (masterpiece, best quality, highly detailed). Add style, lighting, composition. Comma-separated tags. MAX 60 words.]", "negative_prompt": "[things to avoid: worst quality, low quality, blurry, deformed, ugly, bad anatomy, watermark, text, plus scene-specific negatives]"}}"""
+        generate_prompt = f"""{no_think}You are a Stable Diffusion {model_family} prompt expert. Enhance this description into a detailed image prompt.
+
+User's description: {user_prompt}
+
+RULES:
+1. MAX 60 words (CLIP truncates at 77 tokens)
+2. Include quality tags: masterpiece, best quality, highly detailed
+3. Add style, lighting, composition details
+4. Comma-separated tag format
+
+Output ONLY this JSON format, nothing else:
+{{"prompt": "your enhanced prompt here", "negative_prompt": "worst quality, low quality, blurry, deformed, ugly, bad anatomy, watermark, text, plus scene-specific negatives"}}"""
 
     try:
         import urllib.request
@@ -4666,6 +4763,9 @@ Output ONLY this JSON object, nothing else:
         with urllib.request.urlopen(req, timeout=timeout_sec) as resp:
             data = json.loads(resp.read().decode())
         content = (data.get("response", "") or "").strip()
+        # Strip thinking tags and /no_think echoes from all model responses
+        content = _re.sub(r'<think>.*?</think>', '', content, flags=_re.DOTALL).strip()
+        content = content.replace('/no_think', '').strip()
         logger.info("enhance-prompt response (%d chars): %s", len(content), content[:500])
 
         # Try to extract JSON
@@ -4683,7 +4783,7 @@ Output ONLY this JSON object, nothing else:
         chat_body = json.dumps({
             "model": ollama_model,
             "messages": [
-                {"role": "user", "content": f'/no_think\n{generate_prompt}'},
+                {"role": "user", "content": generate_prompt},
             ],
             "stream": False,
             "options": {"temperature": 0.7, "num_predict": 256},
@@ -4697,6 +4797,8 @@ Output ONLY this JSON object, nothing else:
             data2 = json.loads(resp2.read().decode())
         msg = data2.get("message", {})
         chat_content = (msg.get("content", "") or "").strip()
+        chat_content = _re.sub(r'<think>.*?</think>', '', chat_content, flags=_re.DOTALL).strip()
+        chat_content = chat_content.replace('/no_think', '').strip()
         chat_thinking = (msg.get("thinking", "") or "").strip()
         logger.info("enhance-prompt chat content (%d chars), thinking (%d chars)", len(chat_content), len(chat_thinking))
 
@@ -4946,6 +5048,17 @@ def edit_image(body: dict[str, Any]):
     if not model_id or not prompt or not init_image_path:
         raise HTTPException(400, "model_id, prompt (or instruction), and init_image_path (or base_image_id) are required")
 
+    # Handle mask for inpaint edit (decode base64 mask if provided)
+    mask_image_path = body.get("mask_image_path")
+    if not mask_image_path and body.get("mask_image_base64"):
+        import base64 as _b64_edit
+        mask_bytes = _b64_edit.b64decode(body["mask_image_base64"])
+        mask_tmp = Path("data/images/masks")
+        mask_tmp.mkdir(parents=True, exist_ok=True)
+        mask_file = mask_tmp / f"{uuid.uuid4()}.png"
+        mask_file.write_bytes(mask_bytes)
+        mask_image_path = str(mask_file)
+
     result = image_service.generate(
         model_id=model_id,
         prompt=prompt,
@@ -4956,6 +5069,7 @@ def edit_image(body: dict[str, Any]):
         width=int(body.get("width", 1024)),
         height=int(body.get("height", 1024)),
         init_image_path=init_image_path,
+        mask_image_path=mask_image_path,
         strength=float(body.get("strength", 0.65)),
         params_json=body.get("params_json"),
         timeout_sec=body.get("timeout_sec"),

@@ -82,6 +82,9 @@ class _ImagesPageState extends State<ImagesPage> with TickerProviderStateMixin {
   bool _inpaintMode = false;
   List<Offset?> _maskStrokes = [];
   double _brushSize = 30.0;
+  bool _maskVisible = true;
+  // Track stroke boundaries for undo: each entry is the _maskStrokes.length after that stroke
+  final List<int> _strokeBoundaries = [];
 
   // Prompt enhancer
   bool _enhancingPrompt = false;
@@ -152,7 +155,10 @@ class _ImagesPageState extends State<ImagesPage> with TickerProviderStateMixin {
       final data = await widget.api.get('/images/generate/progress') as Map<String, dynamic>;
       if (!mounted || !_busy) return;
       final active = data['active'] == true;
-      if (!active) return;
+      if (!active) {
+        _stopProgressPolling();
+        return;
+      }
       final label = (data['label'] ?? '').toString();
       final elapsed = (data['elapsed_sec'] as num?)?.toDouble() ?? 0.0;
       final percent = (data['percent'] as num?)?.toDouble() ?? 0.0;
@@ -163,7 +169,9 @@ class _ImagesPageState extends State<ImagesPage> with TickerProviderStateMixin {
         _status = '$label  ($elapsedStr elapsed)';
         _progressPercent = percent / 100.0;
       });
-    } catch (_) {}
+    } catch (e) {
+      debugPrint('[progress] Poll error: $e');
+    }
   }
 
   Future<void> _cancelGeneration() async {
@@ -772,6 +780,7 @@ class _ImagesPageState extends State<ImagesPage> with TickerProviderStateMixin {
       _status = 'Upscaling image (4x)...';
       _progressPercent = 0.0;
     });
+    _startProgressPolling();
     try {
       await widget.api.post('/images/upscale', {
         'session_id': _activeSession!['id'],
@@ -785,6 +794,7 @@ class _ImagesPageState extends State<ImagesPage> with TickerProviderStateMixin {
     } catch (e) {
       _captureError(e);
     } finally {
+      _stopProgressPolling();
       _safeSetState(() {
         _busy = false;
         _progressPercent = 0.0;
@@ -1169,7 +1179,11 @@ class _ImagesPageState extends State<ImagesPage> with TickerProviderStateMixin {
                 final url = _imageUrlFor(id);
                 if (url == null) return const SizedBox.shrink();
                 return GestureDetector(
-                  onTap: () => setState(() => _selectedImageId = id),
+                  onTap: () => setState(() {
+                    _selectedImageId = id;
+                    // Clear inpaint mask when switching images (mask was for old image)
+                    if (_inpaintMode && _maskStrokes.isNotEmpty) _maskStrokes.clear();
+                  }),
                   child: AnimatedContainer(
                     duration: const Duration(milliseconds: 150),
                     width: 76,
@@ -1202,23 +1216,28 @@ class _ImagesPageState extends State<ImagesPage> with TickerProviderStateMixin {
     return LayoutBuilder(builder: (ctx, constraints) {
       return GestureDetector(
         onPanUpdate: (details) => setState(() => _maskStrokes.add(details.localPosition)),
-        onPanEnd: (_) => setState(() => _maskStrokes.add(null)),
+        onPanEnd: (_) => setState(() {
+          _maskStrokes.add(null);
+          _strokeBoundaries.add(_maskStrokes.length); // Track stroke end for undo
+        }),
         onTapDown: (details) => setState(() {
           _maskStrokes.add(details.localPosition);
           _maskStrokes.add(null);
+          _strokeBoundaries.add(_maskStrokes.length);
         }),
         child: Stack(children: [
           Center(child: Image.network(selectedUrl, fit: BoxFit.contain)),
-          Positioned.fill(child: CustomPaint(painter: _MaskPainter(_maskStrokes, _brushSize))),
+          if (_maskVisible)
+            Positioned.fill(child: CustomPaint(painter: _MaskPainter(_maskStrokes, _brushSize))),
           Positioned(
             top: 8, right: 8,
             child: Container(
               padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 5),
               decoration: BoxDecoration(color: Colors.black87, borderRadius: BorderRadius.circular(20)),
-              child: const Row(mainAxisSize: MainAxisSize.min, children: [
-                Icon(Icons.brush, size: 14, color: Colors.white70),
-                SizedBox(width: 4),
-                Text('Painting mask', style: TextStyle(fontSize: 11, color: Colors.white70)),
+              child: Row(mainAxisSize: MainAxisSize.min, children: [
+                const Icon(Icons.brush, size: 14, color: Colors.white70),
+                const SizedBox(width: 4),
+                Text(_maskVisible ? 'Painting mask' : 'Mask hidden', style: const TextStyle(fontSize: 11, color: Colors.white70)),
               ]),
             ),
           ),
@@ -1918,7 +1937,7 @@ class _ImagesPageState extends State<ImagesPage> with TickerProviderStateMixin {
                   ? _actionButton(
                       icon: Icons.close,
                       label: 'Exit Inpaint',
-                      onPressed: () => setState(() { _inpaintMode = false; _maskStrokes.clear(); }),
+                      onPressed: () => setState(() { _inpaintMode = false; _maskStrokes.clear(); _strokeBoundaries.clear(); }),
                       cs: cs,
                       color: Colors.orange,
                     )
@@ -1940,7 +1959,8 @@ class _ImagesPageState extends State<ImagesPage> with TickerProviderStateMixin {
                 borderRadius: BorderRadius.circular(8),
               ),
               child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
-                Text('Draw on the image to mark areas', style: TextStyle(fontSize: 11, color: cs.primary, fontWeight: FontWeight.w600)),
+                Text('Paint over areas to replace', style: TextStyle(fontSize: 11, color: cs.primary, fontWeight: FontWeight.w600)),
+                Text('Red overlay = areas that will be regenerated', style: TextStyle(fontSize: 10, color: cs.onSurfaceVariant)),
                 const SizedBox(height: 6),
                 Row(children: [
                   const Text('Brush:', style: TextStyle(fontSize: 11)),
@@ -1952,8 +1972,27 @@ class _ImagesPageState extends State<ImagesPage> with TickerProviderStateMixin {
                   Text('${_brushSize.round()}px', style: const TextStyle(fontSize: 11)),
                 ]),
                 Row(children: [
+                  // Undo last stroke
+                  IconButton(
+                    icon: const Icon(Icons.undo, size: 18),
+                    tooltip: 'Undo last stroke',
+                    onPressed: _strokeBoundaries.isEmpty ? null : () => setState(() {
+                      _strokeBoundaries.removeLast();
+                      final targetLen = _strokeBoundaries.isEmpty ? 0 : _strokeBoundaries.last;
+                      while (_maskStrokes.length > targetLen) { _maskStrokes.removeLast(); }
+                    }),
+                    visualDensity: VisualDensity.compact,
+                  ),
+                  // Toggle mask visibility
+                  IconButton(
+                    icon: Icon(_maskVisible ? Icons.visibility : Icons.visibility_off, size: 18),
+                    tooltip: _maskVisible ? 'Hide mask' : 'Show mask',
+                    onPressed: () => setState(() => _maskVisible = !_maskVisible),
+                    visualDensity: VisualDensity.compact,
+                  ),
+                  const SizedBox(width: 4),
                   Expanded(child: OutlinedButton(
-                    onPressed: () => setState(() => _maskStrokes.clear()),
+                    onPressed: () => setState(() { _maskStrokes.clear(); _strokeBoundaries.clear(); }),
                     child: const Text('Clear', style: TextStyle(fontSize: 11)),
                   )),
                   const SizedBox(width: 6),
@@ -1965,7 +2004,8 @@ class _ImagesPageState extends State<ImagesPage> with TickerProviderStateMixin {
                 if (_prompt.text.trim().isEmpty)
                   Padding(
                     padding: const EdgeInsets.only(top: 4),
-                    child: Text('Enter a prompt above first', style: TextStyle(fontSize: 10, color: cs.error)),
+                    child: Text('Enter a prompt describing what to paint in the masked area',
+                        style: TextStyle(fontSize: 10, color: cs.error)),
                   ),
               ]),
             ),
@@ -1973,6 +2013,15 @@ class _ImagesPageState extends State<ImagesPage> with TickerProviderStateMixin {
           const SizedBox(height: 12),
           // Edit section
           _sectionLabel('Edit Image (img2img)', cs),
+          if (_selectedImageId != null)
+            Padding(
+              padding: const EdgeInsets.only(bottom: 4),
+              child: Text('Editing selected image', style: TextStyle(fontSize: 10, color: cs.onSurfaceVariant)),
+            ),
+          Text(
+            'Describe how to change the image. The model modifies the existing image based on your instruction.',
+            style: TextStyle(fontSize: 10, color: cs.onSurfaceVariant, fontStyle: FontStyle.italic),
+          ),
           const SizedBox(height: 6),
           TextField(
             controller: _instruction,
@@ -1982,12 +2031,13 @@ class _ImagesPageState extends State<ImagesPage> with TickerProviderStateMixin {
             style: const TextStyle(fontSize: 12),
             decoration: const InputDecoration(
               labelText: 'Instruction',
-              hintText: 'e.g. make it cinematic, add sunset',
+              hintText: 'e.g. make it cinematic, add sunset, change sky to night',
               isDense: true,
               contentPadding: EdgeInsets.symmetric(horizontal: 10, vertical: 8),
             ),
           ),
           const SizedBox(height: 6),
+          Text('Change Amount', style: TextStyle(fontSize: 11, color: cs.onSurfaceVariant, fontWeight: FontWeight.w500)),
           Row(children: [
             Expanded(
               child: SliderTheme(
@@ -2004,10 +2054,10 @@ class _ImagesPageState extends State<ImagesPage> with TickerProviderStateMixin {
             ),
           ]),
           Text(
-            _editStrength < 0.3 ? 'Subtle changes'
-              : _editStrength < 0.6 ? 'Moderate changes'
-              : _editStrength < 0.8 ? 'Strong changes'
-              : 'Near-complete regeneration',
+            _editStrength < 0.3 ? 'Subtle — color/texture tweaks only'
+              : _editStrength < 0.6 ? 'Moderate — change objects, lighting, style'
+              : _editStrength < 0.8 ? 'Strong — heavy restyle, new shapes'
+              : 'Extreme — near-complete regeneration from prompt',
             style: TextStyle(fontSize: 10, color: cs.onSurfaceVariant),
           ),
           const SizedBox(height: 6),
@@ -2768,14 +2818,16 @@ class _MaskPainter extends CustomPainter {
 
   @override
   void paint(Canvas canvas, Size size) {
+    // Red semi-transparent overlay — standard mask color in image editors
+    // (Photoshop quick mask, A1111, getimg.ai all use red)
     final paint = Paint()
-      ..color = const Color(0x88FFFFFF)
+      ..color = const Color(0x88FF4444)
       ..strokeWidth = brushSize
       ..strokeCap = StrokeCap.round
       ..style = PaintingStyle.stroke;
 
     final dotPaint = Paint()
-      ..color = const Color(0x88FFFFFF)
+      ..color = const Color(0x88FF4444)
       ..style = PaintingStyle.fill;
 
     for (int i = 0; i < strokes.length; i++) {
