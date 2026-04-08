@@ -384,24 +384,42 @@ def _upscale_realesrgan(image: Image.Image, scale: int = 4, anime: bool = False)
 
 # Cached pipelines (loaded on first use, reused across calls)
 _instruct_pipes: dict[str, Any] = {}
+_kontext_lock = threading.Lock()
+_cosxl_lock = threading.Lock()
+_controlnet_lock = threading.Lock()
 
-# Available instruction-edit models
-# InstructPix2Pix models ranked by reliability (best first)
-# NOTE: SD 1.5 version is officially recommended over SDXL — "works significantly better"
-# See: https://huggingface.co/diffusers/sdxl-instructpix2pix-768
+# Available instruction-edit models — ranked by quality (best first)
 INSTRUCT_MODELS = {
+    "kontext": {
+        "name": "FLUX Kontext (best quality)",
+        "description": "State-of-the-art editing via FLUX.1 Kontext. Q4 GGUF quantized, ~7GB. First use downloads model.",
+        "default_guidance": 2.5,
+        "default_steps": 24,
+    },
+    "cosxl": {
+        "name": "CosXL Edit (SDXL quality)",
+        "description": "SDXL-based instruction editing. Good quality, faster than Kontext. ~6.5GB.",
+        "default_guidance": 7.0,
+        "default_image_guidance": 1.5,
+        "default_steps": 20,
+    },
     "pix2pix": {
-        "name": "InstructPix2Pix",
-        "description": "Instruction-based image editing. DPMSolver, 20 steps. ~4GB VRAM.",
+        "name": "InstructPix2Pix (legacy)",
+        "description": "SD 1.5 instruction editing. Fastest but lower quality. ~4GB VRAM.",
         "repo": "timbrooks/instruct-pix2pix",
         "pipeline_cls": "StableDiffusionInstructPix2PixPipeline",
         "default_guidance": 7.5,
         "default_image_guidance": 1.5,
-        "default_steps": 20,  # DPMSolver converges in 20 steps
-        "resize_to": 512,  # model's native resolution
+        "default_steps": 20,
+        "resize_to": 512,
     },
-    # MagicBrush removed — repo is raw checkpoint, not diffusers-compatible
-    # (no model_index.json). Would need manual conversion.
+    "controlnet": {
+        "name": "ControlNet img2img (structure)",
+        "description": "SD 1.5 + depth/canny ControlNet. Best for structure-preserving edits. Prompt describes desired result.",
+        "default_guidance": 7.5,
+        "default_steps": 25,
+        "default_strength": 0.5,
+    },
 }
 
 
@@ -439,32 +457,230 @@ def _get_hf_token() -> str | None:
         return None
 
 
-def _load_instruct_pipeline(model: str) -> Any:
-    """Load and cache an instruction-edit pipeline."""
-    global _instruct_pipes
-    if model in _instruct_pipes:
-        return _instruct_pipes[model]
+def _unload_other_pipelines(keep: str) -> None:
+    """Unload all instruct pipelines except the one being loaded.
 
+    Only one editing model should be in VRAM at a time (8GB limit).
+    """
+    global _instruct_pipes
     import torch
 
-    spec = INSTRUCT_MODELS.get(model)
-    if not spec:
-        raise ValueError(f"Unknown instruct-edit model: {model}. Available: {list(INSTRUCT_MODELS.keys())}")
+    to_remove = [k for k in _instruct_pipes if k != keep]
+    for key in to_remove:
+        pipe = _instruct_pipes.pop(key, None)
+        if pipe is not None:
+            del pipe
+            logger.info("Unloaded %s pipeline to free VRAM", key)
+    if to_remove:
+        torch.cuda.empty_cache()
 
+
+# ── FLUX Kontext Pipeline (Best Quality) ────────────────────────
+
+def _download_kontext_gguf() -> str:
+    """Download FLUX.1 Kontext dev Q4_K_S GGUF if not present. Returns local path."""
+    from huggingface_hub import hf_hub_download
+
+    token = _get_hf_token()
+    if not token:
+        raise RuntimeError(
+            "FLUX Kontext requires a HuggingFace token (gated model). "
+            "Set HF_TOKEN in .env or run `huggingface-cli login`."
+        )
+
+    logger.info("Downloading FLUX.1 Kontext dev Q4_K_S GGUF (~6.8GB, first use only)...")
+    local_path = hf_hub_download(
+        repo_id="QuantStack/FLUX.1-Kontext-dev-GGUF",
+        filename="flux1-kontext-dev-Q4_K_S.gguf",
+        token=token,
+    )
+    logger.info("FLUX Kontext GGUF downloaded: %s", local_path)
+    return local_path
+
+
+def _load_kontext_pipeline() -> Any:
+    """Load FLUX.1 Kontext dev with Q4 GGUF quantization."""
+    global _instruct_pipes
+    if "kontext" in _instruct_pipes:
+        return _instruct_pipes["kontext"]
+
+    import torch
+    _unload_other_pipelines("kontext")
+
+    from diffusers import FluxKontextPipeline
+    from diffusers import GGUFQuantizationConfig
+
+    gguf_path = _download_kontext_gguf()
+    token = _get_hf_token()
+
+    logger.info("Loading FLUX Kontext pipeline with GGUF quantization...")
+    quantization_config = GGUFQuantizationConfig(compute_dtype=torch.bfloat16)
+    pipe = FluxKontextPipeline.from_pretrained(
+        "black-forest-labs/FLUX.1-Kontext-dev",
+        transformer_path=gguf_path,
+        quantization_config=quantization_config,
+        torch_dtype=torch.bfloat16,
+        token=token,
+    )
+    pipe.enable_model_cpu_offload()
+    pipe.set_progress_bar_config(disable=True)
+
+    _instruct_pipes["kontext"] = pipe
+    logger.info("FLUX Kontext pipeline loaded (GGUF Q4, bfloat16, CPU offload)")
+    return pipe
+
+
+# ── CosXL Edit Pipeline (SDXL Quality) ─────────────────────────
+
+def _download_cosxl_model() -> Path:
+    """Download cosxl_edit.safetensors if not present."""
+    model_path = Path("data/models/cosxl_edit.safetensors")
+    if model_path.exists():
+        return model_path
+
+    from huggingface_hub import hf_hub_download
+
+    model_path.parent.mkdir(parents=True, exist_ok=True)
+    token = _get_hf_token()
+    logger.info("Downloading CosXL Edit model (~6.5GB, first use only)...")
+    downloaded = hf_hub_download(
+        repo_id="stabilityai/cosxl",
+        filename="cosxl_edit.safetensors",
+        token=token,
+    )
+    # Copy from HF cache to local models dir for faster reloads
+    import shutil
+    shutil.copy2(downloaded, str(model_path))
+    logger.info("CosXL Edit saved: %s (%.1f GB)", model_path, model_path.stat().st_size / 1e9)
+    return model_path
+
+
+def _load_cosxl_pipeline() -> Any:
+    """Load CosXL Edit as SDXL InstructPix2Pix pipeline."""
+    global _instruct_pipes
+    if "cosxl" in _instruct_pipes:
+        return _instruct_pipes["cosxl"]
+
+    import torch
+    _unload_other_pipelines("cosxl")
+
+    from diffusers import StableDiffusionXLInstructPix2PixPipeline, AutoencoderKL, EulerDiscreteScheduler
+
+    model_path = _download_cosxl_model()
+
+    # Use fp16-fix VAE for stability
+    logger.info("Loading CosXL Edit pipeline...")
+    vae = AutoencoderKL.from_pretrained("madebyollin/sdxl-vae-fp16-fix", torch_dtype=torch.float16)
+    pipe = StableDiffusionXLInstructPix2PixPipeline.from_single_file(
+        str(model_path),
+        vae=vae,
+        torch_dtype=torch.float16,
+        is_cosxl_edit=True,
+    )
+    pipe.scheduler = EulerDiscreteScheduler.from_config(pipe.scheduler.config)
+    pipe.enable_model_cpu_offload()
+    pipe.vae.enable_slicing()
+    pipe.vae.enable_tiling()
+    pipe.set_progress_bar_config(disable=True)
+
+    _instruct_pipes["cosxl"] = pipe
+    logger.info("CosXL Edit pipeline loaded (fp16, CPU offload)")
+    return pipe
+
+
+# ── ControlNet img2img Pipeline (Structure Preservation) ────────
+
+def _load_controlnet_pipeline(control_type: str = "depth") -> Any:
+    """Load SD 1.5 + ControlNet (depth or canny) for img2img editing."""
+    global _instruct_pipes
+    cache_key = f"controlnet_{control_type}"
+    if cache_key in _instruct_pipes:
+        return _instruct_pipes[cache_key]
+
+    import torch
+    _unload_other_pipelines(cache_key)
+
+    from diffusers import StableDiffusionControlNetImg2ImgPipeline, ControlNetModel
+
+    if control_type == "canny":
+        controlnet_repo = "lllyasviel/control_v11p_sd15_canny"
+    else:
+        controlnet_repo = "lllyasviel/control_v11f1p_sd15_depth"
+
+    logger.info("Loading ControlNet (%s) + SD 1.5 pipeline...", control_type)
+    controlnet = ControlNetModel.from_pretrained(
+        controlnet_repo, torch_dtype=torch.float16,
+    )
+    pipe = StableDiffusionControlNetImg2ImgPipeline.from_pretrained(
+        "runwayml/stable-diffusion-v1-5",
+        controlnet=controlnet,
+        torch_dtype=torch.float16,
+        safety_checker=None,
+    )
+    pipe.enable_model_cpu_offload()
+    pipe.set_progress_bar_config(disable=True)
+    try:
+        pipe.vae.enable_slicing()
+        pipe.vae.enable_tiling()
+    except Exception:
+        pass
+
+    _instruct_pipes[cache_key] = pipe
+    logger.info("ControlNet %s + SD 1.5 pipeline loaded (fp16, CPU offload)", control_type)
+    return pipe
+
+
+def _get_canny_edges(image: Image.Image) -> Image.Image:
+    """Extract Canny edges from image for ControlNet conditioning."""
+    import cv2
+    arr = np.array(image.convert("RGB"))
+    gray = cv2.cvtColor(arr, cv2.COLOR_RGB2GRAY)
+    edges = cv2.Canny(gray, 100, 200)
+    edges_rgb = cv2.cvtColor(edges, cv2.COLOR_GRAY2RGB)
+    return Image.fromarray(edges_rgb)
+
+
+def _get_depth_image(image: Image.Image) -> Image.Image:
+    """Generate depth map image for ControlNet conditioning.
+
+    Uses existing Depth Anything v2 ONNX or MiDaS fallback.
+    """
+    import cv2
+    arr = np.array(image.convert("RGB"))
+    h, w = arr.shape[:2]
+    depth = _get_depth_map(arr, h, w)
+    if depth is None:
+        raise RuntimeError("Could not generate depth map — no depth model available")
+    # Convert to 3-channel image (ControlNet expects RGB)
+    depth_uint8 = (depth * 255).astype(np.uint8)
+    depth_rgb = cv2.cvtColor(depth_uint8, cv2.COLOR_GRAY2RGB)
+    return Image.fromarray(depth_rgb)
+
+
+# ── InstructPix2Pix Pipeline (Legacy) ───────────────────────────
+
+def _load_pix2pix_pipeline() -> Any:
+    """Load and cache the InstructPix2Pix pipeline (SD 1.5)."""
+    global _instruct_pipes
+    if "pix2pix" in _instruct_pipes:
+        return _instruct_pipes["pix2pix"]
+
+    import torch
+    _unload_other_pipelines("pix2pix")
+
+    spec = INSTRUCT_MODELS["pix2pix"]
     device = "cuda" if torch.cuda.is_available() else "cpu"
     dtype = torch.float16 if device == "cuda" else torch.float32
-    token = _get_hf_token() if spec.get("gated") else None
 
     from diffusers import StableDiffusionInstructPix2PixPipeline
     pipe = StableDiffusionInstructPix2PixPipeline.from_pretrained(
         spec["repo"],
         torch_dtype=dtype,
-        safety_checker=None,        # Disable NSFW — false positives on skin/clothing
-        feature_extractor=None,     # Save ~1GB VRAM
+        safety_checker=None,
+        feature_extractor=None,
     )
 
     # DPMSolverMultistep: best quality/speed tradeoff, converges in 15-20 steps
-    # (Research: outperforms EulerAncestral which needs 30+ steps for same quality)
     try:
         from diffusers import DPMSolverMultistepScheduler
         pipe.scheduler = DPMSolverMultistepScheduler.from_config(pipe.scheduler.config)
@@ -480,13 +696,11 @@ def _load_instruct_pipeline(model: str) -> Any:
     pipe.set_progress_bar_config(disable=True)
     if device == "cuda":
         pipe.enable_model_cpu_offload()
-        # Try xformers first (best memory efficiency), fall back to SDPA, then attention slicing
         try:
             pipe.enable_xformers_memory_efficient_attention()
             logger.info("Using xformers memory-efficient attention")
         except Exception:
             try:
-                # PyTorch 2.0+ built-in scaled dot product attention
                 from diffusers.models.attention_processor import AttnProcessor2_0
                 pipe.unet.set_attn_processor(AttnProcessor2_0())
                 logger.info("Using PyTorch SDPA attention")
@@ -504,9 +718,26 @@ def _load_instruct_pipeline(model: str) -> Any:
     else:
         pipe = pipe.to(device)
 
-    _instruct_pipes[model] = pipe
-    logger.info("%s pipeline loaded on %s", spec["name"], device)
+    _instruct_pipes["pix2pix"] = pipe
+    logger.info("InstructPix2Pix pipeline loaded on %s", device)
     return pipe
+
+
+# ── Unified Pipeline Loader ─────────────────────────────────────
+
+def _load_instruct_pipeline(model: str) -> Any:
+    """Load and cache an instruction-edit pipeline by model key."""
+    if model == "kontext":
+        return _load_kontext_pipeline()
+    elif model == "cosxl":
+        return _load_cosxl_pipeline()
+    elif model == "pix2pix":
+        return _load_pix2pix_pipeline()
+    elif model == "controlnet":
+        # Default to depth; actual control_type is handled in instruct_edit
+        return _load_controlnet_pipeline("depth")
+    else:
+        raise ValueError(f"Unknown instruct-edit model: {model}. Available: {list(INSTRUCT_MODELS.keys())}")
 
 
 def instruct_edit(
@@ -519,36 +750,122 @@ def instruct_edit(
     negative_prompt: str = "",
     passes: int = 1,
     preserve_color: float = 0.0,
+    strength: float = 0.0,
+    control_type: str = "depth",
+    conditioning_scale: float = 0.9,
 ) -> Image.Image:
-    """Edit image with optimized quality pipeline.
+    """Edit image using one of 4 models:
 
-    Research-backed settings (April 2026):
-    - DPMSolverMultistep scheduler: best quality at 20 steps (vs EulerAncestral needing 30+)
-    - guidance_scale 7-9: optimal edit strength range
-    - image_guidance_scale 1.2-1.5: balances preservation vs change
-    - 512x512 native resolution: model was trained at this size
-    - Progressive multi-pass: increasing guidance across passes
-    - LAB color preservation: blends chrominance from original
+    - "kontext": FLUX.1 Kontext dev (GGUF Q4) — best quality, instruction-based
+    - "cosxl":   CosXL Edit (SDXL) — good quality, instruction-based, faster
+    - "pix2pix": InstructPix2Pix (SD 1.5) — fastest, legacy
+    - "controlnet": SD 1.5 + ControlNet — structure-preserving, prompt describes desired result
 
     Parameters:
-    - instruction: editing command ("make it sunset", "add snow", "change dress to blue")
-    - model: "pix2pix" (original) or "magicbrush" (fine-tuned on real edits, better for localized changes)
-    - guidance: text guidance (5-12, higher = stronger edit). Default 7.5
-    - image_guidance: image preservation (1.0-2.0, higher = less change). Default 1.5
-    - steps: inference steps (15-30, default 20 with DPMSolver)
-    - negative_prompt: what to avoid
-    - passes: 1=normal, 2=progressive refinement (gentle→strong)
-    - preserve_color: 0.0=full model output, 0.3-0.5=blend original colors in LAB space
+    - instruction: editing command ("make it sunset") or description for controlnet ("a sunset scene")
+    - model: "kontext", "cosxl", "pix2pix", or "controlnet"
+    - guidance: text guidance scale (model-dependent defaults)
+    - image_guidance: image preservation (IP2P/CosXL only)
+    - steps: inference steps (model-dependent defaults)
+    - negative_prompt: what to avoid (IP2P/CosXL/ControlNet)
+    - passes: 1-3, progressive refinement (IP2P only)
+    - preserve_color: 0.0-0.5, blend original colors in LAB space (IP2P only)
+    - strength: denoising strength 0.0-1.0 (ControlNet only, default 0.5)
+    - control_type: "depth" or "canny" (ControlNet only)
+    - conditioning_scale: ControlNet conditioning weight (ControlNet only, default 0.9)
     """
     spec = INSTRUCT_MODELS.get(model, INSTRUCT_MODELS["pix2pix"])
-    with _instruct_lock:
-        pipe = _load_instruct_pipeline(model)
-
     actual_steps = steps if steps > 0 else spec["default_steps"]
     actual_guidance = guidance if guidance > 0 else spec["default_guidance"]
-    actual_img_guidance = image_guidance if image_guidance > 0 else spec["default_image_guidance"]
 
-    # Comprehensive negative prompt targeting common IP2P artifacts
+    logger.info("instruct_edit: model=%s instruction='%s', guidance=%.1f, steps=%d",
+                model, instruction, actual_guidance, actual_steps)
+
+    # ── FLUX Kontext ──────────────────────────────────────────────
+    if model == "kontext":
+        with _kontext_lock:
+            pipe = _load_kontext_pipeline()
+
+        original_rgb = image.convert("RGB")
+        result = pipe(
+            image=original_rgb,
+            prompt=instruction,
+            guidance_scale=actual_guidance,
+            num_inference_steps=actual_steps,
+            max_sequence_length=256,
+        ).images[0]
+
+        logger.info("Kontext edit complete: %s", instruction[:60])
+        return result
+
+    # ── CosXL Edit ────────────────────────────────────────────────
+    if model == "cosxl":
+        with _cosxl_lock:
+            pipe = _load_cosxl_pipeline()
+
+        actual_img_guidance = image_guidance if image_guidance > 0 else spec.get("default_image_guidance", 1.5)
+        original_rgb = image.convert("RGB")
+
+        if not negative_prompt:
+            negative_prompt = (
+                "lowres, bad anatomy, bad hands, cropped, worst quality, low quality, "
+                "blurry, deformed, disfigured, watermark, text, jpeg artifacts"
+            )
+
+        result = pipe(
+            prompt=instruction,
+            image=original_rgb,
+            guidance_scale=actual_guidance,
+            image_guidance_scale=actual_img_guidance,
+            num_inference_steps=actual_steps,
+            negative_prompt=negative_prompt,
+        ).images[0]
+
+        logger.info("CosXL edit complete: %s (guidance=%.1f, img_guidance=%.1f)",
+                    instruction[:60], actual_guidance, actual_img_guidance)
+        return result
+
+    # ── ControlNet img2img ────────────────────────────────────────
+    if model == "controlnet":
+        with _controlnet_lock:
+            pipe = _load_controlnet_pipeline(control_type)
+
+        actual_strength = strength if strength > 0 else spec.get("default_strength", 0.5)
+        original_rgb = image.convert("RGB")
+
+        # Generate control image (depth or canny)
+        if control_type == "canny":
+            control_image = _get_canny_edges(original_rgb)
+        else:
+            control_image = _get_depth_image(original_rgb)
+
+        if not negative_prompt:
+            negative_prompt = (
+                "lowres, bad anatomy, bad hands, cropped, worst quality, low quality, "
+                "blurry, deformed, disfigured, watermark, text, jpeg artifacts"
+            )
+
+        result = pipe(
+            prompt=instruction,
+            image=original_rgb,
+            control_image=control_image,
+            strength=actual_strength,
+            guidance_scale=actual_guidance,
+            num_inference_steps=actual_steps,
+            negative_prompt=negative_prompt,
+            controlnet_conditioning_scale=conditioning_scale,
+        ).images[0]
+
+        logger.info("ControlNet %s edit complete: strength=%.2f, guidance=%.1f",
+                    control_type, actual_strength, actual_guidance)
+        return result
+
+    # ── InstructPix2Pix (legacy) ──────────────────────────────────
+    with _instruct_lock:
+        pipe = _load_pix2pix_pipeline()
+
+    actual_img_guidance = image_guidance if image_guidance > 0 else spec.get("default_image_guidance", 1.5)
+
     if not negative_prompt:
         negative_prompt = (
             "lowres, bad anatomy, bad hands, cropped, worst quality, low quality, "
@@ -560,7 +877,6 @@ def instruct_edit(
     original_rgb = image.convert("RGB")
     target = spec.get("resize_to", 512)
 
-    # ── PREPROCESSING ──
     # Light CLAHE + sharpen helps the model perceive scene details better
     from . import processors
     preprocessed = original_rgb.copy()
@@ -570,29 +886,22 @@ def instruct_edit(
     except Exception:
         pass
 
-    # Resize to model's native 512x512 (trained at this resolution)
     edit_image = preprocessed.resize((target, target), Image.Resampling.LANCZOS)
 
-    logger.info("instruct_edit: model=%s instruction='%s', guidance=%.1f, img_guidance=%.1f, steps=%d, passes=%d",
-                model, instruction, actual_guidance, actual_img_guidance, actual_steps, passes)
+    logger.info("instruct_edit(pix2pix): guidance=%.1f, img_guidance=%.1f, steps=%d, passes=%d",
+                actual_guidance, actual_img_guidance, actual_steps, passes)
 
-    # ── INFERENCE ──
     result = edit_image
     num_passes = max(1, min(passes, 3))
 
     for pass_num in range(num_passes):
         if num_passes == 1:
-            # Single pass: use requested guidance directly
             pass_guidance = actual_guidance
             pass_img_guidance = actual_img_guidance
         else:
-            # Progressive refinement (research-backed):
-            # Pass 1: gentle (low text guidance, high image preservation)
-            # Pass 2: stronger (higher text guidance, lower image preservation)
-            # This reduces artifacts from a single aggressive edit
-            t = pass_num / max(1, num_passes - 1)  # 0.0 → 1.0
-            pass_guidance = actual_guidance * (0.6 + 0.5 * t)      # 60% → 110% of requested
-            pass_img_guidance = actual_img_guidance * (1.2 - 0.3 * t)  # 120% → 90% of requested
+            t = pass_num / max(1, num_passes - 1)
+            pass_guidance = actual_guidance * (0.6 + 0.5 * t)
+            pass_img_guidance = actual_img_guidance * (1.2 - 0.3 * t)
 
         result = pipe(
             instruction,
@@ -607,14 +916,11 @@ def instruct_edit(
             logger.info("Progressive pass %d/%d complete (guidance=%.1f, img_guidance=%.1f)",
                         pass_num + 1, num_passes, pass_guidance, pass_img_guidance)
 
-    # ── POSTPROCESSING ──
-
     # Resize back to original dimensions
     if result.size != original_size:
         result = result.resize(original_size, Image.Resampling.LANCZOS)
 
     # Color preservation via LAB space chrominance blending
-    # (Research: transfer luminance from edit, chrominance from original)
     if preserve_color > 0:
         try:
             import cv2
@@ -624,7 +930,6 @@ def instruct_edit(
             orig_lab = cv2.cvtColor(orig_arr, cv2.COLOR_RGB2LAB).astype(np.float32)
             result_lab = cv2.cvtColor(result_arr, cv2.COLOR_RGB2LAB).astype(np.float32)
 
-            # Blend chrominance (a,b) channels toward original
             blend = min(1.0, max(0.0, preserve_color))
             result_lab[:, :, 1] = result_lab[:, :, 1] * (1 - blend) + orig_lab[:, :, 1] * blend
             result_lab[:, :, 2] = result_lab[:, :, 2] * (1 - blend) + orig_lab[:, :, 2] * blend
@@ -633,7 +938,7 @@ def instruct_edit(
         except Exception as e:
             logger.warning("Color preservation failed: %s", e)
 
-    # Light LAB-space sharpening on output (model outputs are slightly soft)
+    # Light LAB-space sharpening on output
     try:
         result = processors.sharpen(result, amount=0.5, radius=0.8, lab_mode=True)
     except Exception:
@@ -1053,11 +1358,13 @@ AI_OPERATIONS: dict[str, dict] = {
     "instruct_edit": {
         "fn": instruct_edit,
         "category": "ai_edit",
-        "params": ["instruction", "model", "steps", "image_guidance", "guidance", "negative_prompt", "passes", "preserve_color"],
-        "description": "Edit image with text instructions. DPMSolver scheduler, 20 steps, progressive multi-pass.",
+        "params": ["instruction", "model", "steps", "image_guidance", "guidance",
+                   "negative_prompt", "passes", "preserve_color",
+                   "strength", "control_type", "conditioning_scale"],
+        "description": "AI image editing: Kontext (best), CosXL (SDXL), IP2P (fast), ControlNet (structure).",
         "requires": "diffusers",
         "gpu": True,
-        "estimated_seconds": 15,  # ~15s with DPMSolver at 20 steps (was 30s with Euler at 30 steps)
+        "estimated_seconds": 20,
         "model_options": list(INSTRUCT_MODELS.keys()),
     },
     "auto_enhance": {

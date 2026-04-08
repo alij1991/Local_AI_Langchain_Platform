@@ -57,14 +57,18 @@ class _EditorPageState extends State<EditorPage> {
 
   // AI
   final _instructController = TextEditingController();
-  String _instructModel = 'pix2pix';
+  String _instructModel = 'kontext';
   String _bgColor = '#FFFFFF';
-  // AI Edit advanced controls
-  double _editGuidance = 7.5;
+  // AI Edit advanced controls — model-adaptive defaults
+  double _editGuidance = 2.5;
   double _editImageGuidance = 1.5;
-  int _editSteps = 20;
+  int _editSteps = 24;
   int _editPasses = 1;
   double _editPreserveColor = 0.0;
+  // ControlNet-specific
+  double _editStrength = 0.5;
+  String _controlType = 'depth';
+  double _conditioningScale = 0.9;
   final _negPromptController = TextEditingController(
     text: 'blurry, low quality, distorted, deformed, ugly, grayscale',
   );
@@ -1071,20 +1075,42 @@ class _EditorPageState extends State<EditorPage> {
       );
     }
 
-    // AI: Instruct Edit
+    // AI: Instruct Edit — multi-model selector
     if (_selectedTool == 'instruct_edit') {
       final colors = Theme.of(context).colorScheme;
+
+      // Model descriptions
+      const modelDescriptions = {
+        'kontext': 'FLUX Kontext — best quality, GGUF Q4 (~7GB). First use downloads model.',
+        'cosxl': 'CosXL Edit — SDXL quality, good balance of speed and quality.',
+        'pix2pix': 'InstructPix2Pix — fastest, legacy SD 1.5 quality.',
+        'controlnet': 'ControlNet — structure-preserving edits with depth/canny conditioning.',
+      };
+
       return SingleChildScrollView(
         child: Column(
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
             const Text('AI Image Edit', style: TextStyle(fontWeight: FontWeight.w600, fontSize: 14)),
             const SizedBox(height: 4),
-            Text('InstructPix2Pix with DPMSolver (20 steps, ~15s)',
+
+            // ── Model selector chips ──
+            Wrap(
+              spacing: 4,
+              runSpacing: 4,
+              children: [
+                _modelChip('kontext', 'Kontext', Icons.star, colors),
+                _modelChip('cosxl', 'CosXL', Icons.speed, colors),
+                _modelChip('pix2pix', 'IP2P', Icons.flash_on, colors),
+                _modelChip('controlnet', 'ControlNet', Icons.account_tree, colors),
+              ],
+            ),
+            const SizedBox(height: 4),
+            Text(modelDescriptions[_instructModel] ?? '',
                 style: TextStyle(fontSize: 9, color: colors.onSurfaceVariant)),
             const SizedBox(height: 8),
 
-            // Instruction field + enhance button
+            // ── Prompt field + enhance button ──
             Row(
               children: [
                 Expanded(
@@ -1092,106 +1118,156 @@ class _EditorPageState extends State<EditorPage> {
                     controller: _instructController,
                     minLines: 2, maxLines: 3,
                     decoration: InputDecoration(
-                      labelText: 'Instruction',
-                      hintText: 'e.g., "make it sunset", "add snow"',
+                      labelText: _instructModel == 'controlnet' ? 'Description' : 'Instruction',
+                      hintText: _instructModel == 'controlnet'
+                          ? 'Describe desired result, e.g., "a painting of a woman"'
+                          : 'e.g., "make it sunset", "add snow"',
                       isDense: true,
                       border: OutlineInputBorder(borderRadius: BorderRadius.circular(8)),
                     ),
                   ),
                 ),
-                const SizedBox(width: 4),
-                IconButton(
-                  onPressed: _busy || _instructController.text.trim().isEmpty ? null : () async {
-                    setState(() => _busy = true);
-                    try {
-                      final res = await widget.api.post('/editor/enhance-prompt', {
-                        'instruction': _instructController.text.trim(),
-                      }) as Map<String, dynamic>;
-                      final enhanced = res['enhanced']?.toString() ?? '';
-                      if (enhanced.isNotEmpty && enhanced != _instructController.text.trim()) {
-                        setState(() => _instructController.text = enhanced);
+                if (_instructModel != 'kontext') ...[
+                  const SizedBox(width: 4),
+                  IconButton(
+                    onPressed: _busy || _instructController.text.trim().isEmpty ? null : () async {
+                      setState(() => _busy = true);
+                      try {
+                        final res = await widget.api.post('/editor/enhance-prompt', {
+                          'instruction': _instructController.text.trim(),
+                        }) as Map<String, dynamic>;
+                        final enhanced = res['enhanced']?.toString() ?? '';
+                        if (enhanced.isNotEmpty && enhanced != _instructController.text.trim()) {
+                          setState(() => _instructController.text = enhanced);
+                          if (mounted) {
+                            ScaffoldMessenger.of(context).showSnackBar(
+                              const SnackBar(content: Text('Prompt enhanced!'), duration: Duration(seconds: 2)),
+                            );
+                          }
+                        } else {
+                          if (mounted) {
+                            ScaffoldMessenger.of(context).showSnackBar(
+                              const SnackBar(content: Text('No enhancement available for this prompt')),
+                            );
+                          }
+                        }
+                      } catch (e) {
                         if (mounted) {
                           ScaffoldMessenger.of(context).showSnackBar(
-                            const SnackBar(content: Text('Prompt enhanced!'), duration: Duration(seconds: 2)),
+                            SnackBar(content: Text('Enhance failed: $e')),
                           );
                         }
-                      } else {
-                        if (mounted) {
-                          ScaffoldMessenger.of(context).showSnackBar(
-                            const SnackBar(content: Text('No enhancement available for this prompt')),
-                          );
-                        }
+                      } finally {
+                        if (mounted) setState(() => _busy = false);
                       }
-                    } catch (e) {
-                      if (mounted) {
-                        ScaffoldMessenger.of(context).showSnackBar(
-                          SnackBar(content: Text('Enhance failed: $e')),
-                        );
-                      }
-                    } finally {
-                      if (mounted) setState(() => _busy = false);
-                    }
-                  },
-                  icon: Icon(Icons.auto_awesome, size: 20, color: colors.primary),
-                  tooltip: 'Enhance prompt for better results',
-                ),
+                    },
+                    icon: Icon(Icons.auto_awesome, size: 20, color: colors.primary),
+                    tooltip: 'Enhance prompt for better results',
+                  ),
+                ],
               ],
             ),
             const SizedBox(height: 6),
 
-            // Negative prompt (collapsible)
-            ExpansionTile(
-              title: const Text('Negative prompt', style: TextStyle(fontSize: 12)),
-              tilePadding: EdgeInsets.zero,
-              childrenPadding: const EdgeInsets.only(bottom: 8),
-              initiallyExpanded: false,
-              dense: true,
-              children: [
-                TextField(
-                  controller: _negPromptController,
-                  minLines: 1, maxLines: 2,
-                  style: const TextStyle(fontSize: 11),
-                  decoration: InputDecoration(
-                    hintText: 'Things to avoid...',
-                    isDense: true,
-                    border: OutlineInputBorder(borderRadius: BorderRadius.circular(8)),
+            // ── Negative prompt (not for Kontext) ──
+            if (_instructModel != 'kontext')
+              ExpansionTile(
+                title: const Text('Negative prompt', style: TextStyle(fontSize: 12)),
+                tilePadding: EdgeInsets.zero,
+                childrenPadding: const EdgeInsets.only(bottom: 8),
+                initiallyExpanded: false,
+                dense: true,
+                children: [
+                  TextField(
+                    controller: _negPromptController,
+                    minLines: 1, maxLines: 2,
+                    style: const TextStyle(fontSize: 11),
+                    decoration: InputDecoration(
+                      hintText: 'Things to avoid...',
+                      isDense: true,
+                      border: OutlineInputBorder(borderRadius: BorderRadius.circular(8)),
+                    ),
                   ),
-                ),
-              ],
-            ),
+                ],
+              ),
 
-            // Guidance sliders
-            _editSlider('Text Guidance', _editGuidance, 1, 15, (v) => _editGuidance = v,
-                'Higher = stronger edit effect'),
-            _editSlider('Image Preserve', _editImageGuidance, 1.0, 2.5, (v) => _editImageGuidance = v,
-                'Higher = more like original'),
-            _editSlider('Steps', _editSteps.toDouble(), 15, 75, (v) => _editSteps = v.round(),
-                '${_editSteps} steps (more = better quality)'),
+            // ── Model-specific controls ──
 
-            // Multi-pass toggle
-            Row(
-              children: [
-                const Text('Multi-pass', style: TextStyle(fontSize: 11)),
-                const Spacer(),
-                SegmentedButton<int>(
-                  segments: const [
-                    ButtonSegment(value: 1, label: Text('1x', style: TextStyle(fontSize: 10))),
-                    ButtonSegment(value: 2, label: Text('2x', style: TextStyle(fontSize: 10))),
-                  ],
-                  selected: {_editPasses},
-                  onSelectionChanged: (s) => setState(() => _editPasses = s.first),
-                ),
-              ],
-            ),
-            const SizedBox(height: 4),
+            // Kontext: guidance + steps
+            if (_instructModel == 'kontext') ...[
+              _editSlider('Guidance', _editGuidance, 1.0, 10.0, (v) => _editGuidance = v,
+                  _editGuidance <= 2.5 ? 'Subtle edits' : (_editGuidance >= 4.0 ? 'Dramatic changes' : 'Balanced')),
+              _editSlider('Steps', _editSteps.toDouble(), 12, 50, (v) => _editSteps = v.round(),
+                  '${_editSteps} steps'),
+            ],
 
-            // Color preservation slider
-            _editSlider('Color Preserve', _editPreserveColor, 0, 0.5, (v) => _editPreserveColor = v,
-                _editPreserveColor > 0 ? '${(_editPreserveColor * 100).round()}% original color' : 'Off'),
+            // CosXL: guidance + image_guidance + steps
+            if (_instructModel == 'cosxl') ...[
+              _editSlider('Text Guidance', _editGuidance, 1, 15, (v) => _editGuidance = v,
+                  'Higher = stronger edit effect'),
+              _editSlider('Image Preserve', _editImageGuidance, 1.0, 2.5, (v) => _editImageGuidance = v,
+                  'Higher = more like original'),
+              _editSlider('Steps', _editSteps.toDouble(), 10, 50, (v) => _editSteps = v.round(),
+                  '${_editSteps} steps'),
+            ],
+
+            // IP2P: full classic controls
+            if (_instructModel == 'pix2pix') ...[
+              _editSlider('Text Guidance', _editGuidance, 1, 15, (v) => _editGuidance = v,
+                  'Higher = stronger edit effect'),
+              _editSlider('Image Preserve', _editImageGuidance, 1.0, 2.5, (v) => _editImageGuidance = v,
+                  'Higher = more like original'),
+              _editSlider('Steps', _editSteps.toDouble(), 15, 75, (v) => _editSteps = v.round(),
+                  '${_editSteps} steps (more = better quality)'),
+              Row(
+                children: [
+                  const Text('Multi-pass', style: TextStyle(fontSize: 11)),
+                  const Spacer(),
+                  SegmentedButton<int>(
+                    segments: const [
+                      ButtonSegment(value: 1, label: Text('1x', style: TextStyle(fontSize: 10))),
+                      ButtonSegment(value: 2, label: Text('2x', style: TextStyle(fontSize: 10))),
+                    ],
+                    selected: {_editPasses},
+                    onSelectionChanged: (s) => setState(() => _editPasses = s.first),
+                  ),
+                ],
+              ),
+              const SizedBox(height: 4),
+              _editSlider('Color Preserve', _editPreserveColor, 0, 0.5, (v) => _editPreserveColor = v,
+                  _editPreserveColor > 0 ? '${(_editPreserveColor * 100).round()}% original color' : 'Off'),
+            ],
+
+            // ControlNet: strength + control type + guidance + steps
+            if (_instructModel == 'controlnet') ...[
+              Row(
+                children: [
+                  const Text('Control Type', style: TextStyle(fontSize: 11)),
+                  const Spacer(),
+                  SegmentedButton<String>(
+                    segments: const [
+                      ButtonSegment(value: 'depth', label: Text('Depth', style: TextStyle(fontSize: 10))),
+                      ButtonSegment(value: 'canny', label: Text('Canny', style: TextStyle(fontSize: 10))),
+                    ],
+                    selected: {_controlType},
+                    onSelectionChanged: (s) => setState(() => _controlType = s.first),
+                  ),
+                ],
+              ),
+              const SizedBox(height: 4),
+              _editSlider('Denoising Strength', _editStrength, 0.1, 0.9, (v) => _editStrength = v,
+                  _editStrength <= 0.4 ? 'Subtle' : (_editStrength >= 0.7 ? 'Dramatic' : 'Moderate')),
+              _editSlider('Text Guidance', _editGuidance, 1, 15, (v) => _editGuidance = v,
+                  'Higher = more prompt adherence'),
+              _editSlider('ControlNet Weight', _conditioningScale, 0.3, 1.5, (v) => _conditioningScale = v,
+                  'Higher = more structure preservation'),
+              _editSlider('Steps', _editSteps.toDouble(), 15, 50, (v) => _editSteps = v.round(),
+                  '${_editSteps} steps'),
+            ],
 
             const SizedBox(height: 8),
 
-            // Apply button
+            // ── Apply button ──
             SizedBox(
               width: double.infinity,
               child: FilledButton.icon(
@@ -1200,14 +1276,25 @@ class _EditorPageState extends State<EditorPage> {
                       'instruction': _instructController.text.trim(),
                       'model': _instructModel,
                       'guidance': _editGuidance,
-                      'image_guidance': _editImageGuidance,
+                      if (_instructModel == 'cosxl' || _instructModel == 'pix2pix')
+                        'image_guidance': _editImageGuidance,
                       'steps': _editSteps,
-                      'negative_prompt': _negPromptController.text.trim(),
-                      'passes': _editPasses,
-                      'preserve_color': _editPreserveColor,
+                      if (_instructModel != 'kontext')
+                        'negative_prompt': _negPromptController.text.trim(),
+                      if (_instructModel == 'pix2pix') ...{
+                        'passes': _editPasses,
+                        'preserve_color': _editPreserveColor,
+                      },
+                      if (_instructModel == 'controlnet') ...{
+                        'strength': _editStrength,
+                        'control_type': _controlType,
+                        'conditioning_scale': _conditioningScale,
+                      },
                     }),
                 icon: const Icon(Icons.auto_fix_high, size: 16),
-                label: Text(_editPasses > 1 ? 'Apply (${_editPasses} passes)' : 'Apply AI Edit'),
+                label: Text(_instructModel == 'pix2pix' && _editPasses > 1
+                    ? 'Apply (${_editPasses} passes)'
+                    : 'Apply AI Edit'),
               ),
             ),
             if (_busy) const Padding(padding: EdgeInsets.only(top: 8), child: LinearProgressIndicator()),
@@ -1304,6 +1391,52 @@ class _EditorPageState extends State<EditorPage> {
     }
 
     return const SizedBox.shrink();
+  }
+
+  /// Model selector chip for AI Edit panel.
+  Widget _modelChip(String modelKey, String label, IconData icon, ColorScheme colors) {
+    final selected = _instructModel == modelKey;
+
+    // Default parameters per model — applied when switching
+    const modelDefaults = {
+      'kontext': {'guidance': 2.5, 'steps': 24},
+      'cosxl': {'guidance': 7.0, 'image_guidance': 1.5, 'steps': 20},
+      'pix2pix': {'guidance': 7.5, 'image_guidance': 1.5, 'steps': 20},
+      'controlnet': {'guidance': 7.5, 'steps': 25},
+    };
+
+    return FilterChip(
+      label: Row(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          Icon(icon, size: 14, color: selected ? colors.onPrimary : colors.onSurfaceVariant),
+          const SizedBox(width: 4),
+          Text(label, style: TextStyle(
+            fontSize: 11,
+            fontWeight: selected ? FontWeight.w600 : FontWeight.normal,
+            color: selected ? colors.onPrimary : colors.onSurfaceVariant,
+          )),
+          if (modelKey == 'kontext') ...[
+            const SizedBox(width: 2),
+            Icon(Icons.workspace_premium, size: 10, color: selected ? colors.onPrimary : Colors.amber),
+          ],
+        ],
+      ),
+      selected: selected,
+      selectedColor: colors.primary,
+      showCheckmark: false,
+      materialTapTargetSize: MaterialTapTargetSize.shrinkWrap,
+      visualDensity: VisualDensity.compact,
+      onSelected: (_) {
+        setState(() {
+          _instructModel = modelKey;
+          final defaults = modelDefaults[modelKey] ?? {};
+          _editGuidance = (defaults['guidance'] as num?)?.toDouble() ?? 7.5;
+          _editImageGuidance = (defaults['image_guidance'] as num?)?.toDouble() ?? 1.5;
+          _editSteps = (defaults['steps'] as num?)?.toInt() ?? 20;
+        });
+      },
+    );
   }
 
   Widget _editSlider(String label, double value, double min, double max,
