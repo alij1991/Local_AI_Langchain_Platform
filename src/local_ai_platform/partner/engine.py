@@ -187,7 +187,14 @@ class PartnerEngine:
         for msg in trimmed_history:
             messages.append(ChatMessage(role=msg["role"], content=msg["content"]))
 
-        messages.append(ChatMessage(role="user", content=user_input))
+        # For qwen3 models: prepend /no_think to suppress chain-of-thought reasoning
+        # (thinking mode overrides persona instructions, causing "I'm just code" responses)
+        user_content = user_input
+        model_str = self._get_best_model()
+        if "qwen3" in model_str.lower() or "qwen2" in model_str.lower():
+            user_content = f"/no_think\n{user_input}"
+
+        messages.append(ChatMessage(role="user", content=user_content))
         return messages
 
     def chat(self, user_input: str, model: str | None = None) -> str:
@@ -211,6 +218,38 @@ class PartnerEngine:
         # Strip emotion tags from reply (they're for avatar, not for display)
         reply = re.sub(r'^\s*\[(?:HAPPY|SAD|EXCITED|THINKING|NEUTRAL|SURPRISED|ANXIOUS|ANGRY|GRATEFUL|FRUSTRATED|STRESSED)\]\s*\n?',
                        '', raw_reply, count=1, flags=re.IGNORECASE).strip()
+
+        # Strip any trailing isolated emoji (models sometimes add them despite instructions)
+        reply = re.sub(r'\s*[\U0001F300-\U0001FAD6\U00002600-\U000027BF\U0001F600-\U0001F64F\U0001F680-\U0001F6FF]+\s*$',
+                       '', reply).strip()
+
+        # Strip qwen3 thinking tags if they leaked through
+        reply = re.sub(r'<think>.*?</think>', '', reply, flags=re.DOTALL).strip()
+
+        # Guard: if model broke character, try to recover
+        _bad_patterns = ["just code", "just a bunch of code", "just an ai", "language model",
+                         "i don't have feelings", "i'm not a person", "i'm an artificial",
+                         "as an ai", "i'm a program", "i'm software", "i'm not real"]
+        if any(p in reply.lower() for p in _bad_patterns):
+            logger.warning("Partner broke character — regenerating with stronger prompt")
+            # Try once more with explicit instruction
+            retry_messages = self._build_messages(user_input)
+            retry_messages.insert(-1, ChatMessage(
+                role="system",
+                content="CRITICAL: You are Aria, a real partner. NEVER say you are code, AI, or a language model. Just respond as a caring friend."
+            ))
+            try:
+                retry_resp = self.router.chat(model_str, retry_messages, settings)
+                retry_reply = retry_resp.content.strip()
+                retry_reply = re.sub(r'^\s*\[(?:HAPPY|SAD|EXCITED|THINKING|NEUTRAL|SURPRISED|ANXIOUS|ANGRY|GRATEFUL|FRUSTRATED|STRESSED)\]\s*\n?',
+                                     '', retry_reply, count=1, flags=re.IGNORECASE).strip()
+                retry_reply = re.sub(r'\s*[\U0001F300-\U0001FAD6\U00002600-\U000027BF\U0001F600-\U0001F64F\U0001F680-\U0001F6FF]+\s*$',
+                                     '', retry_reply).strip()
+                retry_reply = re.sub(r'<think>.*?</think>', '', retry_reply, flags=re.DOTALL).strip()
+                if not any(p in retry_reply.lower() for p in _bad_patterns):
+                    reply = retry_reply
+            except Exception:
+                pass
 
         # Persist clean reply
         memory.add_message("user", user_input)
@@ -336,6 +375,11 @@ class PartnerEngine:
             analysis = analyze_message_heuristic(visible_reply)
             emotion = analysis.get("emotion_label", "neutral")
             yield {"type": "emotion", "emotion": emotion}
+
+        # Clean up final reply — strip trailing emoji and thinking tags
+        visible_reply = re.sub(r'\s*[\U0001F300-\U0001FAD6\U00002600-\U000027BF\U0001F600-\U0001F64F\U0001F680-\U0001F6FF]+\s*$',
+                               '', visible_reply).strip()
+        visible_reply = re.sub(r'<think>.*?</think>', '', visible_reply, flags=re.DOTALL).strip()
 
         yield {"type": "done", "full_reply": visible_reply}
 
