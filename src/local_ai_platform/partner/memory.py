@@ -38,26 +38,21 @@ def init_partner_tables() -> None:
     """Create partner tables with knowledge graph, temporal facts, and decay support."""
     conn = _get_conn()
     try:
+        # Create tables first WITHOUT indexes on columns that may not exist yet
+        # (old tables may exist with different schemas — migrations handle column additions)
         conn.executescript("""
             CREATE TABLE IF NOT EXISTS partner_core_facts (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                key TEXT NOT NULL,
+                key TEXT PRIMARY KEY,
                 value TEXT NOT NULL,
                 category TEXT DEFAULT 'general',
-                valid_from TEXT NOT NULL,
-                valid_to TEXT,
                 updated_at TEXT NOT NULL
             );
-            CREATE INDEX IF NOT EXISTS idx_facts_key ON partner_core_facts(key);
-            CREATE INDEX IF NOT EXISTS idx_facts_valid ON partner_core_facts(valid_to);
 
             CREATE TABLE IF NOT EXISTS partner_key_memories (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 content TEXT NOT NULL,
                 emotional_tone TEXT,
                 importance INTEGER DEFAULT 5,
-                last_accessed TEXT,
-                access_count INTEGER DEFAULT 0,
                 created_at TEXT NOT NULL
             );
 
@@ -102,14 +97,29 @@ def init_partner_tables() -> None:
                 confidence REAL DEFAULT 0.8,
                 created_at TEXT NOT NULL
             );
-            CREATE INDEX IF NOT EXISTS idx_kg_subject ON partner_knowledge_graph(subject);
-            CREATE INDEX IF NOT EXISTS idx_kg_object ON partner_knowledge_graph(object);
-            CREATE INDEX IF NOT EXISTS idx_kg_valid ON partner_knowledge_graph(valid_to);
         """)
         conn.commit()
 
-        # Migrate old schemas if needed
+        # Migrate old schemas if needed (adds columns that may be missing)
         _migrate_schemas(conn)
+
+        # Create indexes AFTER migrations (columns now guaranteed to exist)
+        try:
+            conn.executescript("""
+                CREATE INDEX IF NOT EXISTS idx_facts_key ON partner_core_facts(key);
+                CREATE INDEX IF NOT EXISTS idx_kg_subject ON partner_knowledge_graph(subject);
+                CREATE INDEX IF NOT EXISTS idx_kg_object ON partner_knowledge_graph(object);
+            """)
+            # Only create indexes on columns that exist after migration
+            cols = [r[1] for r in conn.execute("PRAGMA table_info(partner_core_facts)").fetchall()]
+            if "valid_to" in cols:
+                conn.execute("CREATE INDEX IF NOT EXISTS idx_facts_valid ON partner_core_facts(valid_to)")
+            cols2 = [r[1] for r in conn.execute("PRAGMA table_info(partner_knowledge_graph)").fetchall()]
+            if "valid_to" in cols2:
+                conn.execute("CREATE INDEX IF NOT EXISTS idx_kg_valid ON partner_knowledge_graph(valid_to)")
+            conn.commit()
+        except Exception as e:
+            logger.debug("Index creation: %s", e)
     finally:
         conn.close()
 

@@ -633,22 +633,47 @@ class PartnerEngine:
         return " ".join(seg.text for seg in segments).strip()
 
     # Emotion → voice mapping for expressive TTS
-    # Different Kokoro voices naturally convey different emotional tones
-    # af_ = American Female, bf_ = British Female, etc.
-    _EMOTION_VOICE_MAP = {
-        "happy": "af_bella",       # Bella sounds warm and bright
-        "excited": "af_nova",      # Nova is energetic
-        "sad": "bf_lily",          # Lily has a softer, gentler tone
-        "anxious": "af_sarah",     # Sarah sounds measured
-        "angry": "af_kore",        # Kore has more edge
-        "thinking": "af_river",    # River sounds contemplative
-        "surprised": "af_sky",     # Sky sounds expressive
-        "neutral": "af_heart",     # Heart is the default warm voice
+    # af_ = American Female, bf_ = British Female, am_ = American Male, bm_ = British Male
+    _VOICE_MAPS = {
+        "female": {
+            "happy": "af_bella",       # Bella sounds warm and bright
+            "excited": "af_nova",      # Nova is energetic
+            "sad": "bf_lily",          # Lily has a softer, gentler tone
+            "anxious": "af_sarah",     # Sarah sounds measured
+            "angry": "af_kore",        # Kore has more edge
+            "thinking": "af_river",    # River sounds contemplative
+            "surprised": "af_sky",     # Sky sounds expressive
+            "neutral": "af_heart",     # Heart is the default warm voice
+        },
+        "male": {
+            "happy": "am_adam",        # Adam — warm and friendly
+            "excited": "am_michael",   # Michael — energetic
+            "sad": "bm_george",        # George — soft, measured British
+            "anxious": "bm_lewis",     # Lewis — careful, measured
+            "angry": "am_adam",        # Adam with edge
+            "thinking": "bm_daniel",   # Daniel — contemplative British
+            "surprised": "am_michael", # Michael — expressive
+            "neutral": "am_adam",      # Adam — default male voice
+        },
     }
 
     def _get_voice_for_emotion(self, emotion: str) -> str:
-        """Map current emotion to best-fitting Kokoro voice."""
-        return self._EMOTION_VOICE_MAP.get(emotion, "af_heart")
+        """Map current emotion to best-fitting Kokoro voice based on gender setting."""
+        gender = getattr(self, '_voice_gender', 'female')
+        voice_map = self._VOICE_MAPS.get(gender, self._VOICE_MAPS["female"])
+        return voice_map.get(emotion, voice_map.get("neutral", "af_heart"))
+
+    def set_voice_gender(self, gender: str) -> str:
+        """Set voice gender: 'female' or 'male'."""
+        gender = gender.lower().strip()
+        if gender not in ("female", "male"):
+            return f"Invalid gender: {gender}. Use 'female' or 'male'."
+        self._voice_gender = gender
+        logger.info("Voice gender set to: %s", gender)
+        return f"Voice gender set to: {gender}"
+
+    def get_voice_gender(self) -> str:
+        return getattr(self, '_voice_gender', 'female')
 
     def _preprocess_text_for_tts(self, text: str, emotion: str) -> str:
         """Preprocess text to sound more natural in speech.

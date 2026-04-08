@@ -3833,6 +3833,19 @@ async def partner_voice_mode(body: dict[str, Any]):
     return {"status": result, "mode": _get_partner()._tts_mode}
 
 
+@app.post("/partner/voice/gender")
+async def partner_voice_gender(body: dict[str, Any]):
+    """Set voice gender: 'female' or 'male'."""
+    gender = body.get("gender", "female")
+    result = _get_partner().set_voice_gender(gender)
+    return {"status": result, "gender": _get_partner().get_voice_gender()}
+
+
+@app.get("/partner/voice/gender")
+async def partner_voice_gender_get():
+    return {"gender": _get_partner().get_voice_gender()}
+
+
 @app.post("/partner/voice/transcribe")
 async def partner_voice_transcribe(body: dict[str, Any]):
     """Transcribe audio to text via faster-whisper."""

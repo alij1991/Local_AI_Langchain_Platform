@@ -743,18 +743,19 @@ def _apply_3d_lut(image_arr: np.ndarray, lut_size: int, lut_table: np.ndarray) -
     lut = lut_table.reshape(lut_size, lut_size, lut_size, 3)
 
     # Trilinear interpolation (8 corners)
+    # .cube format: R varies fastest (inner loop), so after reshape the axes are (B, G, R)
     r0, g0, b0 = idx0[:, 0], idx0[:, 1], idx0[:, 2]
     r1, g1, b1 = r0 + 1, g0 + 1, b0 + 1
     fr, fg, fb = frac[:, 0:1], frac[:, 1:2], frac[:, 2:3]
 
-    c000 = lut[r0, g0, b0]
-    c100 = lut[r1, g0, b0]
-    c010 = lut[r0, g1, b0]
-    c110 = lut[r1, g1, b0]
-    c001 = lut[r0, g0, b1]
-    c101 = lut[r1, g0, b1]
-    c011 = lut[r0, g1, b1]
-    c111 = lut[r1, g1, b1]
+    c000 = lut[b0, g0, r0]
+    c100 = lut[b0, g0, r1]
+    c010 = lut[b0, g1, r0]
+    c110 = lut[b0, g1, r1]
+    c001 = lut[b1, g0, r0]
+    c101 = lut[b1, g0, r1]
+    c011 = lut[b1, g1, r0]
+    c111 = lut[b1, g1, r1]
 
     result = (
         c000 * (1 - fr) * (1 - fg) * (1 - fb) +

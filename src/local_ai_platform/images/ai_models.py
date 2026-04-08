@@ -581,53 +581,44 @@ def colorize(image: Image.Image) -> Image.Image:
 
 
 def _colorize_algorithmic_v2(gray: np.ndarray, h: int, w: int) -> Image.Image:
-    """Algorithmic colorization — maps luminance regions to plausible colors.
+    """Algorithmic colorization — warm sepia-tone with depth variation.
 
-    Uses a multi-zone approach: dark regions get warm earth tones,
-    mid regions get greens/neutrals, bright regions get sky blues.
-    More visually interesting than simple tinting.
+    Since we don't have a neural colorization model, this produces a
+    visually appealing warm-toned result rather than trying to guess
+    real colors (which always looks wrong algorithmically).
     """
     import cv2
 
-    # Convert grayscale to LAB (L channel only matters)
+    # Convert grayscale to LAB
     gray_rgb = cv2.cvtColor(gray, cv2.COLOR_GRAY2RGB)
     lab = cv2.cvtColor(gray_rgb, cv2.COLOR_RGB2LAB).astype(np.float32)
-
-    # Create luminance-based A and B channels for natural-looking color
     L = lab[:, :, 0]  # 0-255
 
-    # Zone masks (soft transitions)
-    dark_mask = np.clip(1.0 - L / 80.0, 0, 1)       # Very dark areas
-    shadow_mask = np.clip((L - 40) / 60.0, 0, 1) * np.clip(1.0 - (L - 80) / 60.0, 0, 1)  # Shadows
-    mid_mask = np.clip((L - 80) / 40.0, 0, 1) * np.clip(1.0 - (L - 160) / 40.0, 0, 1)   # Midtones
-    bright_mask = np.clip((L - 140) / 60.0, 0, 1)    # Highlights
+    # Warm sepia-tone approach: apply warm A/B values with depth variation
+    # This looks like a hand-tinted vintage photograph
+    # A channel: warm (red-ish) = values above 128
+    # B channel: warm (yellow-ish) = values above 128
 
-    # Map zones to plausible A,B values (in LAB: A=green-red, B=blue-yellow)
-    # Dark: warm brown (A=+5, B=+10)
-    # Shadows: earthy green (A=-3, B=+8)
-    # Midtones: neutral warm (A=+2, B=+5)
-    # Bright: cool sky (A=-2, B=-8)
-    a_channel = (
-        dark_mask * 133 +      # slight red (+5 from 128)
-        shadow_mask * 125 +    # slight green (-3 from 128)
-        mid_mask * 130 +       # neutral warm (+2 from 128)
-        bright_mask * 126      # slight green (-2 from 128)
-    )
-    b_channel = (
-        dark_mask * 138 +      # yellow (+10 from 128)
-        shadow_mask * 136 +    # yellow (+8 from 128)
-        mid_mask * 133 +       # slight yellow (+5 from 128)
-        bright_mask * 120      # blue (-8 from 128)
-    )
+    # Base warm tone
+    a_base = 138.0  # warm red (+10 from neutral 128)
+    b_base = 148.0  # warm yellow (+20 from neutral 128)
 
-    # Normalize by total mask weight (prevents dark bands)
-    total_mask = dark_mask + shadow_mask + mid_mask + bright_mask + 1e-6
-    a_channel = a_channel / total_mask
-    b_channel = b_channel / total_mask
+    # Vary warmth by luminance: darks are more neutral, brights are warmer
+    warmth_factor = np.clip(L / 200.0, 0.3, 1.0)
+    a_channel = 128.0 + (a_base - 128.0) * warmth_factor
+    b_channel = 128.0 + (b_base - 128.0) * warmth_factor
 
-    # Apply gentle blur to color channels for smooth transitions
-    a_channel = cv2.GaussianBlur(a_channel.astype(np.float32), (31, 31), 15)
-    b_channel = cv2.GaussianBlur(b_channel.astype(np.float32), (31, 31), 15)
+    # Add subtle variation based on spatial position (prevents flat look)
+    # Slightly cooler at edges, warmer in center
+    Y, X = np.ogrid[:h, :w]
+    cx, cy = w / 2, h / 2
+    dist = np.sqrt((X - cx) ** 2 + (Y - cy) ** 2) / max(np.sqrt(cx**2 + cy**2), 1)
+    edge_cool = dist * 3.0  # subtle edge cooling
+    b_channel = b_channel - edge_cool
+
+    # Smooth transitions
+    a_channel = cv2.GaussianBlur(a_channel.astype(np.float32), (21, 21), 10)
+    b_channel = cv2.GaussianBlur(b_channel.astype(np.float32), (21, 21), 10)
 
     lab[:, :, 1] = np.clip(a_channel, 0, 255)
     lab[:, :, 2] = np.clip(b_channel, 0, 255)

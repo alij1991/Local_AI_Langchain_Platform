@@ -54,6 +54,7 @@ class _PartnerPageState extends State<PartnerPage> {
   bool _isRecording = false;
   bool _chatterboxAvailable = false;
   String _ttsMode = 'kokoro'; // kokoro | chatterbox
+  String _voiceGender = 'female'; // female | male
   final AudioPlayer _audioPlayer = AudioPlayer();
   final AudioRecorder _recorder = AudioRecorder();
 
@@ -842,6 +843,32 @@ class _PartnerPageState extends State<PartnerPage> {
                         style: TextStyle(fontSize: 10, fontWeight: FontWeight.w600,
                             color: _ttsMode == 'chatterbox' ? colors.onPrimaryContainer : colors.onSurfaceVariant),
                       ),
+                    ),
+                  ),
+                ],
+                // Voice gender toggle
+                if (_ttsAvailable) ...[
+                  const SizedBox(width: 8),
+                  InkWell(
+                    onTap: () async {
+                      final newGender = _voiceGender == 'female' ? 'male' : 'female';
+                      try {
+                        await widget.api.post('/partner/voice/gender', {'gender': newGender});
+                        setState(() => _voiceGender = newGender);
+                      } catch (_) {}
+                    },
+                    child: Container(
+                      padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
+                      decoration: BoxDecoration(
+                        color: colors.surfaceContainerHighest,
+                        borderRadius: BorderRadius.circular(10),
+                      ),
+                      child: Row(mainAxisSize: MainAxisSize.min, children: [
+                        Icon(_voiceGender == 'female' ? Icons.female : Icons.male, size: 12, color: colors.onSurfaceVariant),
+                        const SizedBox(width: 3),
+                        Text(_voiceGender == 'female' ? 'Female' : 'Male',
+                          style: TextStyle(fontSize: 10, fontWeight: FontWeight.w600, color: colors.onSurfaceVariant)),
+                      ]),
                     ),
                   ),
                 ],
