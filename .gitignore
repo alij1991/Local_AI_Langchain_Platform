@@ -39,9 +39,11 @@ data/models/
 
 # ── Data artifacts (regenerated at runtime) ──
 data/app.db
+data/checkpoints*
 data/uploads/
-data/images/editor/
+data/images/
 data/traces/
+data/partner/
 
 # ── Keep directory structure ──
 !data/.gitkeep

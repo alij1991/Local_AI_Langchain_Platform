@@ -24,6 +24,7 @@ class _ModelsPageState extends State<ModelsPage> with SingleTickerProviderStateM
   String _localProvider = 'all';
   bool _toolsOnly = false;
   bool _visionOnly = false;
+  String _localSort = 'name'; // name, size, provider
 
   // Discover tab
   List<Map<String, dynamic>> _ollamaLibrary = [];
@@ -888,6 +889,20 @@ class _ModelsPageState extends State<ModelsPage> with SingleTickerProviderStateM
                   _loadLocal();
                 },
               ),
+              const SizedBox(width: 8),
+              // Sort dropdown
+              DropdownButton<String>(
+                value: _localSort,
+                underline: const SizedBox.shrink(),
+                isDense: true,
+                style: TextStyle(fontSize: 12, color: colors.onSurfaceVariant),
+                items: const [
+                  DropdownMenuItem(value: 'name', child: Text('Sort: Name')),
+                  DropdownMenuItem(value: 'size', child: Text('Sort: Size')),
+                  DropdownMenuItem(value: 'provider', child: Text('Sort: Provider')),
+                ],
+                onChanged: (v) => setState(() => _localSort = v ?? 'name'),
+              ),
               const Spacer(),
               IconButton(
                 onPressed: () => _pullOllamaModel(),
@@ -912,10 +927,25 @@ class _ModelsPageState extends State<ModelsPage> with SingleTickerProviderStateM
               ? const Center(child: CircularProgressIndicator())
               : _localModels.isEmpty
                   ? _buildEmptyLocal(colors)
-                  : ListView.builder(
-                      itemCount: _localModels.length,
-                      itemBuilder: (_, i) => _buildModelCard(_localModels[i], colors, isLocal: true),
-                    ),
+                  : Builder(builder: (_) {
+                      final sorted = List<Map<String, dynamic>>.from(_localModels);
+                      sorted.sort((a, b) {
+                        switch (_localSort) {
+                          case 'size':
+                            final sa = (a['size_bytes'] as num?) ?? 0;
+                            final sb = (b['size_bytes'] as num?) ?? 0;
+                            return sb.compareTo(sa); // largest first
+                          case 'provider':
+                            return (a['provider'] ?? '').toString().compareTo((b['provider'] ?? '').toString());
+                          default: // name
+                            return (a['name'] ?? '').toString().compareTo((b['name'] ?? '').toString());
+                        }
+                      });
+                      return ListView.builder(
+                        itemCount: sorted.length,
+                        itemBuilder: (_, i) => _buildModelCard(sorted[i], colors, isLocal: true),
+                      );
+                    }),
         ),
       ],
     );
@@ -1720,6 +1750,40 @@ class _ModelsPageState extends State<ModelsPage> with SingleTickerProviderStateM
                   ],
                 ),
               ),
+              // Delete button for Ollama models
+              if (isLocal && provider == 'ollama')
+                IconButton(
+                  icon: Icon(Icons.delete_outline, size: 18, color: colors.error.withValues(alpha: 0.6)),
+                  tooltip: 'Delete model',
+                  onPressed: () async {
+                    final confirm = await showDialog<bool>(
+                      context: context,
+                      builder: (ctx) => AlertDialog(
+                        title: const Text('Delete Model'),
+                        content: Text('Remove "$name" from Ollama? This will free disk space but you\'ll need to pull it again.'),
+                        actions: [
+                          TextButton(onPressed: () => Navigator.pop(ctx, false), child: const Text('Cancel')),
+                          FilledButton(
+                            onPressed: () => Navigator.pop(ctx, true),
+                            style: FilledButton.styleFrom(backgroundColor: colors.error),
+                            child: const Text('Delete'),
+                          ),
+                        ],
+                      ),
+                    );
+                    if (confirm == true && mounted) {
+                      try {
+                        await widget.api.delete('/models/ollama/$modelId');
+                        if (mounted) {
+                          ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('Deleted $name')));
+                          _loadLocal();
+                        }
+                      } catch (e) {
+                        if (mounted) ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('Delete failed: $e')));
+                      }
+                    }
+                  },
+                ),
             ],
           ),
         ),

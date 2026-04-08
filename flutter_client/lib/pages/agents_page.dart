@@ -41,6 +41,8 @@ class _AgentsPageState extends State<AgentsPage> {
   int _loadVersion = 0;
   int _tab = 0;
   Map<String, dynamic>? _definition;
+  String _agentSearch = '';
+  bool _hasUnsavedChanges = false;
 
   @override
   void initState() {
@@ -138,6 +140,19 @@ class _AgentsPageState extends State<AgentsPage> {
   }
 
   Future<void> _save() async {
+    // Validate required fields
+    if (_name.text.trim().isEmpty) {
+      setState(() => _error = 'Agent name is required');
+      return;
+    }
+    if (!RegExp(r'^[a-zA-Z0-9_-]+$').hasMatch(_name.text.trim())) {
+      setState(() => _error = 'Agent name can only contain letters, numbers, hyphens, and underscores');
+      return;
+    }
+    if (_model.isEmpty) {
+      setState(() => _error = 'Please select a model');
+      return;
+    }
     setState(() { _isSaving = true; _error = ''; });
     try {
       final payload = {
@@ -274,6 +289,24 @@ class _AgentsPageState extends State<AgentsPage> {
                   ],
                 ),
               ),
+              // Agent search
+              if (_agents.length > 3)
+                Padding(
+                  padding: const EdgeInsets.only(bottom: 8),
+                  child: TextField(
+                    decoration: InputDecoration(
+                      hintText: 'Search agents...',
+                      prefixIcon: const Icon(Icons.search, size: 18),
+                      isDense: true,
+                      contentPadding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+                      border: OutlineInputBorder(borderRadius: BorderRadius.circular(20), borderSide: BorderSide.none),
+                      filled: true,
+                      fillColor: colors.surfaceContainerHighest.withValues(alpha: 0.5),
+                    ),
+                    style: const TextStyle(fontSize: 13),
+                    onChanged: (v) => setState(() => _agentSearch = v.toLowerCase()),
+                  ),
+                ),
               Expanded(
                 child: _agents.isEmpty && !_isLoading
                     ? Center(
@@ -286,10 +319,16 @@ class _AgentsPageState extends State<AgentsPage> {
                           ],
                         ),
                       )
-                    : ListView.builder(
-                        itemCount: _agents.length,
+                    : Builder(builder: (_) {
+                        final filtered = _agentSearch.isEmpty
+                            ? _agents
+                            : _agents.where((a) =>
+                                (a['name'] ?? '').toString().toLowerCase().contains(_agentSearch) ||
+                                (a['description'] ?? '').toString().toLowerCase().contains(_agentSearch)).toList();
+                        return ListView.builder(
+                        itemCount: filtered.length,
                         itemBuilder: (_, i) {
-                          final a = _agents[i];
+                          final a = filtered[i];
                           final name = (a['name'] ?? '').toString();
                           final isSelected = _selected?['name'] == name;
                           return Card(
@@ -314,7 +353,8 @@ class _AgentsPageState extends State<AgentsPage> {
                             ),
                           );
                         },
-                      ),
+                      );
+                      }),
               ),
             ],
           ),
@@ -624,20 +664,31 @@ class _AgentsPageState extends State<AgentsPage> {
               final id = (t['tool_id'] ?? t['name']).toString();
               final selected = _toolIds.contains(id);
               final type = (t['type'] ?? 'custom').toString();
-              return FilterChip(
-                avatar: Icon(_toolIcon(type), size: 16),
-                label: Text((t['name'] ?? id).toString()),
-                selected: selected,
-                onSelected: (v) => setState(() {
-                  if (v) {
-                    _toolIds.add(id);
-                  } else {
-                    _toolIds.remove(id);
-                  }
-                }),
+              final desc = (t['description'] ?? '').toString();
+              return Tooltip(
+                message: desc.isNotEmpty ? desc : id,
+                child: FilterChip(
+                  avatar: Icon(_toolIcon(type), size: 16),
+                  label: Text((t['name'] ?? id).toString(), style: const TextStyle(fontSize: 12)),
+                  selected: selected,
+                  onSelected: (v) => setState(() {
+                    if (v) {
+                      _toolIds.add(id);
+                    } else {
+                      _toolIds.remove(id);
+                    }
+                    _hasUnsavedChanges = true;
+                  }),
+                ),
               );
             }).toList(),
           ),
+          if (_toolIds.isNotEmpty)
+            Padding(
+              padding: const EdgeInsets.only(top: 4),
+              child: Text('${_toolIds.length} tool${_toolIds.length == 1 ? '' : 's'} selected',
+                style: TextStyle(fontSize: 11, color: colors.onSurfaceVariant)),
+            ),
         const SizedBox(height: 16),
 
         // Generation settings

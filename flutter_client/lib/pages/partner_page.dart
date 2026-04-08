@@ -1,14 +1,14 @@
 import 'dart:async';
 import 'dart:convert';
+import 'dart:io';
 import 'dart:typed_data';
 import 'package:flutter/material.dart';
 import 'package:audioplayers/audioplayers.dart';
+import 'package:http/http.dart' as http_pkg;
 import 'package:local_ai_flutter_client/services/api_client.dart';
-import 'package:local_ai_flutter_client/widgets/avatar_widget.dart';
 import 'package:url_launcher/url_launcher.dart';
 import 'package:record/record.dart';
 import 'package:path_provider/path_provider.dart';
-import 'dart:io';
 
 class PartnerPage extends StatefulWidget {
   const PartnerPage({super.key, required this.api});
@@ -43,10 +43,8 @@ class _PartnerPageState extends State<PartnerPage> {
   // User profile (insights) state
   Map<String, dynamic> _userProfile = {};
 
-  // Avatar state
-  String _avatarEmotion = 'neutral';
-  bool _avatarSpeaking = false;
-  bool _showAvatar = true; // user can toggle
+  // Emotion state (used for TTS voice selection)
+  String _currentEmotion = 'neutral';
 
   // Voice state
   bool _voiceAvailable = false;
@@ -108,10 +106,21 @@ class _PartnerPageState extends State<PartnerPage> {
       setState(() {
         _voiceAvailable = res['asr'] == true;
         _ttsAvailable = res['tts'] == true;
+        _chatterboxAvailable = res['tts_emotional'] == true;
       });
+
+      // Auto-switch to Chatterbox if available (better emotional voice)
+      if (_chatterboxAvailable && _ttsMode != 'chatterbox') {
+        try {
+          await widget.api.post('/partner/voice/mode', {'mode': 'chatterbox'});
+          setState(() => _ttsMode = 'chatterbox');
+        } catch (_) {}
+      }
+
       if (mounted) {
+        final ttsLabel = _chatterboxAvailable ? 'Emotional (Chatterbox)' : _ttsAvailable ? 'Fast (Kokoro)' : 'OFF';
         ScaffoldMessenger.of(context).showSnackBar(SnackBar(
-          content: Text('Voice: ASR=${res['asr'] == true ? 'ON' : 'OFF'}, TTS=${res['tts'] == true ? 'ON' : 'OFF'}'),
+          content: Text('Voice ready: STT=${_voiceAvailable ? 'ON' : 'OFF'}, TTS=$ttsLabel'),
         ));
       }
     } catch (e) {
@@ -121,7 +130,8 @@ class _PartnerPageState extends State<PartnerPage> {
     }
   }
 
-  /// Send text and get audio reply back.
+  /// Send text with streaming LLM + sentence-by-sentence TTS.
+  /// Uses the SSE streaming path for immediate text display + parallel TTS.
   Future<void> _sendWithVoice(String text) async {
     if (text.isEmpty || _isStreaming) return;
     _inputController.clear();
@@ -130,29 +140,55 @@ class _PartnerPageState extends State<PartnerPage> {
       _messages.add({'role': 'user', 'content': text, 'created_at': DateTime.now().toIso8601String()});
       _messages.add({'role': 'assistant', 'content': '', '_streaming': true});
       _isStreaming = true;
+      _currentEmotion = 'thinking';
     });
     _scrollToBottom();
 
     try {
-      final res = await widget.api.post('/partner/voice/chat', {'message': text}) as Map<String, dynamic>;
-      if (!mounted) return;
-
-      final reply = res['reply']?.toString() ?? '';
-      setState(() {
-        final idx = _messages.lastIndexWhere((m) => m['_streaming'] == true);
-        if (idx >= 0) {
-          _messages[idx]['content'] = reply;
-          _messages[idx].remove('_streaming');
-        }
-        _isStreaming = false;
+      String fullReply = '';
+      final stream = widget.api.postSse('/partner/chat/stream', {
+        'message': text,
+        'thinking_pause': false,  // Skip artificial delay for voice mode
       });
-      _scrollToBottom();
-      _loadStats();
 
-      // Play audio if available
-      if (res['has_audio'] == true && res['audio_base64'] != null) {
-        _playAudioBase64(res['audio_base64']);
-      }
+      _streamSub = stream.listen((event) {
+        final type = event['event']?.toString() ?? '';
+
+        if (type == 'emotion') {
+          setState(() => _currentEmotion = event['emotion']?.toString() ?? 'neutral');
+        } else if (type == 'token') {
+          final token = event['text']?.toString() ?? '';
+          fullReply += token;
+          setState(() {
+            final idx = _messages.lastIndexWhere((m) => m['_streaming'] == true);
+            if (idx >= 0) _messages[idx]['content'] = fullReply;
+          });
+          _scrollToBottom();
+        } else if (type == 'sentence') {
+          // Queue sentence for TTS immediately — don't wait for full reply
+          final sentence = event['sentence']?.toString() ?? '';
+          if (_ttsAvailable && sentence.length > 10) {
+            _queueSentenceForTTS(sentence);
+          }
+        } else if (type == 'end') {
+          setState(() {
+            final idx = _messages.lastIndexWhere((m) => m['_streaming'] == true);
+            if (idx >= 0) {
+              _messages[idx]['content'] = fullReply;
+              _messages[idx].remove('_streaming');
+            }
+            _isStreaming = false;
+          });
+          _loadStats();
+
+          // Only synthesize full reply if no sentences were already queued
+          if (_ttsAvailable && fullReply.isNotEmpty && _ttsQueue.isEmpty && !_ttsProcessing) {
+            _synthesizeAndPlay(fullReply);
+          }
+        }
+      }, onError: (_) {
+        if (mounted) setState(() => _isStreaming = false);
+      });
     } catch (e) {
       setState(() {
         final idx = _messages.lastIndexWhere((m) => m['_streaming'] == true);
@@ -165,7 +201,12 @@ class _PartnerPageState extends State<PartnerPage> {
     }
   }
 
-  /// Start recording from microphone.
+  // WebSocket for streaming STT
+  WebSocket? _sttSocket;
+  String _partialTranscript = '';
+
+  /// Start recording + streaming STT: audio streams to server via WebSocket,
+  /// partial transcription shows in real-time as user speaks.
   Future<void> _startRecording() async {
     if (_isRecording || _isStreaming) return;
     try {
@@ -177,13 +218,58 @@ class _PartnerPageState extends State<PartnerPage> {
         }
         return;
       }
+
+      // Open WebSocket for streaming transcription
+      final wsUrl = widget.api.baseUrl.replaceFirst('http', 'ws');
+      try {
+        _sttSocket = await WebSocket.connect('$wsUrl/partner/voice/stream-transcribe');
+      } catch (e) {
+        debugPrint('[STT] WebSocket connection failed: $e — falling back to file-based');
+        _sttSocket = null;
+      }
+
+      // Start recording as PCM stream
       final dir = await getTemporaryDirectory();
       final path = '${dir.path}/partner_recording.wav';
       await _recorder.start(
         const RecordConfig(encoder: AudioEncoder.wav, sampleRate: 16000, numChannels: 1),
         path: path,
       );
-      setState(() => _isRecording = true);
+
+      _partialTranscript = '';
+      setState(() {
+        _isRecording = true;
+        _messages.add({
+          'role': 'user',
+          'content': 'Listening...',
+          '_recording': true,
+          'created_at': DateTime.now().toIso8601String(),
+        });
+      });
+      _scrollToBottom();
+
+      // Listen for partial transcriptions from WebSocket
+      if (_sttSocket != null) {
+        _sttSocket!.listen((data) {
+          if (!mounted) return;
+          try {
+            final msg = jsonDecode(data as String) as Map<String, dynamic>;
+            if (msg.containsKey('partial')) {
+              _partialTranscript = msg['partial'] as String;
+              setState(() {
+                final idx = _messages.lastIndexWhere((m) => m['_recording'] == true);
+                if (idx >= 0) {
+                  _messages[idx]['content'] = _partialTranscript.isEmpty ? 'Listening...' : _partialTranscript;
+                }
+              });
+              _scrollToBottom();
+            }
+          } catch (_) {}
+        });
+
+        // Stream audio chunks to WebSocket every 500ms
+        _startAudioStreaming(path);
+      }
     } catch (e) {
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('Mic error: $e')));
@@ -191,37 +277,78 @@ class _PartnerPageState extends State<PartnerPage> {
     }
   }
 
-  /// Stop recording and process: Transcribe → Stream text → Synthesize audio (background).
-  ///
-  /// Optimized flow: user sees text IMMEDIATELY while audio synthesizes in background.
+  Timer? _audioStreamTimer;
+
+  void _startAudioStreaming(String filePath) {
+    int lastReadPos = 44; // Skip WAV header (44 bytes)
+    _audioStreamTimer = Timer.periodic(const Duration(milliseconds: 500), (timer) async {
+      if (!_isRecording || _sttSocket == null) {
+        timer.cancel();
+        return;
+      }
+      try {
+        final file = File(filePath);
+        if (!file.existsSync()) return;
+        final bytes = await file.readAsBytes();
+        if (bytes.length > lastReadPos) {
+          // Send new audio data (raw PCM16 after WAV header)
+          final newData = bytes.sublist(lastReadPos);
+          _sttSocket!.add(newData);
+          lastReadPos = bytes.length;
+        }
+      } catch (_) {}
+    });
+  }
+
+  /// Stop recording: finalize transcription, then send to LLM with streaming.
   Future<void> _stopRecordingAndSend() async {
     if (!_isRecording) return;
+    _audioStreamTimer?.cancel();
+
     try {
       final path = await _recorder.stop();
       setState(() => _isRecording = false);
       if (path == null) return;
 
-      final voiceMarker = '_voice_${DateTime.now().millisecondsSinceEpoch}';
-      setState(() {
-        _messages.add({'role': 'user', 'content': 'Transcribing...', '_voice_marker': voiceMarker, 'created_at': DateTime.now().toIso8601String()});
-        _isStreaming = true;
-        _avatarEmotion = 'thinking';
-      });
-      _scrollToBottom();
+      String userText = _partialTranscript;
 
-      // ── Stage 1: Transcribe (fast, ~1-2s) ──
-      final audioBytes = await File(path).readAsBytes();
-      final transcribeRes = await widget.api.post('/partner/voice/transcribe', {
-        'audio_path': path,  // backend reads from temp file
-      });
-      final userText = (transcribeRes as Map<String, dynamic>)['text']?.toString() ?? '';
+      // If WebSocket is connected, send END and wait for final transcription
+      if (_sttSocket != null) {
+        try {
+          // Send remaining audio
+          final bytes = await File(path).readAsBytes();
+          if (bytes.length > 44) _sttSocket!.add(bytes.sublist(44));
+          _sttSocket!.add('END');
+
+          // Wait for final response (up to 5 seconds)
+          await for (final data in _sttSocket!.timeout(const Duration(seconds: 5))) {
+            try {
+              final msg = jsonDecode(data as String) as Map<String, dynamic>;
+              if (msg['done'] == true) {
+                userText = (msg['final'] as String?) ?? userText;
+                break;
+              }
+            } catch (_) {}
+          }
+        } catch (_) {}
+        try { _sttSocket?.close(); } catch (_) {}
+        _sttSocket = null;
+      } else {
+        // Fallback: file-based transcription
+        try {
+          final res = await widget.api.post('/partner/voice/transcribe', {'audio_path': path});
+          userText = (res as Map<String, dynamic>)['text']?.toString() ?? '';
+        } catch (_) {}
+      }
 
       if (!mounted) return;
+
+      // Update user message with final transcription
       setState(() {
-        final userIdx = _messages.lastIndexWhere((m) => m['_voice_marker'] == voiceMarker);
-        if (userIdx >= 0) {
-          _messages[userIdx]['content'] = userText.isNotEmpty ? userText : '(no speech detected)';
-          _messages[userIdx].remove('_voice_marker');
+        final recIdx = _messages.lastIndexWhere((m) => m['_recording'] == true);
+        if (recIdx >= 0) {
+          _messages[recIdx]['content'] = userText.isNotEmpty ? userText : '(no speech detected)';
+          _messages[recIdx].remove('_recording');
         }
       });
 
@@ -230,9 +357,11 @@ class _PartnerPageState extends State<PartnerPage> {
         return;
       }
 
-      // ── Stage 2: Stream LLM text reply (shows instantly as it generates) ──
+      // ── Stream LLM text reply (shows instantly as it generates) ──
       setState(() {
         _messages.add({'role': 'assistant', 'content': '', '_streaming': true});
+        _isStreaming = true;
+        _currentEmotion = 'thinking';
       });
       _scrollToBottom();
 
@@ -243,7 +372,7 @@ class _PartnerPageState extends State<PartnerPage> {
         if (!mounted) return;
         final type = event['event']?.toString() ?? '';
         if (type == 'emotion') {
-          setState(() => _avatarEmotion = event['emotion']?.toString() ?? 'neutral');
+          setState(() => _currentEmotion = event['emotion']?.toString() ?? 'neutral');
         } else if (type == 'sentence') {
           // ── Sentence complete: start synthesizing audio immediately ──
           if (_ttsAvailable) {
@@ -295,68 +424,130 @@ class _PartnerPageState extends State<PartnerPage> {
     }
   }
 
-  /// Queue a sentence for TTS synthesis + playback (non-blocking).
-  /// Sentences are processed sequentially: synthesize → play → next.
+  /// TTS sentence queue with pre-fetch: synthesizes next sentence while current plays.
+  /// This hides TTS latency behind audio playback time.
   final List<String> _ttsQueue = [];
   bool _ttsProcessing = false;
+  bool _ttsStopped = false;  // User pressed stop
 
   void _queueSentenceForTTS(String sentence) {
     _ttsQueue.add(sentence);
     if (!_ttsProcessing) _processTTSQueue();
   }
 
+  /// Synthesize one sentence (returns WAV bytes or empty).
+  Future<Uint8List> _synthesizeSentence(String sentence) async {
+    try {
+      final uri = Uri.parse('${widget.api.baseUrl}/partner/voice/synthesize-sentence');
+      final request = http_pkg.Request('POST', uri);
+      request.headers['Content-Type'] = 'application/json';
+      request.body = jsonEncode({'sentence': sentence, 'emotion': _currentEmotion});
+      final client = http_pkg.Client();
+      try {
+        final response = await client.send(request).timeout(const Duration(seconds: 30));
+        if (response.statusCode == 200) {
+          final bytes = await response.stream.toBytes();
+          if (bytes.isNotEmpty) return bytes;
+        }
+      } finally {
+        client.close();
+      }
+    } catch (e) {
+      debugPrint('TTS synthesis failed: $e');
+    }
+    return Uint8List(0);
+  }
+
   Future<void> _processTTSQueue() async {
     if (_ttsProcessing || _ttsQueue.isEmpty) return;
     _ttsProcessing = true;
-    setState(() => _avatarSpeaking = true);
+    _ttsStopped = false;
+    if (mounted) setState(() => _playingAudio = true);
 
-    while (_ttsQueue.isNotEmpty) {
+    Future<Uint8List>? nextAudioFuture;
+
+    while (_ttsQueue.isNotEmpty && !_ttsStopped) {
       final sentence = _ttsQueue.removeAt(0);
-      try {
-        final uri = Uri.parse('${widget.api.baseUrl}/partner/voice/synthesize-sentence');
-        final httpReq = await HttpClient().postUrl(uri);
-        httpReq.headers.set('Content-Type', 'application/json');
-        httpReq.write(jsonEncode({'sentence': sentence, 'emotion': _avatarEmotion}));
-        final httpResp = await httpReq.close();
+      debugPrint('[TTS] Synthesizing: "${sentence.substring(0, sentence.length.clamp(0, 40))}..."');
 
-        if (httpResp.statusCode == 200) {
-          final wavBytes = await httpResp.fold<List<int>>([], (prev, chunk) => prev..addAll(chunk));
-          if (wavBytes.isNotEmpty) {
-            await _audioPlayer.play(BytesSource(Uint8List.fromList(wavBytes)));
-            // Wait for this sentence to finish playing before starting next
-            await _audioPlayer.onPlayerComplete.first.timeout(
-              const Duration(seconds: 60), onTimeout: () => null,
-            );
-          }
+      // Use pre-fetched audio if available, otherwise synthesize now
+      final Uint8List wavBytes;
+      if (nextAudioFuture != null) {
+        wavBytes = await nextAudioFuture;
+        nextAudioFuture = null;
+        debugPrint('[TTS] Using pre-fetched audio (${wavBytes.length} bytes)');
+      } else {
+        wavBytes = await _synthesizeSentence(sentence);
+        debugPrint('[TTS] Synthesized ${wavBytes.length} bytes');
+      }
+
+      // Start pre-fetching the NEXT sentence while this one plays
+      if (_ttsQueue.isNotEmpty && !_ttsStopped) {
+        debugPrint('[TTS] Pre-fetching next sentence...');
+        nextAudioFuture = _synthesizeSentence(_ttsQueue.first);
+      }
+
+      // Play current sentence
+      if (wavBytes.isNotEmpty && !_ttsStopped) {
+        try {
+          await _audioPlayer.play(BytesSource(wavBytes));
+          debugPrint('[TTS] Playing audio...');
+          await _audioPlayer.onPlayerComplete.first.timeout(
+            const Duration(seconds: 30), onTimeout: () {
+              debugPrint('[TTS] Playback timeout — moving to next');
+              return null;
+            },
+          );
+        } catch (e) {
+          debugPrint('[TTS] Playback error: $e');
         }
-      } catch (_) {}
+      } else if (wavBytes.isEmpty) {
+        debugPrint('[TTS] Empty audio returned — skipping');
+      }
     }
 
+    // Clean up
+    if (_ttsStopped) {
+      _ttsQueue.clear();
+      nextAudioFuture = null;
+    }
     _ttsProcessing = false;
-    if (mounted) setState(() => _avatarSpeaking = false);
+    if (mounted) setState(() => _playingAudio = false);
+  }
+
+  /// Stop all TTS playback immediately.
+  void _stopTTS() {
+    _ttsStopped = true;
+    _ttsQueue.clear();
+    _audioPlayer.stop();
+    if (mounted) setState(() => _playingAudio = false);
   }
 
   /// Background: synthesize full text to audio and play (fallback for non-streaming).
   Future<void> _synthesizeAndPlay(String text) async {
     try {
-      setState(() => _avatarSpeaking = true);
-      // Call synthesize endpoint — returns raw WAV bytes
+      if (mounted) setState(() => _playingAudio = true);
       final uri = Uri.parse('${widget.api.baseUrl}/partner/voice/synthesize');
-      final httpReq = await HttpClient().postUrl(uri);
-      httpReq.headers.set('Content-Type', 'application/json');
-      httpReq.write(jsonEncode({'text': text, 'emotion': _avatarEmotion}));
-      final httpResp = await httpReq.close();
-
-      if (httpResp.statusCode == 200) {
-        final wavBytes = await httpResp.fold<List<int>>([], (prev, chunk) => prev..addAll(chunk));
-        if (wavBytes.isNotEmpty) {
-          await _audioPlayer.play(BytesSource(Uint8List.fromList(wavBytes)));
-          await _audioPlayer.onPlayerComplete.first.timeout(const Duration(seconds: 120), onTimeout: () => null);
+      final request = http_pkg.Request('POST', uri);
+      request.headers['Content-Type'] = 'application/json';
+      request.body = jsonEncode({'text': text, 'emotion': _currentEmotion});
+      final client = http_pkg.Client();
+      try {
+        final response = await client.send(request).timeout(const Duration(seconds: 60));
+        if (response.statusCode == 200) {
+          final wavBytes = await response.stream.toBytes();
+          if (wavBytes.isNotEmpty) {
+            await _audioPlayer.play(BytesSource(wavBytes));
+            await _audioPlayer.onPlayerComplete.first.timeout(const Duration(seconds: 120), onTimeout: () => null);
+          }
         }
+      } finally {
+        client.close();
       }
-    } catch (_) {
+    } catch (e) {
+      debugPrint('Full TTS synthesis failed: $e');
     } finally {
-      if (mounted) setState(() => _avatarSpeaking = false);
+      if (mounted) setState(() => _playingAudio = false);
     }
   }
 
@@ -448,14 +639,14 @@ class _PartnerPageState extends State<PartnerPage> {
       final type = event['event']?.toString() ?? '';
       if (type == 'thinking') {
         setState(() {
-          _avatarEmotion = 'thinking';
+          _currentEmotion = 'thinking';
           final idx = _messages.lastIndexWhere((m) => m['_streaming'] == true);
           if (idx >= 0) _messages[idx]['_thinking'] = true;
         });
       } else if (type == 'emotion') {
         setState(() {
-          _avatarEmotion = event['emotion']?.toString() ?? 'neutral';
-          _avatarSpeaking = true;
+          _currentEmotion = event['emotion']?.toString() ?? 'neutral';
+          _playingAudio = true;
         });
       } else if (type == 'sentence') {
         // Sentence complete — synthesize audio in background while LLM continues
@@ -483,7 +674,7 @@ class _PartnerPageState extends State<PartnerPage> {
             _messages[idx].remove('_thinking');
           }
           _isStreaming = false;
-          _avatarSpeaking = false;
+          _playingAudio = false;
         });
         _loadStats();
         _loadMemories();
@@ -522,15 +713,6 @@ class _PartnerPageState extends State<PartnerPage> {
               ],
             ),
             const Spacer(),
-            // Open web avatar in browser
-            IconButton(
-              onPressed: () {
-                final url = '${widget.api.baseUrl}/static/avatar/index.html?name=$_partnerName';
-                launchUrl(Uri.parse(url));
-              },
-              icon: const Icon(Icons.open_in_browser),
-              tooltip: 'Open animated avatar in browser',
-            ),
             // Voice toggle
             IconButton(
               onPressed: _voiceInitializing ? null : () {
@@ -589,31 +771,6 @@ class _PartnerPageState extends State<PartnerPage> {
     return Column(
       children: [
         // ── Avatar (toggleable) ──
-        if (_showAvatar)
-          GestureDetector(
-            onTap: () => setState(() => _showAvatar = !_showAvatar),
-            child: Container(
-              padding: const EdgeInsets.symmetric(vertical: 8),
-              child: AvatarWidget(
-                emotion: _avatarEmotion,
-                isSpeaking: _avatarSpeaking,
-                isThinking: _isStreaming && !_avatarSpeaking,
-                size: 120,
-                name: _partnerName,
-                primaryColor: colors.primary,
-              ),
-            ),
-          )
-        else
-          // Minimized: just a small toggle button
-          Align(
-            alignment: Alignment.center,
-            child: TextButton.icon(
-              onPressed: () => setState(() => _showAvatar = true),
-              icon: Icon(Icons.face, size: 14, color: colors.onSurfaceVariant),
-              label: Text('Show avatar', style: TextStyle(fontSize: 11, color: colors.onSurfaceVariant)),
-            ),
-          ),
         // ── Messages ──
         Expanded(
           child: _messages.isEmpty
@@ -725,36 +882,87 @@ class _PartnerPageState extends State<PartnerPage> {
                 ),
               ),
               const SizedBox(width: 8),
-              // Microphone button (hold to record, release to send)
-              GestureDetector(
-                onLongPressStart: (_) => _startRecording(),
-                onLongPressEnd: (_) => _stopRecordingAndSend(),
-                child: FloatingActionButton.small(
-                  onPressed: _isRecording ? _stopRecordingAndSend : null, // tap also stops
-                  backgroundColor: _isRecording ? Colors.red : null,
-                  tooltip: _isRecording ? 'Release to send' : 'Hold to talk',
-                  child: _isRecording
-                      ? const Icon(Icons.mic, color: Colors.white)
-                      : Icon(Icons.mic, color: _voiceAvailable ? null : colors.onSurfaceVariant.withValues(alpha: 0.3)),
+              // Microphone button — tap to start, tap again to send, long-press also works
+              if (_isRecording) ...[
+                // Cancel button
+                FloatingActionButton.small(
+                  onPressed: () async {
+                    _audioStreamTimer?.cancel();
+                    await _recorder.stop();
+                    try { _sttSocket?.close(); } catch (_) {}
+                    _sttSocket = null;
+                    // Remove the "Listening..." message
+                    setState(() {
+                      _isRecording = false;
+                      _messages.removeWhere((m) => m['_recording'] == true);
+                    });
+                  },
+                  backgroundColor: colors.errorContainer,
+                  tooltip: 'Cancel recording',
+                  child: Icon(Icons.close, color: colors.onErrorContainer, size: 18),
                 ),
-              ),
+                const SizedBox(width: 4),
+                // Recording indicator with pulsing red dot
+                Container(
+                  padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
+                  decoration: BoxDecoration(
+                    color: Colors.red.withValues(alpha: 0.15),
+                    borderRadius: BorderRadius.circular(20),
+                  ),
+                  child: Row(mainAxisSize: MainAxisSize.min, children: [
+                    Container(width: 8, height: 8,
+                      decoration: const BoxDecoration(color: Colors.red, shape: BoxShape.circle)),
+                    const SizedBox(width: 6),
+                    Text('Recording...', style: TextStyle(fontSize: 11, color: Colors.red.shade700, fontWeight: FontWeight.w600)),
+                  ]),
+                ),
+                const SizedBox(width: 4),
+                // Send recording button
+                FloatingActionButton.small(
+                  onPressed: _stopRecordingAndSend,
+                  backgroundColor: Colors.red,
+                  tooltip: 'Send recording',
+                  child: const Icon(Icons.send, color: Colors.white, size: 18),
+                ),
+              ] else ...[
+                // Mic button — tap to start, hold to talk (release sends)
+                GestureDetector(
+                  onLongPressStart: _voiceAvailable && !_isStreaming ? (_) => _startRecording() : null,
+                  onLongPressEnd: _voiceAvailable && _isRecording ? (_) => _stopRecordingAndSend() : null,
+                  child: FloatingActionButton.small(
+                    onPressed: _voiceAvailable && !_isStreaming && !_isRecording ? _startRecording : null,
+                    tooltip: 'Tap or hold to talk',
+                    child: Icon(Icons.mic, color: _voiceAvailable ? null : colors.onSurfaceVariant.withValues(alpha: 0.3)),
+                  ),
+                ),
+              ],
               const SizedBox(width: 4),
-              // Send text (with or without voice reply)
-              if (_ttsAvailable)
+              // Stop TTS playback button (only shown during playback)
+              if (_playingAudio)
                 FloatingActionButton.small(
-                  onPressed: _isStreaming ? null : () => _sendWithVoice(_inputController.text.trim()),
-                  tooltip: 'Send & hear reply',
-                  child: _isStreaming
-                      ? const SizedBox(width: 18, height: 18, child: CircularProgressIndicator(strokeWidth: 2))
-                      : const Icon(Icons.volume_up),
+                  onPressed: _stopTTS,
+                  backgroundColor: colors.errorContainer,
+                  tooltip: 'Stop voice',
+                  child: Icon(Icons.stop, color: colors.onErrorContainer, size: 18),
                 )
-              else
-                FloatingActionButton.small(
-                  onPressed: _isStreaming ? null : _send,
-                  child: _isStreaming
-                      ? const SizedBox(width: 18, height: 18, child: CircularProgressIndicator(strokeWidth: 2))
-                      : const Icon(Icons.send),
-                ),
+              else if (!_isRecording) ...[
+                // Send text (with or without voice reply)
+                if (_ttsAvailable)
+                  FloatingActionButton.small(
+                    onPressed: _isStreaming ? null : () => _sendWithVoice(_inputController.text.trim()),
+                    tooltip: 'Send & hear reply',
+                    child: _isStreaming
+                        ? const SizedBox(width: 18, height: 18, child: CircularProgressIndicator(strokeWidth: 2))
+                        : const Icon(Icons.volume_up),
+                  )
+                else
+                  FloatingActionButton.small(
+                    onPressed: _isStreaming ? null : _send,
+                    child: _isStreaming
+                        ? const SizedBox(width: 18, height: 18, child: CircularProgressIndicator(strokeWidth: 2))
+                        : const Icon(Icons.send),
+                  ),
+              ],
             ],
           ),
         ),

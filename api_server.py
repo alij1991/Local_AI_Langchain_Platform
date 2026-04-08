@@ -249,7 +249,7 @@ app.add_middleware(RequestLoggingMiddleware)
 class ChatRequest(BaseModel):
     agent: str | None = None
     agent_name: str | None = None
-    message: str
+    message: str = Field(..., min_length=1, max_length=50000)
     conversation_id: str | None = None
     image_paths: list[str] | None = None
     stream: bool = False
@@ -1046,6 +1046,23 @@ async def get_ollama_pull_status(model: str | None = None):
         return {"model": model, **info}
     # Return all active pulls
     return {"pulls": {k: v for k, v in _ollama_pulls.items()}}
+
+
+@app.delete("/models/ollama/{model_id:path}")
+async def delete_ollama_model(model_id: str):
+    """Delete an Ollama model locally."""
+    try:
+        import urllib.request
+        req = urllib.request.Request(
+            f"{config.ollama_base_url}/api/delete",
+            data=json.dumps({"name": model_id}).encode(),
+            headers={"Content-Type": "application/json"},
+            method="DELETE",
+        )
+        urllib.request.urlopen(req, timeout=10)
+        return {"status": "deleted", "model": model_id}
+    except Exception as e:
+        raise HTTPException(500, f"Failed to delete model: {e}")
 
 
 def _estimate_ollama_variant_size(variant_str: str) -> dict[str, Any]:
@@ -3155,7 +3172,7 @@ async def get_conv(cid: str):
 
 
 @app.get("/conversations/{cid}/messages")
-async def get_messages(cid: str, limit: int = 100):
+async def get_messages(cid: str, limit: int = Query(100, ge=1, le=1000)):
     """Flutter expects a flat List from this endpoint."""
     return list_messages(cid, limit=limit)
 
@@ -3695,6 +3712,30 @@ async def partner_remove_memory(memory_id: int):
     return {"status": "ok"}
 
 
+@app.get("/partner/knowledge-graph")
+async def partner_knowledge_graph(entity: str = "user"):
+    """Get knowledge graph triples for an entity."""
+    from local_ai_platform.partner.memory import get_entity_triples, search_graph
+    return {
+        "direct": get_entity_triples(entity),
+        "extended": search_graph(entity, depth=2),
+    }
+
+
+@app.get("/partner/memories/facts/history/{key}")
+async def partner_fact_history(key: str):
+    """Get temporal history of a fact (all values over time)."""
+    from local_ai_platform.partner.memory import get_fact_history
+    return get_fact_history(key)
+
+
+@app.get("/partner/memories/archived")
+async def partner_archived_memories(limit: int = 50):
+    """Get archived (decayed) memories."""
+    from local_ai_platform.partner.memory import get_archived_memories
+    return get_archived_memories(limit)
+
+
 @app.post("/partner/chat")
 async def partner_chat_sync(body: dict[str, Any]):
     message = body.get("message", "")
@@ -3803,6 +3844,84 @@ async def partner_voice_transcribe(body: dict[str, Any]):
         return {"text": text}
     except RuntimeError as e:
         raise HTTPException(422, str(e))
+
+
+@app.websocket("/partner/voice/stream-transcribe")
+async def partner_voice_stream_transcribe(websocket):
+    """WebSocket streaming STT: client sends PCM16 audio chunks, server returns partial transcriptions.
+
+    Protocol:
+    - Client sends: raw bytes (PCM16, 16kHz, mono) while user holds mic button
+    - Client sends: text message "END" when user releases mic button
+    - Server sends: JSON {"partial": "transcribed text so far"} as speech segments complete
+    - Server sends: JSON {"final": "complete transcription", "done": true} at the end
+    """
+    from fastapi.websockets import WebSocketDisconnect
+    await websocket.accept()
+
+    partner = _get_partner()
+    if partner._asr is None:
+        await websocket.send_json({"error": "ASR not initialized. Call /partner/voice/init first."})
+        await websocket.close()
+        return
+
+    import numpy as np
+    audio_buffer = bytearray()
+    full_text = ""
+    last_transcribe_len = 0  # Track how much audio we've already transcribed
+
+    try:
+        while True:
+            message = await websocket.receive()
+
+            if "bytes" in message:
+                # Received audio chunk (PCM16, 16kHz, mono)
+                audio_buffer.extend(message["bytes"])
+
+                # Transcribe every ~1.5 seconds of new audio (24000 bytes = 1.5s at 16kHz 16-bit)
+                new_bytes = len(audio_buffer) - last_transcribe_len
+                if new_bytes >= 24000:
+                    try:
+                        # Convert PCM16 to float32
+                        pcm16 = np.frombuffer(bytes(audio_buffer), dtype=np.int16)
+                        audio_f32 = pcm16.astype(np.float32) / 32768.0
+
+                        text = await asyncio.get_event_loop().run_in_executor(
+                            None, partner.transcribe_buffer, audio_f32
+                        )
+                        last_transcribe_len = len(audio_buffer)
+                        if text and text != full_text:
+                            full_text = text
+                            await websocket.send_json({"partial": text})
+                    except Exception as e:
+                        logger.debug("Stream transcribe chunk error: %s", e)
+
+            elif "text" in message:
+                text_msg = message["text"]
+                if text_msg == "END":
+                    # User released mic — do final transcription on complete buffer
+                    if audio_buffer:
+                        try:
+                            pcm16 = np.frombuffer(bytes(audio_buffer), dtype=np.int16)
+                            audio_f32 = pcm16.astype(np.float32) / 32768.0
+                            final_text = await asyncio.get_event_loop().run_in_executor(
+                                None, partner.transcribe_buffer, audio_f32
+                            )
+                            if final_text:
+                                full_text = final_text
+                        except Exception as e:
+                            logger.warning("Final transcription error: %s", e)
+
+                    await websocket.send_json({"final": full_text, "done": True})
+                    break
+
+    except Exception:
+        pass
+    finally:
+        try:
+            await websocket.close()
+        except Exception:
+            pass
 
 
 @app.post("/partner/voice/synthesize")

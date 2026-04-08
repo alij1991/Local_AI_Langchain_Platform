@@ -62,15 +62,22 @@ class PartnerEngine:
     def _get_best_model(self) -> str:
         """Select the best available model for the partner.
 
-        Research: "Qwen3-8B Q4_K_M via Ollama (~5 GB VRAM, 40+ tok/s)"
-        Falls back to whatever model is available.
+        Priority: Qwen3-8B (best conversation) > Gemma4 E4B (128K ctx, multimodal)
+        > Qwen3-4B (strong at 4B) > Gemma4 E2B (tiny, fast) > fallbacks.
         """
         if self._partner_model:
             return self._partner_model
 
-        # Preferred models in order (research-recommended first)
-        preferred = ["qwen3:8b", "qwen3:4b", "qwen2.5:7b", "llama3.2:8b",
-                     "mistral:7b", "gemma3:4b", "gemma3:1b"]
+        # Preferred models in order (research-recommended, April 2026)
+        preferred = [
+            "qwen3:8b",        # Best for conversation/roleplay quality
+            "gemma4:e4b",      # 128K context, multimodal, Apache 2.0, strong human preference
+            "qwen3:4b",        # Strong 4B class for dialogue
+            "gemma4:e2b",      # Tiny + fast, audio input capable
+            "qwen2.5:7b",      # Solid fallback
+            "gemma3:4b",       # Older but capable
+            "gemma3:1b",       # Last resort
+        ]
 
         try:
             import urllib.request, json as _json
@@ -379,16 +386,28 @@ class PartnerEngine:
         # ── 2. Fast regex fact extraction ──
         self._extract_facts_fast(user_input)
 
-        # ── 3. LLM profiling every 5 turns ──
+        # ── 3. LLM profiling + KG extraction every 5 turns ──
         if self._profiling_counter >= 5:
             self._profiling_counter = 0
             try:
                 recent = memory.get_recent_messages(10)
                 if recent:
+                    # Profile extraction
                     llm_updates = extract_profile_with_llm(recent, self.router, self.config)
                     if llm_updates:
                         apply_llm_profile_updates(self.user_profile, llm_updates)
                         logger.info("LLM profiling: extracted %d fields", len(llm_updates))
+
+                    # Knowledge graph extraction (same cadence, separate LLM call)
+                    try:
+                        from .user_profile import extract_knowledge_graph_triples
+                        triples = extract_knowledge_graph_triples(recent, self.router, self.config)
+                        for subj, pred, obj in triples:
+                            memory.add_triple(subj, pred, obj, source="llm_extraction")
+                        if triples:
+                            logger.info("KG extraction: %d triples", len(triples))
+                    except Exception as e:
+                        logger.debug("KG extraction failed: %s", e)
             except Exception as e:
                 logger.debug("LLM profiling failed: %s", e)
 
@@ -504,6 +523,14 @@ class PartnerEngine:
             message_count=len(self._session_messages),
         )
 
+        # Archive decayed memories (background cleanup every 20 messages)
+        try:
+            archived = memory.archive_decayed_memories(threshold=0.5)
+            if archived:
+                logger.info("Archived %d decayed memories", archived)
+        except Exception as e:
+            logger.debug("Memory archival failed: %s", e)
+
         # Reset session counter
         self._session_msg_count = 0
         self._session_messages = self._session_messages[-4:]
@@ -590,6 +617,19 @@ class PartnerEngine:
         if self._asr is None:
             raise RuntimeError("ASR not initialized. Call init_voice() first.")
         segments, _ = self._asr.transcribe(audio_path, beam_size=5)
+        return " ".join(seg.text for seg in segments).strip()
+
+    def transcribe_buffer(self, audio_float32: "np.ndarray") -> str:
+        """Transcribe a float32 numpy audio buffer (16kHz mono) directly.
+
+        Used for streaming STT — avoids writing to disk.
+        """
+        if self._asr is None:
+            raise RuntimeError("ASR not initialized.")
+        if len(audio_float32) < 1600:  # < 0.1s at 16kHz, too short
+            return ""
+        segments, _ = self._asr.transcribe(audio_float32, beam_size=3, vad_filter=True,
+                                            vad_parameters={"min_silence_duration_ms": 300})
         return " ".join(seg.text for seg in segments).strip()
 
     # Emotion → voice mapping for expressive TTS
@@ -847,6 +887,8 @@ class PartnerEngine:
             "core_facts": len(memory.get_facts()),
             "key_memories": len(memory.get_key_memories()),
             "journal_entries": len(memory.get_journal_entries()),
+            "knowledge_graph_triples": len(memory.get_entity_triples("user")),
+            "archived_memories": len(memory.get_archived_memories()),
             "mem0_available": memory._mem0_available is True,
             "mem0_memories": len(memory.mem0_get_all()),
             "voice": self.get_voice_status(),
@@ -858,6 +900,8 @@ class PartnerEngine:
             "core_facts": memory.get_facts(),
             "key_memories": memory.get_key_memories(50),
             "journal": memory.get_journal_entries(20),
+            "knowledge_graph": memory.get_entity_triples("user"),
+            "archived_memories": memory.get_archived_memories(20),
             "mem0_memories": memory.mem0_get_all(),
             "user_profile": self.user_profile.to_dict(),
         }

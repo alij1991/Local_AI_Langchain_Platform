@@ -23,6 +23,7 @@ class ChatUiMessage {
     this.retryMessage,
     this.retryAttachments = const [],
     this.runId,
+    this.feedback = 0,
   }) : toolEvents = toolEvents ?? [];
 
   final String localId;
@@ -36,6 +37,7 @@ class ChatUiMessage {
   final String? retryMessage;
   final List<PlatformFile> retryAttachments;
   String? runId;
+  int feedback; // 0=none, 1=thumbs up, -1=thumbs down
 
   bool get isUser => role == 'user';
 }
@@ -192,6 +194,7 @@ class _ChatPageState extends State<ChatPage> {
   bool _sidebarOpen = true;
 
   String _error = '';
+  String _conversationSearch = '';
   StreamSubscription<Map<String, dynamic>>? _streamSub;
 
   @override
@@ -1155,7 +1158,26 @@ class _ChatPageState extends State<ChatPage> {
               ],
             ),
           ),
-          const Divider(height: 1),
+          // Search bar
+          Padding(
+            padding: const EdgeInsets.fromLTRB(12, 4, 12, 8),
+            child: TextField(
+              decoration: InputDecoration(
+                hintText: 'Search conversations...',
+                prefixIcon: const Icon(Icons.search, size: 18),
+                isDense: true,
+                contentPadding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+                border: OutlineInputBorder(borderRadius: BorderRadius.circular(20), borderSide: BorderSide.none),
+                filled: true,
+                fillColor: colors.surfaceContainerHighest.withValues(alpha: 0.5),
+                suffixIcon: _conversationSearch.isNotEmpty
+                    ? IconButton(icon: const Icon(Icons.close, size: 16), onPressed: () => setState(() => _conversationSearch = ''))
+                    : null,
+              ),
+              style: const TextStyle(fontSize: 13),
+              onChanged: (v) => setState(() => _conversationSearch = v.toLowerCase()),
+            ),
+          ),
           // Conversation list
           Expanded(
             child: _loading && _conversations.isEmpty
@@ -1180,16 +1202,51 @@ class _ChatPageState extends State<ChatPage> {
                           ),
                         ),
                       )
-                    : ListView.separated(
-                        padding: const EdgeInsets.symmetric(vertical: 4),
-                        itemCount: _conversations.length,
-                        separatorBuilder: (_, __) => const SizedBox.shrink(),
-                        itemBuilder: (_, i) {
-                          final conv = _conversations[i];
+                    : Builder(builder: (_) {
+                        final filtered = _conversationSearch.isEmpty
+                            ? _conversations
+                            : _conversations.where((c) =>
+                                (c['title'] ?? '').toString().toLowerCase().contains(_conversationSearch)).toList();
+                        if (filtered.isEmpty && _conversationSearch.isNotEmpty) {
+                          return Center(child: Text('No matches', style: TextStyle(fontSize: 12, color: colors.onSurfaceVariant)));
+                        }
+
+                        // Group by time period (Today / Yesterday / Previous 7 Days / Older)
+                        final now = DateTime.now();
+                        final today = DateTime(now.year, now.month, now.day);
+                        final yesterday = today.subtract(const Duration(days: 1));
+                        final week = today.subtract(const Duration(days: 7));
+
+                        String _timeGroup(Map<String, dynamic> c) {
+                          final dateStr = (c['updated_at'] ?? c['created_at'] ?? '').toString();
+                          try {
+                            final d = DateTime.parse(dateStr).toLocal();
+                            if (d.isAfter(today)) return 'Today';
+                            if (d.isAfter(yesterday)) return 'Yesterday';
+                            if (d.isAfter(week)) return 'Previous 7 days';
+                            return 'Older';
+                          } catch (_) {
+                            return 'Older';
+                          }
+                        }
+
+                        // Build grouped list items
+                        final items = <Widget>[];
+                        String lastGroup = '';
+                        for (final conv in filtered) {
+                          final group = _timeGroup(conv);
+                          if (group != lastGroup) {
+                            items.add(Padding(
+                              padding: const EdgeInsets.fromLTRB(16, 12, 16, 4),
+                              child: Text(group, style: TextStyle(fontSize: 11, fontWeight: FontWeight.w600,
+                                color: colors.onSurfaceVariant, letterSpacing: 0.3)),
+                            ));
+                            lastGroup = group;
+                          }
                           final id = conv['id'].toString();
                           final title = (conv['title'] ?? 'Untitled').toString();
                           final isSelected = _conversationId == id;
-                          return Padding(
+                          items.add(Padding(
                             padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 1),
                             child: Material(
                               color: isSelected ? colors.primaryContainer.withValues(alpha: 0.4) : Colors.transparent,
@@ -1234,9 +1291,13 @@ class _ChatPageState extends State<ChatPage> {
                                 ),
                               ),
                             ),
-                          );
-                        },
-                      ),
+                          ));
+                        }
+                        return ListView(
+                          padding: const EdgeInsets.symmetric(vertical: 4),
+                          children: items,
+                        );
+                      }),
           ),
         ],
       ),
@@ -2707,19 +2768,54 @@ class _ChatPageState extends State<ChatPage> {
                         ],
                       ),
                     ),
-                    // Action row
-                    if (!isUser || m.status == ChatMessageStatus.failed)
+                    // Stop generating button (inline, prominent during streaming)
+                    if (!isUser && m.status == ChatMessageStatus.streaming)
+                      Padding(
+                        padding: const EdgeInsets.only(top: 8),
+                        child: OutlinedButton.icon(
+                          onPressed: _stopStreaming,
+                          icon: const Icon(Icons.stop_circle_outlined, size: 16),
+                          label: const Text('Stop generating'),
+                          style: OutlinedButton.styleFrom(
+                            foregroundColor: colors.error,
+                            side: BorderSide(color: colors.error.withValues(alpha: 0.5)),
+                            padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
+                            visualDensity: VisualDensity.compact,
+                          ),
+                        ),
+                      ),
+                    // Action row — always visible for assistant messages (not hover-only)
+                    if ((!isUser && m.status == ChatMessageStatus.complete && m.content.isNotEmpty) ||
+                        m.status == ChatMessageStatus.failed)
                       Padding(
                         padding: const EdgeInsets.only(top: 4),
                         child: Row(
                           mainAxisSize: MainAxisSize.min,
                           children: [
                             _buildStatusIcon(m),
-                            if (!isUser && m.status == ChatMessageStatus.complete && m.content.isNotEmpty) ...[
+                            if (!isUser && m.status == ChatMessageStatus.complete) ...[
                               const SizedBox(width: 2),
                               _actionIcon(Icons.copy_outlined, 'Copy', () => _copyMessageContent(m.content), colors),
+                              _actionIcon(Icons.refresh, 'Regenerate', () {
+                                // Find the user message before this assistant message and resend
+                                final idx = _messages.indexOf(m);
+                                if (idx > 0) {
+                                  final prev = _messages[idx - 1];
+                                  if (prev.isUser) {
+                                    _sendMessage(overrideText: prev.content);
+                                  }
+                                }
+                              }, colors),
                               if (m.runId != null)
                                 _actionIcon(Icons.timeline, 'View trace', () => _openTrace(m.runId!), colors),
+                              const SizedBox(width: 4),
+                              // Thumbs up/down feedback
+                              _feedbackIcon(Icons.thumb_up_outlined, m.feedback == 1, () {
+                                setState(() => m.feedback = m.feedback == 1 ? 0 : 1);
+                              }, colors),
+                              _feedbackIcon(Icons.thumb_down_outlined, m.feedback == -1, () {
+                                setState(() => m.feedback = m.feedback == -1 ? 0 : -1);
+                              }, colors),
                             ],
                             // Per-message performance metrics
                             if (!isUser && m.perf != null) ...[
@@ -2775,6 +2871,24 @@ class _ChatPageState extends State<ChatPage> {
         child: Padding(
           padding: const EdgeInsets.all(6),
           child: Icon(icon, size: 15, color: colors.onSurfaceVariant.withValues(alpha: 0.5)),
+        ),
+      ),
+    );
+  }
+
+  Widget _feedbackIcon(IconData icon, bool isActive, VoidCallback onTap, ColorScheme colors) {
+    return Tooltip(
+      message: isActive ? 'Remove feedback' : (icon == Icons.thumb_up_outlined ? 'Helpful' : 'Not helpful'),
+      child: InkWell(
+        borderRadius: BorderRadius.circular(6),
+        onTap: onTap,
+        child: Padding(
+          padding: const EdgeInsets.all(5),
+          child: Icon(
+            isActive ? (icon == Icons.thumb_up_outlined ? Icons.thumb_up : Icons.thumb_down) : icon,
+            size: 14,
+            color: isActive ? colors.primary : colors.onSurfaceVariant.withValues(alpha: 0.4),
+          ),
         ),
       ),
     );
@@ -2853,18 +2967,30 @@ class _ChatPageState extends State<ChatPage> {
               Container(
                 width: double.infinity,
                 padding: const EdgeInsets.all(8),
-                constraints: const BoxConstraints(maxHeight: 200),
+                constraints: const BoxConstraints(maxHeight: 300),
                 decoration: BoxDecoration(
                   color: colors.surfaceContainerHighest,
                   borderRadius: BorderRadius.circular(6),
                 ),
                 child: SingleChildScrollView(
                   child: SelectableText(
-                    result.length > 500 ? '${result.substring(0, 500)}...' : result,
+                    result,
                     style: TextStyle(fontSize: 11, fontFamily: 'Consolas', color: colors.onSurface),
                   ),
                 ),
               ),
+              if (result.length > 200)
+                Align(
+                  alignment: Alignment.centerRight,
+                  child: IconButton(
+                    onPressed: () => Clipboard.setData(ClipboardData(text: result)).then((_) {
+                      ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('Result copied'), duration: Duration(seconds: 1)));
+                    }),
+                    icon: Icon(Icons.copy, size: 14, color: colors.onSurfaceVariant),
+                    tooltip: 'Copy full result',
+                    visualDensity: VisualDensity.compact,
+                  ),
+                ),
             ],
           ],
         ),

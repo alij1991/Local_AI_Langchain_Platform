@@ -1,6 +1,8 @@
 import 'dart:convert';
+import 'dart:math';
 
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:file_picker/file_picker.dart';
 import 'package:local_ai_flutter_client/services/api_client.dart';
 import 'package:local_ai_flutter_client/widgets/attachment_widgets.dart';
@@ -71,7 +73,7 @@ class _SystemsPageState extends State<SystemsPage> {
   _SystemsTab _tab = _SystemsTab.templates;
   List<Map<String, dynamic>> _templates = [];
   List<String> _availableModels = [];
-  bool _helpExpanded = true;
+  bool _helpExpanded = false;
 
   bool _runInFlight = false;
   String _runStatus = '';
@@ -146,7 +148,8 @@ class _SystemsPageState extends State<SystemsPage> {
     final agent = _agents.isNotEmpty ? _agents.first : 'assistant';
     final id = 'n${DateTime.now().millisecondsSinceEpoch}';
     setState(() {
-      _nodes.add(_SystemNode(id: id, agent: agent, position: Offset(80 + (_nodes.length * 30), 80 + (_nodes.length * 20))));
+      final rng = Random();
+      _nodes.add(_SystemNode(id: id, agent: agent, position: Offset(80.0 + rng.nextInt(250), 80.0 + rng.nextInt(200))));
       _startNodeId ??= id;
       _selectedNodeId = id;
       _selectedEdgeIndex = null;
@@ -178,6 +181,10 @@ class _SystemsPageState extends State<SystemsPage> {
         notes: (rule['notes'] ?? '').toString(),
       );
     }).toList();
+
+    // Filter orphaned edges (referencing non-existent nodes)
+    final nodeIds = n.map((node) => node.id).toSet();
+    ed.removeWhere((e) => !nodeIds.contains(e.source) || !nodeIds.contains(e.target));
 
     setState(() {
       _selectedName = name;
@@ -489,7 +496,29 @@ class _SystemsPageState extends State<SystemsPage> {
                                     } else if (action == 'export') {
                                       final data = await widget.api.get('/systems/$n/export');
                                       if (context.mounted) {
-                                        ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('Exported $n (copy JSON from browser)')));
+                                        final jsonStr = const JsonEncoder.withIndent('  ').convert(data);
+                                        await showDialog(
+                                          context: context,
+                                          builder: (ctx) => AlertDialog(
+                                            title: Text('Export: $n'),
+                                            content: SizedBox(
+                                              width: 500, height: 400,
+                                              child: SingleChildScrollView(
+                                                child: SelectableText(jsonStr, style: const TextStyle(fontSize: 11, fontFamily: 'Consolas')),
+                                              ),
+                                            ),
+                                            actions: [
+                                              TextButton(
+                                                onPressed: () {
+                                                  Clipboard.setData(ClipboardData(text: jsonStr));
+                                                  ScaffoldMessenger.of(ctx).showSnackBar(const SnackBar(content: Text('Copied to clipboard')));
+                                                },
+                                                child: const Text('Copy JSON'),
+                                              ),
+                                              FilledButton(onPressed: () => Navigator.pop(ctx), child: const Text('Close')),
+                                            ],
+                                          ),
+                                        );
                                       }
                                     } else if (action == 'delete') {
                                       await widget.api.delete('/systems/$n');

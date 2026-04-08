@@ -529,8 +529,30 @@ class _ToolsPageState extends State<ToolsPage> {
                   IconButton(
                     icon: Icon(Icons.delete_outline, size: 18, color: colors.error),
                     onPressed: () async {
-                      await widget.api.delete('/tools/${tool['tool_id']}');
-                      await _load();
+                      final name = (tool['name'] ?? tool['tool_id'] ?? '').toString();
+                      final confirm = await showDialog<bool>(
+                        context: context,
+                        builder: (ctx) => AlertDialog(
+                          title: const Text('Delete Tool'),
+                          content: Text('Delete "$name"? This cannot be undone.'),
+                          actions: [
+                            TextButton(onPressed: () => Navigator.pop(ctx, false), child: const Text('Cancel')),
+                            FilledButton(
+                              onPressed: () => Navigator.pop(ctx, true),
+                              style: FilledButton.styleFrom(backgroundColor: Theme.of(ctx).colorScheme.error),
+                              child: const Text('Delete'),
+                            ),
+                          ],
+                        ),
+                      );
+                      if (confirm == true && mounted) {
+                        try {
+                          await widget.api.delete('/tools/${tool['tool_id']}');
+                          await _load();
+                        } catch (e) {
+                          if (mounted) ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('Delete failed: $e')));
+                        }
+                      }
                     },
                     tooltip: 'Delete',
                   ),

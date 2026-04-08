@@ -134,7 +134,9 @@ class _RunsPageState extends State<RunsPage> {
                               final r = filtered[i];
                               final status = (r['status'] ?? '-').toString();
                               final agent = (r['agent_name'] ?? '-').toString();
-                              final model = '${r['model_provider'] ?? ''}:${r['model_id'] ?? ''}';
+                              final prov = (r['model_provider'] ?? '').toString();
+                              final mid = (r['model_id'] ?? '').toString();
+                              final model = prov.isNotEmpty && mid.isNotEmpty ? '$prov:$mid' : (prov + mid);
                               final duration = r['duration_ms'];
                               final toolCalls = r['tool_calls_count'] ?? 0;
                               final isSelected = _selectedView != null &&
@@ -179,10 +181,15 @@ class _RunsPageState extends State<RunsPage> {
                                             ],
                                           ),
                                         ),
-                                        Text(
-                                          (r['start_timestamp'] ?? '').toString().split('T').first,
-                                          style: TextStyle(fontSize: 11, color: colors.onSurfaceVariant),
-                                        ),
+                                        Builder(builder: (_) {
+                                          final ts = (r['start_timestamp'] ?? '').toString();
+                                          String display = ts.split('T').first;
+                                          try {
+                                            final dt = DateTime.parse(ts).toLocal();
+                                            display = '${dt.month}/${dt.day} ${dt.hour.toString().padLeft(2,'0')}:${dt.minute.toString().padLeft(2,'0')}';
+                                          } catch (_) {}
+                                          return Text(display, style: TextStyle(fontSize: 11, color: colors.onSurfaceVariant));
+                                        }),
                                       ],
                                     ),
                                   ),
@@ -305,7 +312,7 @@ class _RunsPageState extends State<RunsPage> {
                 color: isToolCall ? colors.onSecondaryContainer : colors.onPrimaryContainer,
               ),
             ),
-            title: Text('${isToolCall ? 'Tool' : 'Model'} #${m['index']} \u2022 ${m['name']}', style: const TextStyle(fontSize: 14)),
+            title: Text('${isToolCall ? 'Tool' : 'Model'} #${(m['index'] as int? ?? 0) + 1} \u2022 ${m['name']}', style: const TextStyle(fontSize: 14)),
             subtitle: Text(
               '$status \u2022 ${m['duration_ms'] ?? '-'} ms',
               style: TextStyle(fontSize: 12, color: colors.onSurfaceVariant),

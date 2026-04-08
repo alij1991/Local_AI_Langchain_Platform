@@ -586,6 +586,65 @@ Recent messages:
 JSON output (no markdown, no explanation):"""
 
 
+KG_EXTRACTION_PROMPT = """Extract entity-relationship triples from these messages.
+Focus on: people, places, organizations, preferences, relationships, activities.
+
+Return ONLY a JSON array of triples. Each triple is [subject, predicate, object].
+Use lowercase, normalized names. Use simple predicates like: works_at, lives_in,
+friends_with, likes, dislikes, studied_at, member_of, partner_of, parent_of,
+interested_in, skilled_in, owns, uses.
+
+Example: [["user", "works_at", "google"], ["user", "friends_with", "mike"]]
+
+Messages:
+{messages}
+
+JSON array (no markdown, no explanation):"""
+
+
+def extract_knowledge_graph_triples(
+    recent_messages: list[dict],
+    router: Any,
+    config: Any,
+) -> list[tuple[str, str, str]]:
+    """Extract entity-relationship triples from recent messages using LLM."""
+    if not recent_messages or not router:
+        return []
+    try:
+        from local_ai_platform.providers import ChatMessage, GenerationSettings
+        msg_text = "\n".join(
+            f"{m.get('role', 'user')}: {m.get('content', '')[:200]}"
+            for m in recent_messages[-10:]
+            if m.get("content")
+        )
+        if len(msg_text) < 20:
+            return []
+
+        prompt = KG_EXTRACTION_PROMPT.format(messages=msg_text)
+        model_str = f"ollama:{config.default_model}"
+        response = router.chat(
+            model_str,
+            [ChatMessage(role="user", content=f"/no_think\n{prompt}")],
+            GenerationSettings(temperature=0, max_tokens=300),
+        )
+        text = response.content.strip()
+        # Extract JSON array from response
+        import json, re
+        # Find first [ ... ] block
+        match = re.search(r'\[.*\]', text, re.DOTALL)
+        if match:
+            triples = json.loads(match.group(0))
+            result = []
+            for t in triples:
+                if isinstance(t, (list, tuple)) and len(t) >= 3:
+                    result.append((str(t[0]), str(t[1]), str(t[2])))
+            return result
+    except Exception as e:
+        import logging
+        logging.getLogger(__name__).debug("KG extraction failed: %s", e)
+    return []
+
+
 def extract_profile_with_llm(
     recent_messages: list[dict],
     router: Any,
@@ -687,6 +746,17 @@ def apply_llm_profile_updates(profile: UserProfile, updates: dict) -> bool:
                     profile.social_graph.append(person)
                     changed = True
         profile.social_graph = profile.social_graph[-20:]
+
+        # Sync social graph to knowledge graph
+        try:
+            from local_ai_platform.partner.memory import add_triple
+            for person in sg:
+                if isinstance(person, dict) and person.get("name"):
+                    relationship = person.get("relationship", "knows").lower().replace(" ", "_")
+                    add_triple("user", relationship, person["name"].lower(),
+                              source="llm_extraction", confidence=0.85)
+        except Exception:
+            pass  # graceful degradation
 
     # Big Five from LLM (stronger evidence than heuristics)
     personality_obs = updates.get("personality_observations", {})
