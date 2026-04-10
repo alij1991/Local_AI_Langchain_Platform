@@ -104,6 +104,7 @@ class _PartnerPageState extends State<PartnerPage> {
         _ttsAvailable = res['tts_available'] == true || res['tts_emotional_available'] == true;
         _chatterboxAvailable = res['tts_emotional_available'] == true;
         _ttsMode = res['tts_mode']?.toString() ?? 'kokoro';
+        _voiceGender = res['voice_gender']?.toString() ?? 'female';
       });
     } catch (_) {}
   }
@@ -119,11 +120,14 @@ class _PartnerPageState extends State<PartnerPage> {
         _chatterboxAvailable = res['tts_emotional'] == true;
       });
 
-      // Auto-switch to Chatterbox if available (better emotional voice)
-      if (_chatterboxAvailable && _ttsMode != 'chatterbox') {
+      // Keep Kokoro as default TTS — it's much faster (~200ms vs 2-6s per sentence)
+      // and supports female/male voice mapping. User can manually switch to
+      // Chatterbox for emotional voice if they prefer slower but more expressive output.
+      if (_ttsMode == 'chatterbox' && !_chatterboxAvailable) {
+        // Only reset if Chatterbox was selected but isn't available
         try {
-          await widget.api.post('/partner/voice/mode', {'mode': 'chatterbox'});
-          setState(() => _ttsMode = 'chatterbox');
+          await widget.api.post('/partner/voice/mode', {'mode': 'kokoro'});
+          setState(() => _ttsMode = 'kokoro');
         } catch (_) {}
       }
 
@@ -265,6 +269,20 @@ class _PartnerPageState extends State<PartnerPage> {
     return result.buffer.asUint8List();
   }
 
+  /// Estimate playback duration from WAV bytes by reading the header.
+  int _estimateWavDurationMs(Uint8List wavBytes) {
+    if (wavBytes.length < 44) return 0;
+    try {
+      final bd = ByteData.sublistView(wavBytes);
+      final byteRate = bd.getUint32(28, Endian.little); // bytes per second
+      if (byteRate == 0) return 0;
+      final dataSize = wavBytes.length - 44; // PCM data after header
+      return (dataSize * 1000) ~/ byteRate;
+    } catch (_) {
+      return 0;
+    }
+  }
+
   /// Send text with streaming LLM + sentence-by-sentence TTS.
   /// Uses the SSE streaming path for immediate text display + parallel TTS.
   Future<void> _sendWithVoice(String text) async {
@@ -344,7 +362,9 @@ class _PartnerPageState extends State<PartnerPage> {
 
   // WebSocket for streaming STT
   WebSocket? _sttSocket;
+  StreamSubscription? _sttSocketSub;
   String _partialTranscript = '';
+  Completer<String>? _sttFinalCompleter;
 
   /// Start recording + streaming STT: audio streams to server via WebSocket,
   /// partial transcription shows in real-time as user speaks.
@@ -363,7 +383,9 @@ class _PartnerPageState extends State<PartnerPage> {
       // Open WebSocket for streaming transcription
       final wsUrl = widget.api.baseUrl.replaceFirst('http', 'ws');
       try {
-        _sttSocket = await WebSocket.connect('$wsUrl/partner/voice/stream-transcribe');
+        _sttSocket = await WebSocket.connect('$wsUrl/partner/voice/stream-transcribe')
+            .timeout(const Duration(seconds: 5));
+        debugPrint('[STT] WebSocket connected');
       } catch (e) {
         debugPrint('[STT] WebSocket connection failed: $e — falling back to file-based');
         _sttSocket = null;
@@ -378,6 +400,7 @@ class _PartnerPageState extends State<PartnerPage> {
       );
 
       _partialTranscript = '';
+      _sttFinalCompleter = Completer<String>();
       setState(() {
         _isRecording = true;
         _messages.add({
@@ -389,9 +412,9 @@ class _PartnerPageState extends State<PartnerPage> {
       });
       _scrollToBottom();
 
-      // Listen for partial transcriptions from WebSocket
+      // Single listener handles both partial and final transcriptions
       if (_sttSocket != null) {
-        _sttSocket!.listen((data) {
+        _sttSocketSub = _sttSocket!.listen((data) {
           if (!mounted) return;
           try {
             final msg = jsonDecode(data as String) as Map<String, dynamic>;
@@ -404,8 +427,24 @@ class _PartnerPageState extends State<PartnerPage> {
                 }
               });
               _scrollToBottom();
+            } else if (msg['done'] == true) {
+              // Final transcription received — resolve the completer
+              final finalText = (msg['final'] as String?) ?? _partialTranscript;
+              if (_sttFinalCompleter != null && !_sttFinalCompleter!.isCompleted) {
+                _sttFinalCompleter!.complete(finalText);
+              }
             }
           } catch (_) {}
+        }, onError: (e) {
+          debugPrint('[STT] WebSocket error: $e');
+          if (_sttFinalCompleter != null && !_sttFinalCompleter!.isCompleted) {
+            _sttFinalCompleter!.complete(_partialTranscript);
+          }
+        }, onDone: () {
+          debugPrint('[STT] WebSocket closed');
+          if (_sttFinalCompleter != null && !_sttFinalCompleter!.isCompleted) {
+            _sttFinalCompleter!.complete(_partialTranscript);
+          }
         });
 
         // Stream audio chunks to WebSocket every 500ms
@@ -476,7 +515,8 @@ class _PartnerPageState extends State<PartnerPage> {
     });
   }
 
-  /// Stop recording: finalize transcription, then send to LLM with streaming.
+  /// Stop recording: start LLM IMMEDIATELY with partial transcript, finalize STT in background.
+  /// Key optimization: don't wait for final STT before starting LLM — use partial transcript.
   Future<void> _stopRecordingAndSend() async {
     if (!_isRecording) return;
     _audioStreamTimer?.cancel();
@@ -486,40 +526,59 @@ class _PartnerPageState extends State<PartnerPage> {
       setState(() => _isRecording = false);
       if (path == null) return;
 
+      // Send remaining audio + END, then quickly grab the best transcript
       String userText = _partialTranscript;
+      debugPrint('[STT] Partial at send: "$userText"');
 
-      // If WebSocket is connected, send END and wait for final transcription
-      if (_sttSocket != null) {
+      if (_sttSocket != null && _sttFinalCompleter != null) {
         try {
-          // Send remaining audio
           final bytes = await File(path).readAsBytes();
-          if (bytes.length > 44) _sttSocket!.add(bytes.sublist(44));
+          if (bytes.length > 44) {
+            _sttSocket!.add(_normalizePcm16(Uint8List.sublistView(bytes, 44)));
+          }
           _sttSocket!.add('END');
+        } catch (_) {}
 
-          // Wait for final response (up to 5 seconds)
-          await for (final data in _sttSocket!.timeout(const Duration(seconds: 5))) {
+        // Wait briefly for final STT — catches the last bit of speech.
+        // Short timeout: 2s if we have partial (just need final polish),
+        // 5s if no partial at all (need full transcription).
+        final waitMs = userText.isEmpty ? 5000 : 2000;
+        try {
+          userText = await _sttFinalCompleter!.future
+              .timeout(Duration(milliseconds: waitMs));
+          debugPrint('[STT] Final transcript: "$userText"');
+        } on TimeoutException {
+          debugPrint('[STT] Timeout after ${waitMs}ms — using: "$userText"');
+          // If still empty, try file-based as last resort
+          if (userText.isEmpty) {
             try {
-              final msg = jsonDecode(data as String) as Map<String, dynamic>;
-              if (msg['done'] == true) {
-                userText = (msg['final'] as String?) ?? userText;
-                break;
-              }
+              final res = await widget.api.post('/partner/voice/transcribe', {'audio_path': path});
+              userText = (res as Map<String, dynamic>)['text']?.toString() ?? '';
             } catch (_) {}
           }
-        } catch (_) {}
-        try { _sttSocket?.close(); } catch (_) {}
-        _sttSocket = null;
+        }
+
+        // Clean up STT socket in background (don't block)
+        Future.delayed(const Duration(milliseconds: 500), () {
+          _sttSocketSub?.cancel();
+          try { _sttSocket?.close(); } catch (_) {}
+          _sttSocket = null;
+          _sttFinalCompleter = null;
+        });
       } else {
-        // Fallback: file-based transcription
+        // No WebSocket — file-based transcription (blocking, unavoidable)
+        debugPrint('[STT] File-based transcription fallback');
         try {
-          final res = await widget.api.post('/partner/voice/transcribe', {'audio_path': path});
+          final res = await widget.api.post('/partner/voice/transcribe', {'audio_path': path!});
           userText = (res as Map<String, dynamic>)['text']?.toString() ?? '';
-        } catch (_) {}
+        } catch (e) {
+          debugPrint('[STT] File transcription failed: $e');
+        }
       }
 
       if (!mounted) return;
 
-      // Update user message with final transcription
+      // Update user message
       setState(() {
         final recIdx = _messages.lastIndexWhere((m) => m['_recording'] == true);
         if (recIdx >= 0) {
@@ -533,7 +592,8 @@ class _PartnerPageState extends State<PartnerPage> {
         return;
       }
 
-      // ── Stream LLM text reply (shows instantly as it generates) ──
+      // ── Start LLM response IMMEDIATELY — no waiting ──
+      debugPrint('[LLM] Starting response for: "$userText"');
       setState(() {
         _messages.add({'role': 'assistant', 'content': '', '_streaming': true});
         _isStreaming = true;
@@ -541,7 +601,6 @@ class _PartnerPageState extends State<PartnerPage> {
       });
       _scrollToBottom();
 
-      // Use the regular streaming chat — user sees text immediately
       final stream = widget.api.postSse('/partner/chat/stream', {'message': userText, 'thinking_pause': false});
       String fullReply = '';
       _streamSub = stream.listen((event) {
@@ -550,7 +609,6 @@ class _PartnerPageState extends State<PartnerPage> {
         if (type == 'emotion') {
           setState(() => _currentEmotion = event['emotion']?.toString() ?? 'neutral');
         } else if (type == 'sentence') {
-          // ── Sentence complete: start synthesizing audio immediately ──
           if (_ttsAvailable) {
             final sentence = event['sentence']?.toString() ?? '';
             if (sentence.length > 10) {
@@ -581,7 +639,6 @@ class _PartnerPageState extends State<PartnerPage> {
           _loadMemories();
           _loadUserProfile();
 
-          // ── Stage 3: Only synthesize full reply if no sentences were already queued ──
           if (_ttsAvailable && fullReply.isNotEmpty && _ttsQueue.isEmpty && !_ttsProcessing) {
             _synthesizeAndPlay(fullReply);
           }
@@ -706,12 +763,26 @@ class _PartnerPageState extends State<PartnerPage> {
         try {
           await _audioPlayer.play(BytesSource(wavBytes));
           debugPrint('[TTS] Playing audio...');
-          await _audioPlayer.onPlayerComplete.first.timeout(
-            const Duration(seconds: 30), onTimeout: () {
+
+          // Calculate expected duration from WAV data for reliable wait.
+          // onPlayerComplete is unreliable on Windows for short clips.
+          final durationMs = _estimateWavDurationMs(wavBytes);
+          if (durationMs > 0) {
+            // Wait for the estimated duration + small buffer, OR onPlayerComplete
+            await Future.any([
+              _audioPlayer.onPlayerComplete.first,
+              Future.delayed(Duration(milliseconds: durationMs + 200)),
+            ]);
+          } else {
+            // Fallback: just wait for onPlayerComplete with timeout
+            try {
+              await _audioPlayer.onPlayerComplete.first.timeout(
+                const Duration(seconds: 30),
+              );
+            } on TimeoutException {
               debugPrint('[TTS] Playback timeout — moving to next');
-              return null;
-            },
-          );
+            }
+          }
         } catch (e) {
           debugPrint('[TTS] Playback error: $e');
         }
@@ -751,8 +822,20 @@ class _PartnerPageState extends State<PartnerPage> {
         if (response.statusCode == 200) {
           final wavBytes = await response.stream.toBytes();
           if (wavBytes.isNotEmpty) {
-            await _audioPlayer.play(BytesSource(wavBytes));
-            await _audioPlayer.onPlayerComplete.first.timeout(const Duration(seconds: 120), onTimeout: () => null);
+            await _audioPlayer.play(BytesSource(Uint8List.fromList(wavBytes)));
+            final durationMs = _estimateWavDurationMs(Uint8List.fromList(wavBytes));
+            if (durationMs > 0) {
+              await Future.any([
+                _audioPlayer.onPlayerComplete.first,
+                Future.delayed(Duration(milliseconds: durationMs + 300)),
+              ]);
+            } else {
+              try {
+                await _audioPlayer.onPlayerComplete.first.timeout(const Duration(seconds: 120));
+              } on TimeoutException {
+                debugPrint('[TTS] Full playback timeout');
+              }
+            }
           }
         }
       } finally {
@@ -771,10 +854,13 @@ class _PartnerPageState extends State<PartnerPage> {
       final bytes = base64Decode(base64Audio);
       await _audioPlayer.play(BytesSource(bytes));
       // Wait for playback to complete
-      await _audioPlayer.onPlayerComplete.first.timeout(
-        const Duration(seconds: 60),
-        onTimeout: () => null,
-      );
+      try {
+        await _audioPlayer.onPlayerComplete.first.timeout(
+          const Duration(seconds: 60),
+        );
+      } on TimeoutException {
+        debugPrint('[TTS] Base64 playback timeout');
+      }
     } catch (e) {
       debugPrint('Audio playback error: $e');
     } finally {

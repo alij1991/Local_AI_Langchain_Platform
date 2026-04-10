@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Standalone Chatterbox TTS server with Turbo mode.
+"""Standalone Chatterbox TTS server with voice gender support.
 
 Setup:
     python -m venv .venv_chatterbox
@@ -13,6 +13,7 @@ import io
 import struct
 import sys
 import time
+from pathlib import Path
 
 try:
     import torch
@@ -32,7 +33,6 @@ app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], all
 device = "cuda" if torch.cuda.is_available() else "cpu"
 print(f"Loading Chatterbox on {device}...")
 
-# Try Turbo first (1-step diffusion = MUCH faster), fallback to base
 model = None
 model_type = "unknown"
 try:
@@ -43,6 +43,51 @@ try:
 except Exception as e:
     print(f"Failed to load model: {e}")
     sys.exit(1)
+
+# ── Voice gender support via reference audio ──────────────────────
+# Chatterbox clones any voice from a short reference clip.
+# We generate female/male references using Kokoro at first startup.
+VOICES_DIR = Path("data/partner/voices")
+_current_gender = "female"
+_gender_conds = {}  # Cache: {"female": conds, "male": conds}
+
+
+def _get_ref_path(gender: str) -> Path:
+    return VOICES_DIR / f"{gender}_ref.wav"
+
+
+def _prepare_voice(gender: str) -> None:
+    """Pre-load voice conditionals for the given gender."""
+    global _current_gender
+    ref_path = _get_ref_path(gender)
+    if not ref_path.exists():
+        print(f"[WARN] No reference audio for {gender}: {ref_path}")
+        return
+    if gender not in _gender_conds:
+        print(f"Preparing {gender} voice conditionals from {ref_path}...")
+        start = time.time()
+        model.prepare_conditionals(str(ref_path))
+        _gender_conds[gender] = model.conds
+        print(f"{gender} voice ready ({time.time() - start:.1f}s)")
+    else:
+        model.conds = _gender_conds[gender]
+    _current_gender = gender
+
+
+# Pre-load female voice at startup (default)
+try:
+    _prepare_voice("female")
+    print("Default voice: female")
+except Exception as e:
+    print(f"[WARN] Failed to prepare female voice: {e}")
+
+# Also pre-load male for fast switching
+try:
+    _prepare_voice("male")
+    _prepare_voice("female")  # Switch back to female default
+    print("Male voice also cached")
+except Exception as e:
+    print(f"[WARN] Failed to prepare male voice: {e}")
 
 
 def wav_bytes(samples: np.ndarray, sample_rate: int = 24000) -> bytes:
@@ -62,25 +107,46 @@ def wav_bytes(samples: np.ndarray, sample_rate: int = 24000) -> bytes:
 
 @app.get("/health")
 async def health():
-    return {"status": "ok", "device": device, "model": model_type}
+    return {
+        "status": "ok",
+        "device": device,
+        "model": model_type,
+        "current_gender": _current_gender,
+        "voices_available": [g for g in ("female", "male") if _get_ref_path(g).exists()],
+    }
+
+
+@app.post("/gender")
+async def set_gender(request: Request):
+    """Switch voice gender. Swaps pre-cached conditionals (instant, no re-encode)."""
+    body = await request.json()
+    gender = body.get("gender", "female").lower().strip()
+    if gender not in ("female", "male"):
+        return JSONResponse({"error": f"Invalid gender: {gender}"}, status_code=400)
+    _prepare_voice(gender)
+    return {"gender": _current_gender}
 
 
 @app.post("/synthesize")
 async def synthesize(request: Request):
-    """Synthesize text → WAV audio.
+    """Synthesize text to WAV audio.
 
-    Body: {"text": "...", "exaggeration": 0.5, "cfg_weight": 0.5}
+    Body: {"text": "...", "exaggeration": 0.5, "cfg_weight": 0.5, "gender": "female"}
     """
     body = await request.json()
     text = body.get("text", "")
     exaggeration = float(body.get("exaggeration", 0.7))
     cfg = float(body.get("cfg_weight", 0.5))
+    gender = body.get("gender", _current_gender)
 
     if not text:
         return Response(content=b"", media_type="audio/wav")
 
+    # Switch voice if needed (uses cached conds, instant)
+    if gender != _current_gender and gender in _gender_conds:
+        _prepare_voice(gender)
+
     start = time.time()
-    # Lower temperature = faster convergence (less randomness in autoregressive decoding)
     temp = float(body.get("temperature", 0.6))
     wav_tensor = model.generate(text, exaggeration=exaggeration, cfg_weight=cfg, temperature=temp)
     elapsed = time.time() - start
@@ -88,22 +154,27 @@ async def synthesize(request: Request):
     samples = wav_tensor.cpu().numpy().flatten()
     audio = wav_bytes(samples)
 
-    print(f"Synthesized {len(text)} chars in {elapsed:.1f}s ({len(audio)//1024}KB)")
+    print(f"Synthesized {len(text)} chars in {elapsed:.1f}s ({len(audio)//1024}KB) [{_current_gender}]")
     return Response(content=audio, media_type="audio/wav")
 
 
 @app.post("/synthesize_sentence")
 async def synthesize_sentence(request: Request):
-    """Synthesize a single sentence — optimized for streaming TTS.
+    """Synthesize a single sentence for streaming TTS.
 
-    Called per-sentence as LLM generates. Short text = faster synthesis.
+    Body: {"text": "...", "exaggeration": 0.7, "gender": "female"}
     """
     body = await request.json()
     text = body.get("text", "").strip()
     exaggeration = float(body.get("exaggeration", 0.7))
+    gender = body.get("gender", _current_gender)
 
     if not text or len(text) < 3:
         return Response(content=b"", media_type="audio/wav")
+
+    # Switch voice if needed
+    if gender != _current_gender and gender in _gender_conds:
+        _prepare_voice(gender)
 
     start = time.time()
     wav_tensor = model.generate(text, exaggeration=exaggeration, cfg_weight=0.5, temperature=0.6)
@@ -112,7 +183,7 @@ async def synthesize_sentence(request: Request):
     samples = wav_tensor.cpu().numpy().flatten()
     audio = wav_bytes(samples)
 
-    print(f"Sentence ({len(text)} chars) in {elapsed:.1f}s")
+    print(f"Sentence ({len(text)} chars) in {elapsed:.1f}s [{_current_gender}]")
     return Response(content=audio, media_type="audio/wav")
 
 

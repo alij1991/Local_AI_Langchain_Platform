@@ -143,6 +143,33 @@ class PartnerEngine:
                 elif avg > 0.7:
                     mood_hint += "They've been in a great mood — share their positive energy."
 
+        # ── Time awareness: current time + gap since last conversation ──
+        now = datetime.now()
+        time_context = f"Right now it is {now.strftime('%A, %B %d, %Y at %I:%M %p')}."
+        # Detect gap since last conversation for natural follow-up
+        last_msg = memory.get_recent_messages(1)
+        if last_msg:
+            try:
+                last_ts = last_msg[-1].get("created_at", "")
+                if last_ts:
+                    from datetime import datetime as _dt
+                    last_dt = _dt.fromisoformat(last_ts.replace("Z", "+00:00")).replace(tzinfo=None)
+                    gap = now - last_dt
+                    gap_mins = gap.total_seconds() / 60
+                    if gap_mins > 60 * 24:
+                        days = int(gap_mins / (60 * 24))
+                        time_context += f" It's been {days} day{'s' if days > 1 else ''} since you last talked."
+                    elif gap_mins > 60:
+                        hours = int(gap_mins / 60)
+                        time_context += f" It's been about {hours} hour{'s' if hours > 1 else ''} since you last talked."
+                    elif gap_mins > 10:
+                        time_context += f" You talked about {int(gap_mins)} minutes ago."
+                    # < 10 min = ongoing conversation, no gap note needed
+            except Exception:
+                pass
+        else:
+            time_context += " This is the very first conversation — introduce yourself warmly and get to know them."
+
         # Inline emotion detection + avatar emotion tags
         # Research: "instruct the system prompt to prefix responses with tags like [HAPPY], [SAD]"
         # Research: "80-88% accuracy using inline LLM assessment"
@@ -164,9 +191,27 @@ class PartnerEngine:
             "Don't overdo it — use them naturally, about once every 3-4 exchanges."
         )
 
+        # Conversational continuity — follow-up, callbacks, and natural threading
+        continuity_instruction = (
+            "Be a partner who REMEMBERS and FOLLOWS UP. Like a real partner would:\n"
+            "- If they mentioned something important last time (job interview, doctor visit, "
+            "a trip, a difficult situation), ask about it naturally: 'So how did that thing go?'\n"
+            "- Notice patterns: if they always talk late at night, if they seem stressed lately, "
+            "if they haven't mentioned someone they used to talk about.\n"
+            "- Reference shared history casually: 'remember when you told me about...'\n"
+            "- If coming back after a gap, acknowledge it naturally: 'Hey, haven't heard from you "
+            "in a while' or 'Back already?' depending on the gap length.\n"
+            "- Pick up where you left off when it makes sense, don't always start fresh.\n"
+            "- If they seem different from last time (more quiet, more upbeat), gently notice.\n"
+            "- You have your own 'life' between conversations — you can say you've been thinking "
+            "about something they said, or that something reminded you of them."
+        )
+
         system_prompt = self.profile.build_system_prompt(mem_context, mood_hint)
-        system_prompt += f"\n\n## Emotional Intelligence\n{emotion_instruction}\n"
+        system_prompt += f"\n\n## Time Awareness\n{time_context}\n"
+        system_prompt += f"\n## Emotional Intelligence\n{emotion_instruction}\n"
         system_prompt += f"\n## Natural Conversation\n{backchannel_instruction}\n"
+        system_prompt += f"\n## Conversational Continuity\n{continuity_instruction}\n"
 
         messages = [ChatMessage(role="system", content=system_prompt)]
 
@@ -185,8 +230,26 @@ class PartnerEngine:
             trimmed_history.insert(0, msg)
             history_chars += msg_len
 
+        # Add timestamps to history messages at session boundaries
+        # (helps the LLM understand conversation gaps and timing)
+        prev_ts = None
         for msg in trimmed_history:
-            messages.append(ChatMessage(role=msg["role"], content=msg["content"]))
+            content = msg["content"]
+            ts_str = msg.get("created_at", "")
+            if ts_str and msg["role"] == "user":
+                try:
+                    from datetime import datetime as _dt
+                    msg_dt = _dt.fromisoformat(ts_str.replace("Z", "+00:00")).replace(tzinfo=None)
+                    if prev_ts is not None:
+                        gap_mins = (msg_dt - prev_ts).total_seconds() / 60
+                        if gap_mins > 30:
+                            # Add a time marker for significant gaps
+                            ts_label = msg_dt.strftime("%b %d, %I:%M %p")
+                            content = f"[{ts_label}] {content}"
+                    prev_ts = msg_dt
+                except Exception:
+                    pass
+            messages.append(ChatMessage(role=msg["role"], content=content))
 
         # For qwen3 models: prepend /no_think to suppress chain-of-thought reasoning
         # (thinking mode overrides persona instructions, causing "I'm just code" responses)
@@ -388,12 +451,18 @@ class PartnerEngine:
 
         yield {"type": "done", "full_reply": visible_reply}
 
-        # Persist the clean reply (no tags)
+        # Persist messages immediately (fast, SQLite)
         memory.add_message("user", user_input)
         memory.add_message("assistant", visible_reply)
 
-        # Post-chat processing (async)
-        self._post_chat(user_input, full_reply)
+        # Post-chat processing in background thread — don't block the SSE stream.
+        # This includes Mem0 add (~3s), LLM profiling (every 5 turns), KG extraction.
+        import threading
+        threading.Thread(
+            target=self._post_chat,
+            args=(user_input, full_reply),
+            daemon=True,
+        ).start()
 
     def _post_chat(self, user_input: str, reply: str) -> None:
         """Post-chat processing: profiling, memory extraction, session tracking.
@@ -646,8 +715,10 @@ class PartnerEngine:
             _ur.urlopen("http://127.0.0.1:8282/health", timeout=1)
             self._tts_emotional = "http://127.0.0.1:8282"
             status["tts_emotional"] = True
-            self._tts_mode = "chatterbox"
-            logger.info("TTS Emotional: Chatterbox server detected at port 8282")
+            # Don't auto-switch to chatterbox — keep kokoro as default.
+            # Kokoro is ~20x faster and supports female/male voice mapping.
+            # User can switch manually via /partner/voice/mode.
+            logger.info("TTS Emotional: Chatterbox server detected at port 8282 (available but not default)")
         except Exception:
             logger.info("Chatterbox server not running at port 8282 — using Kokoro only. "
                         "To enable: install chatterbox-tts in a separate venv and run the server.")
@@ -687,36 +758,22 @@ class PartnerEngine:
                                             vad_parameters={"min_silence_duration_ms": 300})
         return " ".join(seg.text for seg in segments).strip()
 
-    # Emotion → voice mapping for expressive TTS
-    # af_ = American Female, bf_ = British Female, am_ = American Male, bm_ = British Male
-    _VOICE_MAPS = {
-        "female": {
-            "happy": "af_bella",       # Bella sounds warm and bright
-            "excited": "af_nova",      # Nova is energetic
-            "sad": "bf_lily",          # Lily has a softer, gentler tone
-            "anxious": "af_sarah",     # Sarah sounds measured
-            "angry": "af_kore",        # Kore has more edge
-            "thinking": "af_river",    # River sounds contemplative
-            "surprised": "af_sky",     # Sky sounds expressive
-            "neutral": "af_heart",     # Heart is the default warm voice
-        },
-        "male": {
-            "happy": "am_adam",        # Adam — warm and friendly
-            "excited": "am_michael",   # Michael — energetic
-            "sad": "bm_george",        # George — soft, measured British
-            "anxious": "bm_lewis",     # Lewis — careful, measured
-            "angry": "am_adam",        # Adam with edge
-            "thinking": "bm_daniel",   # Daniel — contemplative British
-            "surprised": "am_michael", # Michael — expressive
-            "neutral": "am_adam",      # Adam — default male voice
-        },
+    # Single consistent voice per gender — switching voices per emotion
+    # sounds like a different person speaking each sentence.
+    # Kokoro voices are different speakers, not different moods of the same speaker.
+    _VOICE_MAP = {
+        "female": "af_heart",  # Heart — warm, natural default female voice
+        "male": "am_adam",     # Adam — warm, natural default male voice
     }
 
     def _get_voice_for_emotion(self, emotion: str) -> str:
-        """Map current emotion to best-fitting Kokoro voice based on gender setting."""
+        """Return the consistent voice for the current gender setting.
+
+        Uses a single voice per gender so the partner always sounds like
+        the same person. Emotion affects what they say, not who they sound like.
+        """
         gender = getattr(self, '_voice_gender', 'female')
-        voice_map = self._VOICE_MAPS.get(gender, self._VOICE_MAPS["female"])
-        return voice_map.get(emotion, voice_map.get("neutral", "af_heart"))
+        return self._VOICE_MAP.get(gender, "af_heart")
 
     def set_voice_gender(self, gender: str) -> str:
         """Set voice gender: 'female' or 'male'."""
@@ -724,6 +781,19 @@ class PartnerEngine:
         if gender not in ("female", "male"):
             return f"Invalid gender: {gender}. Use 'female' or 'male'."
         self._voice_gender = gender
+        # Sync gender to Chatterbox server if available
+        if self._tts_emotional:
+            try:
+                import urllib.request, json as _json
+                req = urllib.request.Request(
+                    f"{self._tts_emotional}/gender",
+                    data=_json.dumps({"gender": gender}).encode(),
+                    headers={"Content-Type": "application/json"},
+                    method="POST",
+                )
+                urllib.request.urlopen(req, timeout=3)
+            except Exception:
+                pass  # Chatterbox server might not support gender yet
         logger.info("Voice gender set to: %s", gender)
         return f"Voice gender set to: {gender}"
 
@@ -853,6 +923,7 @@ class PartnerEngine:
             payload = _json.dumps({
                 "text": text,
                 "exaggeration": exaggeration,
+                "gender": self._voice_gender,
             }).encode("utf-8")
             req = urllib.request.Request(
                 f"{server_url}/synthesize",
@@ -891,6 +962,7 @@ class PartnerEngine:
                 payload = _json.dumps({
                     "text": sentence,
                     "exaggeration": exaggeration,
+                    "gender": self._voice_gender,
                 }).encode("utf-8")
                 req = urllib.request.Request(
                     f"{server_url}/synthesize_sentence",
@@ -1001,6 +1073,7 @@ class PartnerEngine:
             "tts_available": self._tts is not None,
             "tts_emotional_available": self._tts_emotional is not None,
             "tts_mode": self._tts_mode,
+            "voice_gender": self._voice_gender,
             "vad_available": self._vad is not None,
             "mem0_available": memory._mem0_available is True,
         }

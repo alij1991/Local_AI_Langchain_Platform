@@ -6353,12 +6353,14 @@ class ImageGenerationService:
                 Path(stage_file_path).unlink(missing_ok=True)
             except Exception:
                 pass
-            if _step_previews_dir and Path(_step_previews_dir).exists():
-                try:
+            try:
+                if _step_previews_dir and Path(_step_previews_dir).exists():
                     import shutil
                     shutil.rmtree(_step_previews_dir, ignore_errors=True)
-                except Exception:
-                    pass
+            except (NameError, UnboundLocalError):
+                pass  # _step_previews_dir wasn't assigned yet (error before line 6125)
+            except Exception:
+                pass
             logger.error("[IMG] Exception during generation: %s", exc, exc_info=True)
             return ImageRuntimeResult(ok=False, error_code="provider_unavailable", error_message=str(exc), metadata={"device_used": device})
 

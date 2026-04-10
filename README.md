@@ -20,7 +20,7 @@ Full-stack AI platform: FastAPI backend + Flutter desktop/web UI + local LLM via
 
 **Classical** (CPU, instant): brightness, contrast, saturation, vibrance, clarity, hue, gamma, color temperature, shadows/highlights, auto levels, auto white balance (learning-based), HDR tone mapping (Reinhard/Drago/ACES/Mantiuk), tiered denoising (NLMeans/BM3D/wavelet), skin smoothing (guided filter), LAB-space sharpening, dehaze with sky protection, 5 built-in 3D LUTs (.cube), 6 presets (research-backed), lens corrections, morphological ops, FFT filtering, vignette, grain, and more.
 
-**AI** (GPU): InstructPix2Pix (DPMSolver, 20-step), face restoration (GFPGAN + CodeFormer), super-resolution (RealESRGAN), background removal (BiRefNet/U2-Net), portrait bokeh (Depth Anything v2 ONNX), neural style transfer (5 ONNX styles), LaMa inpainting with brush UI, algorithmic colorization, low-light enhancement, smart auto-enhance with BRISQUE scoring.
+**AI** (GPU): FLUX.1-Kontext-dev instruction editing (GGUF-quantized, cpu_offloaded for 8GB cards — see [KONTEXT_PIPELINE.md](KONTEXT_PIPELINE.md)), CosXL Edit, InstructPix2Pix (DPMSolver, 20-step), face restoration (GFPGAN + CodeFormer), super-resolution (RealESRGAN), background removal (BiRefNet/U2-Net), portrait bokeh (Depth Anything v2 ONNX), neural style transfer (5 ONNX styles), LaMa inpainting with brush UI, algorithmic colorization, low-light enhancement, smart auto-enhance with BRISQUE scoring.
 
 Non-destructive undo/redo history, session persistence, PNG/JPEG/WEBP export.
 
@@ -67,9 +67,15 @@ All directories auto-created. Model weights download on demand.
 
 `.env` file in project root:
 ```
+# Core
 OLLAMA_DEFAULT_MODEL=gemma3:4b
-HF_TOKEN=hf_...
+HF_TOKEN=hf_...                      # required for gated models (FLUX Kontext, FLUX.1-dev)
 TAVILY_API_KEY=tvly-...
+
+# FLUX Kontext image editor (see KONTEXT_PIPELINE.md for full details)
+KONTEXT_GGUF_QUANT=Q3_K_S            # Q2_K | Q3_K_S (recommended for 8GB) | Q4_K_S | Q4_K_M | Q5_K_S | Q6_K | Q8_0
+# KONTEXT_FBC_THRESHOLD=0.08         # leave unset to DISABLE FirstBlockCache (required for strong edits)
+# DIFFUSERS_GGUF_CUDA_KERNELS=true   # Linux only — breaks diffusers import on Windows
 ```
 
 ## Architecture
@@ -91,6 +97,30 @@ src/local_ai_platform/
 flutter_client/lib/pages/           # Flutter UI
 scripts/chatterbox_server.py        # Standalone TTS server
 ```
+
+## Documentation
+
+Long-form reference docs live at the repo root (same place as this README)
+so you don't have to hunt through subdirectories:
+
+| File | Purpose |
+|---|---|
+| [KONTEXT_PIPELINE.md](KONTEXT_PIPELINE.md) | FLUX.1-Kontext-dev reference & tuning guide — memory strategy, GGUF variants, env vars, troubleshooting, design decisions history. **Read before changing `ai_enhance.py`'s `_load_kontext_pipeline`.** |
+| [INSTALL.md](INSTALL.md) | Full install walkthrough (backend, Flutter, Chatterbox) |
+| [MIGRATION_GUIDE.md](MIGRATION_GUIDE.md) | Upgrade notes between versions |
+| [AI_EDIT_BUGFIX_PROMPT.md](AI_EDIT_BUGFIX_PROMPT.md) | Historical bug catalog for the AI image edit section (Kontext, CosXL, IP2P, ControlNet) |
+| [AI_EDIT_UPGRADE_PROMPT.md](AI_EDIT_UPGRADE_PROMPT.md) | Design doc for the AI edit upgrade that introduced Kontext |
+| [IMAGE_EDITOR_PROMPT.md](IMAGE_EDITOR_PROMPT.md) | Original design for the 59-operation editor |
+| [EDITOR_AUDIT_PROMPT.md](EDITOR_AUDIT_PROMPT.md) | Audit of the editor's architecture and session handling |
+| [IMAGE_GEN_AUDIT.md](IMAGE_GEN_AUDIT.md) | Audit + fixes log for the image generation section |
+| [IMAGE_PROCESSING_RESEARCH_REPORT.md](IMAGE_PROCESSING_RESEARCH_REPORT.md) | Research notes on classical image processing operators used by the editor |
+| [AGENT_SYSTEM_REDESIGN_PROMPT.md](AGENT_SYSTEM_REDESIGN_PROMPT.md) | Design doc for the LangGraph agent orchestration system |
+| [STREAMING_VOICE_PROMPT.md](STREAMING_VOICE_PROMPT.md) | Design doc for the streaming voice (STT + Chatterbox TTS) architecture |
+
+**If you hit a problem with Kontext specifically** — weak edits, slow steps,
+device mismatch errors, OOM, cache confusion, quant selection — read
+`KONTEXT_PIPELINE.md` first. Most known issues are documented there with
+their root cause and the fix.
 
 ## License
 

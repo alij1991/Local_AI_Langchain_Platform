@@ -706,13 +706,27 @@ def get_message_count() -> int:
 
 # ── Memory Context Builder (all tiers combined) ─────────────────
 
+_mem0_cache: list[dict] = []
+_mem0_cache_time: float = 0.0
+_mem0_cache_ttl: float = 60.0  # Cache Mem0 results for 60 seconds
+
+
 def build_memory_context(current_query: str = "") -> str:
     """Build full memory context combining all tiers + knowledge graph."""
+    import time as _time
+    global _mem0_cache, _mem0_cache_time
     parts = []
 
-    # Mem0 semantic recall (cross-session memories)
+    # Mem0 semantic recall — cached to avoid 3s Ollama embedding call per message.
+    # Results don't change much between consecutive messages; refresh every 60s.
     if current_query:
-        mem0_results = mem0_search(current_query, limit=5)
+        now = _time.monotonic()
+        if now - _mem0_cache_time > _mem0_cache_ttl or not _mem0_cache:
+            mem0_results = mem0_search(current_query, limit=5)
+            _mem0_cache = mem0_results
+            _mem0_cache_time = now
+        else:
+            mem0_results = _mem0_cache
         if mem0_results:
             lines = ["Relevant memories (semantic search):"]
             for r in mem0_results:

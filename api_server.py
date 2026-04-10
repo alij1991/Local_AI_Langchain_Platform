@@ -17,7 +17,7 @@ import uuid
 from contextlib import asynccontextmanager
 from typing import Any
 
-from fastapi import FastAPI, HTTPException, Query, Request
+from fastapi import FastAPI, HTTPException, Query, Request, WebSocket
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
@@ -60,6 +60,16 @@ if not logger.handlers:
     _handler = logging.StreamHandler()
     _handler.setFormatter(logging.Formatter("%(levelname)s:     %(name)s - %(message)s"))
     logger.addHandler(_handler)
+
+# Ensure local_ai_platform logs (including [KONTEXT] debug output) reach the terminal.
+# Without this, all INFO logs from local_ai_platform.* are silently dropped because
+# only the 'api_server' logger has a handler — the root logger has none by default.
+_lp_logger = logging.getLogger("local_ai_platform")
+_lp_logger.setLevel(logging.INFO)
+if not _lp_logger.handlers:
+    _lp_handler = logging.StreamHandler()
+    _lp_handler.setFormatter(logging.Formatter("%(levelname)s: %(name)s - %(message)s"))
+    _lp_logger.addHandler(_lp_handler)
 
 # ── Globals ───────────────────────────────────────────────────────
 
@@ -205,7 +215,7 @@ app = FastAPI(title="Local AI Platform", version="2.0.0", lifespan=lifespan)
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
-    allow_credentials=True,
+    allow_credentials=False,
     allow_methods=["*"],
     allow_headers=["*"],
 )
@@ -3800,8 +3810,57 @@ async def partner_reset_user_profile():
 
 @app.post("/partner/voice/init")
 async def partner_voice_init():
-    """Initialize voice pipeline (ASR + TTS + VAD)."""
-    return _get_partner().init_voice()
+    """Initialize voice pipeline (ASR + TTS + VAD).
+
+    Also frees GPU VRAM by unloading image generation pipelines.
+    Partner mode needs GPU memory for Ollama LLM inference.
+    """
+    # Free VRAM from image editing/generation pipelines
+    freed = _free_gpu_for_partner()
+    result = _get_partner().init_voice()
+    if freed:
+        result["vram_freed"] = True
+    return result
+
+
+def _free_gpu_for_partner() -> bool:
+    """Unload all cached image pipelines to free GPU VRAM for LLM inference."""
+    freed = False
+    try:
+        import torch
+        # 1. Unload image editing pipelines (CosXL, Kontext, IP2P, ControlNet)
+        from local_ai_platform.images.ai_enhance import _instruct_pipes
+        if _instruct_pipes:
+            for key in list(_instruct_pipes.keys()):
+                pipe = _instruct_pipes.pop(key, None)
+                if pipe is not None:
+                    del pipe
+            logger.info("Freed VRAM: unloaded %d image editing pipeline(s)", len(_instruct_pipes) + 1)
+            freed = True
+
+        # 2. Unload image generation pipelines
+        try:
+            global image_service
+            if image_service and hasattr(image_service, '_pipelines') and image_service._pipelines:
+                count = len(image_service._pipelines)
+                for _key, _pipe in list(image_service._pipelines.items()):
+                    try:
+                        del _pipe
+                    except Exception:
+                        pass
+                image_service._pipelines.clear()
+                logger.info("Freed VRAM: unloaded %d image generation pipeline(s)", count)
+                freed = True
+        except Exception:
+            pass
+
+        if freed and torch.cuda.is_available():
+            torch.cuda.empty_cache()
+            free_mem = torch.cuda.mem_get_info()[0] / 1e9
+            logger.info("GPU VRAM after cleanup: %.1f GB free", free_mem)
+    except Exception as e:
+        logger.debug("VRAM cleanup failed: %s", e)
+    return freed
 
 
 @app.get("/partner/voice/status")
@@ -3817,17 +3876,22 @@ async def partner_voice_synthesize_sentence(body: dict[str, Any]):
     if not sentence:
         raise HTTPException(400, "sentence is required")
     partner = _get_partner()
+    t0 = time.monotonic()
     wav_bytes = await asyncio.get_event_loop().run_in_executor(
         None, lambda: partner.synthesize_sentence(sentence, emotion)
     )
+    elapsed = time.monotonic() - t0
     if wav_bytes is None:
         raise HTTPException(422, "TTS not available")
+    logger.info("TTS sentence: %.0fms, %dKB, mode=%s, gender=%s — '%s'",
+                elapsed * 1000, len(wav_bytes) // 1024, partner._tts_mode,
+                partner._voice_gender, sentence[:50])
     from fastapi.responses import Response
     return Response(content=wav_bytes, media_type="audio/wav")
 
 
 @app.websocket("/partner/voice/tts-stream")
-async def partner_voice_tts_stream(websocket):
+async def partner_voice_tts_stream(websocket: WebSocket):
     """WebSocket streaming TTS: client sends text, server streams PCM16 audio chunks.
 
     Replaces per-sentence HTTP POST with a persistent connection.
@@ -3865,23 +3929,33 @@ async def partner_voice_tts_stream(websocket):
                     continue
 
                 try:
+                    t0 = time.monotonic()
                     # Send start marker with audio params
                     await websocket.send_json({"type": "start", "sample_rate": 24000})
 
                     # Stream PCM16 chunks
+                    chunk_count = 0
                     async for chunk in partner.stream_synthesize(text, emotion):
                         await websocket.send_bytes(chunk)
+                        chunk_count += 1
 
                     # Signal sentence complete
                     await websocket.send_json({"type": "done"})
+                    logger.info("TTS-WS: %.0fms, %d chunks — '%s'",
+                                (time.monotonic() - t0) * 1000, chunk_count, text[:50])
                 except Exception as e:
-                    logger.error("TTS stream synthesis error: %s", e)
-                    await websocket.send_json({"type": "error", "error": str(e)})
+                    if str(e):
+                        logger.error("TTS stream synthesis error: %s", e)
+                    try:
+                        await websocket.send_json({"type": "error", "error": str(e)})
+                    except Exception:
+                        pass  # Client may have already closed
 
     except WebSocketDisconnect:
         pass
     except Exception as e:
-        logger.error("TTS stream WebSocket error: %s", e)
+        if "close message" not in str(e).lower():
+            logger.error("TTS stream WebSocket error: %s", e)
     finally:
         try:
             await websocket.close()
@@ -3924,7 +3998,7 @@ async def partner_voice_transcribe(body: dict[str, Any]):
 
 
 @app.websocket("/partner/voice/stream-transcribe")
-async def partner_voice_stream_transcribe(websocket):
+async def partner_voice_stream_transcribe(websocket: WebSocket):
     """WebSocket streaming STT: client sends PCM16 audio chunks, server returns partial transcriptions.
 
     Protocol:
@@ -3943,36 +4017,70 @@ async def partner_voice_stream_transcribe(websocket):
         return
 
     import numpy as np
-    audio_buffer = bytearray()
-    full_text = ""
-    last_transcribe_len = 0  # Track how much audio we've already transcribed
+    audio_buffer = bytearray()       # Full recording (for final transcription)
+    new_bytes_count = 0              # Bytes received since last partial transcription
+    last_partial = ""                # Last partial text sent to client
     MAX_AUDIO_BUFFER = 5 * 1024 * 1024  # 5MB (~5 minutes at 16kHz 16-bit)
+    TRIGGER_BYTES = 24000            # ~1.5s of new audio triggers a partial transcription
+    # Window size: use full buffer up to 10 seconds, then cap at 10s.
+    # 10s is the sweet spot: Whisper handles it in ~600-800ms and gets great accuracy.
+    MAX_WINDOW_BYTES = 320000        # 10s at 16kHz 16-bit
+
+    # Energy-based silence detection threshold
+    SILENCE_RMS_THRESHOLD = 500
+    silent_chunk_count = 0
+
+    def _is_speech(pcm_bytes: bytes) -> bool:
+        """Fast energy-based speech detection (~0.01ms)."""
+        if len(pcm_bytes) < 64:
+            return False
+        samples = np.frombuffer(pcm_bytes, dtype=np.int16)
+        rms = np.sqrt(np.mean(samples.astype(np.float32) ** 2))
+        return rms > SILENCE_RMS_THRESHOLD
 
     try:
         while True:
             message = await websocket.receive()
 
             if "bytes" in message:
-                # Received audio chunk (PCM16, 16kHz, mono)
-                if len(audio_buffer) + len(message["bytes"]) > MAX_AUDIO_BUFFER:
+                raw = message["bytes"]
+                if len(audio_buffer) + len(raw) > MAX_AUDIO_BUFFER:
                     await websocket.send_json({"error": "Audio buffer limit exceeded (5MB)"})
                     break
-                audio_buffer.extend(message["bytes"])
 
-                # Transcribe every ~1.5 seconds of new audio (24000 bytes = 1.5s at 16kHz 16-bit)
-                new_bytes = len(audio_buffer) - last_transcribe_len
-                if new_bytes >= 24000:
+                audio_buffer.extend(raw)
+
+                # Track speech vs silence
+                if _is_speech(raw):
+                    new_bytes_count += len(raw)
+                    silent_chunk_count = 0
+                else:
+                    silent_chunk_count += 1
+                    new_bytes_count += len(raw)
+                    if silent_chunk_count > 6:  # ~3s of silence — skip transcription
+                        continue
+
+                # Transcribe: use full buffer when short, sliding window when long.
+                # For recordings < 10s: transcribe everything (most accurate).
+                # For recordings > 10s: transcribe last 10s only (capped latency).
+                # Final transcription (on END) always uses the full buffer.
+                if new_bytes_count >= TRIGGER_BYTES:
+                    new_bytes_count = 0
                     try:
-                        # Convert PCM16 to float32
-                        pcm16 = np.frombuffer(bytes(audio_buffer), dtype=np.int16)
+                        if len(audio_buffer) <= MAX_WINDOW_BYTES:
+                            # Short recording — transcribe entire buffer
+                            pcm16 = np.frombuffer(bytes(audio_buffer), dtype=np.int16)
+                        else:
+                            # Long recording — transcribe last 10 seconds only
+                            pcm16 = np.frombuffer(bytes(audio_buffer[-MAX_WINDOW_BYTES:]), dtype=np.int16)
                         audio_f32 = pcm16.astype(np.float32) / 32768.0
 
                         text = await asyncio.get_event_loop().run_in_executor(
                             None, partner.transcribe_buffer, audio_f32
                         )
-                        last_transcribe_len = len(audio_buffer)
-                        if text and text != full_text:
-                            full_text = text
+
+                        if text and text != last_partial:
+                            last_partial = text
                             await websocket.send_json({"partial": text})
                     except Exception as e:
                         logger.debug("Stream transcribe chunk error: %s", e)
@@ -3980,7 +4088,9 @@ async def partner_voice_stream_transcribe(websocket):
             elif "text" in message:
                 text_msg = message["text"]
                 if text_msg == "END":
-                    # User released mic — do final transcription on complete buffer
+                    # User released mic — final transcription on FULL buffer for best quality.
+                    # The full-buffer pass gives Whisper complete context = most accurate result.
+                    best_text = last_partial
                     if audio_buffer:
                         try:
                             pcm16 = np.frombuffer(bytes(audio_buffer), dtype=np.int16)
@@ -3989,15 +4099,19 @@ async def partner_voice_stream_transcribe(websocket):
                                 None, partner.transcribe_buffer, audio_f32
                             )
                             if final_text:
-                                full_text = final_text
+                                best_text = final_text
                         except Exception as e:
                             logger.warning("Final transcription error: %s", e)
 
-                    await websocket.send_json({"final": full_text, "done": True})
+                    try:
+                        await websocket.send_json({"final": best_text, "done": True})
+                    except Exception:
+                        pass  # Client may have already closed
                     break
 
     except Exception as e:
-        logger.error("WebSocket stream-transcribe error: %s", e)
+        if "close message" not in str(e).lower():
+            logger.error("WebSocket stream-transcribe error: %s", e)
     finally:
         try:
             await websocket.close()

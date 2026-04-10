@@ -74,6 +74,9 @@ class _EditorPageState extends State<EditorPage> {
   double _editStrength = 0.5;
   String _controlType = 'depth';
   double _conditioningScale = 0.9;
+  // Kontext-specific — seed for reproducibility, true_cfg_scale for real CFG
+  final _seedController = TextEditingController();  // empty = random
+  double _trueCfgScale = 1.0;  // 1.0 = distilled only (default); >1.0 = real CFG
   final _negPromptController = TextEditingController(
     text: 'blurry, low quality, distorted, deformed, ugly, grayscale',
   );
@@ -141,6 +144,7 @@ class _EditorPageState extends State<EditorPage> {
   void dispose() {
     _instructController.dispose();
     _negPromptController.dispose();
+    _seedController.dispose();
     _cropXCtrl.dispose();
     _cropYCtrl.dispose();
     _cropWCtrl.dispose();
@@ -1286,12 +1290,78 @@ class _EditorPageState extends State<EditorPage> {
 
             // ── Model-specific controls ──
 
-            // Kontext: guidance + steps
+            // Kontext: guidance + steps + seed + true_cfg + negative_prompt
             if (_instructModel == 'kontext') ...[
               _editSlider('Guidance', _editGuidance, 1.0, 10.0, (v) => _editGuidance = v,
-                  _editGuidance <= 2.5 ? 'Subtle edits' : (_editGuidance >= 4.0 ? 'Dramatic changes' : 'Balanced')),
+                  _editGuidance <= 2.5 ? 'Subtle' : (_editGuidance >= 4.0 ? 'Dramatic (may degrade)' : 'Balanced (recommended 2.5–3.5)')),
               _editSlider('Steps', _editSteps.toDouble(), 12, 50, (v) => _editSteps = v.round(),
                   '${_editSteps} steps'),
+              // Seed — empty = random each run, number = reproducible
+              Padding(
+                padding: const EdgeInsets.symmetric(vertical: 4),
+                child: Row(
+                  children: [
+                    const Text('Seed', style: TextStyle(fontSize: 11)),
+                    const SizedBox(width: 8),
+                    Expanded(
+                      child: TextField(
+                        controller: _seedController,
+                        keyboardType: TextInputType.number,
+                        style: const TextStyle(fontSize: 11),
+                        decoration: const InputDecoration(
+                          isDense: true,
+                          hintText: 'empty = random',
+                          contentPadding: EdgeInsets.symmetric(horizontal: 8, vertical: 6),
+                          border: OutlineInputBorder(),
+                        ),
+                      ),
+                    ),
+                    IconButton(
+                      icon: const Icon(Icons.casino, size: 16),
+                      tooltip: 'Lock random seed (for reproducibility)',
+                      padding: EdgeInsets.zero,
+                      constraints: const BoxConstraints(minWidth: 28, minHeight: 28),
+                      onPressed: () => setState(() {
+                        _seedController.text = (DateTime.now().millisecondsSinceEpoch % 2147483647).toString();
+                      }),
+                    ),
+                    IconButton(
+                      icon: const Icon(Icons.clear, size: 16),
+                      tooltip: 'Clear (use random each run)',
+                      padding: EdgeInsets.zero,
+                      constraints: const BoxConstraints(minWidth: 28, minHeight: 28),
+                      onPressed: () => setState(() => _seedController.clear()),
+                    ),
+                  ],
+                ),
+              ),
+              // True CFG scale — 1.0 = distilled only; >1.0 = real CFG (2x slower)
+              _editSlider('True CFG', _trueCfgScale, 1.0, 6.0, (v) => _trueCfgScale = v,
+                  _trueCfgScale <= 1.01
+                      ? 'Off (distilled only — default)'
+                      : '${_trueCfgScale.toStringAsFixed(1)}× — real CFG, 2× slower, stronger edits'),
+              // Negative prompt — only effective when true_cfg > 1.0
+              Padding(
+                padding: const EdgeInsets.symmetric(vertical: 4),
+                child: TextField(
+                  controller: _negPromptController,
+                  maxLines: 2,
+                  style: const TextStyle(fontSize: 11),
+                  decoration: InputDecoration(
+                    isDense: true,
+                    labelText: 'Negative prompt',
+                    helperText: _trueCfgScale > 1.01
+                        ? 'Active — push away from these attributes'
+                        : 'IGNORED unless True CFG > 1.0',
+                    helperStyle: TextStyle(
+                      fontSize: 10,
+                      color: _trueCfgScale > 1.01 ? null : Colors.orange,
+                    ),
+                    contentPadding: const EdgeInsets.symmetric(horizontal: 8, vertical: 6),
+                    border: const OutlineInputBorder(),
+                  ),
+                ),
+              ),
             ],
 
             // CosXL: guidance + image_guidance + steps
@@ -1364,26 +1434,49 @@ class _EditorPageState extends State<EditorPage> {
             SizedBox(
               width: double.infinity,
               child: FilledButton.icon(
-                onPressed: _busy || _instructController.text.trim().isEmpty ? null : () =>
-                    _applyEdit('instruct_edit', {
+                onPressed: _busy || _instructController.text.trim().isEmpty ? null : () {
+                    // Build params dict — Kontext gets seed/true_cfg/negative
+                    // when enabled; non-kontext models use negative_prompt directly.
+                    final Map<String, dynamic> editParams = {
                       'instruction': _instructController.text.trim(),
                       'model': _instructModel,
                       'guidance': _editGuidance,
-                      if (_instructModel == 'cosxl' || _instructModel == 'pix2pix')
-                        'image_guidance': _editImageGuidance,
                       'steps': _editSteps,
-                      if (_instructModel != 'kontext')
-                        'negative_prompt': _negPromptController.text.trim(),
-                      if (_instructModel == 'pix2pix') ...{
-                        'passes': _editPasses,
-                        'preserve_color': _editPreserveColor,
-                      },
-                      if (_instructModel == 'controlnet') ...{
-                        'strength': _editStrength,
-                        'control_type': _controlType,
-                        'conditioning_scale': _conditioningScale,
-                      },
-                    }),
+                    };
+                    if (_instructModel == 'cosxl' || _instructModel == 'pix2pix') {
+                      editParams['image_guidance'] = _editImageGuidance;
+                    }
+                    if (_instructModel != 'kontext') {
+                      editParams['negative_prompt'] = _negPromptController.text.trim();
+                    }
+                    if (_instructModel == 'kontext') {
+                      // Seed: parse as int, empty = random (omit key)
+                      final seedText = _seedController.text.trim();
+                      if (seedText.isNotEmpty) {
+                        final parsed = int.tryParse(seedText);
+                        if (parsed != null) editParams['seed'] = parsed;
+                      }
+                      // True CFG — only forward if > 1.0 (above the "off" default)
+                      if (_trueCfgScale > 1.01) {
+                        editParams['true_cfg_scale'] = _trueCfgScale;
+                        // Negative prompt only matters when true_cfg > 1.0
+                        final neg = _negPromptController.text.trim();
+                        if (neg.isNotEmpty) {
+                          editParams['negative_prompt'] = neg;
+                        }
+                      }
+                    }
+                    if (_instructModel == 'pix2pix') {
+                      editParams['passes'] = _editPasses;
+                      editParams['preserve_color'] = _editPreserveColor;
+                    }
+                    if (_instructModel == 'controlnet') {
+                      editParams['strength'] = _editStrength;
+                      editParams['control_type'] = _controlType;
+                      editParams['conditioning_scale'] = _conditioningScale;
+                    }
+                    _applyEdit('instruct_edit', editParams);
+                  },
                 icon: const Icon(Icons.auto_fix_high, size: 16),
                 label: Text(_instructModel == 'pix2pix' && _editPasses > 1
                     ? 'Apply (${_editPasses} passes)'
