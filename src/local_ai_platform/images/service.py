@@ -143,6 +143,25 @@ def _apply_scheduler(pipe: Any, scheduler_name: str | None, _log: Any = None) ->
             _log(f"Failed to set scheduler {cls_name}: {e}")
 
 
+# ── Generation Instrumentation Helpers ───────────────────────────
+# Delegate to the shared instrumentation module so every pipeline in
+# the platform (diffusers, OpenVINO, ControlNet, sd.cpp, Kontext,
+# CosXL, IP2P, ONNX ops, GFPGAN, RealESRGAN, etc.) produces directly
+# comparable logs. The local names are kept as private aliases for
+# back-compat with existing call sites in this file.
+#
+# See src/local_ai_platform/images/instrumentation.py for the
+# canonical definitions and a full description of healthy / failure
+# signatures by model family.
+from .instrumentation import (
+    format_latent_stats as _format_img_latent_stats,
+    format_vram_snapshot as _format_img_vram_snapshot,
+    format_component_placement as _format_img_component_placement,
+    summarize_scheduler as _summarize_img_scheduler,
+    analyze_output_coherence as _analyze_img_output_coherence,
+)
+
+
 @dataclass
 class ImageRuntimeResult:
     ok: bool
@@ -1238,29 +1257,61 @@ def _get_msvc_env() -> dict[str, str] | None:
 def _sdcpp_worker(payload: dict[str, Any], out_q: Any) -> None:
     """Subprocess worker for stable-diffusion.cpp inference."""
     started = time.time()
+
+    def _log(msg: str) -> None:
+        elapsed = round(time.time() - started, 1)
+        print(f"[SDCPP-WORKER {elapsed:>7.1f}s] {msg}", flush=True)
+
     try:
         from stable_diffusion_cpp import StableDiffusion
+        from .instrumentation import analyze_output_coherence
 
+        total_steps = int(payload["steps"])
+        _log(
+            f"Audit: runtime=stable-diffusion.cpp model={payload['model_path']} "
+            f"size={payload['width']}x{payload['height']} steps={total_steps} "
+            f"guidance={payload['guidance_scale']} threads={payload.get('n_threads', -1)}"
+        )
+        # sd.cpp manages its own memory (ggml CPU+GPU split); a VRAM
+        # snapshot is informational only — torch doesn't own that memory.
+
+        _load_start = time.time()
         sd = StableDiffusion(
             model_path=str(payload["model_path"]),
             wtype="default",
             n_threads=int(payload.get("n_threads", -1)),
         )
+        _log(f"sd.cpp model loaded in {time.time() - _load_start:.2f}s")
 
+        # sd.cpp does not expose a per-step callback; all we can report
+        # is total inference time. The sec/step number still lets us
+        # compare models and settings across runs.
+        _inf_start = time.time()
         images = sd.txt_to_img(
             prompt=payload["prompt"],
             negative_prompt=payload.get("negative_prompt") or "",
             width=int(payload["width"]),
             height=int(payload["height"]),
-            sample_steps=int(payload["steps"]),
+            sample_steps=total_steps,
             cfg_scale=float(payload["guidance_scale"]),
             seed=int(payload.get("seed") or -1),
             sample_method="euler_a",
         )
+        _inf_elapsed = time.time() - _inf_start
+        _log(
+            f"Timing: total={_inf_elapsed:.1f}s sec_per_step={_inf_elapsed / max(total_steps, 1):.2f}s "
+            f"(no per-step callback available from sd.cpp)"
+        )
 
         Image, _ = _require_pillow()
+        _sdcpp_image = images[0]
+        try:
+            _, _coh = analyze_output_coherence(_sdcpp_image)
+            _log(_coh)
+        except Exception as _coh_err:
+            _log(f"Coherence analysis failed: {_coh_err}")
         buf = io.BytesIO()
-        images[0].save(buf, format="PNG")
+        _sdcpp_image.save(buf, format="PNG")
         out_q.put({
             "ok": True,
             "image_bytes": buf.getvalue(),
@@ -1269,6 +1320,7 @@ def _sdcpp_worker(payload: dict[str, Any], out_q: Any) -> None:
                 "device_used": "cpu+gpu",
                 "model_path": str(payload["model_path"]),
                 "worker_elapsed_sec": round(time.time() - started, 3),
+                "inference_sec": round(_inf_elapsed, 2),
             },
         })
     except Exception as exc:  # noqa: BLE001
@@ -1287,6 +1339,11 @@ def _openvino_worker(payload: dict[str, Any], out_q: Any) -> None:
     started = time.time()
     stage_file = str(payload.get("stage_file") or "") or None
     _write_stage_marker(stage_file, "bootstrap")
+
+    def _log(msg: str) -> None:
+        elapsed = round(time.time() - started, 1)
+        print(f"[OV-WORKER {elapsed:>7.1f}s] {msg}", flush=True)
+
     try:
         import numpy as np
 
@@ -1324,12 +1381,34 @@ def _openvino_worker(payload: dict[str, Any], out_q: Any) -> None:
 
         _write_stage_marker(stage_file, f"inference:0/{total_steps}")
 
-        # Step callback for progress tracking
+        # ── Shared instrumentation (OpenVINO worker) ──
+        # OpenVINO components don't expose torch parameters the same way
+        # as diffusers, so the component-placement audit line may be
+        # empty; the scheduler + coherence check still apply.
+        from .instrumentation import (
+            StepInstrumentation,
+            log_pre_inference_audit,
+            log_post_inference_summary,
+            analyze_output_coherence,
+            summarize_scheduler,
+        )
+        try:
+            _log(f"Audit: pipeline_class={type(pipe).__name__}")
+            _log(f"Audit: {summarize_scheduler(pipe)}")
+            _log(f"Audit: runtime=OpenVINO family={model_family}")
+        except Exception as _audit_err:
+            _log(f"Audit failed: {_audit_err}")
+
+        _si = StepInstrumentation(total_steps)
+
         def _ov_step_callback(pipe_obj: Any, step: int, timestep: Any, callback_kwargs: dict[str, Any]) -> dict[str, Any]:
             clamped = min(step + 1, total_steps)
             _write_stage_marker(stage_file, f"inference:{clamped}/{total_steps}")
+            _log(_si.observe(step, timestep, callback_kwargs))
             return callback_kwargs
 
+        _si.reset_clock()
+        _ov_inf_start = time.time()
         result = pipe(
             prompt=payload["prompt"],
             negative_prompt=payload.get("negative_prompt"),
@@ -1339,10 +1418,18 @@ def _openvino_worker(payload: dict[str, Any], out_q: Any) -> None:
             height=int(payload["height"]),
             callback_on_step_end=_ov_step_callback,
         )
+        _ov_inf_elapsed = time.time() - _ov_inf_start
+        log_post_inference_summary(_si.warmup_sec, _si.steady_times, _ov_inf_elapsed, _log)
 
         _write_stage_marker(stage_file, "saving")
+        _ov_image = result.images[0]
+        try:
+            _, _coh = analyze_output_coherence(_ov_image)
+            _log(_coh)
+        except Exception as _coh_err:
+            _log(f"Coherence analysis failed: {_coh_err}")
         buf = io.BytesIO()
-        result.images[0].save(buf, format="PNG")
+        _ov_image.save(buf, format="PNG")
 
         out_q.put({
             "ok": True,
@@ -1608,8 +1695,20 @@ def _controlnet_worker(payload: dict[str, Any], out_q: Any) -> None:
         actual_seed = int(seed) if seed is not None else random.randint(1, 2**31 - 1)
         generator.manual_seed(actual_seed)
 
+        # ── Shared instrumentation (ControlNet worker) ──
+        from .instrumentation import (
+            StepInstrumentation,
+            log_pre_inference_audit,
+            log_post_inference_summary,
+            analyze_output_coherence,
+        )
+        log_pre_inference_audit(pipe, _log)
+        _si = StepInstrumentation(total_steps)
+
         def _step_cb(pipe_obj: Any, step: int, timestep: Any, cb_kwargs: dict[str, Any]) -> dict[str, Any]:
-            _write_stage_marker(stage_file, f"inference:{step + 1}/{total_steps}")
+            clamped = min(step + 1, total_steps)
+            _write_stage_marker(stage_file, f"inference:{clamped}/{total_steps}")
+            _log(_si.observe(step, timestep, cb_kwargs))
             return cb_kwargs
 
         pipe_kwargs: dict[str, Any] = {
@@ -1623,10 +1722,21 @@ def _controlnet_worker(payload: dict[str, Any], out_q: Any) -> None:
             "callback_on_step_end": _step_cb,
         }
 
+        _si.reset_clock()
+        _cn_inf_start = time.time()
         result = pipe(**pipe_kwargs)
+        _cn_inf_elapsed = time.time() - _cn_inf_start
+        log_post_inference_summary(_si.warmup_sec, _si.steady_times, _cn_inf_elapsed, _log)
+
+        _cn_image = result.images[0]
+        try:
+            _, _coh_desc = analyze_output_coherence(_cn_image)
+            _log(_coh_desc)
+        except Exception as _coh_err:
+            _log(f"Coherence analysis failed: {_coh_err}")
 
         buf = io.BytesIO()
-        result.images[0].save(buf, format="PNG")
+        _cn_image.save(buf, format="PNG")
         out_q.put({
             "ok": True,
             "image_bytes": buf.getvalue(),
@@ -2442,10 +2552,47 @@ def _diffusers_worker(payload: dict[str, Any], out_q: Any) -> None:
         if _step_previews_dir:
             Path(_step_previews_dir).mkdir(parents=True, exist_ok=True)
 
+        # ── Per-step timing + latent accumulators (subprocess path) ──
+        # Matches the in-process _run_diffusers instrumentation so subprocess
+        # and in-process runs produce directly comparable logs. Step 1 is
+        # warmup (CUDA JIT / first cache fill); steady-state excludes it.
+        _step_times_steady: list[float] = []
+        _step_last_ts = [time.time()]
+        _step_warmup_sec = [0.0]
+
         def _step_callback(pipe_obj: Any, step: int, timestep: Any, callback_kwargs: dict[str, Any]) -> dict[str, Any]:
             clamped = min(step + 1, total_steps)
             _write_stage_marker(stage_file, f"inference:{clamped}/{total_steps}")
-            _log(f"Step {clamped}/{total_steps} (timestep={timestep})")
+
+            # Per-step elapsed (not cumulative)
+            _now = time.time()
+            _step_dt = _now - _step_last_ts[0]
+            _step_last_ts[0] = _now
+
+            # Latent stats (shape, std, mean, min, max, NaN, Inf)
+            _latents = callback_kwargs.get("latents") if isinstance(callback_kwargs, dict) else None
+            _lat_str = _format_img_latent_stats(_latents)
+
+            # VRAM allocated (fast path; no mem_get_info driver call)
+            _vram_str = ""
+            try:
+                if torch.cuda.is_available():
+                    _vram_str = f" vram_alloc={torch.cuda.memory_allocated() / 1e9:.2f}GB"
+            except Exception:
+                pass
+
+            if clamped == 1:
+                _step_warmup_sec[0] = _step_dt
+                _label = "WARMUP"
+            else:
+                _step_times_steady.append(_step_dt)
+                _label = "STEADY"
+
+            _ts_val = float(timestep) if timestep is not None else 0.0
+            _log(
+                f"Step {clamped}/{total_steps} [{_label}] timestep={_ts_val:.1f} "
+                f"step_dt={_step_dt:.2f}s{_vram_str}{_lat_str}"
+            )
 
             # Decode latents to a preview image if step previews are enabled
             if _step_previews_dir and "latents" in callback_kwargs:
@@ -2612,6 +2759,24 @@ def _diffusers_worker(payload: dict[str, Any], out_q: Any) -> None:
             except Exception:
                 pass  # Non-critical check
 
+        # ── Pre-inference audit (subprocess worker) ──
+        # Mirrors the in-process path so a subprocess log can be diffed
+        # against an in-process log to spot env-specific bugs (e.g.
+        # different accelerate hooks, different torch version, etc.).
+        try:
+            _log(f"Audit: pipeline_class={type(pipe).__name__}")
+            _log(f"Audit: {_summarize_img_scheduler(pipe)}")
+            for _audit_line in _format_img_component_placement(pipe):
+                _log(f"Audit: {_audit_line}")
+            _vram_pre = _format_img_vram_snapshot("Before inference")
+            if _vram_pre:
+                _log(_vram_pre)
+        except Exception as _audit_err:
+            _log(f"Pre-inference audit failed: {_audit_err}")
+        # Reset the step-time clock so the first step_dt doesn't include
+        # the audit's own overhead.
+        _step_last_ts[0] = time.time()
+
         _log(f"Starting inference: {total_steps} steps, guidance={payload['guidance_scale']}, mode={mode}")
         inference_start = time.time()
         mask_image_path = payload.get("mask_image_path")
@@ -2666,6 +2831,26 @@ def _diffusers_worker(payload: dict[str, Any], out_q: Any) -> None:
         _log_stage("inference", steps=total_steps, elapsed_sec=inference_elapsed,
                    sec_per_step=round(inference_elapsed / max(total_steps, 1), 2))
 
+        # ── Post-inference timing summary (subprocess path) ──
+        try:
+            _warm = _step_warmup_sec[0]
+            if _step_times_steady:
+                _ss_mean = sum(_step_times_steady) / len(_step_times_steady)
+                _ss_min = min(_step_times_steady)
+                _ss_max = max(_step_times_steady)
+                _log(
+                    f"Timing: warmup={_warm:.2f}s steady_mean={_ss_mean:.2f}s "
+                    f"steady_min={_ss_min:.2f}s steady_max={_ss_max:.2f}s "
+                    f"steady_n={len(_step_times_steady)} total={inference_elapsed}s"
+                )
+            else:
+                _log(f"Timing: warmup={_warm:.2f}s total={inference_elapsed}s (no steady steps)")
+            _vram_post = _format_img_vram_snapshot("After inference")
+            if _vram_post:
+                _log(_vram_post)
+        except Exception as _tim_err:
+            _log(f"Timing summary failed: {_tim_err}")
+
         # Disable DeepCache if it was enabled
         if _deepcache_helper:
             try:
@@ -2676,16 +2861,22 @@ def _diffusers_worker(payload: dict[str, Any], out_q: Any) -> None:
         _write_stage_marker(stage_file, "saving")
         image = result.images[0]
 
-        # Detect NaN/corrupt output: if the image is essentially uniform
-        # (all-black or all one colour), the model likely produced NaN
-        # latents.  Report as failure so refinement/upscale don't run on
-        # garbage and waste 10+ more minutes.
+        # ── Output coherence check (subprocess worker) ──
+        # Keeps the simple numeric check (used by the error branch below for
+        # back-compat) but also emits the richer CosXL-style coherence line
+        # so subprocess logs are grep-compatible with in-process logs.
         import numpy as _np
         _img_arr = _np.array(image)
         _is_nan_corrupted = False
         _pixel_min = int(_img_arr.min()) if _img_arr.size > 0 else 0
         _pixel_max = int(_img_arr.max()) if _img_arr.size > 0 else 0
         _pixel_range = _pixel_max - _pixel_min
+        try:
+            _coh_ok, _coh_desc = _analyze_img_output_coherence(image)
+            _log(_coh_desc)
+        except Exception as _coh_err:
+            _coh_ok = True
+            _log(f"Coherence analysis failed: {_coh_err}")
         _log(f"Output image: size={image.size}, pixel_range=[{_pixel_min}..{_pixel_max}] (range={_pixel_range})")
         if _img_arr.size > 0:
             # A valid image should have at least *some* contrast.
@@ -4092,6 +4283,7 @@ class ImageGenerationService:
         # Get model-specific parameter hints (architecture, guidance, steps, dtype)
         model_hints = validation.get("hints") or {}
         family = str(model_hints.get("model_family", "")).lower()
+        _is_nunchaku = bool(validation.get("is_nunchaku"))
 
         plan: dict[str, Any] = {
             "device_plan": "cpu_low_memory",
@@ -4109,6 +4301,7 @@ class ImageGenerationService:
             "warnings": [],
             "expected_timeout_sec": 420,
             "practical_on_cpu": True,
+            "is_nunchaku": _is_nunchaku,
         }
 
         if status.get("torch_installed") and status.get("cuda_version") is None and not hw.mps_available and not hw.xpu_available:
@@ -4572,6 +4765,29 @@ class ImageGenerationService:
                     "required_files": {"model_index_json": False, "weights_detected": True},
                 }
 
+        # Check for SVDQuant / nunchaku quantized image models.
+        # These are single-file quantized transformer weights (e.g. svdq-int4*)
+        # without model_index.json.  They load via the nunchaku library as a
+        # drop-in replacement for the base model's transformer component.
+        if has_weights and not model_index.exists():
+            _svdq_markers = ("svdq", "nunchaku", "svdquant")
+            _weight_files = list(path.glob("*.safetensors"))
+            _has_svdq = any(
+                any(m in wf.name.lower() for m in _svdq_markers)
+                for wf in _weight_files
+            )
+            if _has_svdq:
+                return {
+                    "model_type": "nunchaku_quantized",
+                    "runtime_candidate": "nunchaku",
+                    "supported_tasks": ["text-to-image", "image-to-image"],
+                    "loadable_for_images": True,
+                    "pipeline_kind": "diffusers_text2img",
+                    "explanation": "SVDQuant/nunchaku quantized image model. Uses INT4 quantization for reduced VRAM.",
+                    "required_files": {"model_index_json": False, "weights_detected": True},
+                    "is_nunchaku": True,
+                }
+
         return {
             "model_type": "unknown_local_model",
             "runtime_candidate": "unknown",
@@ -4660,6 +4876,7 @@ class ImageGenerationService:
             "loadable_for_images": bool(det.get("loadable_for_images")),
             "required_files": det.get("required_files") or result["required_files"],
             "explanation": det.get("explanation") or "",
+            "is_nunchaku": bool(det.get("is_nunchaku")),
         })
 
         folder_size = self._dir_size(path) if path.exists() else 0
@@ -4688,6 +4905,12 @@ class ImageGenerationService:
         result["hints"] = hints
 
         if result["loadable_for_images"]:
+            # Nunchaku models don't have model_index.json — skip diffusers validation
+            if result.get("is_nunchaku"):
+                result["pipeline_class_guess"] = "NunchakuFluxPipeline"
+                result["is_nunchaku"] = True
+                result["loadable"] = True
+                return result
             ok, issues = _validate_diffusers_dir(path)
             if not ok:
                 result["errors"].extend(issues)
@@ -4772,7 +4995,7 @@ class ImageGenerationService:
                 continue
 
             # Skip models that are only for the editor (not for generation)
-            _editor_only_ids = {"timbrooks/instruct-pix2pix", "diffusers/sdxl-instructpix2pix-768"}
+            _editor_only_ids = {"diffusers/sdxl-instructpix2pix-768"}
             if model_id.lower() in _editor_only_ids:
                 continue
 
@@ -4800,10 +5023,10 @@ class ImageGenerationService:
                 "explanation": det.get("explanation"),
             }
             # Skip single-file repos without model_index.json (can't use AutoPipeline)
-            if is_standalone and not (snapshot / "model_index.json").exists():
-                # Check if it's a single .safetensors — needs special handling
+            # Exception: nunchaku/SVDQuant models have their own loading path
+            if is_standalone and not (snapshot / "model_index.json").exists() and not det.get("is_nunchaku"):
                 safetensors = list(snapshot.glob("*.safetensors"))
-                if safetensors and not (snapshot / "model_index.json").exists():
+                if safetensors:
                     continue  # Can't auto-load, skip
 
             if is_standalone:
@@ -4816,6 +5039,14 @@ class ImageGenerationService:
                 except Exception:
                     entry["model_family"] = "unknown"
                     entry["model_variant"] = None
+                # Nunchaku / SVDQuant models: override with quantization metadata
+                if det.get("is_nunchaku"):
+                    entry["is_nunchaku"] = True
+                    entry["runtime"] = "nunchaku"
+                    if entry["model_family"] == "unknown":
+                        entry["model_family"] = "flux"  # nunchaku models are flux-based
+                    entry["model_variant"] = "nunchaku-int4"
+                    entry["quantization"] = "INT4 (SVDQuant)"
                 entry["category"] = "pipeline"
                 image_models.append(entry)
             elif is_component:
@@ -5088,6 +5319,141 @@ class ImageGenerationService:
                     load_kwargs[_te_key] = None
                     _skipped_te.append(_te_key)
             logger.info("[IMG] Skipping text encoders (pre-encoded): %s", _skipped_te)
+
+        # ── Nunchaku / SVDQuant quantized model loading ──
+        # These repos contain a single quantized transformer .safetensors
+        # without model_index.json.  Load the base FluxPipeline and swap in
+        # the nunchaku-quantized transformer component.
+        _is_nunchaku = ep.get("is_nunchaku") or bool(
+            any(m in model_id_or_path.lower() for m in ("nunchaku", "svdquant", "svdq"))
+        )
+        if _is_nunchaku:
+            try:
+                # Nunchaku's C extension is built against CUDA 12.x DLLs.
+                # If PyTorch ships CUDA 13.x, add CUDA 12.x toolkit to DLL search path.
+                import sys as _sys
+                if _sys.platform == "win32":
+                    _cuda12_bin = r"C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v12.4\bin"
+                    if os.path.isdir(_cuda12_bin):
+                        try:
+                            os.add_dll_directory(_cuda12_bin)
+                            logger.info("[IMG] Added CUDA 12.4 DLL path for nunchaku compat")
+                        except OSError:
+                            pass
+                    import torch as _torch_dll
+                    _torch_lib = os.path.join(os.path.dirname(_torch_dll.__file__), "lib")
+                    if os.path.isdir(_torch_lib):
+                        try:
+                            os.add_dll_directory(_torch_lib)
+                        except OSError:
+                            pass
+                from nunchaku.models.transformers import NunchakuFluxTransformer2dModel as NunchakuFluxTransformer2DModel
+                from diffusers import FluxPipeline
+                # Find the quantized weights file
+                _snap = Path(model_id_or_path) if Path(model_id_or_path).exists() else None
+                if not _snap:
+                    _hf_root = Path(os.getenv("HF_HOME") or (Path.home() / ".cache" / "huggingface"))
+                    _repo_dir = _hf_root / "hub" / f"models--{model_id_or_path.replace('/', '--')}"
+                    if (_repo_dir / "snapshots").exists():
+                        _snaps = sorted(
+                            [s for s in (_repo_dir / "snapshots").iterdir() if s.is_dir()],
+                            key=lambda p: p.stat().st_mtime, reverse=True,
+                        )
+                        _snap = _snaps[0] if _snaps else None
+                _quant_file = None
+                if _snap:
+                    _candidates = sorted(_snap.glob("*.safetensors"), key=lambda f: f.stat().st_size, reverse=True)
+                    # Prefer int4 over fp4 (smaller VRAM)
+                    for _cf in _candidates:
+                        if "int4" in _cf.name.lower():
+                            _quant_file = str(_cf)
+                            break
+                    if not _quant_file and _candidates:
+                        _quant_file = str(_candidates[0])
+
+                if _quant_file:
+                    logger.info("[IMG] Loading nunchaku model: %s (quant file: %s)", model_id_or_path, _quant_file)
+                    # Detect whether this is a Kontext model (img2img) or standard FLUX (txt2img)
+                    _is_kontext_nunchaku = "kontext" in model_id_or_path.lower()
+                    _use_offload = low_mem  # per-layer GPU offload for 8GB cards
+                    transformer = NunchakuFluxTransformer2DModel.from_pretrained(
+                        _quant_file, offload=_use_offload,
+                    )
+                    # Use optimized fp16 attention kernels for better quality + speed
+                    try:
+                        transformer.set_attention_impl("nunchaku-fp16")
+                        logger.info("[IMG] Nunchaku: using nunchaku-fp16 attention")
+                    except Exception as _attn_err:
+                        logger.info("[IMG] Nunchaku: fp16 attention not available: %s", _attn_err)
+
+                    # Get HF token for gated FLUX repos
+                    _nk_token = os.getenv("HF_TOKEN") or os.getenv("HF_API_TOKEN") or os.getenv("HUGGING_FACE_HUB_TOKEN")
+                    if not _nk_token:
+                        # Try loading from .env file directly
+                        _env_path = Path(__file__).resolve().parents[3] / ".env"
+                        if _env_path.exists():
+                            for _line in _env_path.read_text(encoding="utf-8").splitlines():
+                                _line = _line.strip()
+                                if _line.startswith("HF_TOKEN=") or _line.startswith("HF_API_TOKEN="):
+                                    _nk_token = _line.split("=", 1)[1].strip().strip("'\"")
+                                    break
+                    _nk_pipe_kwargs: dict[str, Any] = {
+                        "transformer": transformer,
+                        "torch_dtype": resolved_dtype,
+                        "local_files_only": False,
+                    }
+                    if _nk_token:
+                        _nk_pipe_kwargs["token"] = _nk_token
+                        logger.info("[IMG] Nunchaku: using HF token for gated model access")
+
+                    if _is_kontext_nunchaku:
+                        try:
+                            from diffusers import FluxKontextPipeline
+                            pipe = FluxKontextPipeline.from_pretrained(
+                                "black-forest-labs/FLUX.1-Kontext-dev",
+                                **_nk_pipe_kwargs,
+                            )
+                            logger.info("[IMG] Nunchaku: loaded as Kontext pipeline (img2img editing)")
+                        except Exception:
+                            pipe = FluxPipeline.from_pretrained(
+                                "black-forest-labs/FLUX.1-dev",
+                                **_nk_pipe_kwargs,
+                            )
+                    else:
+                        pipe = FluxPipeline.from_pretrained(
+                            "black-forest-labs/FLUX.1-dev",
+                            **_nk_pipe_kwargs,
+                        )
+                    pipe.set_progress_bar_config(disable=True)
+                    # Memory optimization: exclude quantized transformer from CPU offload
+                    # (nunchaku handles its own per-layer offload internally)
+                    if low_mem:
+                        try:
+                            pipe._exclude_from_cpu_offload = ["transformer"]
+                            pipe.enable_sequential_cpu_offload()
+                            logger.info("[IMG] Nunchaku: sequential CPU offload (transformer excluded)")
+                        except Exception:
+                            try:
+                                pipe.enable_model_cpu_offload()
+                            except Exception:
+                                pass
+                    self._pipelines[key] = pipe
+                    logger.info("[IMG] Nunchaku pipeline loaded in %.1fs", time.time() - load_start)
+                    return pipe
+                else:
+                    raise RuntimeError(
+                        f"Nunchaku model at {model_id_or_path} has no .safetensors weight file. "
+                        "Download it first via the Models page."
+                    )
+            except ImportError:
+                raise RuntimeError(
+                    "The nunchaku package is required to load SVDQuant models. "
+                    "Install it with: pip install nunchaku"
+                )
+            except RuntimeError:
+                raise  # Re-raise our own RuntimeErrors
+            except Exception as e:
+                raise RuntimeError(f"Nunchaku loading failed: {e}")
 
         if mode == "img2img":
             pipe = AutoPipelineForImage2Image.from_pretrained(model_id_or_path, **load_kwargs)
@@ -5757,6 +6123,7 @@ class ImageGenerationService:
             _gen_log.append(entry)
             _stage_start = now
 
+        _step_previews_dir: str | None = None  # init before try so error handlers can reference it
         try:
             # Set up progress tracking
             stage_file = tempfile.NamedTemporaryFile(prefix="img_stage_", suffix=".txt", delete=False)
@@ -5800,9 +6167,13 @@ class ImageGenerationService:
             # then load the pipeline without text encoders.
             ep = execution_plan or {}
             _ip_family = str(ep.get("model_hints", {}).get("model_family", "")).lower()
+            _is_nunchaku_run = ep.get("is_nunchaku") or bool(
+                any(m in model_id_or_path.lower() for m in ("nunchaku", "svdquant", "svdq"))
+            )
             _two_stage = (
                 _ip_family in {"flux", "z-image"}
                 and bool(ep.get("use_group_offloading", False))
+                and not _is_nunchaku_run  # nunchaku repos have no tokenizer files
             )
             _pre_encoded: dict[str, Any] = {}
             _two_stage_active = False
@@ -6121,19 +6492,71 @@ class ImageGenerationService:
             logger.info("[IMG] Starting inference: %d steps, guidance=%.1f, size=%dx%d, seed=%d",
                         total_steps, guidance_scale, width, height, actual_seed)
 
+            # ── Pre-inference audit (CosXL-style instrumentation) ──
+            # Log everything we'd need to diagnose a pipeline bug after the
+            # fact: model class, scheduler config (prediction_type etc.),
+            # dtype, device of every component, accelerate offload hooks,
+            # and a VRAM snapshot. See notes above _format_img_latent_stats
+            # for healthy/failure signatures by model family.
+            try:
+                logger.info("[IMG] Audit: pipeline_class=%s", type(pipe).__name__)
+                logger.info("[IMG] Audit: %s", _summarize_img_scheduler(pipe))
+                for _audit_line in _format_img_component_placement(pipe):
+                    logger.info("[IMG] Audit: %s", _audit_line)
+                _vram_pre = _format_img_vram_snapshot("Before inference")
+                if _vram_pre:
+                    logger.info("[IMG] %s", _vram_pre)
+            except Exception as _audit_err:
+                logger.warning("[IMG] Pre-inference audit failed: %s", _audit_err)
+
             # Step preview: decode latents at each step if enabled
-            _step_previews_dir: str | None = None
             if (execution_plan or {}).get("enable_step_previews") or (execution_plan or {}).get("step_previews_dir"):
                 _step_previews_dir = (execution_plan or {}).get("step_previews_dir") or tempfile.mkdtemp(prefix="img_steps_")
                 Path(_step_previews_dir).mkdir(parents=True, exist_ok=True)
                 logger.info("[IMG] Step previews enabled: %s", _step_previews_dir)
 
+            # Per-step timing + latent-trajectory accumulators (closure captured).
+            # Step 1 is warmup (CUDA JIT, first cache fill); steady-state stats
+            # exclude it so we can spot slow ramps vs fast steady-state runs.
+            _step_times_steady: list[float] = []
+            _step_last_ts: list[float] = [time.time()]  # list for closure write
+            _step_warmup_sec: list[float] = [0.0]
+
             def _step_cb(pipe_obj: Any, step: int, timestep: Any, cb_kwargs: dict[str, Any]) -> dict[str, Any]:
                 clamped = min(step + 1, total_steps)
                 _write_stage_marker(stage_file_path, f"inference:{clamped}/{total_steps}")
-                elapsed = time.time() - started
-                logger.info("[IMG] Step %d/%d (timestep=%.1f, elapsed=%.1fs)", clamped, total_steps,
-                            float(timestep) if timestep is not None else 0.0, elapsed)
+
+                # Per-step elapsed (not cumulative) ──
+                _now = time.time()
+                _step_dt = _now - _step_last_ts[0]
+                _step_last_ts[0] = _now
+                _elapsed_total = _now - started
+
+                # Latent stats (shape, std, mean, min, max, NaN, Inf) ──
+                _latents = cb_kwargs.get("latents") if isinstance(cb_kwargs, dict) else None
+                _lat_str = _format_img_latent_stats(_latents)
+
+                # VRAM allocated (fast — no mem_get_info driver call) ──
+                _vram_str = ""
+                try:
+                    import torch as _t
+                    if _t.cuda.is_available():
+                        _vram_str = f" vram_alloc={_t.cuda.memory_allocated() / 1e9:.2f}GB"
+                except Exception:
+                    pass
+
+                _label = "WARMUP" if clamped == 1 else "STEADY"
+                if clamped == 1:
+                    _step_warmup_sec[0] = _step_dt
+                else:
+                    _step_times_steady.append(_step_dt)
+
+                logger.info(
+                    "[IMG] Step %d/%d [%s] timestep=%.1f step_dt=%.2fs elapsed=%.1fs%s%s",
+                    clamped, total_steps, _label,
+                    float(timestep) if timestep is not None else 0.0,
+                    _step_dt, _elapsed_total, _vram_str, _lat_str,
+                )
 
                 if _step_previews_dir and "latents" in cb_kwargs:
                     try:
@@ -6230,14 +6653,47 @@ class ImageGenerationService:
                        sec_per_step=round(inf_elapsed / max(total_steps, 1), 2))
             logger.info("[IMG] Inference completed in %.1fs (%.1fs/step)", inf_elapsed, inf_elapsed / max(total_steps, 1))
 
+            # ── Post-inference timing summary (warmup vs steady-state) ──
+            # Separates first-step JIT/compile cost from steady-state per-step
+            # cost so regressions are visible. Matches the CosXL edit pipeline
+            # format so the two are directly comparable.
+            try:
+                _warm = _step_warmup_sec[0]
+                if _step_times_steady:
+                    _ss_mean = sum(_step_times_steady) / len(_step_times_steady)
+                    _ss_min = min(_step_times_steady)
+                    _ss_max = max(_step_times_steady)
+                    logger.info(
+                        "[IMG] Timing: warmup=%.2fs steady_mean=%.2fs steady_min=%.2fs "
+                        "steady_max=%.2fs steady_n=%d total=%.1fs",
+                        _warm, _ss_mean, _ss_min, _ss_max, len(_step_times_steady), inf_elapsed,
+                    )
+                else:
+                    logger.info("[IMG] Timing: warmup=%.2fs total=%.1fs (no steady steps)",
+                                _warm, inf_elapsed)
+                _vram_post = _format_img_vram_snapshot("After inference")
+                if _vram_post:
+                    logger.info("[IMG] %s", _vram_post)
+            except Exception as _tim_err:
+                logger.warning("[IMG] Timing summary failed: %s", _tim_err)
+
             _write_stage_marker(stage_file_path, "saving")
             image = result.images[0]
 
-            # NaN / corrupt output detection
+            # ── Output coherence check (CosXL-style) ──
+            # Detects NaN pixels, blank/solid images, monochrome noise, low
+            # contrast — the failure modes of broken pipelines. Kept alongside
+            # the simpler numeric check for back-compat with the error branch.
             img_arr = np.array(image)
             pixel_range = int(img_arr.max()) - int(img_arr.min()) if img_arr.size > 0 else 0
             has_nan = bool(np.isnan(img_arr.astype(np.float32)).any()) if img_arr.size > 0 else False
             unique_count = np.unique(img_arr).size if img_arr.size > 0 else 0
+            try:
+                _coh_ok, _coh_desc = _analyze_img_output_coherence(image)
+                logger.info("[IMG] %s", _coh_desc)
+            except Exception as _coh_err:
+                _coh_ok = True
+                logger.warning("[IMG] Coherence analysis failed: %s", _coh_err)
             logger.info("[IMG] Output image: size=%s, pixel_range=[%d..%d] (range=%d), unique=%d, nan=%s",
                         image.size, int(img_arr.min()), int(img_arr.max()), pixel_range, unique_count, has_nan)
 

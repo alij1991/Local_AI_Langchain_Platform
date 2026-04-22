@@ -423,6 +423,12 @@ def style_transfer(image: Image.Image, style: str = "candy") -> Image.Image:
     model_path = _download_model(f"style_{style}", info["url"], info["filename"])
     session = _get_ort_session(str(model_path))
 
+    from .instrumentation import instrument_op, format_tensor_stats, format_onnx_session_info
+    _label = f"Style:{style}"
+    _log = lambda m: logger.info("[%s] %s", _label, m)
+    for _line in format_onnx_session_info(session, _label):
+        _log(_line)
+
     # These ONNX Model Zoo style models expect fixed 224x224 input
     # Resize input, run inference, then resize output back to original
     arr = np.array(image.convert("RGB"), dtype=np.float32)
@@ -438,7 +444,10 @@ def style_transfer(image: Image.Image, style: str = "candy") -> Image.Image:
     input_tensor = resized.transpose(2, 0, 1)[np.newaxis]  # (1, 3, H, W)
 
     input_name = model_input.name
-    output = session.run(None, {input_name: input_tensor})[0]
+    _log(format_tensor_stats("input", input_tensor))
+    with instrument_op(_label, _log):
+        output = session.run(None, {input_name: input_tensor})[0]
+    _log(format_tensor_stats("output", output))
 
     # Output is (1, 3, H, W) — convert back to HWC
     result = output.squeeze(0).transpose(1, 2, 0)
@@ -447,7 +456,14 @@ def style_transfer(image: Image.Image, style: str = "candy") -> Image.Image:
     # Resize back to original dimensions
     result = np.array(Image.fromarray(result).resize((w_orig, h_orig), Image.Resampling.LANCZOS))
 
-    return Image.fromarray(result)
+    from .instrumentation import analyze_output_coherence as _aoc_style
+    _final = Image.fromarray(result)
+    try:
+        _, _coh = _aoc_style(_final)
+        _log(_coh)
+    except Exception:
+        pass
+    return _final
 
 
 # ── LaMa Inpainting (ONNX, ~208MB, 2-5s) ────────────────────────
@@ -459,6 +475,12 @@ def inpaint_lama(image: Image.Image, mask: Image.Image | None = None,
     Provide a binary mask (white=remove, black=keep) as a PIL Image or base64 string.
     Uses Fast Fourier Convolutions for image-wide receptive field.
     """
+    from .instrumentation import (
+        instrument_op, format_tensor_stats, format_onnx_session_info,
+        analyze_output_coherence as _aoc_lama,
+    )
+    _log = lambda m: logger.info("[LaMa] %s", m)
+
     # Try simple-lama-inpainting package first
     try:
         from simple_lama_inpainting import SimpleLama
@@ -476,7 +498,10 @@ def inpaint_lama(image: Image.Image, mask: Image.Image | None = None,
         # Ensure mask is correct size and mode
         mask = mask.convert("L").resize(image.size, Image.Resampling.NEAREST)
 
-        result = lama(image.convert("RGB"), mask)
+        _log(f"simple-lama path: image={image.size} mask={mask.size}")
+        with instrument_op("LaMa:simple", _log) as ctx:
+            result = lama(image.convert("RGB"), mask)
+            ctx["output_image"] = result
         return result
 
     except ImportError:
@@ -495,6 +520,8 @@ def inpaint_lama(image: Image.Image, mask: Image.Image | None = None,
             )
 
         session = _get_ort_session(str(model_path))
+        for _line in format_onnx_session_info(session, "LaMa:onnx"):
+            _log(_line)
 
         if mask is None and mask_base64:
             import base64
@@ -519,15 +546,25 @@ def inpaint_lama(image: Image.Image, mask: Image.Image | None = None,
         img_input = img_resized.astype(np.float32).transpose(2, 0, 1)[np.newaxis] / 255.0
         mask_input = (mask_resized > 127).astype(np.float32)[np.newaxis, np.newaxis]
 
+        _log(format_tensor_stats("img_input", img_input))
+        _log(format_tensor_stats("mask_input", mask_input))
         inputs = session.get_inputs()
         input_feed = {inputs[0].name: img_input, inputs[1].name: mask_input}
-        output = session.run(None, input_feed)[0]
+        with instrument_op("LaMa:onnx", _log):
+            output = session.run(None, input_feed)[0]
+        _log(format_tensor_stats("output", output))
 
         result = (output.squeeze(0).transpose(1, 2, 0) * 255).clip(0, 255).astype(np.uint8)
         # Resize back to original
         result = cv2.resize(result, (w_orig, h_orig), interpolation=cv2.INTER_CUBIC)
 
-        return Image.fromarray(result)
+        _final = Image.fromarray(result)
+        try:
+            _, _coh = _aoc_lama(_final)
+            _log(_coh)
+        except Exception:
+            pass
+        return _final
 
     except Exception as e:
         raise RuntimeError(
@@ -558,12 +595,23 @@ def colorize(image: Image.Image) -> Image.Image:
         try:
             session = _get_ort_session(str(model_path))
 
+            from .instrumentation import (
+                instrument_op, format_tensor_stats, format_onnx_session_info,
+                analyze_output_coherence as _aoc_col,
+            )
+            _log = lambda m: logger.info("[DDColor] %s", m)
+            for _line in format_onnx_session_info(session, "DDColor"):
+                _log(_line)
+
             input_size = 512
             gray_resized = cv2.resize(gray, (input_size, input_size), interpolation=cv2.INTER_CUBIC)
             gray_input = gray_resized.astype(np.float32)[np.newaxis, np.newaxis] / 255.0
 
             input_name = session.get_inputs()[0].name
-            output = session.run(None, {input_name: gray_input})[0]
+            _log(format_tensor_stats("input", gray_input))
+            with instrument_op("DDColor", _log):
+                output = session.run(None, {input_name: gray_input})[0]
+            _log(format_tensor_stats("output", output))
 
             ab = output.squeeze(0).transpose(1, 2, 0)
             ab_resized = cv2.resize(ab, (w_orig, h_orig), interpolation=cv2.INTER_CUBIC)
@@ -571,7 +619,13 @@ def colorize(image: Image.Image) -> Image.Image:
             lab = cv2.cvtColor(cv2.cvtColor(gray, cv2.COLOR_GRAY2RGB), cv2.COLOR_RGB2LAB).astype(np.float32)
             lab[:, :, 1:] = ab_resized * 128
             result = cv2.cvtColor(np.clip(lab, 0, 255).astype(np.uint8), cv2.COLOR_LAB2RGB)
-            return Image.fromarray(result)
+            _final = Image.fromarray(result)
+            try:
+                _, _coh = _aoc_col(_final)
+                _log(_coh)
+            except Exception:
+                pass
+            return _final
 
         except Exception as e:
             logger.warning("DDColor ONNX inference failed: %s, using algorithmic colorize", e)
@@ -649,6 +703,14 @@ def low_light_enhance(image: Image.Image, iterations: int = 8) -> Image.Image:
             session = _get_ort_session(str(model_path))
             import cv2
 
+            from .instrumentation import (
+                instrument_op, format_tensor_stats, format_onnx_session_info,
+                analyze_output_coherence as _aoc_lle,
+            )
+            _log = lambda m: logger.info("[ZeroDCE++] %s", m)
+            for _line in format_onnx_session_info(session, "ZeroDCE++"):
+                _log(_line)
+
             arr = np.array(image.convert("RGB"), dtype=np.float32) / 255.0
             h_orig, w_orig = arr.shape[:2]
 
@@ -664,10 +726,19 @@ def low_light_enhance(image: Image.Image, iterations: int = 8) -> Image.Image:
             input_tensor = arr_padded.transpose(2, 0, 1)[np.newaxis]  # NCHW
 
             input_name = session.get_inputs()[0].name
-            output = session.run(None, {input_name: input_tensor})[0]
+            _log(format_tensor_stats("input", input_tensor))
+            with instrument_op("ZeroDCE++", _log):
+                output = session.run(None, {input_name: input_tensor})[0]
+            _log(format_tensor_stats("output", output))
 
             result = output.squeeze(0).transpose(1, 2, 0)[:h_orig, :w_orig]
-            return Image.fromarray((np.clip(result, 0, 1) * 255).astype(np.uint8))
+            _final = Image.fromarray((np.clip(result, 0, 1) * 255).astype(np.uint8))
+            try:
+                _, _coh = _aoc_lle(_final)
+                _log(_coh)
+            except Exception:
+                pass
+            return _final
 
         except Exception as e:
             logger.warning("Zero-DCE++ inference failed: %s, using algorithmic fallback", e)

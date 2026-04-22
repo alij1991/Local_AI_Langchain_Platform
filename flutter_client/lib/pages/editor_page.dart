@@ -70,10 +70,6 @@ class _EditorPageState extends State<EditorPage> {
   int _editSteps = 24;
   int _editPasses = 1;
   double _editPreserveColor = 0.0;
-  // ControlNet-specific
-  double _editStrength = 0.5;
-  String _controlType = 'depth';
-  double _conditioningScale = 0.9;
   // Kontext-specific — seed for reproducibility, true_cfg_scale for real CFG
   final _seedController = TextEditingController();  // empty = random
   double _trueCfgScale = 1.0;  // 1.0 = distilled only (default); >1.0 = real CFG
@@ -1179,9 +1175,8 @@ class _EditorPageState extends State<EditorPage> {
       // Model descriptions
       const modelDescriptions = {
         'kontext': 'FLUX Kontext — best quality, GGUF Q4 (~7GB). First use downloads model.',
+        'nunchaku': 'Nunchaku Kontext — SVDQuant INT4, ~3-7× faster than GGUF. Same model, real 4-bit compute.',
         'cosxl': 'CosXL Edit — SDXL quality, good balance of speed and quality.',
-        'pix2pix': 'InstructPix2Pix — fastest, legacy SD 1.5 quality.',
-        'controlnet': 'ControlNet — structure-preserving edits with depth/canny conditioning.',
       };
 
       return SingleChildScrollView(
@@ -1197,9 +1192,8 @@ class _EditorPageState extends State<EditorPage> {
               runSpacing: 4,
               children: [
                 _modelChip('kontext', 'Kontext', Icons.star, colors),
+                _modelChip('nunchaku', 'Nunchaku', Icons.bolt, colors),
                 _modelChip('cosxl', 'CosXL', Icons.speed, colors),
-                _modelChip('pix2pix', 'IP2P', Icons.flash_on, colors),
-                _modelChip('controlnet', 'ControlNet', Icons.account_tree, colors),
               ],
             ),
             const SizedBox(height: 4),
@@ -1215,53 +1209,61 @@ class _EditorPageState extends State<EditorPage> {
                     controller: _instructController,
                     minLines: 2, maxLines: 3,
                     decoration: InputDecoration(
-                      labelText: _instructModel == 'controlnet' ? 'Description' : 'Instruction',
-                      hintText: _instructModel == 'controlnet'
-                          ? 'Describe desired result, e.g., "a painting of a woman"'
-                          : 'e.g., "make it sunset", "add snow"',
+                      labelText: 'Instruction',
+                      hintText: 'e.g., "make it sunset", "add snow"',
                       isDense: true,
                       border: OutlineInputBorder(borderRadius: BorderRadius.circular(8)),
                     ),
                   ),
                 ),
-                if (_instructModel != 'kontext') ...[
-                  const SizedBox(width: 4),
-                  IconButton(
-                    onPressed: _busy || _instructController.text.trim().isEmpty ? null : () async {
-                      setState(() => _busy = true);
-                      try {
-                        final res = await widget.api.post('/editor/enhance-prompt', {
-                          'instruction': _instructController.text.trim(),
-                        }) as Map<String, dynamic>;
-                        final enhanced = res['enhanced']?.toString() ?? '';
-                        if (enhanced.isNotEmpty && enhanced != _instructController.text.trim()) {
-                          setState(() => _instructController.text = enhanced);
-                          if (mounted) {
-                            ScaffoldMessenger.of(context).showSnackBar(
-                              const SnackBar(content: Text('Prompt enhanced!'), duration: Duration(seconds: 2)),
-                            );
-                          }
-                        } else {
-                          if (mounted) {
-                            ScaffoldMessenger.of(context).showSnackBar(
-                              const SnackBar(content: Text('No enhancement available for this prompt')),
-                            );
-                          }
-                        }
-                      } catch (e) {
+                // Enhance button — shown for ALL models.
+                // The backend tailors the enhancement to the active model:
+                //   kontext/nunchaku → target-state scene description
+                //   cosxl            → imperative edit command
+                // The enhancer PRESERVES every content word from the user's
+                // original instruction (60% threshold).
+                const SizedBox(width: 4),
+                IconButton(
+                  onPressed: _busy || _instructController.text.trim().isEmpty ? null : () async {
+                    setState(() => _busy = true);
+                    try {
+                      final res = await widget.api.post('/editor/enhance-prompt', {
+                        'instruction': _instructController.text.trim(),
+                        'model': _instructModel,  // <- forward active model
+                      }) as Map<String, dynamic>;
+                      final enhanced = res['enhanced']?.toString() ?? '';
+                      if (enhanced.isNotEmpty && enhanced != _instructController.text.trim()) {
+                        setState(() => _instructController.text = enhanced);
                         if (mounted) {
                           ScaffoldMessenger.of(context).showSnackBar(
-                            SnackBar(content: Text('Enhance failed: $e')),
+                            SnackBar(
+                              content: Text('Prompt enhanced for $_instructModel'),
+                              duration: const Duration(seconds: 2),
+                            ),
                           );
                         }
-                      } finally {
-                        if (mounted) setState(() => _busy = false);
+                      } else {
+                        if (mounted) {
+                          ScaffoldMessenger.of(context).showSnackBar(
+                            const SnackBar(
+                              content: Text('No enhancement available — prompt returned unchanged'),
+                            ),
+                          );
+                        }
                       }
-                    },
-                    icon: Icon(Icons.auto_awesome, size: 20, color: colors.primary),
-                    tooltip: 'Enhance prompt for better results',
-                  ),
-                ],
+                    } catch (e) {
+                      if (mounted) {
+                        ScaffoldMessenger.of(context).showSnackBar(
+                          SnackBar(content: Text('Enhance failed: $e')),
+                        );
+                      }
+                    } finally {
+                      if (mounted) setState(() => _busy = false);
+                    }
+                  },
+                  icon: Icon(Icons.auto_awesome, size: 20, color: colors.primary),
+                  tooltip: 'Enhance prompt for $_instructModel (uses local LLM, preserves your intent)',
+                ),
               ],
             ),
             const SizedBox(height: 6),
@@ -1290,8 +1292,8 @@ class _EditorPageState extends State<EditorPage> {
 
             // ── Model-specific controls ──
 
-            // Kontext: guidance + steps + seed + true_cfg + negative_prompt
-            if (_instructModel == 'kontext') ...[
+            // Kontext / Nunchaku: guidance + steps + seed + true_cfg + negative_prompt
+            if (_instructModel == 'kontext' || _instructModel == 'nunchaku') ...[
               _editSlider('Guidance', _editGuidance, 1.0, 10.0, (v) => _editGuidance = v,
                   _editGuidance <= 2.5 ? 'Subtle' : (_editGuidance >= 4.0 ? 'Dramatic (may degrade)' : 'Balanced (recommended 2.5–3.5)')),
               _editSlider('Steps', _editSteps.toDouble(), 12, 50, (v) => _editSteps = v.round(),
@@ -1364,69 +1366,63 @@ class _EditorPageState extends State<EditorPage> {
               ),
             ],
 
-            // CosXL: guidance + image_guidance + steps
+            // CosXL: guidance + image_guidance + steps + seed
             if (_instructModel == 'cosxl') ...[
               _editSlider('Text Guidance', _editGuidance, 1, 15, (v) => _editGuidance = v,
-                  'Higher = stronger edit effect'),
+                  _editGuidance <= 4.0
+                      ? 'Subtle'
+                      : (_editGuidance >= 10.0
+                          ? 'Over-saturated (may degrade past 10)'
+                          : 'Balanced (recommended 5–8)')),
               _editSlider('Image Preserve', _editImageGuidance, 1.0, 2.5, (v) => _editImageGuidance = v,
-                  'Higher = more like original'),
+                  _editImageGuidance <= 1.3
+                      ? 'Low — edit wins, may wander (recommended ≥1.5)'
+                      : (_editImageGuidance >= 2.0
+                          ? 'High — preserves input heavily'
+                          : 'Balanced (recommended 1.5–1.9)')),
               _editSlider('Steps', _editSteps.toDouble(), 10, 50, (v) => _editSteps = v.round(),
                   '${_editSteps} steps'),
+              // Seed — same controller/behavior as Kontext. Empty = random, int = reproducible.
+              Padding(
+                padding: const EdgeInsets.symmetric(vertical: 4),
+                child: Row(
+                  children: [
+                    const Text('Seed', style: TextStyle(fontSize: 11)),
+                    const SizedBox(width: 8),
+                    Expanded(
+                      child: TextField(
+                        controller: _seedController,
+                        keyboardType: TextInputType.number,
+                        style: const TextStyle(fontSize: 11),
+                        decoration: const InputDecoration(
+                          isDense: true,
+                          hintText: 'empty = random',
+                          contentPadding: EdgeInsets.symmetric(horizontal: 8, vertical: 6),
+                          border: OutlineInputBorder(),
+                        ),
+                      ),
+                    ),
+                    IconButton(
+                      icon: const Icon(Icons.casino, size: 16),
+                      tooltip: 'Lock random seed (for reproducibility)',
+                      padding: EdgeInsets.zero,
+                      constraints: const BoxConstraints(minWidth: 28, minHeight: 28),
+                      onPressed: () => setState(() {
+                        _seedController.text = (DateTime.now().millisecondsSinceEpoch % 2147483647).toString();
+                      }),
+                    ),
+                    IconButton(
+                      icon: const Icon(Icons.clear, size: 16),
+                      tooltip: 'Clear (use random each run)',
+                      padding: EdgeInsets.zero,
+                      constraints: const BoxConstraints(minWidth: 28, minHeight: 28),
+                      onPressed: () => setState(() => _seedController.clear()),
+                    ),
+                  ],
+                ),
+              ),
             ],
 
-            // IP2P: full classic controls
-            if (_instructModel == 'pix2pix') ...[
-              _editSlider('Text Guidance', _editGuidance, 1, 15, (v) => _editGuidance = v,
-                  'Higher = stronger edit effect'),
-              _editSlider('Image Preserve', _editImageGuidance, 1.0, 2.5, (v) => _editImageGuidance = v,
-                  'Higher = more like original'),
-              _editSlider('Steps', _editSteps.toDouble(), 15, 75, (v) => _editSteps = v.round(),
-                  '${_editSteps} steps (more = better quality)'),
-              Row(
-                children: [
-                  const Text('Multi-pass', style: TextStyle(fontSize: 11)),
-                  const Spacer(),
-                  SegmentedButton<int>(
-                    segments: const [
-                      ButtonSegment(value: 1, label: Text('1x', style: TextStyle(fontSize: 10))),
-                      ButtonSegment(value: 2, label: Text('2x', style: TextStyle(fontSize: 10))),
-                    ],
-                    selected: {_editPasses},
-                    onSelectionChanged: (s) => setState(() => _editPasses = s.first),
-                  ),
-                ],
-              ),
-              const SizedBox(height: 4),
-              _editSlider('Color Preserve', _editPreserveColor, 0, 0.5, (v) => _editPreserveColor = v,
-                  _editPreserveColor > 0 ? '${(_editPreserveColor * 100).round()}% original color' : 'Off'),
-            ],
-
-            // ControlNet: strength + control type + guidance + steps
-            if (_instructModel == 'controlnet') ...[
-              Row(
-                children: [
-                  const Text('Control Type', style: TextStyle(fontSize: 11)),
-                  const Spacer(),
-                  SegmentedButton<String>(
-                    segments: const [
-                      ButtonSegment(value: 'depth', label: Text('Depth', style: TextStyle(fontSize: 10))),
-                      ButtonSegment(value: 'canny', label: Text('Canny', style: TextStyle(fontSize: 10))),
-                    ],
-                    selected: {_controlType},
-                    onSelectionChanged: (s) => setState(() => _controlType = s.first),
-                  ),
-                ],
-              ),
-              const SizedBox(height: 4),
-              _editSlider('Denoising Strength', _editStrength, 0.1, 0.9, (v) => _editStrength = v,
-                  _editStrength <= 0.4 ? 'Subtle' : (_editStrength >= 0.7 ? 'Dramatic' : 'Moderate')),
-              _editSlider('Text Guidance', _editGuidance, 1, 15, (v) => _editGuidance = v,
-                  'Higher = more prompt adherence'),
-              _editSlider('ControlNet Weight', _conditioningScale, 0.3, 1.5, (v) => _conditioningScale = v,
-                  'Higher = more structure preservation'),
-              _editSlider('Steps', _editSteps.toDouble(), 15, 50, (v) => _editSteps = v.round(),
-                  '${_editSteps} steps'),
-            ],
 
             const SizedBox(height: 8),
 
@@ -1443,19 +1439,22 @@ class _EditorPageState extends State<EditorPage> {
                       'guidance': _editGuidance,
                       'steps': _editSteps,
                     };
-                    if (_instructModel == 'cosxl' || _instructModel == 'pix2pix') {
+                    if (_instructModel == 'cosxl') {
                       editParams['image_guidance'] = _editImageGuidance;
-                    }
-                    if (_instructModel != 'kontext') {
                       editParams['negative_prompt'] = _negPromptController.text.trim();
                     }
-                    if (_instructModel == 'kontext') {
-                      // Seed: parse as int, empty = random (omit key)
+                    // Seed support: both Kontext and CosXL pick up the seed
+                    // field. Empty = random (omit key). Backend instruct_edit
+                    // accepts `seed` for any model via inspect.signature
+                    // filtering in editor.py.
+                    if (_instructModel == 'kontext' || _instructModel == 'nunchaku' || _instructModel == 'cosxl') {
                       final seedText = _seedController.text.trim();
                       if (seedText.isNotEmpty) {
                         final parsed = int.tryParse(seedText);
                         if (parsed != null) editParams['seed'] = parsed;
                       }
+                    }
+                    if (_instructModel == 'kontext' || _instructModel == 'nunchaku') {
                       // True CFG — only forward if > 1.0 (above the "off" default)
                       if (_trueCfgScale > 1.01) {
                         editParams['true_cfg_scale'] = _trueCfgScale;
@@ -1466,21 +1465,10 @@ class _EditorPageState extends State<EditorPage> {
                         }
                       }
                     }
-                    if (_instructModel == 'pix2pix') {
-                      editParams['passes'] = _editPasses;
-                      editParams['preserve_color'] = _editPreserveColor;
-                    }
-                    if (_instructModel == 'controlnet') {
-                      editParams['strength'] = _editStrength;
-                      editParams['control_type'] = _controlType;
-                      editParams['conditioning_scale'] = _conditioningScale;
-                    }
                     _applyEdit('instruct_edit', editParams);
                   },
                 icon: const Icon(Icons.auto_fix_high, size: 16),
-                label: Text(_instructModel == 'pix2pix' && _editPasses > 1
-                    ? 'Apply (${_editPasses} passes)'
-                    : 'Apply AI Edit'),
+                label: const Text('Apply AI Edit'),
               ),
             ),
             if (_busy) const Padding(padding: EdgeInsets.only(top: 8), child: LinearProgressIndicator()),
@@ -1587,9 +1575,8 @@ class _EditorPageState extends State<EditorPage> {
     // Default parameters per model — applied when switching
     const modelDefaults = {
       'kontext': {'guidance': 2.5, 'steps': 24},
+      'nunchaku': {'guidance': 2.5, 'steps': 24},
       'cosxl': {'guidance': 7.0, 'image_guidance': 1.5, 'steps': 20},
-      'pix2pix': {'guidance': 7.5, 'image_guidance': 1.5, 'steps': 20},
-      'controlnet': {'guidance': 7.5, 'steps': 25},
     };
 
     return FilterChip(

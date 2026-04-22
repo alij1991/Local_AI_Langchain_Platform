@@ -1,0 +1,90 @@
+# ── Virtualenvs & caches ──
+.venv/
+.venv_chatterbox/
+__pycache__/
+*.pyc
+*.pyo
+.ruff_cache/
+.pytest_cache/
+.mypy_cache/
+
+# ── Build artifacts ──
+build/
+dist/
+*.egg-info/
+
+# ── Flutter build/generated ──
+flutter_client/.dart_tool/
+flutter_client/build/
+flutter_client/.flutter-plugins*
+flutter_client/.packages
+flutter_client/.metadata
+flutter_client/**/GeneratedPluginRegistrant.*
+flutter_client/windows/flutter/ephemeral/
+flutter_client/windows/flutter/generated_*
+flutter_client/linux/flutter/generated_*
+flutter_client/android/.gradle/
+flutter_client/ios/Pods/
+
+# ── Model weights / large binaries (never read these) ──
+*.pth
+*.onnx
+*.bin
+*.safetensors
+*.ckpt
+*.pt
+*.gguf
+*.whl
+gfpgan/weights/
+data/models/
+kokoro-v1.0.onnx
+voices-v1.0.bin
+sageattention-*.whl
+
+# ── Runtime data ──
+data/app.db
+data/checkpoints*
+data/uploads/
+data/images/
+data/traces/
+data/partner/
+data/luts/
+data/*.png
+data/*.jpg
+data/*.jpeg
+workspace/
+
+# ── SQLite companion files (WAL, shared memory, rollback) ──
+*.db-shm
+*.db-wal
+*.db-journal
+
+# ── IDE / OS ──
+.idea/
+.vscode/
+*.iml
+*.swp
+*.swo
+Thumbs.db
+.DS_Store
+
+# ── Lock files & logs ──
+uv.lock
+pubspec.lock
+*.log
+
+# ── One-off design docs & scratch files (outdated — do not use as source of truth) ──
+# Historical prompt/audit/research dumps. The CODE is the source of truth.
+# Patterns catch future dumps automatically.
+*_PROMPT.md
+*_AUDIT.md
+*_RESEARCH_REPORT.md
+MIGRATION_GUIDE.md
+C:Usersalij1kontext_diff.txt
+
+# ── Git internals ──
+.git/
+
+# ── Secrets ──
+.env
+hf_token*

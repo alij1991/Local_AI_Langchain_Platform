@@ -1129,6 +1129,334 @@ precheck catches this and reports the conflicting processes by name via
 
 ---
 
+## 9b. CosXL Edit — diffusers compatibility limitations
+
+CosXL Edit is the sibling editing model we also support. During debugging we
+uncovered fundamental incompatibilities between CosXL and diffusers'
+`StableDiffusionXLInstructPix2PixPipeline` that are not fixable without
+patching the pipeline's denoising loop. This section captures what we
+learned so future debugging doesn't repeat the same dead ends.
+
+### What CosXL Edit is
+
+Per the checkpoint metadata (readable from
+`data/models/cosxl_edit.safetensors`):
+
+```
+modelspec.architecture: stable-diffusion-xl-v1-edit
+modelspec.description: "Stable Diffusion XL 1.0 Base tuned to use a
+   Cosine-Continuous EDM VPred schedule, and then upgraded to perform
+   instructed image editing."
+edm_vpred.sigma_min: 0.002
+edm_vpred.sigma_max: 120.0
+```
+
+So it's a genuine EDM (Karras 2022) v-prediction model, trained with
+sigmas in `[0.002, 120]`. The natural diffusers scheduler is
+`EDMEulerScheduler` with those exact parameters.
+
+### The real diffusers bug (scheduler config only)
+
+`StableDiffusionXLInstructPix2PixPipeline.__call__` has this denoising loop:
+
+```python
+for i, t in enumerate(timesteps):
+    latent_model_input = torch.cat([latents] * 3) if do_classifier_free_guidance else latents
+    scaled_latent_model_input = self.scheduler.scale_model_input(latent_model_input, t)
+    scaled_latent_model_input = torch.cat([scaled_latent_model_input, image_latents], dim=1)
+    noise_pred = self.unet(scaled_latent_model_input, t, ...)
+```
+
+**The loop itself is correct.** It applies EDM's `c_in` preconditioning
+to the noise latents (channels 0–3) and concatenates the unscaled
+`image_latents` (channels 4–7). At high σ the noise channels shrink
+toward zero while the image channels retain full scale — that's
+exactly how InstructPix2Pix anchors the output to the input image at
+the start of denoising, and it's the same pattern k-diffusion and
+ComfyUI use. CosXL was trained with this exact preconditioning.
+
+**What's wrong is the default scheduler.** The pipeline loads CosXL with
+the checkpoint's stored scheduler config, which is
+`EulerDiscreteScheduler` + `epsilon` prediction + beta schedule
+(sigma range ~0 → 14.6). CosXL was actually trained with a
+*k-diffusion-style EDM VPred schedule* over sigma ∈ [0.002, 120] with
+sigma_data=1.0. Those are three independent mismatches: wrong
+scheduler class, wrong `prediction_type`, wrong σ range.
+
+Under the default scheduler, the pipeline produces garbled output
+because every math operation after the UNet call is wrong:
+`precondition_outputs` decomposes the v-prediction incorrectly (epsilon
+decoding instead of v-prediction decoding), the Euler step advances
+through a sigma grid that the model was never trained on, and the
+latent either plateaus early or diverges after step ~14.
+
+### Alternative scheduler attempts (all failed)
+
+| Scheduler | prediction_type | sigma range | Result |
+|---|---|---|---|
+| EulerDiscreteScheduler (default) | epsilon | 0–14.6 | Garbled — wrong math everywhere |
+| EulerDiscreteScheduler | v_prediction | 0–14.6 | Latent DIVERGES — std grows back after step 14 |
+| EDMEulerScheduler (karras) | v_prediction | 0.002–120 | Latent plateaus at step 12 |
+| **EDMEulerScheduler (exponential)** | **v_prediction** | **0.002–120** | **✓ Correct — matches training schedule** |
+
+The per-step latent logging (see section 10, `[COSXL]` log lines with
+`latent[shape=... std=... nan=...]`) was the critical tool for
+diagnosing each of these failures — each broke in a distinct way
+visible in the std trajectory.
+
+### Root-cause summary
+
+CosXL was trained with **k-diffusion-style EDM schedules**, and diffusers
+ships a scheduler class that can match them (`EDMEulerScheduler`) —
+it's just not the one the pipeline loads by default. There's a
+diffusers issue
+([huggingface/diffusers#8356](https://github.com/huggingface/diffusers/issues/8356))
+where a maintainer explicitly acknowledged: "the script doesn't support
+the scheduling and training objective used by the CosXL model." It was
+closed without a fix in the upstream defaults, but the fix is
+one-liner in user code: swap the scheduler before calling the pipeline.
+
+Once you replace the scheduler with a properly-configured
+`EDMEulerScheduler` (`prediction_type="v_prediction"`,
+`sigma_min=0.002`, `sigma_max=120`, `sigma_data=1.0`,
+`sigma_schedule="exponential"`), the stock `pipe.__call__` produces
+correct output. **The loop's concatenation pattern (`c_in` on noise,
+image latents untouched) was never the bug** — it's the same pattern
+k-diffusion and ComfyUI use for InstructPix2Pix-style models.
+
+Earlier versions of this project (and earlier versions of this
+document) claimed there was a *second* bug in the preconditioning
+logic and tried to fix it by `c_in`-scaling the image channels too.
+That was wrong: scaling both channel groups killed the image anchor at
+high σ and produced outputs that completely reimagined the scene. That
+"fix" was reverted.
+
+### A/B verification (2026-04)
+
+The claim that the corrected stock path and our custom kdiff loop are
+mathematically equivalent was verified by A/B test on the same seed,
+CFG, and steps:
+
+| Step | kdiff loop | stock `pipe.__call__` |
+|---|---|---|
+| 1 | std=67.477, mean=-0.849 | std=67.480, mean=-0.849 |
+| 2 | std=37.875, mean=-1.004 | std=37.877, mean=-1.004 |
+| 10 | std=1.148, mean=-0.034 | std=1.148, mean=-0.034 |
+| 20 (final) | std=1.086, mean=-0.043, min=-2.81, max=3.88 | std=1.085, mean=-0.043, min=-2.81, max=3.88 |
+
+Agreement to 3+ decimal places on every σ over 20 steps. The tiny
+sub-0.001 deltas are fp16 non-determinism in the UNet forward pass,
+not algorithmic differences. The decoded images are visually
+indistinguishable. **The pipeline is mathematically correct.** Any
+remaining edit-quality issues are CosXL model-ceiling effects, not
+pipeline bugs.
+
+### What we do instead: inline k-diffusion-style denoising loop
+
+We implement a custom denoising loop — `_run_cosxl_kdiff()` in
+`ai_enhance.py` — but **not for correctness reasons** (the A/B above
+confirmed the stock pipeline is correct once the scheduler is fixed).
+The loop exists entirely for engineering reasons:
+
+1. **Manual device staging.** We need per-component GPU ↔ CPU cycling
+   to fit CosXL into 8 GB VRAM. Accelerate's `cpu_offload` hooks fight
+   our manual `.to()` calls, so we explicitly do NOT install them on
+   the CosXL pipeline. The stock `pipe.__call__` expects offload hooks,
+   so we can't cleanly use it alongside manual staging. (The diffusers
+   regression path enables offload dynamically for the call, but that
+   leaves stale accelerate hooks on the pipeline afterwards — avoid
+   mixing the two paths in the same session.)
+2. **Per-step instrumentation.** We log VRAM, step timing, and full
+   latent statistics (`std`, `mean`, `min`, `max`, NaN/Inf counts) on
+   every step. This was the critical tool for diagnosing all the
+   scheduler bugs above and for catching the `torch.no_grad()` /
+   fp32-Euler regressions.
+3. **Auditable math.** A readable Euler loop in our source tree is
+   easier to reason about than `scheduler.step()` + `scale_model_input`
+   indirection when debugging.
+
+Setting `KONTEXT_COSXL_USE_DIFFUSERS=1` runs `pipe.__call__` instead
+(with `cpu_offload` enabled dynamically for that call). Both paths
+produce equivalent output — use this env var for regression testing
+the custom loop against the upstream reference.
+
+**What `_run_cosxl_kdiff` does:**
+
+1. **Reuses** the pipe's own `encode_prompt`, `prepare_image_latents`,
+   `_get_add_time_ids`, and VAE methods so the setup is byte-identical
+   to what the upstream pipeline does. We only replace the denoising
+   loop itself.
+
+   **Critical: all three of these calls are wrapped in `torch.no_grad()`.**
+   Without this, `vae.encode()` (called inside `prepare_image_latents`)
+   builds a full autograd computation graph for a 1024×1024 image — even
+   though we never call `.backward()`. Measured impact:
+   ```
+   with torch.no_grad():    VAE encode peak = 0.59 GB
+   without torch.no_grad(): VAE encode peak = 10.13 GB (!)
+   ```
+   That 10 GB spike on an 8 GB card forces PyTorch to page memory into
+   Windows' shared GPU (UMA) region. Every subsequent CUDA operation
+   then becomes PCIe-throttled, pushing each denoising step from
+   ~0.9 s to **62–70 s**. This was the last bug discovered — it was
+   invisible until all the scheduler/preconditioning bugs were fixed.
+
+2. **Builds an exponential sigma schedule** from `sigma_max=120` down to
+   `sigma_min=0.002`, with a final zero appended so the last Euler step
+   lands at σ=0. This matches CosXL's `edm_vpred` training range exactly.
+
+3. **Initializes latents** as `N(0, σ_max² · I)` — pure noise at the
+   highest sigma, which is the correct k-diffusion starting point.
+
+4. **For each denoising step, applies EDM preconditioning** to the noise
+   channels only, matching stock `scale_model_input`:
+   ```python
+   c_in   = 1 / sqrt(σ² + σ_data²)
+   c_skip = σ_data² / (σ² + σ_data²)
+   c_out  = -σ · σ_data / sqrt(σ² + σ_data²)
+
+   scaled_noise = latents * c_in            # noise channels (0-3)
+   unet_image   = image_latents             # image channels (4-7) — NOT scaled
+   unet_input   = cat([scaled_noise, unet_image], dim=1)
+   ```
+   **Why image latents are NOT scaled:** at high σ the c_in-shrunk noise
+   channels are tiny (~0.008 × x at σ=120), so the image channels dominate
+   the UNet input — and that's exactly how InstructPix2Pix anchors the
+   output to the input image at the start of denoising. If you `c_in`-scale
+   both groups (as an earlier version of this loop did, incorrectly), the
+   model loses its image anchor at high σ, falls back to text-only
+   generation, and completely reimagines the scene — ignoring the input's
+   composition, subject count, and identity. This matches what stock
+   `StableDiffusionXLInstructPix2PixPipeline.__call__` does; the thing
+   the stock pipeline gets wrong is the scheduler config (epsilon vs
+   v_prediction, wrong σ range), which we fix separately.
+
+5. **Passes `0.25 · log(σ)` as the timestep** to the UNet, matching what
+   `EDMEulerScheduler.precondition_noise` does. The SDXL UNet's Timesteps
+   layer uses sinusoidal embeddings, so it accepts continuous floats.
+
+6. **Applies InstructPix2Pix CFG** correctly:
+   ```
+   v_final = v_uncond
+           + guidance_scale       · (v_text  - v_image)
+           + image_guidance_scale · (v_image - v_uncond)
+   ```
+   where the three v_ predictions come from the three-way batched UNet
+   output.
+
+7. **Computes x_0 via v-prediction deconditioning:**
+   `denoised = c_skip · latents + c_out · model_output`
+
+8. **Steps with Euler in float32:** `d = (latents - denoised) / σ`,
+   `latents += d · (σ_next - σ)`. **The Euler update must be computed in
+   float32, not fp16**, even though the UNet forward and CFG combination
+   run in fp16. At the final few steps σ drops to ~0.002, and the
+   division `(latents - denoised) / σ` divides two small fp16 numbers
+   with only ~10 bits of mantissa. The accumulated precision error over
+   the last 3–4 steps produces visibly distorted fine details (melted
+   faces, warped hands, fractal fingers) even though the overall
+   composition is correct. Stock `EDMEulerScheduler.step()` does exactly
+   this — it upcasts the sample to float32 at the top of the function
+   and downcasts at the bottom. We match that behavior:
+   ```python
+   latents_f32       = latents.to(torch.float32)
+   model_output_f32  = model_output.to(torch.float32)
+   denoised_f32      = c_skip * latents_f32 + c_out * model_output_f32
+   d_f32             = (latents_f32 - denoised_f32) / max(σ, 1e-6)
+   latents           = (latents_f32 + d_f32 * (σ_next - σ)).to(fp16)
+   ```
+   This was the second invisible correctness fix discovered by reading
+   stock diffusers source, after `torch.no_grad()`. The telltale
+   signature of missing this fix: **composition looks right but fine
+   details are warped**. Per-step latent stats look perfectly healthy
+   (std=1.05, mean=-0.05, no NaN/Inf) because the error is sub-1% per
+   step — it only becomes visible after the VAE decodes back to pixels.
+
+9. **VAE-decodes** the final latents (with fp16 upcast if the VAE needs it).
+
+### Code location
+
+`src/local_ai_platform/images/ai_enhance.py` — look for
+`def _run_cosxl_kdiff(`. The function is ~180 lines including
+extensive comments and logging. It's called from the CosXL inference
+branch when `KONTEXT_COSXL_USE_DIFFUSERS` is NOT set.
+
+### Environment variables
+
+| Variable | Default | Effect |
+|---|---|---|
+| `KONTEXT_COSXL_USE_DIFFUSERS` | unset | Custom k-diff loop (default, correct) |
+| `KONTEXT_COSXL_USE_DIFFUSERS=1` | — | Stock diffusers pipeline (broken, for A/B testing) |
+
+### Logs to watch
+
+The custom loop produces `[COSXL-KDIFF]` log lines separate from the
+regular `[COSXL]` lines so you can tell which path ran:
+
+```
+[COSXL] Inference path: custom k-diffusion-style loop (EDM-correct preconditioning).
+[COSXL-KDIFF] Starting custom denoising (EDM-correct preconditioning)
+[COSXL-KDIFF] device=cuda:0 do_cfg=True steps=20 guidance=7.00 image_guidance=1.60
+[COSXL-KDIFF] Image latents: shape=(3, 4, 128, 128) dtype=torch.float16
+[COSXL-KDIFF] Sigma schedule (first 5): [120.000, 67.251, 37.689, ...] ... (last 3): [0.006, 0.002, 0.000]
+[COSXL-KDIFF] Initial latents: shape=(1, 4, 128, 128) std=119.631 (should be ~120.0)
+[COSXL] Step 1 WARMUP/20 — X.Xs — sigma=120.000 latent[std=... nan=0 inf=0]
+[COSXL] Step 2/20 — X.Xs — sigma=67.251 latent[std=... ...]
+...
+[COSXL-KDIFF] Custom denoising loop complete, decoded to PIL (1024, 1024)
+```
+
+**Healthy signs:**
+- Initial latent std ≈ 120 (sigma_max)
+- Latent std should decrease step-by-step, tracking sigma roughly
+- Final latent std should be in the ~1.2–1.3 range (SDXL VAE natural scale)
+- NO plateau, NO std growing back up
+- Every step's sigma should be strictly decreasing, ending near 0.002
+- VRAM should stay around **6.6 GB** during the UNet loop (5.26 GB PyTorch allocated)
+- Steady-state step time: **0.8–0.9 s/step** (first step ~6 s for CUDA JIT warmup)
+- Total for 20 steps at 1024×1024: ~25 s
+
+**Expected VRAM staging log (verified 2025-04-11):**
+```
+[COSXL-KDIFF] After pre-flight reset — driver_free=7.44GB pytorch=0.00GB
+[COSXL-KDIFF] After text encoders → GPU — driver_used=2.92GB pytorch=1.64GB
+[COSXL-KDIFF] After text encoders → CPU — driver_used=1.20GB pytorch=0.01GB
+[COSXL-KDIFF] After VAE → GPU — driver_used=1.38GB pytorch=0.18GB
+[COSXL-KDIFF] After VAE → CPU — driver_used=1.22GB pytorch=0.02GB
+[COSXL-KDIFF] After UNet → GPU — driver_used=6.61GB pytorch=5.26GB   ← peak
+...all 20 steps at 5.26 GB PyTorch / 0.8-0.9 s each...
+[COSXL-KDIFF] After UNet → CPU — driver_used=1.24GB pytorch=0.02GB
+[COSXL-KDIFF] After final eviction — driver_used=1.26GB pytorch=0.03GB
+```
+
+If you see any of:
+- Initial latent std << 120 → seed/generator issue
+- Latent std growing between steps → wrong v-prediction math (regression)
+- Latent std drastically different from sigma_data=1.0 at the end → preconditioning bug
+- NaN/Inf → fp16 overflow or VAE issue
+- Step times 60 s+ / VRAM 10–17 GB during VAE encode → `torch.no_grad()` missing
+  from the `prepare_image_latents` or `encode_prompt` call (see item 1 above)
+- **Output composition correct but fine details warped** (melted faces, warped
+  hands, blurry eyes) while per-step latent stats look perfectly healthy →
+  Euler step not upcasting to float32 (see item 8 above). This is the most
+  insidious failure mode because every instrument says "pipeline healthy" —
+  only the decoded pixels reveal the fp16 precision loss.
+
+…then something in the custom loop broke and needs fixing.
+
+### If you prefer ComfyUI anyway
+
+The custom loop should produce output that's functionally equivalent to
+ComfyUI's CosXL workflow (same preconditioning, same sigma schedule,
+same v-prediction deconditioning, same CFG). If you still prefer
+ComfyUI, install it from
+[comfyanonymous/ComfyUI](https://github.com/comfyanonymous/ComfyUI) and
+the CosXL example from
+[comfyanonymous.github.io/ComfyUI_examples/edit_models](https://comfyanonymous.github.io/ComfyUI_examples/edit_models/),
+then import the result into the editor via "Open".
+
+---
+
 ## 10. Log line reference
 
 When a Kontext edit runs, you'll see a structured log sequence prefixed with

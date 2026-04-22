@@ -6,6 +6,7 @@ Models are downloaded from HuggingFace on demand.
 from __future__ import annotations
 
 import logging
+import re
 import sys
 import threading
 from pathlib import Path
@@ -80,7 +81,13 @@ def remove_background(image: Image.Image, model: str = "birefnet-general") -> Im
             else:
                 raise
 
-    return remove(image, session=_rembg_sessions[model])
+    from .instrumentation import instrument_op
+    _log = lambda m: logger.info("[rembg:%s] %s", model, m)
+    _log(f"Input: size={image.size} mode={image.mode}")
+    with instrument_op(f"rembg:{model}", _log) as ctx:
+        result = remove(image, session=_rembg_sessions[model])
+        ctx["output_image"] = result
+    return result
 
 
 def replace_background(
@@ -168,8 +175,14 @@ def _restore_gfpgan(image: Image.Image, upscale: int = 1) -> Image.Image:
     import cv2
     arr = np.array(image.convert("RGB"))
     arr_bgr = cv2.cvtColor(arr, cv2.COLOR_RGB2BGR)
-    _, _, output = _gfpgan_model.enhance(arr_bgr, has_aligned=False, only_center_face=False, paste_back=True)
-    result = Image.fromarray(cv2.cvtColor(output, cv2.COLOR_BGR2RGB))
+
+    from .instrumentation import instrument_op
+    _log = lambda m: logger.info("[GFPGAN] %s", m)
+    _log(f"Input: size={image.size} upscale={upscale}")
+    with instrument_op("GFPGAN", _log) as ctx:
+        _, _, output = _gfpgan_model.enhance(arr_bgr, has_aligned=False, only_center_face=False, paste_back=True)
+        result = Image.fromarray(cv2.cvtColor(output, cv2.COLOR_BGR2RGB))
+        ctx["output_image"] = result
 
     # Resize back to original dimensions if we downscaled
     if w * h > max_pixels:
@@ -225,6 +238,15 @@ def _restore_codeformer(image: Image.Image, upscale: int = 1, fidelity_weight: f
         logger.info("Downscaling CodeFormer input from %dx%d to %dx%d (VRAM protection)", w, h, new_w, new_h)
         original_size = (w, h)
         image = image.resize((new_w, new_h), Image.Resampling.LANCZOS)
+
+    # ── Shared instrumentation ──
+    from .instrumentation import analyze_output_coherence, get_vram_allocated_gb
+    import time as _time
+    _cf_start = _time.time()
+    _cf_vram_before = get_vram_allocated_gb()
+    logger.info("[CodeFormer] START size=%s upscale=%d fidelity_weight=%.2f vram_alloc=%s",
+                image.size, upscale, fidelity_weight,
+                f"{_cf_vram_before:.2f}GB" if _cf_vram_before is not None else "n/a")
 
     try:
         # Try codeformer-pip package first
@@ -305,6 +327,19 @@ def _restore_codeformer(image: Image.Image, upscale: int = 1, fidelity_weight: f
 
     if original_size:
         result = result.resize(original_size, Image.Resampling.LANCZOS)
+
+    # ── CodeFormer done — timing + coherence ──
+    _cf_elapsed = _time.time() - _cf_start
+    _cf_vram_after = get_vram_allocated_gb()
+    _delta_str = ""
+    if _cf_vram_before is not None and _cf_vram_after is not None:
+        _delta_str = f" vram_delta={_cf_vram_after - _cf_vram_before:+.2f}GB"
+    logger.info("[CodeFormer] DONE elapsed=%.2fs%s", _cf_elapsed, _delta_str)
+    try:
+        _, _coh = analyze_output_coherence(result)
+        logger.info("[CodeFormer] %s", _coh)
+    except Exception as _coh_err:
+        logger.warning("[CodeFormer] coherence check failed: %s", _coh_err)
     return result
 
 
@@ -376,8 +411,16 @@ def _upscale_realesrgan(image: Image.Image, scale: int = 4, anime: bool = False)
     import cv2
     arr = np.array(image.convert("RGB"))
     arr_bgr = cv2.cvtColor(arr, cv2.COLOR_RGB2BGR)
-    output, _ = _realesrgan_models[variant_key].enhance(arr_bgr, outscale=scale)
-    return Image.fromarray(cv2.cvtColor(output, cv2.COLOR_BGR2RGB))
+
+    from .instrumentation import instrument_op
+    _label = f"RealESRGAN-{'anime' if anime else 'std'}-x{scale}"
+    _log = lambda m: logger.info("[%s] %s", _label, m)
+    _log(f"Input: size={image.size} outscale={scale}")
+    with instrument_op(_label, _log) as ctx:
+        output, _ = _realesrgan_models[variant_key].enhance(arr_bgr, outscale=scale)
+        result = Image.fromarray(cv2.cvtColor(output, cv2.COLOR_BGR2RGB))
+        ctx["output_image"] = result
+    return result
 
 
 # ── Instruction-Based Editing ────────────────────────────────────
@@ -386,13 +429,17 @@ def _upscale_realesrgan(image: Image.Image, scale: int = 4, anime: bool = False)
 _instruct_pipes: dict[str, Any] = {}
 _kontext_lock = threading.Lock()
 _cosxl_lock = threading.Lock()
-_controlnet_lock = threading.Lock()
-
 # Available instruction-edit models — ranked by quality (best first)
 INSTRUCT_MODELS = {
     "kontext": {
         "name": "FLUX Kontext (best quality)",
         "description": "State-of-the-art editing via FLUX.1 Kontext. Q4 GGUF quantized, ~7GB. First use downloads model.",
+        "default_guidance": 2.5,
+        "default_steps": 24,
+    },
+    "nunchaku": {
+        "name": "Nunchaku Kontext (fast INT4)",
+        "description": "FLUX.1 Kontext with SVDQuant INT4. Real 4-bit compute — ~3-7× faster than GGUF. ~7GB download.",
         "default_guidance": 2.5,
         "default_steps": 24,
     },
@@ -402,23 +449,6 @@ INSTRUCT_MODELS = {
         "default_guidance": 7.0,
         "default_image_guidance": 1.5,
         "default_steps": 20,
-    },
-    "pix2pix": {
-        "name": "InstructPix2Pix (legacy)",
-        "description": "SD 1.5 instruction editing. Fastest but lower quality. ~4GB VRAM.",
-        "repo": "timbrooks/instruct-pix2pix",
-        "pipeline_cls": "StableDiffusionInstructPix2PixPipeline",
-        "default_guidance": 7.5,
-        "default_image_guidance": 1.5,
-        "default_steps": 20,
-        "resize_to": 512,
-    },
-    "controlnet": {
-        "name": "ControlNet img2img (structure)",
-        "description": "SD 1.5 + depth/canny ControlNet. Best for structure-preserving edits. Prompt describes desired result.",
-        "default_guidance": 7.5,
-        "default_steps": 25,
-        "default_strength": 0.5,
     },
 }
 
@@ -518,24 +548,90 @@ def _evict_ollama_from_gpu() -> None:
         models_in_vram = ps_data.get("models", [])
         if not models_in_vram:
             logger.info("[KONTEXT] Ollama: no models in VRAM")
-            return
-        for m in models_in_vram:
-            model_name = m.get("name") or m.get("model", "")
-            if not model_name:
-                continue
-            logger.info("[KONTEXT] Evicting Ollama model '%s' from VRAM...", model_name)
-            payload = _json.dumps({"model": model_name, "keep_alive": 0}).encode()
-            req = urllib.request.Request(
-                "http://localhost:11434/api/generate",
-                data=payload,
-                headers={"Content-Type": "application/json"},
-                method="POST",
-            )
-            urllib.request.urlopen(req, timeout=10)
-            logger.info("[KONTEXT] Ollama model '%s' evicted from VRAM", model_name)
-        gc.collect()
+        else:
+            for m in models_in_vram:
+                model_name = m.get("name") or m.get("model", "")
+                if not model_name:
+                    continue
+                logger.info("[KONTEXT] Evicting Ollama model '%s' from VRAM...", model_name)
+                payload = _json.dumps({"model": model_name, "keep_alive": 0}).encode()
+                req = urllib.request.Request(
+                    "http://localhost:11434/api/generate",
+                    data=payload,
+                    headers={"Content-Type": "application/json"},
+                    method="POST",
+                )
+                urllib.request.urlopen(req, timeout=10)
+                logger.info("[KONTEXT] Ollama model '%s' evicted from VRAM", model_name)
+            gc.collect()
     except Exception as e:
         logger.info("[KONTEXT] Ollama eviction skipped (%s) — Ollama may not be running", e)
+
+    # Stop the Ollama Windows service AND kill the process to free its CUDA
+    # context (~300-500MB). Just killing ollama.exe doesn't work — the Windows
+    # service ("Ollama") auto-restarts it within milliseconds, so the CUDA
+    # context is never actually freed. We must stop the service first, THEN
+    # kill any remaining process. The service will be restarted automatically
+    # when the user next uses the Chat page (via _restart_ollama_service).
+    if _read_env("KONTEXT_KILL_OLLAMA", "true").lower() in ("1", "true", "yes"):
+        try:
+            import subprocess
+            import time as _tkill
+            # Step 1: Stop the Windows service (prevents auto-restart)
+            svc_result = subprocess.run(
+                ["net", "stop", "ollama"],
+                capture_output=True, text=True, timeout=10,
+            )
+            if svc_result.returncode == 0:
+                logger.info("[KONTEXT] Stopped Ollama Windows service")
+            else:
+                # Service might not exist or might be named differently
+                logger.info("[KONTEXT] 'net stop ollama' returned: %s", svc_result.stderr.strip() or svc_result.stdout.strip())
+
+            # Step 2: Kill any remaining ollama.exe processes
+            kill_result = subprocess.run(
+                ["taskkill", "/f", "/im", "ollama.exe"],
+                capture_output=True, text=True, timeout=5,
+            )
+            if kill_result.returncode == 0:
+                logger.info("[KONTEXT] Killed ollama.exe process(es)")
+
+            # Step 3: Also kill ollama_runners (the actual GPU process)
+            subprocess.run(
+                ["taskkill", "/f", "/im", "ollama_llama_server.exe"],
+                capture_output=True, text=True, timeout=5,
+            )
+
+            # Wait for driver to reclaim VRAM
+            _tkill.sleep(2)
+            gc.collect()
+            logger.info("[KONTEXT] Ollama fully stopped — CUDA context should be freed")
+        except Exception as e:
+            logger.info("[KONTEXT] Failed to stop Ollama: %s", e)
+
+
+def _restart_ollama_service() -> None:
+    """Restart the Ollama Windows service after Kontext inference completes.
+
+    Called at the end of Kontext editing so chat continues to work.
+    Runs in a background thread to avoid blocking the response.
+    """
+    def _do_restart():
+        try:
+            import subprocess
+            result = subprocess.run(
+                ["net", "start", "ollama"],
+                capture_output=True, text=True, timeout=15,
+            )
+            if result.returncode == 0:
+                logger.info("[KONTEXT] Ollama service restarted — chat will work again")
+            else:
+                logger.info("[KONTEXT] Ollama service restart: %s", result.stderr.strip() or result.stdout.strip())
+        except Exception as e:
+            logger.info("[KONTEXT] Failed to restart Ollama: %s", e)
+
+    import threading
+    threading.Thread(target=_do_restart, daemon=True).start()
 
 
 def _unload_other_pipelines(keep: str) -> None:
@@ -563,6 +659,27 @@ def _unload_other_pipelines(keep: str) -> None:
 # Picked via KONTEXT_GGUF_QUANT env var — default Q4_K_S preserves prior
 # behavior. On 8GB cards where other processes hold ~1GB of VRAM, Q3_K_S or
 # Q2_K is strongly recommended to avoid paging to shared GPU memory.
+def _read_env(key: str, default: str = "") -> str:
+    """Read a config value: .env file (priority) > shell env var > default."""
+    import os
+    for _ep in (".env", "../.env"):
+        try:
+            _p = Path(_ep)
+            if _p.exists():
+                for _line in _p.read_text().splitlines():
+                    _line = _line.strip()
+                    if _line.startswith("#") or "=" not in _line:
+                        continue
+                    _k, _, _v = _line.partition("=")
+                    _k = _k.strip()
+                    _v = _v.strip().strip('"').strip("'")
+                    if _k == key and _v:
+                        return _v
+        except Exception:
+            pass
+    return os.environ.get(key, default)
+
+
 _KONTEXT_GGUF_VARIANTS = {
     "Q2_K":    ("flux1-kontext-dev-Q2_K.gguf",    3.7,  "lowest quality, ~3.7GB, leaves ~3GB headroom on 8GB"),
     "Q3_K_S":  ("flux1-kontext-dev-Q3_K_S.gguf",  4.9,  "good quality, ~4.9GB, leaves ~1.8GB headroom (RECOMMENDED for 8GB)"),
@@ -577,14 +694,12 @@ _KONTEXT_GGUF_VARIANTS = {
 
 
 def _get_kontext_gguf_variant() -> str:
-    """Resolve the active GGUF variant from the KONTEXT_GGUF_QUANT env var.
+    """Resolve the active GGUF variant from KONTEXT_GGUF_QUANT.
 
-    Returns one of the keys in _KONTEXT_GGUF_VARIANTS. Falls back to Q4_K_S
-    (the prior default) with a warning if the env var points to an unknown
-    variant, so a typo doesn't break the whole pipeline load.
+    Priority: .env file > shell environment variable > default (Q4_K_S).
+    Falls back to Q4_K_S with a warning if the value is not a known variant.
     """
-    import os
-    requested = os.environ.get("KONTEXT_GGUF_QUANT", "Q4_K_S").strip().upper()
+    requested = _read_env("KONTEXT_GGUF_QUANT", "Q4_K_S").strip().upper()
     if requested not in _KONTEXT_GGUF_VARIANTS:
         logger.warning(
             "[KONTEXT] KONTEXT_GGUF_QUANT='%s' is not a known variant. "
@@ -624,16 +739,19 @@ def _download_kontext_gguf(variant: str | None = None) -> str:
     return local_path
 
 
-def _log_vram(label: str) -> None:
-    """Log GPU memory usage for debugging Kontext loading/inference.
+def _log_vram(label: str, tag: str = "KONTEXT") -> None:
+    """Log GPU memory usage for debugging pipeline loading/inference.
 
     Uses torch.cuda.mem_get_info() which queries CUDA driver for TRUE free
     memory across all processes (not just PyTorch allocations).
+
+    The tag parameter lets multiple pipelines (KONTEXT, COSXL, etc.) share
+    this helper while keeping their log prefixes grep-able.
     """
     try:
         import torch
         if not torch.cuda.is_available():
-            logger.info("[KONTEXT] %s — CUDA not available", label)
+            logger.info("[%s] %s — CUDA not available", tag, label)
             return
         # PyTorch-only accounting (what our process has allocated)
         pt_allocated = torch.cuda.memory_allocated() / 1e9
@@ -644,24 +762,209 @@ def _log_vram(label: str) -> None:
         total_gb = total_bytes / 1e9
         used_gb = total_gb - free_gb
         other_gb = used_gb - pt_allocated  # memory held by other processes
-        logger.info("[KONTEXT] %s — VRAM: driver_free=%.2fGB driver_used=%.2fGB (pytorch=%.2fGB other_procs=%.2fGB) total=%.1fGB",
-                    label, free_gb, used_gb, pt_allocated, other_gb, total_gb)
+        logger.info("[%s] %s — VRAM: driver_free=%.2fGB driver_used=%.2fGB (pytorch=%.2fGB other_procs=%.2fGB) total=%.1fGB",
+                    tag, label, free_gb, used_gb, pt_allocated, other_gb, total_gb)
     except Exception as e:
-        logger.info("[KONTEXT] %s — VRAM check failed: %s", label, e)
+        logger.info("[%s] %s — VRAM check failed: %s", tag, label, e)
+
+
+def _load_kontext_nunchaku() -> Any:
+    """Load FLUX.1 Kontext with Nunchaku/SVDQuant INT4 quantization.
+
+    Nunchaku does REAL 4-bit computation (no upcasting to BF16 like GGUF),
+    giving both smaller VRAM footprint AND ~3× faster inference vs GGUF.
+
+    Memory strategy for 8GB cards:
+    - Nunchaku transformer with per-layer offloading (~4-6GB VRAM peak)
+    - T5 on CPU (bf16, ~9.5GB system RAM)
+    - Sequential CPU offload for remaining components
+    """
+    import os
+    import time as _time
+
+    import torch
+    from diffusers import FluxKontextPipeline
+
+    logger.info("[KONTEXT-NUNCHAKU] ====== Starting Nunchaku pipeline load ======")
+    _log_vram("Before load")
+    t0 = _time.monotonic()
+
+    # Nunchaku's C extension (_C.pyd) is built against CUDA 12.x runtime DLLs
+    # (cublas64_12.dll, cudart64_12.dll etc.). If PyTorch ships CUDA 13.x DLLs
+    # instead, we must add the CUDA 12.x toolkit bin to the DLL search path so
+    # the nunchaku extension can find its dependencies.
+    _cuda12_bin = r"C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v12.4\bin"
+    if os.path.isdir(_cuda12_bin):
+        try:
+            os.add_dll_directory(_cuda12_bin)
+            logger.info("[KONTEXT-NUNCHAKU] Added CUDA 12.4 DLL path for nunchaku compat")
+        except OSError:
+            pass
+    # Also ensure torch's own DLLs are discoverable
+    _torch_lib = os.path.join(os.path.dirname(torch.__file__), "lib")
+    if os.path.isdir(_torch_lib):
+        try:
+            os.add_dll_directory(_torch_lib)
+        except OSError:
+            pass
+
+    try:
+        from nunchaku import NunchakuFluxTransformer2dModel
+        from nunchaku.utils import get_precision
+    except ImportError:
+        raise RuntimeError(
+            "Nunchaku backend selected but package not installed. "
+            "Install with the correct wheel from "
+            "https://github.com/nunchaku-ai/nunchaku/releases "
+            "(match your Python, PyTorch, and CUDA versions)"
+        )
+
+    token = _get_hf_token()
+    precision = get_precision()  # "int4" for RTX 20/30/40 series, "fp4" for Blackwell
+    logger.info("[KONTEXT-NUNCHAKU] Detected precision: %s", precision)
+
+    # Step 1: Load nunchaku quantized transformer
+    t1 = _time.monotonic()
+    model_path = f"nunchaku-tech/nunchaku-flux.1-kontext-dev/svdq-{precision}_r32-flux.1-kontext-dev.safetensors"
+    logger.info("[KONTEXT-NUNCHAKU] Step 1: Loading transformer from %s...", model_path)
+
+    # Check available VRAM to decide offload strategy
+    _free_gb = 8.0
+    try:
+        _free_b, _total_b = torch.cuda.mem_get_info()
+        _free_gb = _free_b / 1e9
+    except Exception:
+        pass
+
+    # Use per-layer offload on 8GB cards for minimum VRAM usage
+    _use_offload = _free_gb < 10.0
+    transformer = NunchakuFluxTransformer2dModel.from_pretrained(
+        model_path,
+        offload=_use_offload,
+    )
+
+    # Use nunchaku's optimized FP16 attention kernel — faster than default
+    # FlashAttention2 and no precision loss on Ada/Ampere/Turing GPUs.
+    try:
+        transformer.set_attention_impl("nunchaku-fp16")
+        logger.info("[KONTEXT-NUNCHAKU] Step 1: nunchaku-fp16 attention enabled (~1.2× faster, same quality)")
+    except Exception as _attn_err:
+        logger.info("[KONTEXT-NUNCHAKU] Step 1: nunchaku-fp16 attention not available: %s", _attn_err)
+
+    logger.info("[KONTEXT-NUNCHAKU] Step 1 done: transformer loaded (offload=%s) (%.1fs)",
+                _use_offload, _time.monotonic() - t1)
+    _log_vram("After transformer load")
+
+    # Step 2: Load T5 encoder
+    # Try nunchaku's quantized T5 (AWQ INT4, ~3GB on GPU) for better quality
+    # than BF16 T5 shuffled through sequential offload. Falls back to BF16 on CPU.
+    t2 = _time.monotonic()
+    text_encoder_2 = None
+    try:
+        from nunchaku import NunchakuT5EncoderModel
+        _t5_path = "nunchaku-tech/nunchaku-t5/awq-int4-flux.1-t5xxl.safetensors"
+        logger.info("[KONTEXT-NUNCHAKU] Step 2: Loading quantized T5 (AWQ INT4, ~3GB) from %s...", _t5_path)
+        text_encoder_2 = NunchakuT5EncoderModel.from_pretrained(_t5_path)
+        logger.info("[KONTEXT-NUNCHAKU] Step 2 done: quantized T5 loaded (%.1fs)", _time.monotonic() - t2)
+    except Exception as _qt5_err:
+        logger.info("[KONTEXT-NUNCHAKU] Quantized T5 failed (%s) — falling back to BF16 T5 on CPU", _qt5_err)
+
+    if text_encoder_2 is None:
+        from transformers import T5EncoderModel
+        logger.info("[KONTEXT-NUNCHAKU] Step 2: Loading BF16 T5 on CPU (fallback)...")
+        text_encoder_2 = T5EncoderModel.from_pretrained(
+            "black-forest-labs/FLUX.1-Kontext-dev",
+            subfolder="text_encoder_2",
+            torch_dtype=torch.bfloat16,
+            device_map="cpu",
+            token=token,
+        )
+        logger.info("[KONTEXT-NUNCHAKU] Step 2 done: BF16 T5 on CPU (%.1fs)", _time.monotonic() - t2)
+    _log_vram("After T5 load")
+
+    # Step 3: Assemble pipeline
+    t3 = _time.monotonic()
+    logger.info("[KONTEXT-NUNCHAKU] Step 3: Assembling FluxKontextPipeline...")
+    pipe = FluxKontextPipeline.from_pretrained(
+        "black-forest-labs/FLUX.1-Kontext-dev",
+        transformer=transformer,
+        text_encoder_2=text_encoder_2,
+        torch_dtype=torch.bfloat16,
+        token=token,
+    )
+    logger.info("[KONTEXT-NUNCHAKU] Step 3 done: pipeline assembled (%.1fs)", _time.monotonic() - t3)
+    _log_vram("After pipeline assembly")
+
+    # Step 4: Memory management
+    t4 = _time.monotonic()
+    _is_quantized_t5 = "NunchakuT5" in type(text_encoder_2).__name__
+    if _use_offload:
+        # Nunchaku manages the transformer's layer offloading internally.
+        # If we loaded the quantized T5, it also manages its own memory.
+        # Exclude both from diffusers' sequential offload to avoid conflicts.
+        _exclude = ["transformer"]
+        if _is_quantized_t5:
+            _exclude.append("text_encoder_2")
+        logger.info("[KONTEXT-NUNCHAKU] Step 4: Sequential CPU offload (excluded: %s)...", _exclude)
+        pipe._exclude_from_cpu_offload = _exclude
+        pipe.enable_sequential_cpu_offload()
+    else:
+        logger.info("[KONTEXT-NUNCHAKU] Step 4: Moving to CUDA (enough VRAM)...")
+        pipe = pipe.to("cuda")
+
+    pipe.vae.enable_slicing()
+    pipe.vae.enable_tiling()
+    pipe.set_progress_bar_config(disable=True)
+    logger.info("[KONTEXT-NUNCHAKU] Step 4 done (%.1fs)", _time.monotonic() - t4)
+    _log_vram("After device placement")
+
+    # NOTE: Attention slicing and Karras sigmas are intentionally DISABLED for
+    # the nunchaku path. Nunchaku has its own optimized INT4 attention kernels
+    # (set_attention_impl("nunchaku-fp16")) and diffusers' attention slicing
+    # conflicts with them. Karras sigmas are not part of FLUX's trained noise
+    # schedule and degrade quality with quantized transformers. Official nunchaku
+    # examples use neither.
+    logger.info("[KONTEXT-NUNCHAKU] Attention slicing: DISABLED (nunchaku has own optimized kernels)")
+    logger.info("[KONTEXT-NUNCHAKU] Karras sigmas: DISABLED (FLUX uses flow-matching schedule)")
+
+    # Log component placement
+    for comp_name in ("text_encoder", "text_encoder_2", "transformer", "vae"):
+        comp = getattr(pipe, comp_name, None)
+        if comp is not None and hasattr(comp, "device"):
+            logger.info("[KONTEXT-NUNCHAKU] Component '%s' device: %s", comp_name, comp.device)
+
+    logger.info("[KONTEXT-NUNCHAKU] ====== Pipeline ready (total: %.1fs) ======",
+                _time.monotonic() - t0)
+    return pipe
+
+
+def _load_nunchaku_pipeline() -> Any:
+    """Load FLUX.1 Kontext with Nunchaku/SVDQuant INT4.
+
+    Separate from GGUF pipeline — cached under _instruct_pipes["nunchaku"].
+    """
+    import time as _time
+    global _instruct_pipes
+    if "nunchaku" in _instruct_pipes:
+        logger.info("[KONTEXT-NUNCHAKU] Using cached pipeline")
+        return _instruct_pipes["nunchaku"]
+
+    logger.info("[KONTEXT-NUNCHAKU] Loading nunchaku backend...")
+    _unload_other_pipelines("nunchaku")
+    _evict_ollama_from_gpu()
+    pipe = _load_kontext_nunchaku()
+    _instruct_pipes["nunchaku"] = pipe
+    return pipe
 
 
 def _load_kontext_pipeline() -> Any:
-    """Load FLUX.1 Kontext for 8GB VRAM.
+    """Load FLUX.1 Kontext for 8GB VRAM (GGUF backend).
 
     Memory strategy:
     - T5 encoder: loaded in bf16 on CPU system RAM (~9.5GB RAM, never goes to GPU).
-      Reason: bitsandbytes NF4 quantization cannot be CPU-offloaded (requires CUDA
-      kernels permanently), which breaks enable_model_cpu_offload() and causes the
-      GGUF transformer to stay on CPU → 0% GPU utilization.
-    - GGUF Q4_K_S transformer: stays on CPU until denoising, then cycled to GPU
-      per step via enable_model_cpu_offload hook (~6.7GB peak VRAM per step).
+    - GGUF transformer: stays on CPU until denoising, then cycled to GPU per step.
     - CLIP + VAE: small, moved to GPU normally.
-    Peak VRAM ≈ 7.3GB (transformer + CLIP). Requires ~12GB system RAM.
+    Peak VRAM ≈ 5.5-7.0GB depending on variant. Requires ~12GB system RAM.
     """
     import os
     import time as _time
@@ -672,6 +975,7 @@ def _load_kontext_pipeline() -> Any:
 
     import torch
 
+    logger.info("[KONTEXT] Backend: GGUF")
     logger.info("[KONTEXT] ====== Starting Kontext pipeline load ======")
     _log_vram("Before load")
     _unload_other_pipelines("kontext")
@@ -837,6 +1141,31 @@ def _load_kontext_pipeline() -> Any:
     pipe.vae.enable_slicing()
     pipe.vae.enable_tiling()
     pipe.set_progress_bar_config(disable=True)
+
+    # Attention slicing: process attention in chunks instead of all at once.
+    # Trades ~5-10% speed for lower peak VRAM during the attention computation.
+    # The attention matrix for 768px (2304 image tokens) is ~40MB per head at
+    # bf16. Slicing avoids materializing the full matrix at once, reducing the
+    # activation peak that can push Q4_K_S over the VRAM limit.
+    if _read_env("KONTEXT_ATTENTION_SLICING", "true").lower() in ("1", "true", "yes"):
+        pipe.enable_attention_slicing("auto")
+        logger.info("[KONTEXT] Attention slicing enabled (reduces peak activation VRAM)")
+    else:
+        logger.info("[KONTEXT] Attention slicing disabled")
+
+    # Karras sigmas: concentrate more denoising steps in the low-noise range
+    # where fine details (faces, textures) are formed. At fixed step count,
+    # this can improve quality without speed cost. The scheduler already uses
+    # FlowMatchEulerDiscreteScheduler — karras modifies the sigma distribution.
+    if _read_env("KONTEXT_KARRAS_SIGMAS", "true").lower() in ("1", "true", "yes"):
+        try:
+            pipe.scheduler.config.use_karras_sigmas = True
+            logger.info("[KONTEXT] Karras sigmas enabled (better detail at same step count)")
+        except Exception as _ks_err:
+            logger.info("[KONTEXT] Karras sigmas not supported: %s", _ks_err)
+    else:
+        logger.info("[KONTEXT] Karras sigmas disabled")
+
     logger.info("[KONTEXT] Step 4 done (%.1fs)", _time.monotonic() - t4)
     _log_vram("After device placement")
 
@@ -951,22 +1280,515 @@ def _download_cosxl_model() -> Path:
     return model_path
 
 
+def _run_cosxl_kdiff(
+    pipe: Any,
+    *,
+    prompt: str,
+    image,  # PIL.Image
+    num_inference_steps: int,
+    guidance_scale: float,
+    image_guidance_scale: float,
+    negative_prompt: str,
+    width: int,
+    height: int,
+    generator=None,
+    step_callback=None,
+) -> Any:
+    """k-diffusion-style denoising loop for CosXL Edit.
+
+    Why this exists (instead of just calling pipe.__call__):
+      1. **Manual device staging** — we need per-component GPU/CPU cycling
+         to fit CosXL into 8GB VRAM without accelerate's cpu_offload hooks
+         (which fight our manual staging and interact poorly with
+         `torch.no_grad()` on the VAE encode path).
+      2. **Per-step VRAM + latent logging**, which the stock callback API
+         doesn't expose cleanly for SDXL-InstructPix2Pix. We log std, mean,
+         min, max, NaN/Inf counts, and VRAM on every step.
+      3. **Auditable math** — a readable Euler loop in our source tree is
+         easier to reason about than `scheduler.step()` +
+         `scale_model_input` indirection when debugging.
+
+    **This loop is NOT bypassing a diffusers bug.** An earlier version of
+    this docstring claimed it was fixing a preconditioning issue in
+    `StableDiffusionXLInstructPix2PixPipeline`. That claim was wrong and
+    was disproven by an A/B test (2026-04): with the pre-fixed
+    EDMEulerScheduler + is_cosxl_edit=True pipeline configured in
+    `_load_cosxl_pipeline`, the stock `pipe.__call__` path and this
+    custom kdiff loop produce trajectories that agree to 3+ decimal
+    places on every single sigma, for the same seed and CFG. The two
+    paths are mathematically equivalent. The only *real* bug in the
+    stock diffusers CosXL path is the default scheduler (it ships with
+    `EulerDiscreteScheduler` + epsilon prediction instead of
+    `EDMEulerScheduler` + v_prediction), which we fix in the loader
+    before either denoising path runs.
+
+    Setting `KONTEXT_COSXL_USE_DIFFUSERS=1` routes to stock `pipe.__call__`
+    instead. Both paths now produce equivalent results; the env var is
+    kept for future regression testing.
+
+    The math (verified identical to
+    `pipeline_stable_diffusion_xl_instruct_pix2pix.py:885-922` once the
+    scheduler is fixed):
+
+      - **c_in is applied to the NOISE latents ONLY**, not the image
+        latents. `scale_model_input` in EDMEulerScheduler does
+        `sample * c_in`, then the stock pipeline concatenates the
+        unscaled `image_latents` along the channel dim. At high σ this
+        makes the noise channels tiny but leaves the image channels at
+        full strength — that's how IP2P anchors the output to the input
+        image at the start of denoising. If you c_in-scale both channel
+        groups (as an even earlier version of this loop did), the model
+        loses its image anchor at high σ and completely reimagines the
+        scene.
+
+      - **v-prediction deconditioning:**
+        `x_0 = c_skip * latents + c_out * v_pred` (matches
+        `EDMEulerScheduler.precondition_outputs`).
+
+      - **IP2P CFG:**
+        `v = v_uncond + gs*(v_text - v_image) + igs*(v_image - v_uncond)`.
+
+      - **Euler step, in float32:** `d = (x - denoised)/σ`, `x += d·dt`.
+        The fp32 upcast here is critical — stock
+        `EDMEulerScheduler.step()` upcasts the sample to float32 for
+        this update, and fp16 loses visible precision at low σ
+        (σ≈0.002 at the end).
+
+      - **Timestep passed to UNet:** `0.25 * log(σ)` as a scalar fp32
+        tensor, matching `EDMEulerScheduler.precondition_noise`.
+
+    Reuses the pipe's own encode_prompt / prepare_image_latents / VAE
+    methods so we get identical setup to the stock pipeline — only the
+    memory management and callback instrumentation are different.
+
+    Memory management: calling pipe.unet(...) directly bypasses the
+    accelerate cpu_offload hooks that normally evict components between
+    stages. To prevent VRAM explosions on 8GB cards, we MANUALLY stage
+    each component to CUDA just before use and back to CPU after:
+      1. text_encoder + text_encoder_2 → CUDA → encode_prompt → CPU
+      2. VAE encoder → CUDA → encode image → CPU
+      3. UNet → CUDA → denoising loop (stays on GPU for all steps) → CPU
+      4. VAE decoder → CUDA → decode → CPU
+
+    Also critical: every call that involves VAE or text encoder forward
+    passes (encode_prompt, prepare_image_latents, vae.decode) is wrapped
+    in `torch.no_grad()`. Without this, autograd graph construction on a
+    1024×1024 image spikes VRAM from 0.6 GB to 10 GB (measured), which
+    pages into Windows shared GPU memory and blows step time from 0.9s
+    to 62–70s.
+
+    Returns a PIL.Image of the same size as the input.
+    """
+    import torch
+    import gc
+    from PIL import Image as _PIL_Image
+
+    do_cfg = guidance_scale > 1.0
+    device = torch.device("cuda") if torch.cuda.is_available() else torch.device("cpu")
+
+    def _stage(component_name: str, target_device: torch.device) -> None:
+        """Manually move a pipeline component to the target device.
+
+        This relies on the CosXL loader NOT calling enable_model_cpu_offload —
+        so there are no accelerate hooks to fight. Raw `.to()` on the
+        component actually moves weights and `empty_cache()` reliably reclaims
+        the GPU memory.
+        """
+        comp = getattr(pipe, component_name, None)
+        if comp is None:
+            return
+        try:
+            comp.to(target_device)
+        except Exception as e:
+            logger.warning("[COSXL-KDIFF] Failed to stage %s → %s: %s",
+                           component_name, target_device, e)
+
+    logger.info("[COSXL-KDIFF] Starting custom denoising (EDM-correct preconditioning)")
+    logger.info("[COSXL-KDIFF] device=%s do_cfg=%s steps=%d guidance=%.2f image_guidance=%.2f",
+                device, do_cfg, num_inference_steps, guidance_scale, image_guidance_scale)
+
+    # ── Stage 0: pre-flight reset — ensure clean starting state.
+    # The loader already set all components to CPU and did NOT install
+    # cpu_offload hooks, so this is mostly belt-and-braces in case a
+    # previous run left something stale. Raw `.to()` works here because
+    # there are no accelerate hooks to intercept it.
+    logger.info("[COSXL-KDIFF] Pre-flight: forcing all components to CPU...")
+    _stage("text_encoder", torch.device("cpu"))
+    _stage("text_encoder_2", torch.device("cpu"))
+    _stage("unet", torch.device("cpu"))
+    _stage("vae", torch.device("cpu"))
+    gc.collect()
+    torch.cuda.empty_cache()
+    _log_vram("After pre-flight reset", tag="COSXL-KDIFF")
+
+    # ── Stage 1: text encoders → GPU, encode prompts, evict ──
+    logger.info("[COSXL-KDIFF] Staging text encoders to GPU...")
+    _stage("text_encoder", device)
+    _stage("text_encoder_2", device)
+    _log_vram("After text encoders → GPU", tag="COSXL-KDIFF")
+
+    # torch.no_grad() prevents the text encoders from building up autograd
+    # activation tensors (same issue as VAE: ~1 GB saved at 77 tokens).
+    with torch.no_grad():
+        (
+            prompt_embeds,
+            negative_prompt_embeds,
+            pooled_prompt_embeds,
+            negative_pooled_prompt_embeds,
+        ) = pipe.encode_prompt(
+            prompt=prompt,
+            prompt_2=None,
+            device=device,
+            num_images_per_prompt=1,
+            do_classifier_free_guidance=do_cfg,
+            negative_prompt=negative_prompt,
+        )
+
+    # Evict text encoders — not needed for the rest of inference
+    logger.info("[COSXL-KDIFF] Evicting text encoders back to CPU...")
+    _stage("text_encoder", torch.device("cpu"))
+    _stage("text_encoder_2", torch.device("cpu"))
+    gc.collect()
+    torch.cuda.empty_cache()
+    _log_vram("After text encoders → CPU", tag="COSXL-KDIFF")
+
+    if do_cfg:
+        # InstructPix2Pix-style triple conditioning: [text, image, uncond]
+        prompt_embeds = torch.cat(
+            [prompt_embeds, negative_prompt_embeds, negative_prompt_embeds], dim=0,
+        )
+        add_text_embeds = torch.cat(
+            [pooled_prompt_embeds, negative_pooled_prompt_embeds, negative_pooled_prompt_embeds],
+            dim=0,
+        )
+    else:
+        add_text_embeds = pooled_prompt_embeds
+
+    # ── Stage 2: VAE → GPU, encode image, evict ──
+    logger.info("[COSXL-KDIFF] Staging VAE to GPU for image encoding...")
+    _stage("vae", device)
+    _log_vram("After VAE → GPU", tag="COSXL-KDIFF")
+
+    image_tensor = pipe.image_processor.preprocess(image, height=height, width=width).to(
+        device=device, dtype=prompt_embeds.dtype
+    )
+    # CRITICAL: wrap in torch.no_grad() — the default pipe.prepare_image_latents
+    # does NOT wrap its internal vae.encode() in a no_grad context, so without
+    # this wrapper the VAE encoder builds up ~10 GB of autograd activation
+    # tensors for a 1024x1024 image (even though we never call .backward()).
+    # That 10 GB spike forces pytorch to spill into Windows shared GPU memory
+    # and every subsequent operation becomes PCIe-bound. Diagnosed by
+    # comparing vae.encode() with/without torch.no_grad() on 1024x1024:
+    #   with no_grad:    peak 0.59 GB
+    #   without no_grad: peak 10.13 GB (!)
+    with torch.no_grad():
+        image_latents = pipe.prepare_image_latents(
+            image_tensor,
+            batch_size=1,
+            num_images_per_prompt=1,
+            dtype=prompt_embeds.dtype,
+            device=device,
+            do_classifier_free_guidance=do_cfg,
+        )
+    logger.info("[COSXL-KDIFF] Image latents: shape=%s dtype=%s device=%s",
+                tuple(image_latents.shape), image_latents.dtype, image_latents.device)
+
+    # Evict VAE until we need it again for the final decode
+    logger.info("[COSXL-KDIFF] Evicting VAE back to CPU until final decode...")
+    _stage("vae", torch.device("cpu"))
+    gc.collect()
+    torch.cuda.empty_cache()
+    _log_vram("After VAE → CPU", tag="COSXL-KDIFF")
+
+    # 3. Build SDXL add_time_ids (original_size, crops, target_size)
+    original_size = (height, width)
+    target_size = (height, width)
+    crops_coords_top_left = (0, 0)
+    if pipe.text_encoder_2 is not None:
+        text_encoder_projection_dim = pipe.text_encoder_2.config.projection_dim
+    else:
+        text_encoder_projection_dim = int(pooled_prompt_embeds.shape[-1])
+    add_time_ids = pipe._get_add_time_ids(
+        original_size,
+        crops_coords_top_left,
+        target_size,
+        dtype=prompt_embeds.dtype,
+        text_encoder_projection_dim=text_encoder_projection_dim,
+    ).to(device)
+    if do_cfg:
+        add_time_ids = torch.cat([add_time_ids, add_time_ids, add_time_ids], dim=0)
+
+    # 4. Build the sigma schedule (k-diffusion style: exponential sigmas
+    #    spanning CosXL's trained range 0.002..120).
+    sigma_min = 0.002
+    sigma_max = 120.0
+    # exponential_sigmas: constant ratio r = (sigma_min/sigma_max)^(1/(N-1))
+    steps = num_inference_steps
+    ramp = torch.linspace(0, 1, steps)
+    # log-linear interpolation
+    sigmas = torch.exp(
+        torch.log(torch.tensor(sigma_max)) * (1 - ramp)
+        + torch.log(torch.tensor(sigma_min)) * ramp
+    )
+    # Append a final zero so the last Euler step lands at sigma=0
+    sigmas = torch.cat([sigmas, torch.zeros(1)]).to(device=device, dtype=prompt_embeds.dtype)
+    logger.info(
+        "[COSXL-KDIFF] Sigma schedule (first 5): %s ... (last 3): %s",
+        [f"{float(s):.3f}" for s in sigmas[:5]],
+        [f"{float(s):.3f}" for s in sigmas[-3:]],
+    )
+
+    # 5. Prepare initial latents: x_T = N(0, sigma_max² * I)
+    batch_size = 1
+    num_channels_latents = pipe.vae.config.latent_channels
+    latent_shape = (
+        batch_size,
+        num_channels_latents,
+        height // pipe.vae_scale_factor,
+        width // pipe.vae_scale_factor,
+    )
+    latents = torch.randn(
+        latent_shape,
+        generator=generator,
+        device=device,
+        dtype=prompt_embeds.dtype,
+    ) * sigmas[0]
+    logger.info("[COSXL-KDIFF] Initial latents: shape=%s std=%.3f (should be ~%s)",
+                tuple(latents.shape), float(latents.float().std()), float(sigmas[0]))
+
+    # ── Stage 3: UNet → GPU and keep it there for all denoising steps ──
+    logger.info("[COSXL-KDIFF] Staging UNet to GPU for denoising loop...")
+    _stage("unet", device)
+    _log_vram("After UNet → GPU (ready for denoising)", tag="COSXL-KDIFF")
+
+    # 6. Denoising loop — k-diffusion VDenoiser pattern
+    # For v-prediction with sigma_data=1.0:
+    #   c_skip(sigma) = 1 / (sigma² + 1)
+    #   c_out(sigma)  = -sigma / sqrt(sigma² + 1)
+    #   c_in(sigma)   = 1 / sqrt(sigma² + 1)
+    # The UNet timestep input uses 0.25 * log(sigma) (EDM preconditioning).
+    sigma_data = 1.0
+    for i in range(steps):
+        sigma = sigmas[i]
+        sigma_next = sigmas[i + 1]
+
+        sigma_sq = float(sigma) ** 2
+        c_in = 1.0 / (sigma_sq + sigma_data ** 2) ** 0.5
+        c_skip = sigma_data ** 2 / (sigma_sq + sigma_data ** 2)
+        c_out = -float(sigma) * sigma_data / (sigma_sq + sigma_data ** 2) ** 0.5
+
+        # Apply c_in to the NOISE latents only, NOT the image latents.
+        #
+        # This is deliberately the same as what stock
+        # StableDiffusionXLInstructPix2PixPipeline.__call__ does (see
+        # pipeline_stable_diffusion_xl_instruct_pix2pix.py line 893-894):
+        #
+        #     scaled = scheduler.scale_model_input(latents, t)   # c_in on noise
+        #     scaled = cat([scaled, image_latents], dim=1)       # image untouched
+        #
+        # An earlier version of this function c_in-scaled BOTH channel groups
+        # under the theory that diffusers issue #8356 was about a preconditioning
+        # bug. That was wrong — #8356 is about the scheduler config (epsilon vs
+        # v_prediction, sigma range), which we already fix when constructing
+        # EDMEulerScheduler. The IP2P image latents are SUPPOSED to remain at
+        # full scale at all sigmas: at high σ the c_in-shrunk noise channels
+        # are tiny, so the image latents dominate the input → the model anchors
+        # its prediction to the input image. If you scale the image channels
+        # down by c_in too, both channel groups become tiny at high σ and the
+        # model has no image anchor left, so it falls back to text-only
+        # generation and completely reimagines the scene (ignoring the input
+        # image's composition, subjects, and identity).
+        #
+        # Verified by reading:
+        #  - diffusers/.../pipeline_stable_diffusion_xl_instruct_pix2pix.py:893-894
+        #  - diffusers/.../scheduling_edm_euler.py (scale_model_input → c_in * x only)
+        scaled_latents = latents * c_in
+        if do_cfg:
+            # Expand latents 3x to match the tripled conditioning
+            scaled_latents_in = torch.cat([scaled_latents] * 3, dim=0)
+        else:
+            scaled_latents_in = scaled_latents
+
+        # image_latents was already tripled by prepare_image_latents when do_cfg=True
+        # (it produces [img, img, zero]). Pass it through UNCHANGED — no c_in
+        # scaling here. The uncond slice is zeros, the cond slices are full-scale
+        # scaled VAE latents (is_cosxl_edit=True → multiplied by scaling_factor),
+        # and that's exactly what the UNet was trained on.
+        unet_image_latents = image_latents
+
+        # Concatenate along the channel dim — UNet gets 8 channels now
+        unet_input = torch.cat([scaled_latents_in, unet_image_latents], dim=1)
+
+        # Timestep conditioning: use 0.25 * log(sigma) (EDM c_noise preconditioning).
+        # The SDXL UNet's Timesteps layer uses sinusoidal embeddings so it accepts
+        # floats in any range. This matches what EDMEulerScheduler does internally.
+        #
+        # IMPORTANT: compute and pass the timestep in float32, not fp16. Stock
+        # EDMEulerScheduler stores `self.timesteps` in fp32 (computed from an fp32
+        # sigmas tensor via `precondition_noise`). The sinusoidal time embedding
+        # operates on a narrow value range (~[-1.55, 1.20] for σ ∈ [0.002, 120])
+        # and fp16 quantization of this input can slightly perturb the
+        # high-frequency sinusoidal components used by the UNet's cross-attention,
+        # producing subtle detail artifacts in the output. fp32 here is free —
+        # it's a scalar tensor.
+        c_noise_scalar = 0.25 * float(torch.log(sigma.clamp(min=1e-6).to(torch.float32)))
+        # Pass as a scalar fp32 tensor (matches stock `timesteps[i]` exactly).
+        t_input = torch.tensor(c_noise_scalar, device=device, dtype=torch.float32)
+
+        added_cond_kwargs = {"text_embeds": add_text_embeds, "time_ids": add_time_ids}
+        with torch.no_grad():
+            model_output = pipe.unet(
+                unet_input,
+                t_input,
+                encoder_hidden_states=prompt_embeds,
+                added_cond_kwargs=added_cond_kwargs,
+                return_dict=False,
+            )[0]
+
+        # CFG combination (InstructPix2Pix style) — done in fp16 to match
+        # stock diffusers' `__call__` loop.
+        if do_cfg:
+            v_text, v_image, v_uncond = model_output.chunk(3)
+            model_output = (
+                v_uncond
+                + guidance_scale * (v_text - v_image)
+                + image_guidance_scale * (v_image - v_uncond)
+            )
+        # else: model_output is already the single prediction
+
+        # ── v-prediction deconditioning + Euler step, IN FLOAT32 ──
+        #
+        # This matches EDMEulerScheduler.step():
+        #     sample = sample.to(torch.float32)
+        #     pred_original_sample = c_skip * sample + c_out * model_output
+        #     derivative = (sample - pred_original_sample) / sigma_hat
+        #     dt = sigmas[step+1] - sigma_hat
+        #     prev_sample = sample + derivative * dt
+        #     prev_sample = prev_sample.to(model_output.dtype)
+        #
+        # Why this matters: at low sigmas (late steps), (latents - denoised)
+        # is small and σ is also small (~0.002 at the end). Dividing two
+        # small-magnitude fp16 numbers loses multiple bits of precision per
+        # step, and the errors accumulate into visible artifacts — warped
+        # anatomy, smeared fine details, blocky textures. Upcasting to fp32
+        # for the scheduler step is what the stock diffusers scheduler
+        # always does, and we need to do the same. The UNet forward pass
+        # and CFG combination stay in fp16 (no reason to pay the latency
+        # cost there — the UNet is precision-stable).
+        latents_f32 = latents.to(torch.float32)
+        model_output_f32 = model_output.to(torch.float32)
+        sigma_f = float(sigma)
+        sigma_next_f = float(sigma_next)
+
+        denoised_f32 = c_skip * latents_f32 + c_out * model_output_f32
+        d_f32 = (latents_f32 - denoised_f32) / max(sigma_f, 1e-6)
+        dt_f32 = sigma_next_f - sigma_f
+        latents = (latents_f32 + d_f32 * dt_f32).to(prompt_embeds.dtype)
+
+        # Keep `denoised` available in fp16 for the step callback (it
+        # expects a value in the same space as `latents`, for stat logging).
+        denoised = denoised_f32.to(prompt_embeds.dtype)
+
+        # Step callback for logging
+        if step_callback is not None:
+            try:
+                step_callback(i, float(sigma), latents)
+            except Exception:
+                pass
+
+    # ── Stage 4: UNet → CPU (done with it), VAE → GPU for decode ──
+    logger.info("[COSXL-KDIFF] Evicting UNet back to CPU...")
+    _stage("unet", torch.device("cpu"))
+    gc.collect()
+    torch.cuda.empty_cache()
+    _log_vram("After UNet → CPU", tag="COSXL-KDIFF")
+
+    logger.info("[COSXL-KDIFF] Staging VAE to GPU for final decode...")
+    _stage("vae", device)
+    _log_vram("After VAE → GPU (ready for decode)", tag="COSXL-KDIFF")
+
+    # 7. VAE-decode the final latents to a PIL image
+    latents_for_decode = latents / pipe.vae.config.scaling_factor
+    # Upcast VAE if needed for stability
+    needs_upcasting = pipe.vae.dtype == torch.float16 and pipe.vae.config.force_upcast
+    if needs_upcasting:
+        pipe.upcast_vae()
+        latents_for_decode = latents_for_decode.to(next(iter(pipe.vae.post_quant_conv.parameters())).dtype)
+    with torch.no_grad():
+        decoded = pipe.vae.decode(latents_for_decode, return_dict=False)[0]
+    if needs_upcasting:
+        pipe.vae.to(dtype=torch.float16)
+
+    # Final eviction — return VAE to CPU so the cached pipeline is idle
+    logger.info("[COSXL-KDIFF] Final eviction: VAE → CPU...")
+    _stage("vae", torch.device("cpu"))
+    gc.collect()
+    torch.cuda.empty_cache()
+    _log_vram("After final eviction (all components on CPU)", tag="COSXL-KDIFF")
+
+    image_out = pipe.image_processor.postprocess(decoded, output_type="pil")[0]
+    logger.info("[COSXL-KDIFF] Custom denoising loop complete, decoded to PIL %s",
+                image_out.size)
+    return image_out
+
+
 def _load_cosxl_pipeline() -> Any:
-    """Load CosXL Edit as SDXL InstructPix2Pix pipeline."""
+    """Load CosXL Edit as SDXL InstructPix2Pix pipeline.
+
+    Critical setup (each a known footgun — see [COSXL] logs for verification):
+
+    1. `is_cosxl_edit = True` — without this, image latents are NOT scaled
+       by the VAE scaling_factor, producing rainbow/red noise output.
+       `from_single_file` does NOT pass this to __init__, so we set it
+       manually AND re-verify before every inference.
+
+    2. `EDMEulerScheduler` (sigma-based) instead of the default beta-based
+       EulerDiscreteScheduler. CosXL uses EDM noise schedules from the
+       Karras paper; a standard scheduler produces garbled output because
+       the sigma→timestep mapping is wrong.
+
+    3. `num_in_channels=8` on the UNet (vs standard SDXL's 4). CosXL
+       concatenates edit-image latents with noise latents along the
+       channel dim — if num_in_channels is 4, the pipeline silently
+       mis-interprets inputs.
+
+    4. `madebyollin/sdxl-vae-fp16-fix` VAE — the stock SDXL VAE has fp16
+       overflow issues that produce NaN latents on some images.
+    """
+    import time as _time
     global _instruct_pipes
     if "cosxl" in _instruct_pipes:
+        logger.info("[COSXL] Using cached pipeline")
         return _instruct_pipes["cosxl"]
 
     import torch
+    logger.info("[COSXL] ====== Starting CosXL pipeline load ======")
+    _log_vram("Before load", tag="COSXL")
     _unload_other_pipelines("cosxl")
+    _evict_ollama_from_gpu()
+    _log_vram("After unload + Ollama eviction", tag="COSXL")
 
-    from diffusers import StableDiffusionXLInstructPix2PixPipeline, AutoencoderKL, EDMDPMSolverMultistepScheduler
+    from diffusers import StableDiffusionXLInstructPix2PixPipeline, AutoencoderKL
 
+    t0 = _time.monotonic()
+
+    # Step 0: Download CosXL checkpoint (no-op if cached)
+    logger.info("[COSXL] Step 0: Checking/downloading CosXL edit checkpoint...")
     model_path = _download_cosxl_model()
+    logger.info("[COSXL] Step 0 done: model at %s (%.1fs)", model_path, _time.monotonic() - t0)
 
-    # Use fp16-fix VAE for stability
-    logger.info("Loading CosXL Edit pipeline...")
+    # Step 1: Load fp16-stable VAE (critical — stock SDXL VAE overflows at fp16)
+    t1 = _time.monotonic()
+    logger.info("[COSXL] Step 1: Loading madebyollin/sdxl-vae-fp16-fix (stable at fp16)...")
     vae = AutoencoderKL.from_pretrained("madebyollin/sdxl-vae-fp16-fix", torch_dtype=torch.float16)
+    logger.info("[COSXL] Step 1 done: VAE loaded, scaling_factor=%.4f, dtype=%s (%.1fs)",
+                float(vae.config.scaling_factor), vae.dtype, _time.monotonic() - t1)
+
+    # Step 2: Load CosXL UNet from single file with num_in_channels=8
+    # The '8' is critical — CosXL's UNet concatenates edit-image latents
+    # with noise latents along the channel dim. Standard SDXL UNet is 4ch.
+    t2 = _time.monotonic()
+    logger.info("[COSXL] Step 2: Loading CosXL UNet from single_file (num_in_channels=8, fp16)...")
     pipe = StableDiffusionXLInstructPix2PixPipeline.from_single_file(
         str(model_path),
         config="diffusers/sdxl-instructpix2pix-768",
@@ -974,168 +1796,136 @@ def _load_cosxl_pipeline() -> Any:
         torch_dtype=torch.float16,
         num_in_channels=8,
     )
-    # CRITICAL: from_single_file does NOT pass is_cosxl_edit to __init__.
-    # Without this, image latents aren't scaled by VAE scaling_factor,
-    # producing completely distorted/rainbow output.
+    logger.info("[COSXL] Step 2 done: pipeline assembled (%.1fs)", _time.monotonic() - t2)
+    logger.info("[COSXL] UNet config: in_channels=%d (MUST be 8), sample_size=%s, cross_attention_dim=%s",
+                pipe.unet.config.in_channels,
+                getattr(pipe.unet.config, 'sample_size', '?'),
+                getattr(pipe.unet.config, 'cross_attention_dim', '?'))
+    if pipe.unet.config.in_channels != 8:
+        logger.warning("[COSXL] UNet in_channels=%d but expected 8. "
+                       "The single_file loader may have ignored num_in_channels. "
+                       "Output will be garbled.", pipe.unet.config.in_channels)
+
+    # Step 3: Set is_cosxl_edit = True (THIS FLAG IS WHY CosXL EXISTS)
+    logger.info("[COSXL] Step 3: Setting is_cosxl_edit=True (enables VAE scaling_factor on image latents)...")
     pipe.is_cosxl_edit = True
-    # CosXL uses EDM noise schedule (sigma-based), NOT standard beta-based schedulers.
-    # Using EulerDiscreteScheduler produces garbled red/orange noise on real photographs.
-    # from_config preserves the model's own scheduling parameters.
+    logger.info("[COSXL] is_cosxl_edit verified: %s", pipe.is_cosxl_edit)
+
+    # Step 4: Scheduler for CosXL Edit.
+    #
+    # CosXL Edit's checkpoint metadata says:
+    #   modelspec.description: "... Cosine-Continuous EDM VPred schedule ..."
+    #   edm_vpred.sigma_max: 120.0
+    #   edm_vpred.sigma_min: 0.002
+    #
+    # So it's a true EDM v-prediction model trained with sigma ∈ [0.002, 120].
+    # The correct scheduler is EDMEulerScheduler with those exact params
+    # (plus sigma_data=1.0 and the exponential schedule to match the
+    # k-diffusion-style training trajectory).
+    #
+    # The *default* scheduler that diffusers loads from the checkpoint —
+    # `EulerDiscreteScheduler` with epsilon prediction and beta schedule —
+    # is wrong for this model: the sigma range (14.6→0) doesn't match
+    # CosXL's training range (120→0.002), and epsilon vs v_prediction
+    # gives the wrong deconditioning formula. Under that default, latents
+    # either plateau early or diverge after step ~14, producing garbled
+    # output. This is a known diffusers issue (huggingface/diffusers#8356),
+    # and it is strictly a scheduler config bug — NOT a preconditioning bug.
+    # Once the scheduler is fixed (as we do here), the stock
+    # `StableDiffusionXLInstructPix2PixPipeline.__call__` path and our
+    # custom kdiff loop produce identical trajectories (verified by A/B
+    # test to 3 decimal places on every sigma).
+    #
+    # History note: an earlier comment here claimed the diffusers pipeline
+    # had a secondary "c_in-on-image-latents" preconditioning bug. It does
+    # not — c_in is supposed to apply to noise only, not image latents,
+    # and both paths do that correctly. The entire CosXL bug surface in
+    # diffusers is this one scheduler config issue, which we fix below.
+    t4 = _time.monotonic()
+    old_scheduler_name = type(pipe.scheduler).__name__
+    logger.info(
+        "[COSXL] Step 4: Swapping scheduler %s → EDMEulerScheduler "
+        "(v_prediction, exponential, sigma_min=0.002, sigma_max=120, sigma_data=1.0 "
+        "per checkpoint edm_vpred metadata)...",
+        old_scheduler_name,
+    )
     from diffusers import EDMEulerScheduler
-    pipe.scheduler = EDMEulerScheduler.from_config(pipe.scheduler.config)
-    pipe.enable_model_cpu_offload()
+    pipe.scheduler = EDMEulerScheduler(
+        sigma_min=0.002,
+        sigma_max=120.0,
+        sigma_data=1.0,
+        prediction_type="v_prediction",
+        sigma_schedule="exponential",
+    )
+    new_scheduler_name = type(pipe.scheduler).__name__
+    logger.info(
+        "[COSXL] Step 4 done: scheduler=%s prediction_type=%s sigma_min=%s sigma_max=%s "
+        "sigma_data=%s sigma_schedule=%s (%.1fs)",
+        new_scheduler_name,
+        getattr(pipe.scheduler.config, "prediction_type", "?"),
+        getattr(pipe.scheduler.config, "sigma_min", "?"),
+        getattr(pipe.scheduler.config, "sigma_max", "?"),
+        getattr(pipe.scheduler.config, "sigma_data", "?"),
+        getattr(pipe.scheduler.config, "sigma_schedule", "?"),
+        _time.monotonic() - t4,
+    )
+    if new_scheduler_name != "EDMEulerScheduler":
+        logger.error("[COSXL] Scheduler swap FAILED — still %s", new_scheduler_name)
+    if getattr(pipe.scheduler.config, "prediction_type", None) != "v_prediction":
+        logger.error(
+            "[COSXL] prediction_type=%s but CosXL requires 'v_prediction'",
+            getattr(pipe.scheduler.config, "prediction_type", "?"),
+        )
+
+    # Step 5: Configure VAE (no cpu_offload — the custom k-diff denoising
+    # loop manages device placement manually by staging each component to
+    # GPU just before use and back to CPU after. Adding cpu_offload hooks
+    # here would interfere with that staging because the hooks intercept
+    # .to() calls and keep stale weight copies around. In A/B fallback mode
+    # (KONTEXT_COSXL_USE_DIFFUSERS=1), cpu_offload is re-enabled dynamically
+    # in the inference path — see the `_inference_path` branch).
+    t5 = _time.monotonic()
+    logger.info("[COSXL] Step 5: Configuring VAE slicing/tiling (no cpu_offload; "
+                "kdiff loop manages devices manually)...")
     pipe.vae.enable_slicing()
     pipe.vae.enable_tiling()
     pipe.set_progress_bar_config(disable=True)
+    # Start all components on CPU for a clean baseline
+    for _name in ("text_encoder", "text_encoder_2", "unet", "vae"):
+        _c = getattr(pipe, _name, None)
+        if _c is not None:
+            try:
+                _c.to("cpu")
+            except Exception:
+                pass
+    logger.info("[COSXL] Step 5 done: all components on CPU, no offload hooks (%.1fs)",
+                _time.monotonic() - t5)
+    _log_vram("After baseline setup (no offload)", tag="COSXL")
+
+    # Log final component placements + dtypes
+    for comp_name in ("text_encoder", "text_encoder_2", "unet", "vae"):
+        comp = getattr(pipe, comp_name, None)
+        if comp is not None and hasattr(comp, "device"):
+            logger.info("[COSXL] Component '%s' device=%s dtype=%s",
+                        comp_name, comp.device, getattr(comp, 'dtype', '?'))
 
     _instruct_pipes["cosxl"] = pipe
-    logger.info("CosXL Edit pipeline loaded (fp16, CPU offload)")
-    return pipe
-
-
-# ── ControlNet img2img Pipeline (Structure Preservation) ────────
-
-def _load_controlnet_pipeline(control_type: str = "depth") -> Any:
-    """Load SD 1.5 + ControlNet (depth or canny) for img2img editing."""
-    global _instruct_pipes
-    cache_key = f"controlnet_{control_type}"
-    if cache_key in _instruct_pipes:
-        return _instruct_pipes[cache_key]
-
-    import torch
-    _unload_other_pipelines(cache_key)
-
-    from diffusers import StableDiffusionControlNetImg2ImgPipeline, ControlNetModel
-
-    if control_type == "canny":
-        controlnet_repo = "lllyasviel/control_v11p_sd15_canny"
-    else:
-        controlnet_repo = "lllyasviel/control_v11f1p_sd15_depth"
-
-    logger.info("Loading ControlNet (%s) + SD 1.5 pipeline...", control_type)
-    try:
-        controlnet = ControlNetModel.from_pretrained(
-            controlnet_repo, torch_dtype=torch.float16,
-        )
-        pipe = StableDiffusionControlNetImg2ImgPipeline.from_pretrained(
-            "runwayml/stable-diffusion-v1-5",
-            controlnet=controlnet,
-            torch_dtype=torch.float16,
-            safety_checker=None,
-        )
-    except Exception as e:
-        raise RuntimeError(
-            f"Failed to load ControlNet ({control_type}) pipeline: {e}. "
-            "Check your internet connection and disk space."
-        )
-    pipe.enable_model_cpu_offload()
-    pipe.set_progress_bar_config(disable=True)
-    try:
-        pipe.vae.enable_slicing()
-        pipe.vae.enable_tiling()
-    except Exception:
-        pass
-
-    _instruct_pipes[cache_key] = pipe
-    logger.info("ControlNet %s + SD 1.5 pipeline loaded (fp16, CPU offload)", control_type)
-    return pipe
-
-
-def _get_canny_edges(image: Image.Image) -> Image.Image:
-    """Extract Canny edges from image for ControlNet conditioning."""
-    import cv2
-    arr = np.array(image.convert("RGB"))
-    gray = cv2.cvtColor(arr, cv2.COLOR_RGB2GRAY)
-    edges = cv2.Canny(gray, 100, 200)
-    edges_rgb = cv2.cvtColor(edges, cv2.COLOR_GRAY2RGB)
-    return Image.fromarray(edges_rgb)
-
-
-def _get_depth_image(image: Image.Image) -> Image.Image:
-    """Generate depth map image for ControlNet conditioning.
-
-    Uses existing Depth Anything v2 ONNX or MiDaS fallback.
-    """
-    import cv2
-    arr = np.array(image.convert("RGB"))
-    h, w = arr.shape[:2]
-    depth = _get_depth_map(arr, h, w)
-    if depth is None:
-        raise RuntimeError(
-            "Could not generate depth map — no depth model available. "
-            "The Depth Anything v2 ONNX model will be downloaded on first use. "
-            "Alternatively, use control_type='canny' which has no extra dependencies."
-        )
-    # Convert to 3-channel image (ControlNet expects RGB)
-    depth_uint8 = (depth * 255).astype(np.uint8)
-    depth_rgb = cv2.cvtColor(depth_uint8, cv2.COLOR_GRAY2RGB)
-    return Image.fromarray(depth_rgb)
-
-
-# ── InstructPix2Pix Pipeline (Legacy) ───────────────────────────
-
-def _load_pix2pix_pipeline() -> Any:
-    """Load and cache the InstructPix2Pix pipeline (SD 1.5)."""
-    global _instruct_pipes
-    if "pix2pix" in _instruct_pipes:
-        return _instruct_pipes["pix2pix"]
-
-    import torch
-    _unload_other_pipelines("pix2pix")
-
-    spec = INSTRUCT_MODELS["pix2pix"]
-    device = "cuda" if torch.cuda.is_available() else "cpu"
-    dtype = torch.float16 if device == "cuda" else torch.float32
-
-    from diffusers import StableDiffusionInstructPix2PixPipeline
-    pipe = StableDiffusionInstructPix2PixPipeline.from_pretrained(
-        spec["repo"],
-        torch_dtype=dtype,
-        safety_checker=None,
-        feature_extractor=None,
+    logger.info(
+        "[COSXL] ====== Pipeline ready — %s, is_cosxl_edit=%s, unet.in_channels=%d, fp16 (total: %.1fs) ======",
+        new_scheduler_name, pipe.is_cosxl_edit, pipe.unet.config.in_channels, _time.monotonic() - t0,
     )
-
-    # DPMSolverMultistep: best quality/speed tradeoff, converges in 15-20 steps
-    try:
-        from diffusers import DPMSolverMultistepScheduler
-        pipe.scheduler = DPMSolverMultistepScheduler.from_config(pipe.scheduler.config)
-        logger.info("Using DPMSolverMultistepScheduler (optimal for 20-step inference)")
-    except Exception:
-        try:
-            from diffusers import EulerAncestralDiscreteScheduler
-            pipe.scheduler = EulerAncestralDiscreteScheduler.from_config(pipe.scheduler.config)
-            logger.info("Fallback: EulerAncestralDiscreteScheduler")
-        except Exception:
-            pass
-
-    pipe.set_progress_bar_config(disable=True)
-    if device == "cuda":
-        pipe.enable_model_cpu_offload()
-        try:
-            pipe.enable_xformers_memory_efficient_attention()
-            logger.info("Using xformers memory-efficient attention")
-        except Exception:
-            try:
-                from diffusers.models.attention_processor import AttnProcessor2_0
-                pipe.unet.set_attn_processor(AttnProcessor2_0())
-                logger.info("Using PyTorch SDPA attention")
-            except Exception:
-                try:
-                    pipe.enable_attention_slicing(1)
-                    logger.info("Using attention slicing fallback")
-                except Exception:
-                    pass
-        try:
-            pipe.vae.enable_slicing()
-            pipe.vae.enable_tiling()
-        except Exception:
-            pass
-    else:
-        pipe = pipe.to(device)
-
-    _instruct_pipes["pix2pix"] = pipe
-    logger.info("InstructPix2Pix pipeline loaded on %s", device)
+    logger.info(
+        "[COSXL] Inference path: custom k-diffusion-style loop. "
+        "Mathematically equivalent to stock pipe.__call__ (verified bit-identical "
+        "to 3 decimal places over all sigmas in A/B testing), but uses manual "
+        "device staging for 8GB VRAM management and provides per-step latent "
+        "instrumentation. Set KONTEXT_COSXL_USE_DIFFUSERS=1 to route through "
+        "stock pipe.__call__ instead (regression test path)."
+    )
     return pipe
+
+
+# ── (ControlNet and InstructPix2Pix removed — only Kontext, Nunchaku, CosXL remain) ──
 
 
 # ── Unified Pipeline Loader ─────────────────────────────────────
@@ -1146,11 +1936,6 @@ def _load_instruct_pipeline(model: str) -> Any:
         return _load_kontext_pipeline()
     elif model == "cosxl":
         return _load_cosxl_pipeline()
-    elif model == "pix2pix":
-        return _load_pix2pix_pipeline()
-    elif model == "controlnet":
-        # Default to depth; actual control_type is handled in instruct_edit
-        return _load_controlnet_pipeline("depth")
     else:
         raise ValueError(f"Unknown instruct-edit model: {model}. Available: {list(INSTRUCT_MODELS.keys())}")
 
@@ -1158,39 +1943,34 @@ def _load_instruct_pipeline(model: str) -> Any:
 def instruct_edit(
     image: Image.Image,
     instruction: str,
-    model: str = "pix2pix",
+    model: str = "kontext",
     steps: int = 0,
     image_guidance: float = 0,
     guidance: float = 0,
     negative_prompt: str = "",
+    seed: int | None = None,
+    true_cfg_scale: float = 1.0,
+    # Legacy params kept for API compat but unused now
     passes: int = 1,
     preserve_color: float = 0.0,
     strength: float = 0.0,
     control_type: str = "depth",
     conditioning_scale: float = 0.9,
-    seed: int | None = None,
-    true_cfg_scale: float = 1.0,
 ) -> Image.Image:
-    """Edit image using one of 4 models:
+    """Edit image using one of 3 models:
 
-    - "kontext": FLUX.1 Kontext dev (GGUF Q4) — best quality, instruction-based
-    - "cosxl":   CosXL Edit (SDXL) — good quality, instruction-based, faster
-    - "pix2pix": InstructPix2Pix (SD 1.5) — fastest, legacy
-    - "controlnet": SD 1.5 + ControlNet — structure-preserving, prompt describes desired result
+    - "kontext":   FLUX.1 Kontext dev (GGUF Q4) — best quality, instruction-based
+    - "nunchaku":  FLUX.1 Kontext dev (SVDQuant INT4) — same model, ~3-7× faster than GGUF
+    - "cosxl":     CosXL Edit (SDXL) — good quality, instruction-based, faster
 
     Parameters:
-    - instruction: editing command ("make it sunset") or description for controlnet ("a sunset scene")
-    - model: "kontext", "cosxl", "pix2pix", or "controlnet"
+    - instruction: editing command ("make it sunset")
+    - model: "kontext", "nunchaku", or "cosxl"
     - guidance: text guidance scale (model-dependent defaults)
-    - image_guidance: image preservation (IP2P/CosXL only)
+    - image_guidance: image preservation (CosXL only)
     - steps: inference steps (model-dependent defaults)
     - negative_prompt: what to avoid. For Kontext, ONLY effective when
       true_cfg_scale > 1.0 (otherwise the distilled guidance ignores it).
-    - passes: 1-3, progressive refinement (IP2P only)
-    - preserve_color: 0.0-0.5, blend original colors in LAB space (IP2P only)
-    - strength: denoising strength 0.0-1.0 (ControlNet only, default 0.5)
-    - control_type: "depth" or "canny" (ControlNet only)
-    - conditioning_scale: ControlNet conditioning weight (ControlNet only, default 0.9)
     - seed: random seed for reproducibility. None = random each call. Pass the
       same int to reproduce a previous result exactly (for A/B testing
       guidance/steps without seed variance noise).
@@ -1203,7 +1983,7 @@ def instruct_edit(
     if not instruction or not instruction.strip():
         raise ValueError("Edit instruction cannot be empty. Describe what you want to change.")
 
-    spec = INSTRUCT_MODELS.get(model, INSTRUCT_MODELS["pix2pix"])
+    spec = INSTRUCT_MODELS.get(model, INSTRUCT_MODELS["kontext"])
     actual_steps = steps if steps > 0 else spec["default_steps"]
     actual_guidance = guidance if guidance > 0 else spec["default_guidance"]
 
@@ -1213,10 +1993,21 @@ def instruct_edit(
     # Model-specific error hints for better user messages
     _MODEL_HINTS = {
         "kontext": "Requires: diffusers>=0.35.0, pip install gguf, HF_TOKEN set, ~7GB VRAM, ~12GB system RAM (T5 on CPU)",
+        "nunchaku": "Requires: nunchaku-ai wheel (from GitHub releases), CUDA 12.x toolkit, ~7GB download, ~12GB system RAM",
         "cosxl": "Requires: HF_TOKEN set, ~8GB VRAM, first use downloads ~6.5GB",
-        "pix2pix": "Requires: ~4GB VRAM, first use downloads ~4GB",
-        "controlnet": "Requires: ~4GB VRAM, depth model for depth mode",
     }
+
+    # ── Nunchaku: use same Kontext inference logic but different pipeline loader ──
+    if model == "nunchaku":
+        # Nunchaku shares ALL inference logic with Kontext (same FluxKontextPipeline,
+        # same scheduler, same parameters). Only the pipeline loader differs.
+        model = "kontext"  # fall through to kontext inference block below
+        spec = INSTRUCT_MODELS["nunchaku"]
+        actual_steps = steps if steps > 0 else spec["default_steps"]
+        actual_guidance = guidance if guidance > 0 else spec["default_guidance"]
+        _nunchaku_mode = True
+    else:
+        _nunchaku_mode = False
 
     # ── FLUX Kontext (GGUF Q4 transformer on GPU, T5 on CPU) ──
     if model == "kontext":
@@ -1224,15 +2015,20 @@ def instruct_edit(
             import time as _time_k
             import torch
             from PIL import Image as _PIL_Image
-            logger.info("[KONTEXT] ====== Starting edit ======")
-            logger.info("[KONTEXT] Instruction: '%s'", instruction[:100])
-            logger.info("[KONTEXT] Params: steps=%d, guidance=%.1f, input_size=%dx%d",
-                        actual_steps, actual_guidance, image.size[0], image.size[1])
+            _tag = "KONTEXT-NUNCHAKU" if _nunchaku_mode else "KONTEXT"
+            logger.info("[%s] ====== Starting edit ======", _tag)
+            logger.info("[%s] Instruction: '%s'", _tag, instruction[:100])
+            logger.info("[%s] Params: steps=%d, guidance=%.1f, input_size=%dx%d",
+                        _tag, actual_steps, actual_guidance, image.size[0], image.size[1])
 
             t_load = _time_k.monotonic()
             with _kontext_lock:
-                pipe = _load_kontext_pipeline()
-            logger.info("[KONTEXT] Pipeline ready (%.1fs)", _time_k.monotonic() - t_load)
+                if _nunchaku_mode:
+                    logger.info("[%s] Backend: nunchaku (SVDQuant INT4)", _tag)
+                    pipe = _load_nunchaku_pipeline()
+                else:
+                    pipe = _load_kontext_pipeline()
+            logger.info("[%s] Pipeline ready (%.1fs)", _tag, _time_k.monotonic() - t_load)
             _log_vram("Before inference")
 
             # Resize input image to fit in 8GB VRAM.
@@ -1249,7 +2045,7 @@ def instruct_edit(
             # cost drops by ~3.2× on top of the paging elimination.
             original_rgb = image.convert("RGB")
             orig_w, orig_h = original_rgb.size
-            MAX_SIDE = 768
+            MAX_SIDE = int(_read_env("KONTEXT_MAX_SIDE", "768"))
             if orig_w > MAX_SIDE or orig_h > MAX_SIDE:
                 scale = min(MAX_SIDE / orig_w, MAX_SIDE / orig_h)
                 new_w = max(64, (int(orig_w * scale) // 64) * 64)
@@ -1571,6 +2367,37 @@ def instruct_edit(
             except Exception as _hook_err:
                 logger.info("[KONTEXT DEBUG] Could not install T5 diagnostic hook: %s", _hook_err)
 
+            # ── Optimization: empty_cache() after each text encoder ──
+            # With enable_model_cpu_offload(), accelerate moves each component
+            # to CPU after its forward pass. BUT PyTorch's CUDA allocator still
+            # holds the freed memory blocks in its internal cache (fragmented).
+            # Calling empty_cache() forces these blocks back to the driver so
+            # the transformer has a clean, contiguous pool to work with.
+            # CLIP (~0.5GB) + T5 activations → reclaimed before denoising starts.
+            _cleanup_handles = []
+            def _make_cache_cleanup_hook(comp_name):
+                _fired = [False]
+                def _hook(module, args, kwargs, output):
+                    if not _fired[0]:
+                        _fired[0] = True
+                        torch.cuda.empty_cache()
+                        logger.info("[KONTEXT] empty_cache() after %s forward — freed allocator blocks", comp_name)
+                    return output
+                return _hook
+            try:
+                if hasattr(pipe, "text_encoder") and pipe.text_encoder is not None:
+                    _h = pipe.text_encoder.register_forward_hook(
+                        _make_cache_cleanup_hook("CLIP"), with_kwargs=True)
+                    _cleanup_handles.append(_h)
+                if hasattr(pipe, "text_encoder_2") and pipe.text_encoder_2 is not None:
+                    _h = pipe.text_encoder_2.register_forward_hook(
+                        _make_cache_cleanup_hook("T5"), with_kwargs=True)
+                    _cleanup_handles.append(_h)
+                if _cleanup_handles:
+                    logger.info("[KONTEXT] Installed %d cache-cleanup hooks (CLIP, T5)", len(_cleanup_handles))
+            except Exception as _ch_err:
+                logger.info("[KONTEXT] Could not install cache-cleanup hooks: %s", _ch_err)
+
             # Log exactly what goes into pipe() for audit
             logger.info(
                 "[KONTEXT DEBUG] pipe() kwargs: prompt=%r len=%d, guidance=%.2f, steps=%d, "
@@ -1580,6 +2407,10 @@ def instruct_edit(
                 _kontext_pipe_kwargs["width"], _kontext_pipe_kwargs["height"],
                 original_rgb.mode,
             )
+
+            # Pre-inference cache flush: release any stale PyTorch allocator
+            # blocks so the denoising loop starts with maximum contiguous VRAM.
+            torch.cuda.empty_cache()
 
             with _sdp_ctx, _cache_ctx:
                 result = pipe(**_kontext_pipe_kwargs).images[0]
@@ -1591,6 +2422,18 @@ def instruct_edit(
                     _t5_diag_handle[0][1].remove()
                 except Exception:
                     pass
+            # Remove cache-cleanup hooks
+            for _ch in _cleanup_handles:
+                try:
+                    _ch.remove()
+                except Exception:
+                    pass
+
+            # Post-inference empty_cache: free activations/intermediates from the
+            # denoising loop and VAE decode before returning. Prevents fragmented
+            # VRAM from accumulating across successive edits.
+            torch.cuda.empty_cache()
+
             total_infer = _time_k.monotonic() - t_infer
             logger.info("[KONTEXT] Inference complete (%.1fs)", total_infer)
             _log_vram("After inference")
@@ -1612,315 +2455,819 @@ def instruct_edit(
                                    _mean)
 
             logger.info("[KONTEXT] ====== Edit complete ======")
+            # Restart Ollama in background so chat works again
+            if _read_env("KONTEXT_KILL_OLLAMA", "true").lower() in ("1", "true", "yes"):
+                _restart_ollama_service()
             return result
         except (ValueError, RuntimeError):
+            # Restart Ollama even on error so chat isn't permanently broken
+            if _read_env("KONTEXT_KILL_OLLAMA", "true").lower() in ("1", "true", "yes"):
+                _restart_ollama_service()
             raise
         except Exception as e:
+            if _read_env("KONTEXT_KILL_OLLAMA", "true").lower() in ("1", "true", "yes"):
+                _restart_ollama_service()
             logger.error("[KONTEXT] Edit failed: %s", e, exc_info=True)
             raise RuntimeError(f"Kontext edit failed: {e}. {_MODEL_HINTS['kontext']}")
 
     # ── CosXL Edit ────────────────────────────────────────────────
     if model == "cosxl":
         try:
+            import time as _time_c
+            import torch
+            from PIL import Image as _PIL_Image
+            logger.info("[COSXL] ====== Starting edit ======")
+            logger.info("[COSXL] Instruction: '%s'", instruction[:100])
+            logger.info("[COSXL] Params requested: steps=%d, guidance=%.1f, image_guidance=%.1f, input_size=%dx%d",
+                        actual_steps, actual_guidance, image_guidance, image.size[0], image.size[1])
+
+            t_load = _time_c.monotonic()
             with _cosxl_lock:
                 pipe = _load_cosxl_pipeline()
+            logger.info("[COSXL] Pipeline ready (%.1fs)", _time_c.monotonic() - t_load)
+            _log_vram("Before inference", tag="COSXL")
 
-            # Ensure is_cosxl_edit is ALWAYS True before inference.
+            # CRITICAL: re-verify every setting that matters for CosXL output
+            # correctness AND self-heal any stale cached pipeline that was built
+            # before a recent loader fix.
+            #
+            # Why self-heal: `_instruct_pipes["cosxl"]` persists across inferences
+            # until the process restarts. If we change how the loader builds the
+            # pipeline (e.g. switch EDMEulerScheduler.from_config → explicit args),
+            # cached pipelines from before the change still carry the old config.
+            # The user would need to remember to restart the server every time a
+            # loader bug is fixed. Instead, we re-apply the critical settings
+            # BEFORE every inference and rebuild broken components in-place.
             pipe.is_cosxl_edit = True
-            logger.info("CosXL: is_cosxl_edit=%s, unet.in_channels=%s, scheduler=%s, dtype=%s",
-                        pipe.is_cosxl_edit,
-                        getattr(pipe.unet.config, 'in_channels', '?'),
-                        type(pipe.scheduler).__name__,
-                        pipe.dtype)
+            _scheduler_name = type(pipe.scheduler).__name__
+            _unet_in_channels = getattr(pipe.unet.config, 'in_channels', None)
+
+            # Read the actual scheduler config — not just the class name —
+            # so we catch the "right class, wrong config params" footgun.
+            _sched_pred_type = getattr(pipe.scheduler.config, "prediction_type", None)
+            _sched_sigma_min = getattr(pipe.scheduler.config, "sigma_min", None)
+            _sched_sigma_max = getattr(pipe.scheduler.config, "sigma_max", None)
+            _sched_sigma_data = getattr(pipe.scheduler.config, "sigma_data", None)
+            _sched_sigma_schedule = getattr(pipe.scheduler.config, "sigma_schedule", None)
+
+            logger.info(
+                "[COSXL] Pre-inference critical flags: is_cosxl_edit=%s, scheduler=%s, "
+                "unet.in_channels=%s, pipe.dtype=%s",
+                pipe.is_cosxl_edit, _scheduler_name, _unet_in_channels, pipe.dtype,
+            )
+            logger.info(
+                "[COSXL] Pre-inference scheduler config: prediction_type=%s "
+                "sigma_min=%s sigma_max=%s sigma_data=%s sigma_schedule=%s",
+                _sched_pred_type, _sched_sigma_min, _sched_sigma_max,
+                _sched_sigma_data, _sched_sigma_schedule,
+            )
+
+            # Self-heal: if the scheduler is the wrong class OR has wrong
+            # config params (stale cache), rebuild it in place. We use
+            # EDMEulerScheduler with the official params from CosXL's
+            # checkpoint metadata (edm_vpred.sigma_min/sigma_max). See
+            # Step 4 comment in _load_cosxl_pipeline for the full history
+            # of why neither scheduler is perfect — the pragmatic choice
+            # is EDM matching the checkpoint's training config.
+            _scheduler_is_stale = (
+                _scheduler_name != "EDMEulerScheduler"
+                or _sched_pred_type != "v_prediction"
+                or _sched_sigma_min != 0.002
+                or _sched_sigma_max != 120.0
+                or _sched_sigma_data != 1.0
+                or _sched_sigma_schedule != "exponential"
+            )
+            if _scheduler_is_stale:
+                logger.warning(
+                    "[COSXL] STALE SCHEDULER DETECTED — cached pipeline has outdated config. "
+                    "Rebuilding in place with official CosXL checkpoint params "
+                    "(was: class=%s pred=%s sigma_min=%s sigma_max=%s sigma_data=%s sigma_schedule=%s)",
+                    _scheduler_name, _sched_pred_type, _sched_sigma_min,
+                    _sched_sigma_max, _sched_sigma_data, _sched_sigma_schedule,
+                )
+                from diffusers import EDMEulerScheduler
+                pipe.scheduler = EDMEulerScheduler(
+                    sigma_min=0.002,
+                    sigma_max=120.0,
+                    sigma_data=1.0,
+                    prediction_type="v_prediction",
+                    sigma_schedule="exponential",
+                )
+                _scheduler_name = type(pipe.scheduler).__name__
+                _sched_pred_type = getattr(pipe.scheduler.config, "prediction_type", None)
+                _sched_sigma_min = getattr(pipe.scheduler.config, "sigma_min", None)
+                _sched_sigma_max = getattr(pipe.scheduler.config, "sigma_max", None)
+                _sched_sigma_data = getattr(pipe.scheduler.config, "sigma_data", None)
+                _sched_sigma_schedule = getattr(pipe.scheduler.config, "sigma_schedule", None)
+                logger.info(
+                    "[COSXL] Scheduler rebuilt: class=%s pred=%s sigma_min=%s sigma_max=%s sigma_data=%s sigma_schedule=%s",
+                    _scheduler_name, _sched_pred_type, _sched_sigma_min,
+                    _sched_sigma_max, _sched_sigma_data, _sched_sigma_schedule,
+                )
+
+            # Final fail-loud checks (post self-heal)
+            if _scheduler_name != "EDMEulerScheduler":
+                logger.error("[COSXL] scheduler is %s after self-heal, expected EDMEulerScheduler",
+                             _scheduler_name)
+            if _sched_pred_type != "v_prediction":
+                logger.error("[COSXL] prediction_type=%s after self-heal, expected 'v_prediction'",
+                             _sched_pred_type)
+            if not pipe.is_cosxl_edit:
+                logger.error("[COSXL] is_cosxl_edit=False, image latents won't be "
+                             "scaled → rainbow noise output")
+            if _unet_in_channels != 8:
+                logger.error("[COSXL] unet.in_channels=%s, expected 8 "
+                             "— UNet not in edit mode, output will be wrong",
+                             _unet_in_channels)
 
             actual_img_guidance = image_guidance if image_guidance > 0 else spec.get("default_image_guidance", 1.5)
+            logger.info("[COSXL] Resolved: steps=%d, guidance=%.1f, image_guidance=%.1f",
+                        actual_steps, actual_guidance, actual_img_guidance)
+
+            # Resize to CosXL's NATIVE resolution (derived from UNet sample_size).
+            #
+            # Original assumption (WRONG): the `diffusers/sdxl-instructpix2pix-768`
+            # config name suggested CosXL was trained at 768×768 and we resized
+            # accordingly. Evidence from loaded pipeline: `sample_size=128`
+            # (prints during load), which means the UNet's native latent size
+            # is 128×128 → 128 × vae_scale_factor(8) = 1024 pixels. CosXL is a
+            # 1024-native model; the `-768` config class is just being reused
+            # as a structural template.
+            #
+            # Proof this was the problem: previous runs at 768 still produced
+            # 1024×1024 OUTPUT because `__call__` computes
+            # `height = height or self.default_sample_size * self.vae_scale_factor`
+            # and that's 128 × 8 = 1024. The pipeline ignored our 768 input and
+            # ran the UNet at 1024, but with a 768-encoded image latent — shape
+            # mismatch between image cond latent (96×96) and noise latent
+            # (128×128) → garbage cross-attention → noise output.
+            #
+            # Fix: resize to 1024 AND pass explicit width=1024, height=1024 so
+            # the pipeline and VAE encoder agree on dimensions.
             original_rgb = image.convert("RGB")
+            orig_w, orig_h = original_rgb.size
+            logger.info("[COSXL] Input image: %dx%d mode=%s", orig_w, orig_h, original_rgb.mode)
+            # Derive the target size from the UNet itself — source of truth.
+            try:
+                _cosxl_sample_size = int(getattr(pipe.unet.config, "sample_size", 128))
+                _cosxl_vae_scale = int(getattr(pipe, "vae_scale_factor", 8))
+                COSXL_TARGET_SIZE = _cosxl_sample_size * _cosxl_vae_scale
+            except Exception:
+                COSXL_TARGET_SIZE = 1024
+            logger.info(
+                "[COSXL] Native resolution derived from UNet: %dx%d "
+                "(unet.sample_size=%d × vae_scale_factor=%d)",
+                COSXL_TARGET_SIZE, COSXL_TARGET_SIZE,
+                getattr(pipe.unet.config, "sample_size", "?"),
+                getattr(pipe, "vae_scale_factor", "?"),
+            )
+            if orig_w != COSXL_TARGET_SIZE or orig_h != COSXL_TARGET_SIZE:
+                # Preserve aspect ratio, snap to multiples of (vae_scale_factor × 2)
+                _snap = 16  # SDXL pipelines require this
+                scale = min(COSXL_TARGET_SIZE / orig_w, COSXL_TARGET_SIZE / orig_h)
+                new_w = max(_snap, (int(orig_w * scale) // _snap) * _snap)
+                new_h = max(_snap, (int(orig_h * scale) // _snap) * _snap)
+                original_rgb = original_rgb.resize((new_w, new_h), _PIL_Image.Resampling.LANCZOS)
+                logger.info(
+                    "[COSXL] Image resized %dx%d → %dx%d (matches UNet native %dx%d)",
+                    orig_w, orig_h, new_w, new_h, COSXL_TARGET_SIZE, COSXL_TARGET_SIZE,
+                )
+            else:
+                logger.info("[COSXL] Image already at native resolution — no resize needed")
 
             if not negative_prompt:
                 negative_prompt = (
                     "lowres, bad anatomy, bad hands, cropped, worst quality, low quality, "
                     "blurry, deformed, disfigured, watermark, text, jpeg artifacts"
                 )
+            logger.info("[COSXL] Negative prompt: %r (len=%d)",
+                        negative_prompt[:80], len(negative_prompt))
 
-            result = pipe(
+            _evict_ollama_from_gpu()
+            _log_vram("After pre-inference Ollama eviction", tag="COSXL")
+
+            # Step callback: tracks timing, VRAM, and LATENT health per step.
+            # The latent stats are the key diagnostic for "why is the output
+            # noise?" — if latents go NaN/Inf partway through, the scheduler
+            # or is_cosxl_edit flag is wrong. If latents look fine and decoded
+            # output is still noise, VAE is the problem.
+            #
+            # IMPORTANT: StableDiffusionXLInstructPix2PixPipeline uses the
+            # LEGACY `callback(step, timestep, latents)` API, NOT the modern
+            # `callback_on_step_end(pipe, step, timestep, callback_kwargs)`.
+            # We detect which one the installed diffusers supports by
+            # inspecting __call__'s signature, then install the matching one.
+            step_start = [_time_c.monotonic()]
+            step_stats = {"first_step_sec": None, "steady_steps": []}
+
+            def _log_cosxl_step(step_index: int, timestep, latents) -> None:
+                """Shared step logger used by both the modern and legacy
+                callback wrappers. Takes the raw step/timestep/latents and
+                produces one [COSXL] log line per step."""
+                elapsed = _time_c.monotonic() - step_start[0]
+                step_start[0] = _time_c.monotonic()
+                alloc = torch.cuda.memory_allocated() / 1e9 if torch.cuda.is_available() else 0.0
+                is_first = step_index == 0
+                label = "Step 1 WARMUP" if is_first else f"Step {step_index + 1}"
+
+                latent_info = ""
+                if latents is not None:
+                    try:
+                        f = latents.detach().float()
+                        nan_cnt = int(torch.isnan(latents).sum().item())
+                        inf_cnt = int(torch.isinf(latents).sum().item())
+                        latent_info = (
+                            f" latent[shape={tuple(latents.shape)} std={float(f.std()):.3f} "
+                            f"mean={float(f.mean()):.3f} min={float(f.min()):.2f} "
+                            f"max={float(f.max()):.2f} nan={nan_cnt} inf={inf_cnt}]"
+                        )
+                        if nan_cnt > 0 or inf_cnt > 0:
+                            logger.warning(
+                                "[COSXL] %s/%d latents have %d NaN / %d Inf — "
+                                "denoising is broken (fp16 overflow or bad conditioning)",
+                                label, actual_steps, nan_cnt, inf_cnt,
+                            )
+                    except Exception:
+                        pass
+
+                try:
+                    _ts = timestep.item() if hasattr(timestep, "item") else timestep
+                    _ts_str = f"{float(_ts):.3f}" if isinstance(_ts, (int, float)) else str(_ts)
+                except Exception:
+                    _ts_str = str(timestep)
+                logger.info(
+                    "[COSXL] %s/%d — %.1fs — VRAM: %.2fGB — timestep=%s%s",
+                    label, actual_steps, elapsed, alloc, _ts_str, latent_info,
+                )
+                if is_first:
+                    step_stats["first_step_sec"] = elapsed
+                else:
+                    step_stats["steady_steps"].append(elapsed)
+
+            # Modern API (diffusers >= 0.27-ish): callback_on_step_end
+            def _cosxl_callback_modern(pipe_obj, step_index, timestep, callback_kwargs):
+                lat = callback_kwargs.get("latents") if isinstance(callback_kwargs, dict) else None
+                _log_cosxl_step(step_index, timestep, lat)
+                return callback_kwargs
+
+            # Legacy API (diffusers < 0.27, what StableDiffusionXLInstructPix2PixPipeline still uses):
+            # callback(step, timestep, latents) — no pipe_obj, no callback_kwargs dict,
+            # latents is a positional arg.
+            def _cosxl_callback_legacy(step_index, timestep, latents):
+                _log_cosxl_step(step_index, timestep, latents)
+
+            # Detect which callback API this pipeline's __call__ supports.
+            try:
+                import inspect as _inspect
+                _pipe_sig_params = set(_inspect.signature(pipe.__call__).parameters.keys())
+            except Exception:
+                _pipe_sig_params = set()
+            _has_modern_cb = "callback_on_step_end" in _pipe_sig_params
+            _has_legacy_cb = "callback" in _pipe_sig_params and "callback_steps" in _pipe_sig_params
+            logger.info(
+                "[COSXL] Callback API detection: modern=%s, legacy=%s",
+                _has_modern_cb, _has_legacy_cb,
+            )
+
+            # Pass explicit width/height to ensure the pipeline's default
+            # (sample_size × vae_scale_factor) doesn't silently override
+            # our resized input. Also pass a fixed generator for
+            # reproducibility if seed is set.
+            _cosxl_w, _cosxl_h = original_rgb.size
+            _base_kwargs = dict(
                 prompt=instruction,
                 image=original_rgb,
+                width=_cosxl_w,
+                height=_cosxl_h,
                 guidance_scale=actual_guidance,
                 image_guidance_scale=actual_img_guidance,
                 num_inference_steps=actual_steps,
                 negative_prompt=negative_prompt,
-            ).images[0]
+            )
+            if seed is not None:
+                try:
+                    _gen_device = "cuda" if torch.cuda.is_available() else "cpu"
+                    _base_kwargs["generator"] = torch.Generator(device=_gen_device).manual_seed(int(seed))
+                    logger.info("[COSXL] Seed locked: seed=%d, generator_device=%s", int(seed), _gen_device)
+                except Exception as _seed_err:
+                    logger.warning("[COSXL] Failed to set seed=%s: %s", seed, _seed_err)
 
-            logger.info("CosXL edit complete: %s (guidance=%.1f, img_guidance=%.1f)",
-                        instruction[:60], actual_guidance, actual_img_guidance)
-            return result
-        except (ValueError, RuntimeError):
-            raise
-        except Exception as e:
-            raise RuntimeError(f"CosXL edit failed: {e}. {_MODEL_HINTS['cosxl']}")
+            logger.info(
+                "[COSXL] pipe() kwargs: width=%d, height=%d, guidance=%.1f, "
+                "img_guidance=%.1f, steps=%d, neg_len=%d, seed=%s",
+                _cosxl_w, _cosxl_h, actual_guidance, actual_img_guidance, actual_steps,
+                len(negative_prompt), seed if seed is not None else "random",
+            )
 
-    # ── ControlNet img2img ────────────────────────────────────────
-    if model == "controlnet":
-        try:
-            with _controlnet_lock:
-                pipe = _load_controlnet_pipeline(control_type)
-
-            actual_strength = strength if strength > 0 else spec.get("default_strength", 0.5)
-            original_rgb = image.convert("RGB")
-
-            # Generate control image (depth or canny)
-            if control_type == "canny":
-                control_image = _get_canny_edges(original_rgb)
+            # Choose the callback API based on signature detection.
+            # StableDiffusionXLInstructPix2PixPipeline only has the legacy
+            # (callback, callback_steps) API — no callback_on_step_end.
+            _cb_kwargs: dict[str, Any] = {}
+            if _has_modern_cb:
+                _cb_kwargs["callback_on_step_end"] = _cosxl_callback_modern
+                logger.info("[COSXL] Using modern callback_on_step_end API")
+            elif _has_legacy_cb:
+                _cb_kwargs["callback"] = _cosxl_callback_legacy
+                _cb_kwargs["callback_steps"] = 1
+                logger.info("[COSXL] Using legacy callback/callback_steps API (per-step logging active)")
             else:
-                control_image = _get_depth_image(original_rgb)
+                logger.info("[COSXL] No callback API detected — per-step logging unavailable")
 
-            if not negative_prompt:
-                negative_prompt = (
-                    "lowres, bad anatomy, bad hands, cropped, worst quality, low quality, "
-                    "blurry, deformed, disfigured, watermark, text, jpeg artifacts"
+            # Choose denoising path:
+            # - Default: custom k-diffusion-style loop — runs on the same
+            #   pre-fixed pipeline (EDMEulerScheduler, is_cosxl_edit=True) and
+            #   is mathematically equivalent to stock pipe.__call__. Its
+            #   advantages are explicit 8GB VRAM staging and per-step latent
+            #   instrumentation, not any math difference — see the
+            #   _run_cosxl_kdiff docstring for the A/B proof.
+            # - KONTEXT_COSXL_USE_DIFFUSERS=1: route through stock
+            #   pipe.__call__ (regression test path; produces the same output).
+            import os as _os_c
+            _use_diffusers_cosxl = _os_c.environ.get("KONTEXT_COSXL_USE_DIFFUSERS", "").strip() in ("1", "true", "yes")
+
+            t_infer = _time_c.monotonic()
+            if _use_diffusers_cosxl:
+                logger.info("[COSXL] Starting pipeline.__call__ (stock diffusers regression path — KONTEXT_COSXL_USE_DIFFUSERS=1)")
+                # The loader no longer installs cpu_offload (to keep the kdiff
+                # path clean). If the user explicitly chose the diffusers
+                # fallback, enable it now so the pipe.__call__ has the memory
+                # management it needs.
+                try:
+                    _already_has_offload = any(
+                        hasattr(getattr(pipe, n, None), "_hf_hook")
+                        for n in ("text_encoder", "text_encoder_2", "unet", "vae")
+                    )
+                    if not _already_has_offload:
+                        logger.info("[COSXL] Enabling model_cpu_offload for diffusers fallback path")
+                        pipe.enable_model_cpu_offload()
+                except Exception as _off_err:
+                    logger.warning("[COSXL] Failed to enable cpu_offload: %s", _off_err)
+                try:
+                    result = pipe(**_base_kwargs, **_cb_kwargs).images[0]
+                except TypeError as _cb_err:
+                    if ("callback" in str(_cb_err) or "callback_on_step_end" in str(_cb_err)) and _cb_kwargs:
+                        logger.warning("[COSXL] Callback rejected at runtime (%s) — retrying without per-step logging", _cb_err)
+                        result = pipe(**_base_kwargs).images[0]
+                    else:
+                        raise
+            else:
+                logger.info("[COSXL] Starting custom k-diffusion loop (EDM-correct preconditioning)")
+
+                # Wire our step logger into the custom loop
+                def _kdiff_step_cb(step_idx, sigma, lat):
+                    elapsed = _time_c.monotonic() - step_start[0]
+                    step_start[0] = _time_c.monotonic()
+                    alloc = torch.cuda.memory_allocated() / 1e9 if torch.cuda.is_available() else 0.0
+                    is_first = step_idx == 0
+                    label = "Step 1 WARMUP" if is_first else f"Step {step_idx + 1}"
+                    try:
+                        f = lat.detach().float()
+                        nan_cnt = int(torch.isnan(lat).sum().item())
+                        inf_cnt = int(torch.isinf(lat).sum().item())
+                        latent_info = (
+                            f" latent[shape={tuple(lat.shape)} std={float(f.std()):.3f} "
+                            f"mean={float(f.mean()):.3f} min={float(f.min()):.2f} "
+                            f"max={float(f.max()):.2f} nan={nan_cnt} inf={inf_cnt}]"
+                        )
+                        if nan_cnt > 0 or inf_cnt > 0:
+                            logger.warning(
+                                "[COSXL] %s/%d latents have %d NaN / %d Inf — denoising broken",
+                                label, actual_steps, nan_cnt, inf_cnt,
+                            )
+                    except Exception:
+                        latent_info = ""
+                    logger.info(
+                        "[COSXL] %s/%d — %.1fs — VRAM: %.2fGB — sigma=%.3f%s",
+                        label, actual_steps, elapsed, alloc, sigma, latent_info,
+                    )
+                    if is_first:
+                        step_stats["first_step_sec"] = elapsed
+                    else:
+                        step_stats["steady_steps"].append(elapsed)
+
+                result = _run_cosxl_kdiff(
+                    pipe,
+                    prompt=instruction,
+                    image=original_rgb,
+                    num_inference_steps=actual_steps,
+                    guidance_scale=actual_guidance,
+                    image_guidance_scale=actual_img_guidance,
+                    negative_prompt=negative_prompt,
+                    width=_cosxl_w,
+                    height=_cosxl_h,
+                    generator=_base_kwargs.get("generator"),
+                    step_callback=_kdiff_step_cb,
+                )
+            total_infer = _time_c.monotonic() - t_infer
+            logger.info("[COSXL] Inference complete (%.1fs)", total_infer)
+            _log_vram("After inference", tag="COSXL")
+
+            # Output validation: check for degenerate outputs (pure noise,
+            # solid color, NaN). This catches the "rainbow noise" failure mode
+            # that happens when is_cosxl_edit or scheduler is wrong.
+            try:
+                import numpy as _np
+                arr = _np.array(result)
+                if arr.ndim >= 2:
+                    arr_f = arr.astype(_np.float32)
+                    px_mean = float(arr_f.mean())
+                    px_std = float(arr_f.std())
+                    px_min = int(arr.min())
+                    px_max = int(arr.max())
+                    # Per-channel std gives a hint about noise vs real content
+                    ch_stds = []
+                    if arr.ndim == 3:
+                        for c in range(arr.shape[2]):
+                            ch_stds.append(float(arr_f[:, :, c].std()))
+                    logger.info(
+                        "[COSXL] Output stats: size=%s mode=%s px_mean=%.1f px_std=%.1f "
+                        "range=[%d, %d] per_channel_std=%s",
+                        result.size, result.mode, px_mean, px_std, px_min, px_max,
+                        [f"{s:.1f}" for s in ch_stds] if ch_stds else "n/a",
+                    )
+                    # Noise-like output detection.
+                    # Pure uniform noise over [0,255]: std≈73.6, mean≈127.5,
+                    # all three RGB channel stds within ~2-3 of each other
+                    # (sampling variance only).
+                    # Natural photographs: channel stds vary significantly
+                    # because colors dominate different regions of the scene
+                    # (e.g. a grass photo has high green std, low red std).
+                    #
+                    # PER-CHANNEL SPREAD IS AUTHORITATIVE — if the 3 channel
+                    # stds differ by more than ~10, it cannot be uniform noise,
+                    # regardless of what the global stats look like. This
+                    # prevents the "global std happens to fall in the noise
+                    # band" false positive we had on a real coherent output
+                    # with ch_stds=[69.3, 56.0, 87.6] (spread=31.6) that was
+                    # incorrectly flagged as noise.
+                    looks_noisy = False
+                    reason = ""
+                    ch_spread = None
+                    if ch_stds and len(ch_stds) == 3:
+                        ch_spread = max(ch_stds) - min(ch_stds)
+                        ch_min_s = min(ch_stds)
+                        ch_max_s = max(ch_stds)
+                        if ch_spread > 12.0:
+                            # Definitive: real image with meaningful color
+                            # variation. Skip noise check entirely.
+                            pass
+                        elif ch_min_s > 50.0 and ch_spread < 8.0:
+                            # All three channels have similar high variance —
+                            # the signature of uniform noise.
+                            looks_noisy = True
+                            reason = (f"all 3 channels have similar high std "
+                                      f"(min={ch_min_s:.1f} max={ch_max_s:.1f} spread={ch_spread:.1f}) — "
+                                      f"characteristic of uniform noise")
+                        # else: ambiguous, fall through to global stats check
+                        else:
+                            if 55.0 <= px_std <= 85.0 and 100.0 <= px_mean <= 160.0:
+                                looks_noisy = True
+                                reason = (f"ambiguous per-channel data (spread={ch_spread:.1f}) "
+                                          f"plus global px_std={px_std:.1f} in noise band [55,85] "
+                                          f"and px_mean={px_mean:.1f} in neutral band [100,160]")
+                    else:
+                        # No per-channel data available (e.g. grayscale image).
+                        # Fall back to global stats heuristic.
+                        if 55.0 <= px_std <= 85.0 and 100.0 <= px_mean <= 160.0:
+                            looks_noisy = True
+                            reason = (f"px_std={px_std:.1f} in noise band [55,85], "
+                                      f"px_mean={px_mean:.1f} in neutral band [100,160] "
+                                      f"(no per-channel data to veto)")
+
+                    if looks_noisy:
+                        logger.warning(
+                            "[COSXL] Output LOOKS LIKE PURE NOISE (%s). "
+                            "Classic CosXL failure modes in order of likelihood: "
+                            "(1) scheduler.prediction_type MUST be 'v_prediction' — "
+                            "    epsilon produces inverted denoising → noise; "
+                            "(2) scheduler sigma_min/sigma_max/sigma_data must match "
+                            "    the official stabilityai/cosxl values (0.002, 120, 1.0); "
+                            "(3) is_cosxl_edit=True before every inference; "
+                            "(4) unet.in_channels=8 (check for silent num_in_channels=4 fallback); "
+                            "(5) input image size matches unet.sample_size × vae_scale_factor; "
+                            "(6) VAE decoded without NaN (fp16 overflow).",
+                            reason,
+                        )
+                    elif px_std < 5.0:
+                        logger.warning(
+                            "[COSXL] Output is nearly uniform (std=%.1f) — likely solid color "
+                            "(VAE decode NaN → normalized to constant)", px_std,
+                        )
+                    else:
+                        # Positive confirmation: output looks like a real
+                        # coherent image. Prints the evidence so the user
+                        # knows the coherence check actually ran.
+                        if ch_spread is not None:
+                            logger.info(
+                                "[COSXL] Output coherence check PASSED: per-channel spread=%.1f (>12 = real image), "
+                                "px_std=%.1f, px_mean=%.1f. If the edit doesn't match your instruction, "
+                                "it's a prompt/guidance issue, not a pipeline bug.",
+                                ch_spread, px_std, px_mean,
+                            )
+                        else:
+                            logger.info(
+                                "[COSXL] Output coherence check PASSED: px_std=%.1f, px_mean=%.1f "
+                                "(outside noise band).", px_std, px_mean,
+                            )
+            except Exception as _val_err:
+                logger.info("[COSXL] Output validation failed: %s", _val_err)
+
+            # Timing summary (separates warmup from steady state)
+            if step_stats["steady_steps"]:
+                _steady = step_stats["steady_steps"]
+                _mean = sum(_steady) / len(_steady)
+                logger.info(
+                    "[COSXL] Timing summary: warmup=%.1fs | steady-state mean=%.1fs "
+                    "min=%.1fs max=%.1fs over %d steps | total=%.1fs",
+                    step_stats["first_step_sec"] or 0.0, _mean,
+                    min(_steady), max(_steady), len(_steady), total_infer,
                 )
 
-            result = pipe(
-                prompt=instruction,
-                image=original_rgb,
-                control_image=control_image,
-                strength=actual_strength,
-                guidance_scale=actual_guidance,
-                num_inference_steps=actual_steps,
-                negative_prompt=negative_prompt,
-                controlnet_conditioning_scale=conditioning_scale,
-            ).images[0]
-
-            logger.info("ControlNet %s edit complete: strength=%.2f, guidance=%.1f",
-                        control_type, actual_strength, actual_guidance)
+            logger.info("[COSXL] ====== Edit complete ======")
             return result
         except (ValueError, RuntimeError):
             raise
         except Exception as e:
-            raise RuntimeError(f"ControlNet ({control_type}) edit failed: {e}. {_MODEL_HINTS['controlnet']}")
+            logger.error("[COSXL] Edit failed: %s", e, exc_info=True)
+            raise RuntimeError(f"CosXL edit failed: {e}. {_MODEL_HINTS['cosxl']}")
 
-    # ── InstructPix2Pix (legacy) ──────────────────────────────────
-    with _instruct_lock:
-        pipe = _load_pix2pix_pipeline()
-
-    actual_img_guidance = image_guidance if image_guidance > 0 else spec.get("default_image_guidance", 1.5)
-
-    if not negative_prompt:
-        negative_prompt = (
-            "lowres, bad anatomy, bad hands, cropped, worst quality, low quality, "
-            "blurry, deformed, disfigured, watermark, text, jpeg artifacts, "
-            "duplicate, error, ugly, out of frame, grayscale, monochrome"
-        )
-
-    original_size = image.size
-    original_rgb = image.convert("RGB")
-    target = spec.get("resize_to", 512)
-
-    # Light CLAHE + sharpen helps the model perceive scene details better
-    from . import processors
-    preprocessed = original_rgb.copy()
-    try:
-        preprocessed = processors.clahe(preprocessed, clip_limit=1.5)
-        preprocessed = processors.sharpen(preprocessed, amount=0.4, radius=0.5)
-    except Exception:
-        pass
-
-    edit_image = preprocessed.resize((target, target), Image.Resampling.LANCZOS)
-
-    logger.info("instruct_edit(pix2pix): guidance=%.1f, img_guidance=%.1f, steps=%d, passes=%d",
-                actual_guidance, actual_img_guidance, actual_steps, passes)
-
-    result = edit_image
-    num_passes = max(1, min(passes, 3))
-
-    for pass_num in range(num_passes):
-        if num_passes == 1:
-            pass_guidance = actual_guidance
-            pass_img_guidance = actual_img_guidance
-        else:
-            t = pass_num / max(1, num_passes - 1)
-            pass_guidance = actual_guidance * (0.6 + 0.5 * t)
-            pass_img_guidance = actual_img_guidance * (1.2 - 0.3 * t)
-
-        result = pipe(
-            instruction,
-            image=result,
-            negative_prompt=negative_prompt,
-            num_inference_steps=actual_steps,
-            image_guidance_scale=pass_img_guidance,
-            guidance_scale=pass_guidance,
-        ).images[0]
-
-        if pass_num < num_passes - 1:
-            logger.info("Progressive pass %d/%d complete (guidance=%.1f, img_guidance=%.1f)",
-                        pass_num + 1, num_passes, pass_guidance, pass_img_guidance)
-
-    # Resize back to original dimensions
-    if result.size != original_size:
-        result = result.resize(original_size, Image.Resampling.LANCZOS)
-
-    # Color preservation via LAB space chrominance blending
-    if preserve_color > 0:
-        try:
-            import cv2
-            orig_arr = np.array(original_rgb)
-            result_arr = np.array(result.convert("RGB"))
-
-            orig_lab = cv2.cvtColor(orig_arr, cv2.COLOR_RGB2LAB).astype(np.float32)
-            result_lab = cv2.cvtColor(result_arr, cv2.COLOR_RGB2LAB).astype(np.float32)
-
-            blend = min(1.0, max(0.0, preserve_color))
-            result_lab[:, :, 1] = result_lab[:, :, 1] * (1 - blend) + orig_lab[:, :, 1] * blend
-            result_lab[:, :, 2] = result_lab[:, :, 2] * (1 - blend) + orig_lab[:, :, 2] * blend
-
-            result = Image.fromarray(cv2.cvtColor(result_lab.astype(np.uint8), cv2.COLOR_LAB2RGB))
-        except Exception as e:
-            logger.warning("Color preservation failed: %s", e)
-
-    # Light LAB-space sharpening on output
-    try:
-        result = processors.sharpen(result, amount=0.5, radius=0.8, lab_mode=True)
-    except Exception:
-        pass
-
-    return result
+    # Unknown model — should not reach here
+    raise ValueError(f"Unknown instruct-edit model: {model}. Available: {list(INSTRUCT_MODELS.keys())}")
 
 
-def enhance_edit_prompt(instruction: str, router=None, config=None) -> str:
-    """Enhance an image editing instruction for better InstructPix2Pix results.
+# ── Prompt enhancement (model-aware, intent-preserving) ──────────
 
-    Rewrites vague instructions into specific, detailed prompts that the
-    model understands better. Uses LLM if available, otherwise rule-based.
+# Per-model system prompts and few-shot examples. Each entry describes:
+#   - what THIS model expects (imperative delta vs target-state description)
+#   - common failure modes to avoid
+#   - 2-3 examples mapped to the right format
+#
+# The enhancer will NEVER replace the user's intent — it only expands and
+# clarifies. The LLM is told to preserve every noun/subject/object from the
+# original instruction and add detail/structure around them. If the LLM
+# produces a shorter or unrelated output, we reject it and return the
+# original unchanged.
+
+_ENHANCE_PROFILES = {
+    "kontext": {
+        "name": "FLUX.1 Kontext",
+        "format": "target-state description",
+        "system": (
+            "You are an expert at writing prompts for FLUX.1-Kontext-dev image editing.\n"
+            "\n"
+            "FLUX Kontext works best with TARGET-STATE descriptions — describe the desired "
+            "OUTPUT IMAGE as a complete photograph, not as a delta/change command. Kontext "
+            "has a strong preservation prior that fights against short imperative commands "
+            "like 'make it X', so phrase the output as 'a photograph of X'.\n"
+            "\n"
+            "RULES:\n"
+            "1. Preserve every subject, noun, and concrete detail from the user's instruction. "
+            "If they say 'make her smile', the output MUST mention smiling. Do not replace it.\n"
+            "2. Expand the prompt to 25-60 tokens (Kontext's text-conditioning is "
+            "proportional to prompt length within the 512-token T5 sequence).\n"
+            "3. Use target-state phrasing: 'a photograph of ...', 'a portrait of ...'.\n"
+            "4. Mention what should STAY THE SAME ('same face, same pose, same background, "
+            "same lighting') — this anchors Kontext's preservation prior on the unchanged "
+            "regions while freeing it to edit the region you're changing.\n"
+            "5. Add photographic detail: lighting, composition, realism hints "
+            "('natural lighting, sharp focus, photorealistic').\n"
+            "6. Output ONE line only. No preamble. No explanation. Just the prompt.\n"
+        ),
+        "examples": [
+            ("make it sunset",
+             "a photograph of the same scene at golden hour sunset, warm orange and pink sky, long shadows, warm golden light on all surfaces, same subjects, same composition, natural lighting, photorealistic, sharp focus"),
+            ("make her smile",
+             "a photograph of the same woman smiling warmly with a natural genuine expression, same face, same hair, same clothing, same background, same pose, natural lighting, photorealistic portrait"),
+            ("add a hat",
+             "a photograph of the same person wearing a stylish hat that fits naturally on their head, same face, same expression, same hair visible under the hat, same clothing, same background, natural lighting, photorealistic"),
+        ],
+    },
+    "cosxl": {
+        "name": "CosXL Edit",
+        "format": "imperative edit command",
+        "system": (
+            "You are an expert at writing prompts for CosXL Edit image editing (SDXL-based).\n"
+            "\n"
+            "CosXL works best with IMPERATIVE EDIT COMMANDS — tell the model what to change "
+            "using action verbs. CosXL uses classifier-free guidance so the text signal is "
+            "strong; be specific and concrete.\n"
+            "\n"
+            "RULES:\n"
+            "1. Preserve every subject/noun from the user's instruction. If they say "
+            "'add a hat', the output MUST mention adding a hat. Do not replace it.\n"
+            "2. Start with an action verb: make, change, add, remove, transform, turn.\n"
+            "3. Be specific about color, material, style, lighting — 3-5 concrete details.\n"
+            "4. Keep it 1-2 sentences, 15-40 tokens.\n"
+            "5. Output ONE line only. No preamble. No explanation. Just the prompt.\n"
+        ),
+        "examples": [
+            ("make it sunset",
+             "change the lighting to golden hour sunset with warm orange and pink tones, add long shadows, add a warm glow across all surfaces"),
+            ("make her smile",
+             "make the woman smile with a warm natural expression, show her teeth slightly, crinkle her eyes to make the smile look genuine"),
+            ("add a hat",
+             "add a stylish felt hat to the person's head that fits their hair, match the lighting of the scene so the hat looks realistic"),
+        ],
+    },
+}
+
+
+def _build_enhance_prompt(instruction: str, model: str) -> str:
+    """Assemble the full LLM prompt for enhancement based on target model."""
+    profile = _ENHANCE_PROFILES.get(model, _ENHANCE_PROFILES["kontext"])
+    ex_block = "\n".join(
+        f"Original: '{orig}'\nImproved: {imp}"
+        for orig, imp in profile["examples"]
+    )
+    return (
+        f"{profile['system']}\n"
+        f"Examples (preserve the subject, do not invent new topics):\n\n"
+        f"{ex_block}\n\n"
+        f"Now enhance this instruction. Preserve every concrete noun and subject from it:\n\n"
+        f"Original: '{instruction}'\n"
+        f"Improved:"
+    )
+
+
+def _validate_enhanced_prompt(original: str, enhanced: str, model: str) -> tuple[bool, str]:
+    """Return (is_valid, reason). Rejects enhancements that drop user intent.
+
+    The critical check: every "content word" (noun/verb, not stopwords) from
+    the original must survive into the enhanced version in some form. This
+    catches the old behavior where "make the girls kiss" got replaced with
+    a generic "sunset scene" because of a keyword match on "make it".
     """
-    logger.info("enhance_edit_prompt called: '%s' (router=%s, config=%s)",
-                instruction[:80], "yes" if router else "no", "yes" if config else "no")
-
-    # Rule-based enhancement for common patterns — editing commands, not scene descriptions
-    enhancements = {
-        # Weather/atmosphere
-        "sunset": "Transform the lighting to golden hour sunset with warm orange and pink tones, add long shadows and a warm golden glow on all surfaces",
-        "snow": "Add a layer of white snow covering all horizontal surfaces, add frost on edges, add snowflakes falling, change the color temperature to cold blue-white",
-        "night": "Change the scene to nighttime, make the sky dark blue, add artificial lighting with warm pools of light, add visible stars in the sky",
-        "rain": "Add heavy rainfall with visible rain streaks, make the ground surfaces wet and reflective, add puddles with ripples, darken the sky to overcast",
-        "winter": "Transform to a cold winter scene, add snow on surfaces, add frost and icicles, change the overall color temperature to cool blue",
-        "summer": "Make the lighting bright and warm, make foliage vivid green, add strong sunlight with defined shadows, make the sky blue with white clouds",
-        "autumn": "Change all foliage to autumn colors of red orange yellow and brown, add warm golden afternoon light, add scattered fallen leaves on the ground",
-        "fog": "Add dense atmospheric fog, make distant objects fade into white mist, change the lighting to soft and diffused",
-        "underwater": "Add a blue-green water tint over everything, add caustic light patterns, add floating particles, add slight blur at distance",
-        # Brightness/exposure
-        "brighter": "Increase the overall brightness and exposure, add soft highlights, make shadows lighter and more open",
-        "darker": "Decrease the overall brightness, deepen the shadows, reduce highlights for a moodier look",
-        "bright": "Increase the overall brightness and exposure, add soft highlights, make shadows lighter and more open",
-        "dark": "Decrease the overall brightness, deepen the shadows, reduce highlights for a moodier look",
-        # Style
-        "vintage": "Add a warm vintage film look with faded colors, slightly lifted blacks, warm color cast, and subtle film grain texture",
-        "cinematic": "Make the image look cinematic with teal shadows and warm orange highlights, slight desaturation, wide aspect feel",
-        "dramatic": "Increase the contrast dramatically, deepen the blacks, add strong directional lighting feel, intensify the mood",
-        "soft": "Make the image softer with reduced contrast, gentle highlights, smooth transitions, dreamlike quality",
-        "warm": "Add warm golden tones throughout, increase the color temperature, make highlights glow with warmth",
-        "cool": "Add cool blue tones throughout, decrease the color temperature, make the overall mood cold and serene",
-        # Color changes
-        "black and white": "Convert the image to high contrast black and white, remove all color, increase tonal contrast",
-        "sepia": "Convert to a warm sepia tone with brown-golden tint, like an old photograph",
-        "vibrant": "Make all colors more vivid and saturated, increase vibrancy, make the image pop with color",
+    if not enhanced:
+        return False, "empty response"
+    if len(enhanced) < len(original) * 0.8:
+        return False, f"too short ({len(enhanced)} < {len(original)} * 0.8)"
+    enhanced_lower = enhanced.lower()
+    # Reject if enhancer added any of these — they indicate hallucination
+    reject_words = [
+        "generate ", "create a ", "i cannot", "i can't", "sorry",
+        "as an ai", "here is the", "here's the", "improved:",
+    ]
+    for w in reject_words:
+        if w in enhanced_lower:
+            return False, f"contains forbidden phrase '{w}' (LLM didn't follow instructions)"
+    # Extract content words from the original (length >= 4, excludes common stopwords)
+    _stopwords = {
+        "the", "and", "with", "from", "that", "this", "them", "they", "have",
+        "make", "add", "put", "give", "show", "more", "less", "very", "some",
+        "into", "onto", "over", "just", "like", "want", "would", "could", "should",
     }
+    content_words = [
+        w for w in re.findall(r"\b[a-z']+\b", original.lower())
+        if len(w) >= 4 and w not in _stopwords
+    ]
+    if not content_words:
+        # Very short prompt, nothing to preserve
+        return True, "no content words to verify"
+    # At least 60% of content words should survive (allow some paraphrasing)
+    preserved = sum(1 for w in content_words if w in enhanced_lower or w[:-1] in enhanced_lower)
+    ratio = preserved / len(content_words)
+    if ratio < 0.6:
+        missing = [w for w in content_words if w not in enhanced_lower and w[:-1] not in enhanced_lower]
+        return False, f"only {preserved}/{len(content_words)} content words preserved ({ratio:.0%}), missing: {missing}"
+    return True, f"{preserved}/{len(content_words)} content words preserved ({ratio:.0%})"
 
-    instruction_lower = instruction.lower().strip()
 
-    # Check for keyword matches
-    for keyword, enhanced in enhancements.items():
-        if keyword in instruction_lower:
-            logger.info("enhance_edit_prompt: keyword match '%s'", keyword)
-            return enhanced
+def enhance_edit_prompt(
+    instruction: str,
+    router=None,
+    config=None,
+    model: str = "kontext",
+) -> str:
+    """Enhance an image editing instruction for better results, tailored to
+    the target model's expected prompt format.
 
-    # The key LLM prompt — must produce EDITING instructions, not scene descriptions
-    _LLM_SYSTEM = (
-        "You enhance image EDITING instructions for InstructPix2Pix. "
-        "InstructPix2Pix modifies an EXISTING photo — it does NOT generate new images. "
-        "Your output must be an editing command that changes the existing image. "
-        "Use verbs like: make, turn, change, add, remove, increase, decrease, transform. "
-        "NEVER describe a scene from scratch. NEVER use 'Generate' or 'Create'. "
-        "Keep it 1-2 sentences. Output ONLY the improved instruction."
+    The three supported models have DIFFERENT ideal prompt formats:
+    - kontext:    target-state description ("a photograph of X")
+    - nunchaku:   same as kontext (uses kontext profile)
+    - cosxl:      imperative command ("change X to Y")
+
+    CRITICAL: this function will NEVER replace the user's stated intent.
+    The old version had a keyword dictionary that replaced ANY prompt
+    containing "sunset" with a generic sunset description — losing the rest
+    of the user's request. The new version validates that at least 60% of
+    the content words from the original survive into the enhanced version,
+    and falls back to the original if validation fails.
+    """
+    logger.info(
+        "[ENHANCE] called for model=%s: '%s' (router=%s, config=%s)",
+        model, instruction[:100],
+        "yes" if router else "no", "yes" if config else "no",
     )
-    _LLM_EXAMPLES = (
-        "\n\nExamples:"
-        "\nOriginal: 'brighter' → Improved: 'Make the image brighter with increased exposure, add warm sunlight and soft highlights'"
-        "\nOriginal: 'sunset' → Improved: 'Transform the lighting to golden hour with warm orange and pink tones, add long shadows and a warm glow on all surfaces'"
-        "\nOriginal: 'make it winter' → Improved: 'Add snow covering all surfaces, add frost to edges, change the sky to overcast gray, add a cool blue color temperature'"
-        "\nOriginal: 'blue dress' → Improved: 'Change the color of the dress to deep royal blue while keeping the fabric texture and folds'"
-    )
 
-    # Try LLM enhancement if available
+    # Normalize model name
+    model = (model or "kontext").lower().strip()
+    if model not in _ENHANCE_PROFILES:
+        logger.info("[ENHANCE] unknown model '%s' — falling back to kontext profile", model)
+        model = "kontext"
+
+    profile = _ENHANCE_PROFILES[model]
+    logger.info("[ENHANCE] using profile: %s (format=%s)", profile["name"], profile["format"])
+
+    # Build the full LLM prompt
+    llm_prompt = _build_enhance_prompt(instruction, model)
+
+    # Try router-based LLM first (if available)
+    enhanced = None
+    source = None
     if router and config:
         try:
             from local_ai_platform.providers import ChatMessage, GenerationSettings
             model_str = f"ollama:{config.default_model}"
-            logger.info("enhance_edit_prompt: trying LLM (%s)", model_str)
-            prompt = f"{_LLM_SYSTEM}{_LLM_EXAMPLES}\n\nOriginal: '{instruction}'\nImproved:"
+            logger.info("[ENHANCE] trying router LLM: %s", model_str)
             response = router.chat(
                 model_str,
-                [ChatMessage(role="user", content=prompt)],
-                GenerationSettings(temperature=0.3, max_tokens=150),
+                [ChatMessage(role="user", content=llm_prompt)],
+                GenerationSettings(temperature=0.4, max_tokens=250),
             )
-            enhanced = response.content.strip().strip('"').strip("'")
-            # Reject if LLM produced a scene description instead of an edit instruction
-            reject_words = ["generate ", "create a ", "photograph of", "image of a"]
-            if enhanced and len(enhanced) > len(instruction) and not any(w in enhanced.lower() for w in reject_words):
-                logger.info("enhance_edit_prompt: LLM enhanced to: '%s'", enhanced[:100])
-                return enhanced
+            candidate = response.content.strip()
+            # Strip thinking tags from qwen3/r1-style models
+            candidate = re.sub(r'<think>.*?</think>', '', candidate, flags=re.DOTALL).strip()
+            candidate = candidate.strip('"').strip("'").strip()
+            # Sometimes the LLM echoes "Improved:" — strip it
+            if candidate.lower().startswith("improved:"):
+                candidate = candidate[len("improved:"):].strip()
+            is_valid, reason = _validate_enhanced_prompt(instruction, candidate, model)
+            if is_valid:
+                enhanced = candidate
+                source = f"router:{model_str}"
+                logger.info("[ENHANCE] router LLM accepted: %s", reason)
             else:
-                logger.warning("enhance_edit_prompt: LLM response rejected (scene description or too short): '%s'", enhanced[:80] if enhanced else "")
+                logger.warning("[ENHANCE] router LLM rejected: %s. candidate='%s'",
+                               reason, candidate[:120])
         except Exception as e:
-            logger.warning("enhance_edit_prompt: LLM failed: %s", e)
+            logger.warning("[ENHANCE] router LLM failed: %s", e)
 
-    # Direct Ollama fallback (doesn't need router)
-    # Ollama direct fallback — try when router LLM was unavailable or failed above
-    if True:
+    # Direct Ollama fallback
+    if enhanced is None:
         try:
             import json
             import urllib.request
             try:
                 resp = urllib.request.urlopen("http://localhost:11434/api/tags", timeout=5)
                 tags = json.loads(resp.read().decode())
-                models = [m["name"] for m in tags.get("models", [])]
-                preferred = ["qwen3:1.7b", "qwen3:4b", "qwen2.5:3b", "gemma3:1b", "gemma3:4b", "llama3.2:3b"]
-                model = next((m for m in preferred if m in models), models[0] if models else None)
-            except Exception:
-                model = None
+                models_list = [m["name"] for m in tags.get("models", [])]
+                preferred = [
+                    "qwen3:4b", "qwen3:1.7b", "qwen2.5:3b",
+                    "gemma3:4b", "gemma3:1b", "llama3.2:3b",
+                ]
+                ollama_model = next((m for m in preferred if m in models_list),
+                                    models_list[0] if models_list else None)
+            except Exception as _list_err:
+                logger.info("[ENHANCE] could not list ollama models: %s", _list_err)
+                ollama_model = None
 
-            if model:
-                logger.info("enhance_edit_prompt: direct Ollama with model '%s'", model)
+            if ollama_model:
+                logger.info("[ENHANCE] trying direct Ollama: %s", ollama_model)
+                prompt_with_nothink = (
+                    ("/no_think\n" if "qwen" in ollama_model.lower() else "")
+                    + llm_prompt
+                )
                 req_body = json.dumps({
-                    "model": model,
-                    "prompt": f"{'/no_think' + chr(10) if 'qwen' in model.lower() else ''}{_LLM_SYSTEM}{_LLM_EXAMPLES}\n\nOriginal: '{instruction}'\nImproved:",
+                    "model": ollama_model,
+                    "prompt": prompt_with_nothink,
                     "stream": False,
-                    "options": {"temperature": 0.3, "num_predict": 150},
+                    "options": {"temperature": 0.4, "num_predict": 250},
                 }).encode()
                 req = urllib.request.Request(
                     "http://localhost:11434/api/generate",
                     data=req_body,
                     headers={"Content-Type": "application/json"},
                 )
-                with urllib.request.urlopen(req, timeout=30) as resp:
+                with urllib.request.urlopen(req, timeout=60) as resp:
                     data = json.loads(resp.read().decode())
-                enhanced = (data.get("response", "") or "").strip()
-                # Strip thinking tags and /no_think echoes
-                enhanced = re.sub(r'<think>.*?</think>', '', enhanced, flags=re.DOTALL).strip()
-                enhanced = enhanced.replace('/no_think', '').strip()
-                enhanced = enhanced.strip('"').strip("'")
-                reject_words = ["generate ", "create a ", "photograph of", "image of a"]
-                if enhanced and len(enhanced) > len(instruction) and not any(w in enhanced.lower() for w in reject_words):
-                    logger.info("enhance_edit_prompt: Ollama direct enhanced to: '%s'", enhanced[:100])
-                    return enhanced
+                candidate = (data.get("response", "") or "").strip()
+                candidate = re.sub(r'<think>.*?</think>', '', candidate, flags=re.DOTALL).strip()
+                candidate = candidate.replace('/no_think', '').strip()
+                candidate = candidate.strip('"').strip("'").strip()
+                if candidate.lower().startswith("improved:"):
+                    candidate = candidate[len("improved:"):].strip()
+                # Keep only the first line (prevents multi-paragraph rambling)
+                candidate = candidate.split("\n")[0].strip()
+                is_valid, reason = _validate_enhanced_prompt(instruction, candidate, model)
+                if is_valid:
+                    enhanced = candidate
+                    source = f"ollama:{ollama_model}"
+                    logger.info("[ENHANCE] direct Ollama accepted: %s", reason)
+                else:
+                    logger.warning("[ENHANCE] direct Ollama rejected: %s. candidate='%s'",
+                                   reason, candidate[:120])
         except Exception as e:
-            logger.warning("enhance_edit_prompt: direct Ollama also failed: %s", e)
+            logger.warning("[ENHANCE] direct Ollama failed: %s", e)
 
-    # Fallback: append quality hints
-    logger.info("enhance_edit_prompt: using quality suffix fallback")
-    quality_suffix = ", high quality, detailed, photorealistic, 8k"
-    if not any(q in instruction_lower for q in ["quality", "detailed", "photorealistic"]):
-        return instruction + quality_suffix
+    if enhanced:
+        logger.info("[ENHANCE] result via %s: original=%r → enhanced=%r",
+                    source, instruction[:80], enhanced[:120])
+        return enhanced
 
+    # No LLM available or all attempts rejected — return original UNCHANGED.
+    # We do NOT append "high quality, photorealistic, 8k" style suffixes
+    # anymore because they don't help editing models and muddy the prompt.
+    logger.info("[ENHANCE] no enhancement available — returning original unchanged")
     return instruction
 
 
@@ -2203,9 +3550,8 @@ AI_OPERATIONS: dict[str, dict] = {
         "fn": instruct_edit,
         "category": "ai_edit",
         "params": ["instruction", "model", "steps", "image_guidance", "guidance",
-                   "negative_prompt", "passes", "preserve_color",
-                   "strength", "control_type", "conditioning_scale"],
-        "description": "AI image editing: Kontext (best), CosXL (SDXL), IP2P (fast), ControlNet (structure).",
+                   "negative_prompt", "seed", "true_cfg_scale"],
+        "description": "AI image editing: Kontext GGUF (best), Nunchaku INT4 (fast), CosXL (SDXL).",
         "requires": "diffusers",
         "gpu": True,
         "estimated_seconds": 20,

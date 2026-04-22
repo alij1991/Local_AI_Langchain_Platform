@@ -1577,6 +1577,150 @@ def _format_param_count(param_count: int) -> str:
     return f"{param_count}"
 
 
+# ── Quantization detection (non-GGUF) ──────────────────────────────
+
+_QUANT_PATTERNS: list[tuple[str, str, int, float]] = [
+    # (pattern, method, bits, vram_multiplier_vs_fp16)
+    # Order: more-specific first so "bnb-4bit" matches before a hypothetical "bnb"
+    ("svdquant",  "SVDQuant", 4,  0.30),
+    ("nunchaku",  "SVDQuant", 4,  0.30),
+    ("int4",      "INT4",     4,  0.30),
+    ("nf4",       "NF4",      4,  0.30),
+    ("gptq",      "GPTQ",     4,  0.30),
+    ("awq",       "AWQ",      4,  0.30),
+    ("bnb-4bit",  "BnB-4bit", 4,  0.30),
+    ("quanto-4",  "Quanto",   4,  0.30),
+    ("int8",      "INT8",     8,  0.55),
+    ("fp8",       "FP8",      8,  0.55),
+    ("bnb-8bit",  "BnB-8bit", 8,  0.55),
+    ("quanto-8",  "Quanto",   8,  0.55),
+    ("quanto",    "Quanto",   4,  0.30),  # default Quanto = 4-bit
+]
+
+
+def _detect_quantization(tags: list[str], model_id: str) -> dict[str, Any] | None:
+    """Detect non-GGUF quantization from HF tags and model ID.
+
+    Returns dict ``{"method", "bits", "vram_factor", "label"}`` or *None*.
+    """
+    # Build a single lowercase search string from tags + model_id
+    tags_lower = " ".join(t.lower() for t in tags)
+    id_lower = model_id.lower() if model_id else ""
+    search_text = f"{tags_lower} {id_lower}"
+
+    for pattern, method, bits, vram_factor in _QUANT_PATTERNS:
+        if pattern in search_text:
+            label = f"{method}" if method == f"INT{bits}" or method == f"FP{bits}" or method == f"NF{bits}" else f"INT{bits} ({method})"
+            # Clean up redundant labels like "INT4 (INT4)"
+            if method in (f"INT{bits}", f"FP{bits}", f"NF{bits}"):
+                label = method
+            return {
+                "method": method,
+                "bits": bits,
+                "vram_factor": vram_factor,
+                "label": label,
+            }
+    return None
+
+
+# ── GGUF variant detection ───────────────────────────────────────
+
+_GGUF_QUANT_RE = re.compile(
+    r"((?:UD[-_])?"   # optional UD- prefix (ultra-decomposed)
+    r"(?:"
+    r"IQ[1-4]_(?:XXS|XS|NL|S|M)"        # imatrix quants
+    r"|Q[2-8]_K_(?:XS|XL|S|M|L)"        # k-quants with sub-type
+    r"|Q[2-8]_K"                          # k-quants (e.g. Q6_K)
+    r"|Q[2-8]_[01]"                       # legacy quants (Q4_0, Q8_0)
+    r"|BF16|F16|F32"                      # full precision
+    r"))",
+    re.IGNORECASE,
+)
+
+_GGUF_QUALITY: dict[str, dict[str, Any]] = {
+    "Q2_K":     {"bits": 2.5, "quality": "Poor",         "rating": 1},
+    "Q3_K_S":   {"bits": 3.0, "quality": "Low",          "rating": 2},
+    "Q3_K_M":   {"bits": 3.5, "quality": "Low-Med",      "rating": 3},
+    "Q3_K_L":   {"bits": 3.5, "quality": "Low-Med",      "rating": 3},
+    "Q4_0":     {"bits": 4.0, "quality": "Medium",        "rating": 4},
+    "Q4_1":     {"bits": 4.5, "quality": "Medium",        "rating": 5},
+    "Q4_K_S":   {"bits": 4.2, "quality": "Medium",        "rating": 5},
+    "Q4_K_M":   {"bits": 4.5, "quality": "Good",          "rating": 6},
+    "Q5_0":     {"bits": 5.0, "quality": "Good",           "rating": 6},
+    "Q5_1":     {"bits": 5.5, "quality": "Good",           "rating": 7},
+    "Q5_K_S":   {"bits": 5.0, "quality": "Good",           "rating": 7},
+    "Q5_K_M":   {"bits": 5.2, "quality": "Very Good",      "rating": 8},
+    "Q6_K":     {"bits": 6.0, "quality": "Excellent",       "rating": 9},
+    "Q8_0":     {"bits": 8.0, "quality": "Near-Perfect",    "rating": 10},
+    "BF16":     {"bits": 16,  "quality": "Reference",       "rating": 10},
+    "F16":      {"bits": 16,  "quality": "Reference",       "rating": 10},
+    "F32":      {"bits": 32,  "quality": "Reference",       "rating": 10},
+    "IQ2_XS":   {"bits": 2.3, "quality": "Poor",           "rating": 1},
+    "IQ2_XXS":  {"bits": 2.1, "quality": "Very Poor",      "rating": 1},
+    "IQ3_XS":   {"bits": 3.0, "quality": "Low",            "rating": 2},
+    "IQ3_S":    {"bits": 3.2, "quality": "Low",            "rating": 2},
+    "IQ4_XS":   {"bits": 4.0, "quality": "Medium",         "rating": 5},
+    "IQ4_NL":   {"bits": 4.5, "quality": "Medium",         "rating": 5},
+}
+
+
+def _parse_gguf_quant(filename: str) -> str:
+    """Extract quantization level from a GGUF filename."""
+    stem = filename.rsplit(".", 1)[0]
+    m = _GGUF_QUANT_RE.search(stem)
+    return m.group(1).upper().replace("-", "_") if m else "unknown"
+
+
+def _extract_gguf_variants(
+    siblings: list[dict[str, Any]],
+    model_id: str,
+    pipeline_tag: str = "text-to-image",
+) -> list[dict[str, Any]]:
+    """Extract GGUF variant files from HF siblings data.
+
+    Returns a list sorted by size (smallest first), each with:
+      filename, size_bytes, size_human, quant_level, quality,
+      quality_rating, bits, hardware_fit, hardware_badge, vram_required_gb
+    """
+    variants: list[dict[str, Any]] = []
+    for s in siblings:
+        fname = s.get("rfilename", "")
+        if not fname.lower().endswith(".gguf"):
+            continue
+        # Get file size from direct field or LFS pointer
+        sz = s.get("size")
+        if not isinstance(sz, (int, float)) or sz <= 0:
+            lfs = s.get("lfs")
+            if isinstance(lfs, dict):
+                sz = lfs.get("size")
+        if not isinstance(sz, (int, float)) or sz <= 0:
+            continue
+
+        size_bytes = int(sz)
+        quant = _parse_gguf_quant(fname)
+        qi = _GGUF_QUALITY.get(quant, {})
+
+        # Assess hardware fit for this specific variant's file size.
+        # is_single_file=True: the GGUF file IS the weight, not a multi-file repo.
+        hw = _assess_hardware_fit(size_bytes, None, pipeline_tag, model_id, is_single_file=True)
+
+        variants.append({
+            "filename": fname,
+            "size_bytes": size_bytes,
+            "size_human": format_bytes_human(size_bytes),
+            "quant_level": quant,
+            "quality": qi.get("quality", "Unknown"),
+            "quality_rating": qi.get("rating", 0),
+            "bits": qi.get("bits", 0),
+            "hardware_fit": hw["fit"],
+            "hardware_badge": hw["badge"],
+            "vram_required_gb": hw["vram_required_gb"],
+        })
+
+    variants.sort(key=lambda v: v["size_bytes"])
+    return variants
+
+
 _TASK_DESCRIPTIONS: dict[str, str] = {
     "text-generation": "text generation",
     "text2text-generation": "text-to-text generation",
@@ -1620,8 +1764,13 @@ def _synthesize_hf_description(
     pipeline_tag: str,
     tags: list[str],
     param_count: int | None,
+    hw_fit: dict[str, Any] | None = None,
 ) -> str:
-    """Synthesize a human-readable description from available HF metadata."""
+    """Synthesize a human-readable description from available HF metadata.
+
+    If *hw_fit* is provided, appends a short suitability note so the user
+    sees at-a-glance whether the model will run on their hardware.
+    """
     parts: list[str] = []
 
     author = model_id.split("/")[0] if "/" in model_id else ""
@@ -1654,7 +1803,21 @@ def _synthesize_hf_description(
     if license_tag:
         parts.append(f"({license_tag})")
 
-    return " ".join(parts) + "." if parts else ""
+    desc = " ".join(parts) + "." if parts else ""
+
+    # Append hardware suitability note
+    if hw_fit and hw_fit.get("fit") and hw_fit["fit"] != "unknown":
+        vram_req = hw_fit.get("vram_required_gb", 0)
+        gpu_vram = hw_fit.get("gpu_vram_gb", 0)
+        fit = hw_fit["fit"]
+        if fit == "fits":
+            desc += f" [Fits your {gpu_vram:.0f} GB GPU]"
+        elif fit == "tight":
+            desc += f" [Tight fit — ~{vram_req:.0f} GB needed, {gpu_vram:.0f} GB available]"
+        elif fit == "wont_fit":
+            desc += f" [Too large — needs ~{vram_req:.0f} GB, your GPU has {gpu_vram:.0f} GB]"
+
+    return desc
 
 
 def _extract_hf_capabilities(pipeline_tag: str, tags: list[str]) -> list[str]:
@@ -1728,6 +1891,225 @@ def _classify_hf_model(model_id: str, pipeline_tag: str, tags: list[str]) -> str
     if any(k in name_low for k in ("-instruct", "-chat", "-ft", "-finetuned", "-dpo", "-rlhf")):
         return "fine_tune"
     return "base_model"
+
+
+# ── Hardware-aware model suitability assessment ──────────────────
+# Used by /models/hf/discover to annotate each model with fit info.
+
+def _get_gpu_vram_gb() -> float:
+    """Return primary GPU VRAM in GB (cached).  0.0 if no GPU detected."""
+    try:
+        from local_ai_platform.system_info import get_cached_hardware
+        hw = get_cached_hardware()
+        return hw.best_gpu_vram_mb / 1024.0 if hw.best_gpu_vram_mb else 0.0
+    except Exception:
+        return 0.0
+
+
+# Measured peak VRAM for known diffusion architectures.
+# These are real-world numbers WITH the optimizations the app auto-applies
+# on <=8 GB cards (model CPU offload, TinyVAE, fp16, attention slicing).
+# With CPU offload only the largest single component (UNet/transformer)
+# sits on GPU at a time, so peak VRAM ≈ UNet size + ~0.5-1 GB overhead.
+# Longer / more-specific patterns MUST come before shorter ones so
+# "stable-diffusion-3-medium" matches before "stable-diffusion-3" etc.
+_DIFFUSION_PEAK_VRAM_GB: list[tuple[str, float]] = [
+    # SD 1.5 / 2.x  (UNet ~1.7 GB fp16 + VAE overhead)
+    ("stable-diffusion-v1-5",       3.5),
+    ("stable-diffusion-v1-4",       3.5),
+    ("stable-diffusion-v1",         3.5),
+    ("stable-diffusion-2-1",        3.8),
+    ("stable-diffusion-2",          3.8),
+    ("sd-turbo",                    3.5),
+    # SDXL (UNet ~5 GB fp16 with CPU offload → peak ~5.5 GB)
+    ("sdxl-turbo",                  5.5),
+    ("sdxl-lightning",              5.5),
+    ("sdxl-base",                   5.5),
+    ("stable-diffusion-xl",         5.5),
+    # SD 3 / 3.5
+    ("stable-diffusion-3.5",        8.0),
+    ("stable-diffusion-3-medium",   7.5),
+    ("stable-diffusion-3",          7.5),
+    # Flux — transformer is ~24 GB fp16, needs GGUF quantization
+    ("flux.1-kontext",              22.0),
+    ("flux.1-schnell",              22.0),
+    ("flux.1-dev",                  22.0),
+    ("flux-schnell",                22.0),
+    ("flux-dev",                    22.0),
+    # Z-Image (turbo before base — turbo is smaller)
+    ("z-image-turbo",               5.0),
+    ("z-image",                     12.0),
+    # PixArt
+    ("pixart-sigma",                4.0),
+    ("pixart-alpha",                4.0),
+    # Kandinsky
+    ("kandinsky",                   5.0),
+    # HunyuanDiT
+    ("hunyuandit",                  7.0),
+    ("hunyuan-dit",                 7.0),
+    # AnimateDiff
+    ("animatediff",                 4.0),
+    # Kolors
+    ("kolors",                      12.0),
+]
+
+
+def _estimate_vram_required_gb(
+    size_bytes: int | None,
+    param_count: int | None,
+    pipeline_tag: str,
+    model_id: str = "",
+    *,
+    is_single_file: bool = False,
+    quantization: dict[str, Any] | None = None,
+) -> float:
+    """Estimate peak runtime VRAM needed in GB.
+
+    For diffusion models, uses measured peak VRAM for known architectures.
+    The app auto-applies CPU offloading on <=8 GB cards, so peak VRAM
+    equals the largest single component (UNet/transformer) + overhead,
+    NOT the entire pipeline loaded at once.
+
+    For unknown diffusion repos, uses 0.6x download size as a heuristic
+    (the UNet is typically 50-60% of total download, plus ~10% overhead
+    for activations during the forward pass).
+
+    For single-file models (e.g. individual GGUF variants), the file IS
+    the model weight, so peak VRAM ≈ file_size * 1.2 (dequant buffers +
+    activations overhead).
+
+    For LLMs/transformers, fp16 inference needs ~2 bytes/param + KV cache.
+
+    If *quantization* is provided (from ``_detect_quantization``), the
+    FP16 baseline VRAM is scaled by ``vram_factor`` (e.g. 0.30 for INT4).
+    """
+    is_diffusion = pipeline_tag in ("text-to-image", "image-to-image", "text-to-video", "image-to-video")
+    qfactor = quantization["vram_factor"] if quantization else 1.0
+
+    # 1. Check known architecture lookup (most accurate)
+    if is_diffusion and model_id and not is_single_file:
+        model_lower = model_id.lower()
+        for pattern, peak_gb in _DIFFUSION_PEAK_VRAM_GB:
+            if pattern in model_lower:
+                return round(peak_gb * qfactor, 1)
+
+    if size_bytes and size_bytes > 0:
+        if is_single_file:
+            # Single GGUF file: the file IS the model weight.
+            # Peak VRAM ≈ file size + ~20% for dequantization buffers,
+            # KV cache, and activation memory during forward pass.
+            return round(size_bytes * 1.2 / (1024 ** 3), 1)
+        if is_diffusion:
+            # Multi-file diffusion repo with CPU offload: only the
+            # UNet/transformer needs GPU at a time.
+            # UNet is typically 50-60% of the total download size.
+            # Add ~15% for VAE decode + activations overhead.
+            return round(size_bytes * 0.6 / (1024 ** 3), 1)
+        # Text/other models: on-disk safetensors ≈ fp16 weights; runtime adds ~30% for KV/activations
+        return round(size_bytes * 1.3 / (1024 ** 3), 1)
+    if param_count and param_count > 0:
+        if is_diffusion:
+            # Diffusion param counts include ALL components; UNet is ~60%
+            return round(param_count * 2 * 0.65 / (1024 ** 3), 1)
+        # fp16: 2 bytes/param + overhead
+        return round(param_count * 2.2 / (1024 ** 3), 1)
+    return 0.0
+
+
+def _assess_hardware_fit(
+    size_bytes: int | None,
+    param_count: int | None,
+    pipeline_tag: str,
+    model_id: str,
+    *,
+    is_single_file: bool = False,
+    quantization: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Evaluate whether a model fits on the user's GPU.
+
+    Returns dict with:
+      fit:         "fits" | "tight" | "wont_fit" | "unknown"
+      vram_required_gb:  estimated runtime VRAM (float)
+      gpu_vram_gb:       detected GPU VRAM (float)
+      badge:       short UI label ("OK for 8 GB", "Needs 24 GB", etc.)
+      note:        one-line human explanation
+      suggestion:  optional recommendation (e.g. "Use Q4_K_M GGUF variant")
+    """
+    gpu_vram = _get_gpu_vram_gb()
+    vram_req = _estimate_vram_required_gb(
+        size_bytes, param_count, pipeline_tag, model_id,
+        is_single_file=is_single_file,
+        quantization=quantization,
+    )
+    gpu_label = f"{gpu_vram:.0f} GB" if gpu_vram > 0 else "no GPU"
+    is_diffusion = pipeline_tag in ("text-to-image", "image-to-image", "text-to-video", "image-to-video")
+
+    result: dict[str, Any] = {
+        "gpu_vram_gb": round(gpu_vram, 1),
+        "vram_required_gb": vram_req,
+        "fit": "unknown",
+        "badge": "",
+        "note": "",
+        "suggestion": None,
+    }
+
+    if gpu_vram <= 0 or vram_req <= 0:
+        result["fit"] = "unknown"
+        result["badge"] = "Unknown"
+        result["note"] = "Could not estimate VRAM requirements."
+        return result
+
+    headroom = gpu_vram - vram_req
+    ratio = vram_req / gpu_vram
+
+    if ratio <= 0.75:
+        # Comfortable fit
+        result["fit"] = "fits"
+        result["badge"] = f"Fits {gpu_label}"
+        result["note"] = f"Needs ~{vram_req:.1f} GB VRAM. Your {gpu_label} GPU has plenty of headroom."
+    elif ratio <= 1.0:
+        # Tight but workable with optimizations
+        result["fit"] = "tight"
+        result["badge"] = f"Tight on {gpu_label}"
+        result["note"] = f"Needs ~{vram_req:.1f} GB VRAM. Will fit on your {gpu_label} GPU with memory optimizations (CPU offload, TinyVAE)."
+        if is_diffusion:
+            result["suggestion"] = "Enable low-memory mode. CPU offloading will be used automatically."
+    else:
+        # Won't fit
+        result["fit"] = "wont_fit"
+        result["badge"] = f"Needs ~{vram_req:.0f} GB"
+        result["note"] = f"Needs ~{vram_req:.1f} GB VRAM but your GPU only has {gpu_label}. This model will not fit."
+
+        # Suggest GGUF alternatives for known large diffusion models
+        model_lower = model_id.lower()
+        if is_diffusion:
+            if any(k in model_lower for k in ("flux", "flux.1", "flux1")):
+                result["suggestion"] = (
+                    "Look for a GGUF-quantized variant (e.g., Q4_K_M ~7 GB, Q3_K_S ~5 GB) "
+                    "which can run on 8 GB cards with CPU offloading."
+                )
+            elif "sdxl" in model_lower or "stable-diffusion-xl" in model_lower:
+                result["suggestion"] = (
+                    "SDXL may still work with aggressive optimizations: NF4 quantization, "
+                    "TinyVAE, and sequential CPU offloading. Set quality tier to 'performance'."
+                )
+            elif vram_req > gpu_vram * 2:
+                result["suggestion"] = (
+                    "Consider a smaller model or a quantized variant. "
+                    f"This model needs {vram_req:.0f} GB — far more than your {gpu_label} GPU."
+                )
+        else:
+            # Text/LLM models: suggest quantization
+            if param_count:
+                params_b = param_count / 1e9
+                if params_b >= 70:
+                    result["suggestion"] = f"A {params_b:.0f}B model is too large. Consider a smaller model (7B-14B) with Q4_K_M quantization."
+                elif params_b >= 14:
+                    result["suggestion"] = f"Try a Q4_K_M or Q3_K_S quantized variant to fit in {gpu_label}."
+                elif params_b >= 7:
+                    result["suggestion"] = f"Try a Q4_K_M quantized variant, or use Ollama which handles quantization automatically."
+
+    return result
 
 
 @app.get("/models/hf/discover")
@@ -1831,7 +2213,9 @@ async def discover_hf_models(
             # ── Accurate download size ──────────────────────────────
             # 1st: sum actual file sizes from siblings (gold standard)
             siblings = model.get("siblings")
-            size_bytes = _sum_siblings_bytes(siblings) if isinstance(siblings, list) else None
+            _siblings_bytes = _sum_siblings_bytes(siblings) if isinstance(siblings, list) else None
+            _has_real_size = _siblings_bytes is not None
+            size_bytes = _siblings_bytes
             # 2nd: param-based estimate
             if not size_bytes and param_count:
                 size_bytes = _params_to_size_bytes(param_count, pipeline_tag, model_id)
@@ -1844,7 +2228,70 @@ async def discover_hf_models(
                 if not param_count:
                     param_count = int(1.1e9)
 
-            description = _synthesize_hf_description(model_id, pipeline_tag, tags, param_count)
+            # ── Quantization detection ─────────────────────────────────
+            quant_info = _detect_quantization(tags, model_id)
+            # If quantized AND size came from generic pattern matching, adjust
+            if quant_info and size_bytes and not _has_real_size:
+                # Generic estimates assume FP16; scale by bits/16
+                size_bytes = int(size_bytes * quant_info["bits"] / 16)
+
+            # ── GGUF variant detection ─────────────────────────────────
+            gguf_variants = _extract_gguf_variants(
+                siblings, model_id, pipeline_tag,
+            ) if isinstance(siblings, list) else []
+
+            # ── Hardware fit assessment ────────────────────────────────
+            # If GGUF variants exist, assess fit based on the best-fitting
+            # variant rather than the full repo size.
+            if gguf_variants:
+                # Find the best variant that fits (highest quality that fits)
+                _fitting = [v for v in gguf_variants if v["hardware_fit"] == "fits"]
+                _tight = [v for v in gguf_variants if v["hardware_fit"] == "tight"]
+                if _fitting:
+                    _best = max(_fitting, key=lambda v: v["quality_rating"])
+                    hw_fit = _assess_hardware_fit(
+                        _best["size_bytes"], None, pipeline_tag, model_id,
+                    )
+                    hw_fit["note"] = (
+                        f"GGUF variant {_best['quant_level']} ({_best['size_human']}) "
+                        f"fits your GPU. {len(_fitting)} variant(s) available that fit."
+                    )
+                    hw_fit["suggestion"] = (
+                        f"Recommended: {_best['quant_level']} — "
+                        f"{_best['quality']} quality, {_best['size_human']}. "
+                        f"Select a variant below to download."
+                    )
+                elif _tight:
+                    _best = max(_tight, key=lambda v: v["quality_rating"])
+                    hw_fit = _assess_hardware_fit(
+                        _best["size_bytes"], None, pipeline_tag, model_id,
+                    )
+                    hw_fit["note"] = (
+                        f"GGUF variant {_best['quant_level']} ({_best['size_human']}) "
+                        f"is a tight fit. Needs memory optimizations."
+                    )
+                    hw_fit["suggestion"] = (
+                        f"Best option: {_best['quant_level']} — "
+                        f"{_best['quality']} quality, {_best['size_human']}. "
+                        f"Select a variant below to download."
+                    )
+                else:
+                    # No variant fits — assess the smallest one
+                    _smallest = gguf_variants[0]
+                    hw_fit = _assess_hardware_fit(
+                        _smallest["size_bytes"], None, pipeline_tag, model_id,
+                    )
+                    hw_fit["note"] = (
+                        f"Even the smallest GGUF variant ({_smallest['quant_level']}, "
+                        f"{_smallest['size_human']}) needs ~{_smallest['vram_required_gb']:.1f} GB VRAM."
+                    )
+            else:
+                hw_fit = _assess_hardware_fit(
+                    size_bytes, param_count, pipeline_tag, model_id,
+                    quantization=quant_info,
+                )
+
+            description = _synthesize_hf_description(model_id, pipeline_tag, tags, param_count, hw_fit)
             capabilities = _extract_hf_capabilities(pipeline_tag, tags)
             category = _classify_hf_model(model_id, pipeline_tag, tags)
             gated = model.get("gated", False)
@@ -1888,8 +2335,18 @@ async def discover_hf_models(
                 "param_count_human": _format_param_count(param_count) if param_count else None,
                 "size_bytes": size_bytes,
                 "size_human": format_bytes_human(size_bytes) if size_bytes else None,
+                "size_estimated": not _has_real_size,
+                "quantization": quant_info["label"] if quant_info else None,
+                "quantization_bits": quant_info["bits"] if quant_info else None,
                 "base_model": _base_model_id or None,
                 "base_model_installed": _base_installed if _base_model_id else None,
+                "hardware_fit": hw_fit["fit"],
+                "hardware_badge": hw_fit["badge"],
+                "hardware_note": hw_fit["note"],
+                "hardware_suggestion": hw_fit["suggestion"],
+                "vram_required_gb": hw_fit["vram_required_gb"],
+                "gpu_vram_gb": hw_fit["gpu_vram_gb"],
+                "gguf_variants": gguf_variants if gguf_variants else None,
             })
     except Exception as exc:
         logger.warning("HF Hub discovery failed: %s", exc)
@@ -1974,58 +2431,170 @@ async def get_vllm_library(search: str = ""):
 _hf_downloads: dict[str, dict[str, Any]] = {}  # model_id → {status, progress, error, ...}
 
 
-def _hf_download_worker(model_id: str, token: str | None) -> None:
+def _hf_download_worker(model_id: str, token: str | None, *, gguf_filename: str | None = None) -> None:
     """Background thread that downloads a HF model via snapshot_download.
 
-    Uses allow_patterns to grab ONLY the pipeline component files that
-    diffusers/transformers actually need:
-      - model_index.json and all config/scheduler JSON inside subdirs
-      - .safetensors weights inside subdirs (unet/, vae/, text_encoder/, etc.)
-      - tokenizer files (vocab, merges, spiece, tokenizer.json)
-      - top-level config.json and README
-    Skips root-level multi-GB pruned checkpoints (v1-5-pruned*.safetensors)
-    and all legacy .bin/.ckpt/.h5/.msgpack formats.
+    If *gguf_filename* is provided, downloads ONLY that specific GGUF file
+    plus the lightweight pipeline components (configs, tokenizers, scheduler)
+    — skipping all other large weight files.  This lets users pick a single
+    quantization variant instead of downloading the entire 30+ GB repo.
+
+    Without *gguf_filename*, uses allow_patterns to grab the pipeline files
+    that diffusers/transformers need (safetensors weights, configs, tokenizers).
     """
     import threading
-    _hf_downloads[model_id] = {"model_id": model_id, "status": "downloading", "progress": 0.0, "error": None, "thread": threading.current_thread().name}
+    download_key = f"{model_id}:{gguf_filename}" if gguf_filename else model_id
+    _hf_downloads[download_key] = {
+        "model_id": model_id,
+        "gguf_filename": gguf_filename,
+        "status": "downloading",
+        "progress": 0.0,
+        "error": None,
+        "thread": threading.current_thread().name,
+    }
     try:
         from huggingface_hub import snapshot_download
 
-        # Download all model files needed for inference.
-        # For transformers models: weights are at root level (model.safetensors
-        # or model-00001-of-*.safetensors). For diffusers pipelines: weights
-        # are in subdirs (unet/*.safetensors, vae/*.safetensors, etc.).
-        snapshot_download(
-            repo_id=model_id,
-            token=token or None,
-            resume_download=True,
-            allow_patterns=[
-                # Pipeline/model configs
-                "*.json",
-                "*.txt",                   # tokenizer vocab, merges
-                "*.model",                 # sentencepiece models
-                # Safetensors weights (preferred format)
-                "*.safetensors",
-                # Special files
-                "*.md",
-            ],
-            ignore_patterns=[
-                "*non_ema*",               # Training artifacts (huge, not needed)
-                "*.fp16.*",                # Skip fp16 variant if fp32 exists
-                "*fp16*safetensors",       # Explicit fp16 variants
-                "flax_model*",             # Flax weights
-                "tf_model*",              # TensorFlow weights
-                "openvino_*",              # OpenVINO pre-compiled
-                "*.ot",                    # ONNX training
-                "training_args*",          # Training artifacts
-                "optimizer*",              # Training optimizer state
-                "runs/*",                  # TensorBoard logs
-                ".git*",                   # Git metadata
-            ],
-        )
-        _hf_downloads[model_id]["status"] = "completed"
-        _hf_downloads[model_id]["progress"] = 1.0
-        logger.info("HF download completed: %s", model_id)
+        if gguf_filename:
+            # ── GGUF variant download ─────────────────────────────
+            # Download the specific GGUF file + all small pipeline
+            # support files (configs, tokenizers, scheduler).
+            # Exclude other GGUF files and safetensors weights.
+            logger.info("Downloading GGUF variant: %s from %s", gguf_filename, model_id)
+            snapshot_download(
+                repo_id=model_id,
+                token=token or None,
+                resume_download=True,
+                allow_patterns=[
+                    gguf_filename,             # the specific GGUF variant
+                    "*.json",                  # configs, model_index, scheduler
+                    "*.txt",                   # tokenizer vocab, merges
+                    "*.model",                 # sentencepiece models
+                    "*.md",                    # README
+                ],
+                ignore_patterns=[
+                    "*.safetensors",           # skip full-precision weights
+                    "*.bin",
+                    "*.ckpt",
+                    # Exclude other GGUF files — only keep the selected one
+                    "*.gguf",
+                ],
+            )
+            # snapshot_download's ignore_patterns for *.gguf would exclude
+            # ALL gguf files.  So we download the specific one separately.
+            from huggingface_hub import hf_hub_download
+            hf_hub_download(
+                repo_id=model_id,
+                filename=gguf_filename,
+                token=token or None,
+                resume_download=True,
+            )
+        else:
+            # ── Full pipeline download ────────────────────────────
+            # Detect repos with multiple alternative weight variants
+            # (e.g., nunchaku: svdq-fp4 + svdq-int4). Only download
+            # the variant that matches the model name / quantization.
+            _ignore = [
+                "*non_ema*",
+                "*.fp16.*",
+                "*fp16*safetensors",
+                "flax_model*",
+                "tf_model*",
+                "openvino_*",
+                "*.ot",
+                "training_args*",
+                "optimizer*",
+                "runs/*",
+                ".git*",
+            ]
+            # Detect repos with multiple alternative weight variants
+            # (e.g., nunchaku: svdq-fp4 + svdq-int4).  These are NOT
+            # pipeline components but competing quantization levels —
+            # user only needs ONE.  Pick the smallest that fits the GPU.
+            try:
+                from huggingface_hub import model_info as _mi
+                _info = _mi(model_id, token=token)
+                _siblings = _info.siblings or []
+                _weight_files = [
+                    s for s in _siblings
+                    if s.rfilename.endswith(".safetensors")
+                    and "/" not in s.rfilename              # top-level only
+                    and not any(skip in s.rfilename.lower()
+                                for skip in ("non_ema", "fp16", "training"))
+                ]
+                # Heuristic: multiple top-level safetensors files whose names
+                # differ only by a quant prefix (fp4/int4/int8/nf4) are
+                # alternative variants, not pipeline components.
+                _quant_markers = ("fp4", "int4", "int8", "nf4", "fp8", "q4", "q8")
+                if len(_weight_files) >= 2:
+                    _has_quant_in_name = [
+                        wf for wf in _weight_files
+                        if any(qm in wf.rfilename.lower() for qm in _quant_markers)
+                    ]
+                    if len(_has_quant_in_name) >= 2:
+                        # These ARE alternative quant variants.
+                        # Rank by quantization level (lower bits = smaller
+                        # VRAM) and pick the best for the user's hardware.
+                        _quant_rank = {
+                            "int4": 1, "nf4": 1, "q4": 1, "fp4": 2,
+                            "int8": 3, "q8": 3, "fp8": 4,
+                        }
+
+                        def _rank_wf(wf: Any) -> int:
+                            """Lower = more quantized = less VRAM."""
+                            name = wf.rfilename.lower()
+                            for marker, rank in _quant_rank.items():
+                                if marker in name:
+                                    return rank
+                            return 99
+
+                        gpu_vram = _get_gpu_vram_gb()
+                        # Sort: most-quantized first
+                        _sorted_wf = sorted(_has_quant_in_name, key=_rank_wf)
+                        # If we have file sizes, use them to pick best fit
+                        _best_wf = _sorted_wf[0]  # default: most quantized
+                        for wf in reversed(_sorted_wf):
+                            sz = getattr(wf, "size", None) or 0
+                            if not sz:
+                                lfs = getattr(wf, "lfs", None)
+                                if isinstance(lfs, dict):
+                                    sz = lfs.get("size", 0) or 0
+                            if sz > 0 and gpu_vram > 0:
+                                vram_est = sz * 1.2 / (1024**3)
+                                if vram_est <= gpu_vram:
+                                    _best_wf = wf  # largest that fits
+                                    break
+                        _exclude = [
+                            wf.rfilename for wf in _has_quant_in_name
+                            if wf.rfilename != _best_wf.rfilename
+                        ]
+                        if _exclude:
+                            for ef in _exclude:
+                                _ignore.append(ef)
+                            logger.info(
+                                "Smart download: keeping %s, excluding %s",
+                                _best_wf.rfilename, _exclude,
+                            )
+            except Exception as exc:
+                logger.debug("Could not pre-check repo files: %s", exc)
+
+            snapshot_download(
+                repo_id=model_id,
+                token=token or None,
+                resume_download=True,
+                allow_patterns=[
+                    "*.json",
+                    "*.txt",
+                    "*.model",
+                    "*.safetensors",
+                    "*.md",
+                ],
+                ignore_patterns=_ignore,
+            )
+
+        _hf_downloads[download_key]["status"] = "completed"
+        _hf_downloads[download_key]["progress"] = 1.0
+        logger.info("HF download completed: %s%s", model_id, f" ({gguf_filename})" if gguf_filename else "")
         # Invalidate model caches so new model shows up
         _invalidate_cache("models")
         if image_service:
@@ -2034,8 +2603,8 @@ def _hf_download_worker(model_id: str, token: str | None) -> None:
             except Exception:
                 pass
     except Exception as exc:
-        _hf_downloads[model_id]["status"] = "failed"
-        _hf_downloads[model_id]["error"] = str(exc)
+        _hf_downloads[download_key]["status"] = "failed"
+        _hf_downloads[download_key]["error"] = str(exc)
         logger.warning("HF download failed for %s: %s", model_id, exc)
 
 
@@ -2055,23 +2624,41 @@ async def get_hf_downloads(limit: int = 20):
 
 @app.post("/models/hf/download")
 async def start_hf_download(body: dict[str, Any]):
-    """Start downloading a HF model in a background thread."""
+    """Start downloading a HF model in a background thread.
+
+    Body:
+      model_id (str, required): HuggingFace model ID (e.g. "org/model")
+      gguf_filename (str, optional): Specific GGUF file to download.
+        When provided, only this file + lightweight pipeline configs are
+        downloaded — skipping other large weight files.
+    """
     import threading
 
     model_id = body.get("model_id", "")
     if not model_id:
         raise HTTPException(400, "model_id required")
 
+    gguf_filename = body.get("gguf_filename")  # e.g. "model-Q4_K_M.gguf"
+    download_key = f"{model_id}:{gguf_filename}" if gguf_filename else model_id
+
     # Check if already downloading
-    existing = _hf_downloads.get(model_id)
+    existing = _hf_downloads.get(download_key)
     if existing and existing.get("status") == "downloading":
         return {"status": "already_downloading", "model_id": model_id}
 
     token = (config.hf_api_token or "").strip() or None
-    thread = threading.Thread(target=_hf_download_worker, args=(model_id, token), daemon=True)
+    thread = threading.Thread(
+        target=_hf_download_worker,
+        args=(model_id, token),
+        kwargs={"gguf_filename": gguf_filename},
+        daemon=True,
+    )
     thread.start()
-    logger.info("Started HF download: %s", model_id)
-    return {"status": "downloading", "model_id": model_id}
+    log_msg = f"Started HF download: {model_id}"
+    if gguf_filename:
+        log_msg += f" (variant: {gguf_filename})"
+    logger.info(log_msg)
+    return {"status": "downloading", "model_id": model_id, "gguf_filename": gguf_filename}
 
 
 @app.get("/model-catalog/{provider}/{model_id:path}/details")
@@ -2221,6 +2808,21 @@ async def get_hf_model_readme(model_id: str):
         _bc = Path(os.getenv("HF_HOME") or (Path.home() / ".cache" / "huggingface")) / "hub" / f"models--{_readme_base_model.replace('/', '--')}"
         _readme_base_installed = _bc.exists() and (_bc / "snapshots").exists() and any((_bc / "snapshots").iterdir()) if (_bc / "snapshots").exists() else False
 
+    # ── Compute actual size & hardware fit from authoritative data ──
+    _actual_size: int | None = hub_info.get("used_storage_bytes")
+    if not _actual_size:
+        # Fallback: sum individual file sizes from siblings
+        _actual_size = sum(
+            (f.get("size") or 0) for f in hub_info.get("files", [])
+        ) or None
+    _readme_ptag = hub_info.get("pipeline_tag", "") or ""
+    _readme_quant = _detect_quantization(all_tags, model_id)
+    _readme_sf = hub_info.get("safetensors_total_params")
+    _readme_hw = _assess_hardware_fit(
+        _actual_size, _readme_sf, _readme_ptag, model_id,
+        quantization=_readme_quant,
+    )
+
     result = {
         "model_id": model_id,
         "readme": readme,
@@ -2229,6 +2831,16 @@ async def get_hf_model_readme(model_id: str):
         "category": _readme_category,
         "base_model": _readme_base_model or None,
         "base_model_installed": _readme_base_installed if _readme_base_model else None,
+        # Authoritative size / VRAM / hardware data
+        "actual_size_bytes": _actual_size,
+        "actual_size_human": format_bytes_human(_actual_size) if _actual_size else None,
+        "hardware_fit": _readme_hw["fit"],
+        "hardware_badge": _readme_hw["badge"],
+        "hardware_note": _readme_hw["note"],
+        "hardware_suggestion": _readme_hw.get("suggestion"),
+        "vram_required_gb": _readme_hw["vram_required_gb"],
+        "gpu_vram_gb": _readme_hw["gpu_vram_gb"],
+        "quantization": _readme_quant["label"] if _readme_quant else None,
         **hub_info,
     }
     _set_cache(cache_key, result)
@@ -4242,8 +4854,20 @@ def _get_editor():
 
 @app.post("/editor/enhance-prompt")
 async def editor_enhance_prompt(body: dict[str, Any]):
-    """Enhance an image editing instruction for better InstructPix2Pix results."""
+    """Enhance an image editing instruction for better results.
+
+    Body:
+        instruction (str, required): the user's original instruction
+        model (str, optional): target model — one of 'kontext', 'cosxl',
+            'pix2pix', 'controlnet'. Defaults to 'pix2pix' for backward
+            compat. The enhancer produces different output formats for
+            different models (target-state for kontext/controlnet,
+            imperative for cosxl/pix2pix).
+
+    Returns {original, enhanced, model}.
+    """
     instruction = body.get("instruction", "")
+    model = (body.get("model") or "pix2pix").lower().strip()
     if not instruction:
         raise HTTPException(400, "instruction is required")
     from local_ai_platform.images.ai_enhance import enhance_edit_prompt
@@ -4251,12 +4875,13 @@ async def editor_enhance_prompt(body: dict[str, Any]):
     loop = asyncio.get_event_loop()
     try:
         enhanced = await loop.run_in_executor(
-            None, lambda: enhance_edit_prompt(instruction, router=router, config=config)
+            None,
+            lambda: enhance_edit_prompt(instruction, router=router, config=config, model=model),
         )
     except Exception as e:
         logger.error("enhance-prompt failed: %s", e)
         raise HTTPException(500, f"Prompt enhancement failed: {e}")
-    return {"original": instruction, "enhanced": enhanced}
+    return {"original": instruction, "enhanced": enhanced, "model": model}
 
 
 @app.get("/editor/operations/list")
@@ -4508,11 +5133,25 @@ async def serve_step_preview(session_id: str, image_id: str, filename: str):
 
 @app.get("/images/models")
 async def get_image_models(refresh: bool = False):
-    """Return available image generation models."""
+    """Return available image generation models with hardware fit info."""
     if not image_service:
         return {"items": []}
     try:
         items = image_service.list_models(refresh=refresh)
+        # Annotate each model with hardware suitability
+        for item in items:
+            hw_fit = _assess_hardware_fit(
+                item.get("size_bytes"),
+                None,  # param_count not in image model entries
+                "text-to-image",
+                item.get("model_id", ""),
+            )
+            item["hardware_fit"] = hw_fit["fit"]
+            item["hardware_badge"] = hw_fit["badge"]
+            item["hardware_note"] = hw_fit["note"]
+            item["hardware_suggestion"] = hw_fit["suggestion"]
+            item["vram_required_gb"] = hw_fit["vram_required_gb"]
+            item["gpu_vram_gb"] = hw_fit["gpu_vram_gb"]
         return {"items": items}
     except Exception as exc:
         logger.warning("Failed to list image models: %s", exc)

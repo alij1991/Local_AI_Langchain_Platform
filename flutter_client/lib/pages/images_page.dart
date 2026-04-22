@@ -2616,6 +2616,7 @@ class _ImagesPageState extends State<ImagesPage> with TickerProviderStateMixin {
         final shortName = _modelShortName(id);
         final sizeStr = m['size_human'] as String? ?? '';
         final downloaded = (m['local_status'] as Map?)?['downloaded'] == true;
+        final hwFit = (m['hardware_fit'] ?? '').toString();
         items.add(DropdownMenuItem(
           value: id,
           child: Row(children: [
@@ -2624,6 +2625,13 @@ class _ImagesPageState extends State<ImagesPage> with TickerProviderStateMixin {
             const SizedBox(width: 6),
             Expanded(child: Text(shortName, overflow: TextOverflow.ellipsis,
                 style: const TextStyle(fontSize: 12))),
+            if (hwFit == 'wont_fit') ...[
+              Icon(Icons.cancel_outlined, size: 11, color: Colors.red.shade400),
+              const SizedBox(width: 2),
+            ] else if (hwFit == 'tight') ...[
+              Icon(Icons.warning_amber_rounded, size: 11, color: Colors.orange.shade400),
+              const SizedBox(width: 2),
+            ],
             if (sizeStr.isNotEmpty)
               Text(sizeStr, style: TextStyle(fontSize: 9, color: Colors.grey.shade500)),
           ]),

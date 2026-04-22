@@ -110,6 +110,25 @@ class _ModelsPageState extends State<ModelsPage> with SingleTickerProviderStateM
       final data = await widget.api.get('/models/hf/$modelId/readme') as Map<String, dynamic>;
       if (!mounted) return;
       _hfDetailCache[modelId] = data;
+      // Merge authoritative size/hardware data back into selected model
+      if (_selected != null && (_selected!['model_id'] ?? '').toString() == modelId) {
+        if (data['actual_size_bytes'] != null) {
+          _selected!['size_bytes'] = data['actual_size_bytes'];
+          _selected!['size_human'] = data['actual_size_human'];
+          _selected!['size_estimated'] = false;
+        }
+        if (data['hardware_fit'] != null) {
+          _selected!['hardware_fit'] = data['hardware_fit'];
+          _selected!['hardware_badge'] = data['hardware_badge'];
+          _selected!['hardware_note'] = data['hardware_note'];
+          _selected!['hardware_suggestion'] = data['hardware_suggestion'];
+          _selected!['vram_required_gb'] = data['vram_required_gb'];
+          _selected!['gpu_vram_gb'] = data['gpu_vram_gb'];
+        }
+        if (data['quantization'] != null) {
+          _selected!['quantization'] = data['quantization'];
+        }
+      }
     } catch (_) {
       _hfDetailCache[modelId] = {};
     }
@@ -620,8 +639,64 @@ class _ModelsPageState extends State<ModelsPage> with SingleTickerProviderStateM
 
   bool _isModelPulling(String modelName) => _pullingModels.containsKey(modelName);
 
-  Future<void> _downloadHfModel(String modelId) async {
+  Future<void> _downloadHfModel(String modelId, {Map<String, dynamic>? modelData}) async {
     if (_isModelDownloading(modelId)) return;
+
+    // Check hardware fit — warn user before downloading a model that won't fit
+    final data = modelData ?? _selected;
+    final fit = (data?['hardware_fit'] ?? '').toString();
+    if (fit == 'wont_fit') {
+      final note = (data?['hardware_note'] ?? '').toString();
+      final suggestion = (data?['hardware_suggestion'] ?? '').toString();
+      final confirmed = await showDialog<bool>(
+        context: context,
+        builder: (ctx) => AlertDialog(
+          icon: const Icon(Icons.warning_amber_rounded, color: Colors.orange, size: 36),
+          title: const Text('Model Too Large for Your GPU'),
+          content: SizedBox(
+            width: 420,
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Text(note, style: const TextStyle(fontSize: 14, height: 1.4)),
+                if (suggestion.isNotEmpty) ...[
+                  const SizedBox(height: 12),
+                  Container(
+                    padding: const EdgeInsets.all(10),
+                    decoration: BoxDecoration(
+                      color: Colors.blue.withValues(alpha: 0.08),
+                      borderRadius: BorderRadius.circular(8),
+                      border: Border.all(color: Colors.blue.withValues(alpha: 0.2)),
+                    ),
+                    child: Row(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        const Icon(Icons.lightbulb_outline, size: 16, color: Colors.blue),
+                        const SizedBox(width: 8),
+                        Expanded(child: Text(suggestion, style: const TextStyle(fontSize: 13, color: Colors.blue))),
+                      ],
+                    ),
+                  ),
+                ],
+                const SizedBox(height: 12),
+                const Text('Download anyway?', style: TextStyle(fontWeight: FontWeight.w500)),
+              ],
+            ),
+          ),
+          actions: [
+            TextButton(onPressed: () => Navigator.pop(ctx, false), child: const Text('Cancel')),
+            FilledButton(
+              onPressed: () => Navigator.pop(ctx, true),
+              style: FilledButton.styleFrom(backgroundColor: Colors.orange),
+              child: const Text('Download Anyway'),
+            ),
+          ],
+        ),
+      );
+      if (confirmed != true) return;
+    }
+
     try {
       await widget.api.post('/models/hf/download', {'model_id': modelId});
       await _loadDownloads();
@@ -1469,27 +1544,40 @@ class _ModelsPageState extends State<ModelsPage> with SingleTickerProviderStateM
                       crossAxisAlignment: CrossAxisAlignment.start,
                       children: [
                         Row(children: [
-                          Expanded(child: Text(modelId, style: const TextStyle(fontWeight: FontWeight.w500), maxLines: 1, overflow: TextOverflow.ellipsis)),
+                          Flexible(
+                            flex:2,
+                              child: Text(modelId, style: const TextStyle(fontWeight: FontWeight.w500), maxLines: 1, overflow: TextOverflow.ellipsis)),
                           if (m['gated'] == true || m['gated'] == 'auto' || m['gated'] == 'manual')
-                            Tooltip(message: 'Gated model — requires access approval', child: Icon(Icons.lock, size: 14, color: colors.error)),
+                            Flexible(
+                                child: Tooltip(message: 'Gated model — requires access approval', child: Icon(Icons.lock, size: 14, color: colors.error))),
+                          // Hardware fit badge
+                          if ((m['hardware_fit'] ?? '').toString().isNotEmpty && m['hardware_fit'] != 'unknown') ...[
+                            const SizedBox(width: 6),
+                            Flexible(child: _hardwareFitBadge(m['hardware_fit'].toString(), m['hardware_badge']?.toString() ?? '', colors)),
+                          ],
+                          // Quantization badge
+                          if ((m['quantization'] ?? '').toString().isNotEmpty) ...[
+                            const SizedBox(width: 6),
+                            Flexible(child: _quantBadge(m['quantization'].toString(), colors)),
+                          ],
                         ]),
                         const SizedBox(height: 2),
                         Row(
                           children: [
                             if (task.isNotEmpty) ...[
-                              _tagChip(task, colors),
+                              Flexible(child: _tagChip(task, colors)),
                               const SizedBox(width: 6),
                             ],
                             if ((m['category'] ?? '').toString().isNotEmpty) ...[
-                              _categoryChip((m['category'] ?? '').toString(), colors),
+                              Flexible(child: _categoryChip((m['category'] ?? '').toString(), colors)),
                               const SizedBox(width: 4),
                             ],
                             if (paramHuman.isNotEmpty) ...[
-                              _infoChip(paramHuman, colors),
+                              Flexible(child: _infoChip(paramHuman, colors)),
                               const SizedBox(width: 4),
                             ],
                             if (sizeHuman.isNotEmpty) ...[
-                              _infoChip(sizeHuman, colors),
+                              Flexible(child: _infoChip(m['size_estimated'] == true ? '~$sizeHuman' : sizeHuman, colors)),
                               const SizedBox(width: 6),
                             ],
                             if (downloads != null) ...[
@@ -1510,7 +1598,7 @@ class _ModelsPageState extends State<ModelsPage> with SingleTickerProviderStateM
                   ),
                   const SizedBox(width: 8),
                   FilledButton.tonal(
-                    onPressed: isDownloading ? null : () => _downloadHfModel(modelId),
+                    onPressed: isDownloading ? null : () => _downloadHfModel(modelId, modelData: m),
                     child: Text(isDownloading ? 'Downloading' : 'Download', style: const TextStyle(fontSize: 12)),
                   ),
                 ],
@@ -1860,6 +1948,14 @@ class _ModelsPageState extends State<ModelsPage> with SingleTickerProviderStateM
                               child: const Text('installed', style: TextStyle(fontSize: 10, color: Colors.green, fontWeight: FontWeight.w500)),
                             ),
                           ],
+                          if ((m['quantization'] ?? '').toString().isNotEmpty) ...[
+                            const SizedBox(width: 8),
+                            Container(
+                              padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
+                              decoration: BoxDecoration(color: Colors.deepPurple.withValues(alpha: 0.12), borderRadius: BorderRadius.circular(4)),
+                              child: Text(m['quantization'].toString(), style: TextStyle(fontSize: 10, color: Colors.deepPurple.shade600, fontWeight: FontWeight.w600)),
+                            ),
+                          ],
                         ],
                       ),
                     ],
@@ -1881,6 +1977,14 @@ class _ModelsPageState extends State<ModelsPage> with SingleTickerProviderStateM
               const SizedBox(height: 16),
               Text(desc, style: TextStyle(fontSize: 14, height: 1.4, color: colors.onSurfaceVariant)),
             ],
+
+            // Hardware Compatibility
+            if ((m['hardware_fit'] ?? '').toString().isNotEmpty && m['hardware_fit'] != 'unknown')
+              _buildHardwareCompatibilitySection(m, colors),
+
+            // GGUF Variant Picker
+            if (m['gguf_variants'] != null && (m['gguf_variants'] as List).isNotEmpty)
+              _buildGgufVariantSection(m, colors),
 
             // HF rich detail (gated warning, hub info, model card)
             if (isHfDiscover) ...[
@@ -2114,7 +2218,7 @@ class _ModelsPageState extends State<ModelsPage> with SingleTickerProviderStateM
                 ],
                 if (isHfDiscover)
                   FilledButton.icon(
-                    onPressed: _isModelDownloading(modelId) ? null : () => _downloadHfModel(modelId),
+                    onPressed: _isModelDownloading(modelId) ? null : () => _downloadHfModel(modelId, modelData: m),
                     icon: const Icon(Icons.download, size: 16),
                     label: Text(_isModelDownloading(modelId) ? 'Downloading...' : 'Download'),
                   ),
@@ -2221,6 +2325,11 @@ class _ModelsPageState extends State<ModelsPage> with SingleTickerProviderStateM
         if (storageHuman.isNotEmpty) _specRow('Repo Size', storageHuman, colors),
         if (fileCount > 0) _specRow('Files', '$fileCount', colors),
 
+        // File list (largest files first)
+        if (d.containsKey('files')) ...[
+          _buildFileListSection(d['files'] as List<dynamic>? ?? [], colors),
+        ],
+
         // Resources
         if (d.containsKey('resources')) ...[
           const SizedBox(height: 16),
@@ -2250,6 +2359,63 @@ class _ModelsPageState extends State<ModelsPage> with SingleTickerProviderStateM
               Text('No model card available', style: TextStyle(fontSize: 13, color: colors.onSurfaceVariant.withValues(alpha: 0.5))),
           ],
         ),
+      ],
+    );
+  }
+
+  Widget _buildFileListSection(List<dynamic> files, ColorScheme colors) {
+    // Sort by size descending, take top 10 model-weight files
+    final sorted = List<Map<String, dynamic>>.from(
+      files.where((f) {
+        final name = ((f as Map<String, dynamic>)['filename'] ?? '').toString().toLowerCase();
+        // Skip tiny metadata files
+        return name.endsWith('.safetensors') ||
+            name.endsWith('.bin') ||
+            name.endsWith('.pt') ||
+            name.endsWith('.gguf') ||
+            name.endsWith('.onnx') ||
+            name.endsWith('.ckpt') ||
+            name.endsWith('.msgpack');
+      }).map((f) => f as Map<String, dynamic>),
+    );
+    sorted.sort((a, b) {
+      final sa = (a['size'] as num?) ?? 0;
+      final sb = (b['size'] as num?) ?? 0;
+      return sb.compareTo(sa);
+    });
+    if (sorted.isEmpty) return const SizedBox.shrink();
+    final display = sorted.take(10).toList();
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        const SizedBox(height: 14),
+        Text('Model Files', style: Theme.of(context).textTheme.titleSmall),
+        const SizedBox(height: 6),
+        ...display.map((f) {
+          final name = (f['filename'] ?? '').toString();
+          final shortName = name.contains('/') ? name.split('/').last : name;
+          final sz = f['size'] as num?;
+          return Padding(
+            padding: const EdgeInsets.only(bottom: 3),
+            child: Row(
+              children: [
+                Icon(Icons.insert_drive_file_outlined, size: 13, color: colors.onSurfaceVariant),
+                const SizedBox(width: 6),
+                Expanded(
+                  child: Text(shortName, style: TextStyle(fontSize: 12, color: colors.onSurfaceVariant), maxLines: 1, overflow: TextOverflow.ellipsis),
+                ),
+                if (sz != null && sz > 0)
+                  Text(_formatSize(sz.toInt()), style: TextStyle(fontSize: 12, fontWeight: FontWeight.w500, color: colors.onSurface)),
+              ],
+            ),
+          );
+        }),
+        if (sorted.length > 10)
+          Padding(
+            padding: const EdgeInsets.only(top: 2),
+            child: Text('... and ${sorted.length - 10} more weight files',
+                style: TextStyle(fontSize: 11, color: colors.onSurfaceVariant.withValues(alpha: 0.6))),
+          ),
       ],
     );
   }
@@ -2365,6 +2531,376 @@ class _ModelsPageState extends State<ModelsPage> with SingleTickerProviderStateM
     );
   }
 
+  // ── Hardware Compatibility Widgets ─────────────────────────────
+
+  Widget _hardwareFitBadge(String fit, String badge, ColorScheme colors) {
+    Color bgColor;
+    Color textColor;
+    IconData icon;
+    switch (fit) {
+      case 'fits':
+        bgColor = Colors.green.withValues(alpha: 0.15);
+        textColor = Colors.green.shade700;
+        icon = Icons.check_circle_outline;
+        break;
+      case 'tight':
+        bgColor = Colors.orange.withValues(alpha: 0.15);
+        textColor = Colors.orange.shade700;
+        icon = Icons.warning_amber_rounded;
+        break;
+      case 'wont_fit':
+        bgColor = Colors.red.withValues(alpha: 0.15);
+        textColor = Colors.red.shade700;
+        icon = Icons.cancel_outlined;
+        break;
+      default:
+        return const SizedBox.shrink();
+    }
+    return Tooltip(
+      message: badge,
+      child: Container(
+        padding: const EdgeInsets.symmetric(horizontal: 5, vertical: 2),
+        decoration: BoxDecoration(
+          color: bgColor,
+          borderRadius: BorderRadius.circular(4),
+        ),
+        child: Row(mainAxisSize: MainAxisSize.min, children: [
+          Icon(icon, size: 11, color: textColor),
+          const SizedBox(width: 3),
+          Text(
+            fit == 'fits' ? 'Fits' : fit == 'tight' ? 'Tight' : 'Too Large',
+            style: TextStyle(fontSize: 9, fontWeight: FontWeight.w600, color: textColor),
+          ),
+        ]),
+      ),
+    );
+  }
+
+  Widget _quantBadge(String label, ColorScheme colors) {
+    return Tooltip(
+      message: 'Quantized: $label',
+      child: Container(
+        padding: const EdgeInsets.symmetric(horizontal: 5, vertical: 2),
+        decoration: BoxDecoration(
+          color: Colors.deepPurple.withValues(alpha: 0.12),
+          borderRadius: BorderRadius.circular(4),
+        ),
+        child: Text(
+          label,
+          style: TextStyle(fontSize: 9, fontWeight: FontWeight.w600, color: Colors.deepPurple.shade600),
+        ),
+      ),
+    );
+  }
+
+  Widget _buildHardwareCompatibilitySection(Map<String, dynamic> m, ColorScheme colors) {
+    final fit = (m['hardware_fit'] ?? '').toString();
+    final note = (m['hardware_note'] ?? '').toString();
+    final suggestion = (m['hardware_suggestion'] ?? '').toString();
+    final vramReq = m['vram_required_gb'];
+    final gpuVram = m['gpu_vram_gb'];
+
+    Color borderColor;
+    Color bgColor;
+    Color iconColor;
+    IconData icon;
+    String title;
+    switch (fit) {
+      case 'fits':
+        borderColor = Colors.green.withValues(alpha: 0.3);
+        bgColor = Colors.green.withValues(alpha: 0.06);
+        iconColor = Colors.green.shade600;
+        icon = Icons.check_circle;
+        title = 'Compatible with Your Hardware';
+        break;
+      case 'tight':
+        borderColor = Colors.orange.withValues(alpha: 0.3);
+        bgColor = Colors.orange.withValues(alpha: 0.06);
+        iconColor = Colors.orange.shade700;
+        icon = Icons.warning_amber_rounded;
+        title = 'Tight Fit — Optimizations Required';
+        break;
+      case 'wont_fit':
+        borderColor = Colors.red.withValues(alpha: 0.3);
+        bgColor = Colors.red.withValues(alpha: 0.06);
+        iconColor = Colors.red.shade600;
+        icon = Icons.cancel;
+        title = 'Incompatible with Your Hardware';
+        break;
+      default:
+        return const SizedBox.shrink();
+    }
+
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.stretch,
+      children: [
+        const SizedBox(height: 16),
+        Container(
+          padding: const EdgeInsets.all(12),
+          decoration: BoxDecoration(
+            color: bgColor,
+            borderRadius: BorderRadius.circular(10),
+            border: Border.all(color: borderColor),
+          ),
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Row(children: [
+                Icon(icon, size: 18, color: iconColor),
+                const SizedBox(width: 8),
+                Expanded(child: Text(title, style: TextStyle(fontSize: 13, fontWeight: FontWeight.w600, color: iconColor))),
+              ]),
+              const SizedBox(height: 8),
+              // VRAM bar visualization
+              if (vramReq is num && gpuVram is num && gpuVram > 0) _buildVramBar(vramReq, gpuVram, fit, iconColor, colors),
+              Text(note, style: TextStyle(fontSize: 12, height: 1.4, color: colors.onSurfaceVariant)),
+              if (suggestion.isNotEmpty) ...[
+                const SizedBox(height: 8),
+                Container(
+                  padding: const EdgeInsets.all(8),
+                  decoration: BoxDecoration(
+                    color: Colors.blue.withValues(alpha: 0.06),
+                    borderRadius: BorderRadius.circular(6),
+                    border: Border.all(color: Colors.blue.withValues(alpha: 0.15)),
+                  ),
+                  child: Row(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Icon(Icons.lightbulb_outline, size: 14, color: Colors.blue.shade600),
+                      const SizedBox(width: 6),
+                      Expanded(child: Text(suggestion, style: TextStyle(fontSize: 11, height: 1.3, color: Colors.blue.shade700))),
+                    ],
+                  ),
+                ),
+              ],
+            ],
+          ),
+        ),
+      ],
+    );
+  }
+
+  Widget _buildGgufVariantSection(Map<String, dynamic> m, ColorScheme colors) {
+    final variants = (m['gguf_variants'] as List<dynamic>?) ?? [];
+    if (variants.isEmpty) return const SizedBox.shrink();
+
+    final modelId = (m['model_id'] ?? '').toString();
+
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.stretch,
+      children: [
+        const SizedBox(height: 16),
+        Row(children: [
+          Icon(Icons.storage, size: 16, color: colors.primary),
+          const SizedBox(width: 8),
+          Text('Available GGUF Variants', style: TextStyle(fontSize: 14, fontWeight: FontWeight.w600, color: colors.primary)),
+          const SizedBox(width: 8),
+          Container(
+            padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
+            decoration: BoxDecoration(color: colors.primaryContainer, borderRadius: BorderRadius.circular(8)),
+            child: Text('${variants.length}', style: TextStyle(fontSize: 11, fontWeight: FontWeight.w600, color: colors.onPrimaryContainer)),
+          ),
+        ]),
+        const SizedBox(height: 4),
+        Text('Pick a quantization variant that fits your GPU. Smaller = less VRAM but lower quality.',
+            style: TextStyle(fontSize: 11, color: colors.onSurfaceVariant, height: 1.3)),
+        const SizedBox(height: 10),
+        // Variant table
+        Table(
+          columnWidths: const {
+            0: FlexColumnWidth(2.2),  // Quant level
+            1: FlexColumnWidth(1.5),  // Size
+            2: FlexColumnWidth(1.5),  // Quality
+            3: FlexColumnWidth(1.5),  // Fit
+            4: FlexColumnWidth(1.8),  // Download
+          },
+          defaultVerticalAlignment: TableCellVerticalAlignment.middle,
+          children: [
+            TableRow(
+              decoration: BoxDecoration(color: colors.surfaceContainerHighest.withValues(alpha: 0.5)),
+              children: [
+                _variantHeader('Variant', colors),
+                _variantHeader('Size', colors),
+                _variantHeader('Quality', colors),
+                _variantHeader('VRAM Fit', colors),
+                _variantHeader('', colors),
+              ],
+            ),
+            ...variants.map((v) {
+              final vMap = v as Map<String, dynamic>;
+              final filename = (vMap['filename'] ?? '').toString();
+              final quant = (vMap['quant_level'] ?? 'unknown').toString();
+              final sizeHuman = (vMap['size_human'] ?? '').toString();
+              final quality = (vMap['quality'] ?? '').toString();
+              final rating = vMap['quality_rating'] as int? ?? 0;
+              final variantFit = (vMap['hardware_fit'] ?? '').toString();
+              final isDownloading = _isModelDownloading(modelId) || _isModelDownloading('$modelId:$filename');
+
+              return TableRow(
+                children: [
+                  Padding(
+                    padding: const EdgeInsets.symmetric(vertical: 6, horizontal: 6),
+                    child: Text(quant, style: const TextStyle(fontSize: 12, fontWeight: FontWeight.w600, fontFamily: 'monospace')),
+                  ),
+                  Padding(
+                    padding: const EdgeInsets.symmetric(vertical: 6, horizontal: 6),
+                    child: Text(sizeHuman, style: TextStyle(fontSize: 11, color: colors.onSurfaceVariant)),
+                  ),
+                  Padding(
+                    padding: const EdgeInsets.symmetric(vertical: 6, horizontal: 6),
+                    child: Row(mainAxisSize: MainAxisSize.min, children: [
+                      _qualityBar(rating, colors),
+                      const SizedBox(width: 4),
+                      Flexible(child: Text(quality, style: TextStyle(fontSize: 10, color: colors.onSurfaceVariant), overflow: TextOverflow.ellipsis)),
+                    ]),
+                  ),
+                  Padding(
+                    padding: const EdgeInsets.symmetric(vertical: 6, horizontal: 6),
+                    child: _hardwareFitBadge(variantFit, '', colors),
+                  ),
+                  Padding(
+                    padding: const EdgeInsets.symmetric(vertical: 4, horizontal: 4),
+                    child: SizedBox(
+                      height: 28,
+                      child: FilledButton.tonal(
+                        onPressed: isDownloading ? null : () => _downloadGgufVariant(modelId, filename, vMap),
+                        style: FilledButton.styleFrom(
+                          padding: const EdgeInsets.symmetric(horizontal: 8),
+                          textStyle: const TextStyle(fontSize: 11),
+                          backgroundColor: variantFit == 'fits'
+                              ? Colors.green.withValues(alpha: 0.15)
+                              : variantFit == 'tight'
+                                  ? Colors.orange.withValues(alpha: 0.15)
+                                  : null,
+                        ),
+                        child: Text(isDownloading ? '...' : 'Download', style: TextStyle(
+                          fontSize: 11,
+                          color: variantFit == 'fits' ? Colors.green.shade700
+                              : variantFit == 'tight' ? Colors.orange.shade700
+                              : null,
+                        )),
+                      ),
+                    ),
+                  ),
+                ],
+              );
+            }),
+          ],
+        ),
+      ],
+    );
+  }
+
+  Widget _variantHeader(String label, ColorScheme colors) {
+    return Padding(
+      padding: const EdgeInsets.all(6),
+      child: Text(label, style: TextStyle(fontSize: 10, fontWeight: FontWeight.w600, color: colors.onSurface)),
+    );
+  }
+
+  Widget _qualityBar(int rating, ColorScheme colors) {
+    // 0-10 rating shown as 5 small squares
+    final filled = (rating / 2).ceil().clamp(0, 5);
+    return Row(
+      mainAxisSize: MainAxisSize.min,
+      children: List.generate(5, (i) => Container(
+        width: 6, height: 6,
+        margin: const EdgeInsets.only(right: 1),
+        decoration: BoxDecoration(
+          color: i < filled
+              ? (filled >= 4 ? Colors.green : filled >= 3 ? Colors.orange : Colors.red)
+              : colors.surfaceContainerHighest,
+          borderRadius: BorderRadius.circular(1),
+        ),
+      )),
+    );
+  }
+
+  Future<void> _downloadGgufVariant(String modelId, String filename, Map<String, dynamic> variantData) async {
+    final fit = (variantData['hardware_fit'] ?? '').toString();
+    // Warn if variant won't fit
+    if (fit == 'wont_fit') {
+      final confirmed = await showDialog<bool>(
+        context: context,
+        builder: (ctx) => AlertDialog(
+          icon: const Icon(Icons.warning_amber_rounded, color: Colors.orange, size: 36),
+          title: const Text('Variant Too Large'),
+          content: Text(
+            'This variant (${variantData['quant_level']}, ${variantData['size_human']}) '
+            'needs ~${variantData['vram_required_gb']} GB VRAM but your GPU only has '
+            '${_systemInfo?['hardware']?['gpus'] is List && (_systemInfo!['hardware']['gpus'] as List).isNotEmpty ? '${((_systemInfo!['hardware']['gpus'] as List).first as Map)['vram_mb'] ~/ 1024} GB' : 'limited VRAM'}. '
+            '\n\nDownload anyway?',
+          ),
+          actions: [
+            TextButton(onPressed: () => Navigator.pop(ctx, false), child: const Text('Cancel')),
+            FilledButton(
+              onPressed: () => Navigator.pop(ctx, true),
+              style: FilledButton.styleFrom(backgroundColor: Colors.orange),
+              child: const Text('Download Anyway'),
+            ),
+          ],
+        ),
+      );
+      if (confirmed != true) return;
+    }
+
+    try {
+      await widget.api.post('/models/hf/download', {
+        'model_id': modelId,
+        'gguf_filename': filename,
+      });
+      await _loadDownloads();
+      if (!mounted) return;
+      final quant = variantData['quant_level'] ?? filename;
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text('Downloading $quant variant of $modelId (${variantData['size_human']})')),
+      );
+    } catch (e) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('Download failed: $e')));
+    }
+  }
+
+  Widget _buildVramBar(num vramReq, num gpuVram, String fit, Color iconColor, ColorScheme colors) {
+    final ratio = (vramReq / gpuVram).clamp(0.0, 1.0).toDouble();
+    final overCapacity = vramReq > gpuVram;
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        Row(children: [
+          Text('VRAM: ', style: TextStyle(fontSize: 11, color: colors.onSurfaceVariant, fontWeight: FontWeight.w500)),
+          Text('~${vramReq.toStringAsFixed(1)} GB needed', style: TextStyle(fontSize: 11, color: iconColor, fontWeight: FontWeight.w600)),
+          Text(' / ', style: TextStyle(fontSize: 11, color: colors.onSurfaceVariant)),
+          Text('${gpuVram.toStringAsFixed(0)} GB available', style: TextStyle(fontSize: 11, color: colors.onSurfaceVariant)),
+        ]),
+        const SizedBox(height: 6),
+        ClipRRect(
+          borderRadius: BorderRadius.circular(3),
+          child: LinearProgressIndicator(
+            value: ratio,
+            minHeight: 6,
+            backgroundColor: colors.surfaceContainerHighest,
+            valueColor: AlwaysStoppedAnimation<Color>(
+              fit == 'fits' ? Colors.green : fit == 'tight' ? Colors.orange : Colors.red,
+            ),
+          ),
+        ),
+        if (overCapacity)
+          Padding(
+            padding: const EdgeInsets.only(top: 2),
+            child: Align(
+              alignment: Alignment.centerRight,
+              child: Text(
+                '${((vramReq / gpuVram - 1) * 100).toStringAsFixed(0)}% over capacity',
+                style: TextStyle(fontSize: 10, color: Colors.red.shade600, fontWeight: FontWeight.w500),
+              ),
+            ),
+          ),
+        const SizedBox(height: 8),
+      ],
+    );
+  }
+
   IconData _categoryIcon(String category) {
     switch (category) {
       case 'base_model': return Icons.hub;
@@ -2417,9 +2953,9 @@ class _ModelsPageState extends State<ModelsPage> with SingleTickerProviderStateM
         borderRadius: BorderRadius.circular(8),
       ),
       child: Row(mainAxisSize: MainAxisSize.min, children: [
-        Icon(_categoryIcon(category), size: 11, color: colors.onSecondaryContainer),
+        Flexible(child: Icon(_categoryIcon(category), size: 11, color: colors.onSecondaryContainer)),
         const SizedBox(width: 3),
-        Text(_categoryLabel(category), style: TextStyle(fontSize: 10, fontWeight: FontWeight.w500, color: colors.onSecondaryContainer)),
+        Flexible(child: Text(_categoryLabel(category), style: TextStyle(fontSize: 10, fontWeight: FontWeight.w500, color: colors.onSecondaryContainer))),
       ]),
     );
   }
