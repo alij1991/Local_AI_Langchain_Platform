@@ -1,8 +1,11 @@
 from __future__ import annotations
 
 import logging
+import os
+import time
 from typing import Any, AsyncGenerator, Generator
 
+from ..observability import emit
 from .base import (
     BaseProvider,
     ChatMessage,
@@ -29,13 +32,32 @@ class ProviderRouter:
         "gemma3:1b"                    (auto-detects provider)
     """
 
+    # [IMPROVE-12] Default TTL for the per-provider availability cache.
+    # Matches _CACHE_TTL in api_server.py so the two layers stay in
+    # sync. Override per-instance by assigning to _availability_ttl_sec.
+    _DEFAULT_AVAILABILITY_TTL_SEC = 30.0
+
     def __init__(self) -> None:
         self._providers: dict[str, BaseProvider] = {}
         self._default_provider: str = "ollama"
+        # [IMPROVE-12] Per-provider TTL cache for is_available() probes.
+        # A cold `/models` list previously re-probed every provider on
+        # every call; with 5 providers and a hung Ollama daemon that is
+        # a visible delay on the Models page. We cache both hits and
+        # misses so a flapping provider doesn't get re-probed every
+        # request — the caller can force a re-probe via
+        # invalidate_availability() after config changes.
+        # Shape: {provider_name: (is_available, expires_monotonic_ts)}
+        self._availability_cache: dict[str, tuple[bool, float]] = {}
+        self._availability_ttl_sec: float = float(
+            os.getenv("PROVIDER_AVAILABILITY_TTL_SEC", self._DEFAULT_AVAILABILITY_TTL_SEC)
+        )
 
     def register(self, name: str, provider: BaseProvider) -> None:
         self._providers[name] = provider
         provider.provider_name = name
+        # Config changed — drop any stale availability entry.
+        self._availability_cache.pop(name, None)
 
     def set_default(self, name: str) -> None:
         if name in self._providers:
@@ -44,9 +66,78 @@ class ProviderRouter:
     def get_provider(self, name: str) -> BaseProvider | None:
         return self._providers.get(name)
 
+    # ── [IMPROVE-12] Cached availability probes ──────────────────────
+
+    def is_available(self, provider_name: str) -> bool:
+        """Return the cached availability for one provider; probe on miss.
+
+        Returns False for unknown provider names (rather than raising)
+        so callers can iterate over a list without defensive checks.
+        Use invalidate_availability() to force a fresh probe.
+        """
+        provider = self._providers.get(provider_name)
+        if provider is None:
+            return False
+        return self._is_available_cached(provider_name, provider)
+
+    def _is_available_cached(self, name: str, provider: BaseProvider) -> bool:
+        now = time.monotonic()
+        cached = self._availability_cache.get(name)
+        if cached is not None:
+            value, expires_at = cached
+            if now < expires_at:
+                return value
+
+        # Cache miss — actually probe. Emit per probe so the weekly
+        # review can confirm the cache is working (steady-state probe
+        # count should be bounded by TTL, not request volume).
+        t0 = time.monotonic()
+        try:
+            result = bool(provider.is_available())
+            emit(
+                "provider",
+                "availability_probe",
+                status="ok",
+                duration_ms=int((time.monotonic() - t0) * 1000),
+                context={"provider": name, "available": result},
+            )
+        except Exception as exc:
+            # Treat any exception as "not available" so a misbehaving
+            # provider doesn't bubble up into the Models page — and
+            # cache the False so we don't re-probe every request while
+            # it's down.
+            logger.warning("is_available() raised for %s: %s", name, exc)
+            result = False
+            emit(
+                "provider",
+                "availability_probe",
+                status="error",
+                duration_ms=int((time.monotonic() - t0) * 1000),
+                error_code=type(exc).__name__,
+                error_message=str(exc)[:500],
+                context={"provider": name},
+            )
+
+        self._availability_cache[name] = (result, now + self._availability_ttl_sec)
+        return result
+
+    def invalidate_availability(self, provider_name: str | None = None) -> None:
+        """Drop a cached availability entry (or all of them).
+
+        Call this after configuration changes (e.g. user updated the
+        LM Studio base URL in /settings) or after a known transition
+        (user just started Ollama). Without this, the next probe is
+        deferred by up to TTL seconds.
+        """
+        if provider_name is None:
+            self._availability_cache.clear()
+        else:
+            self._availability_cache.pop(provider_name, None)
+
     @property
     def available_providers(self) -> dict[str, bool]:
-        return {name: p.is_available() for name, p in self._providers.items()}
+        # Uses the per-provider cache — see _is_available_cached.
+        return {name: self._is_available_cached(name, p) for name, p in self._providers.items()}
 
     def _resolve(self, model: str) -> tuple[BaseProvider, str]:
         """Resolve 'provider:model' string to (provider, model_name).
@@ -139,7 +230,7 @@ class ProviderRouter:
         all_models = []
         for name, provider in self._providers.items():
             try:
-                if provider.is_available():
+                if self._is_available_cached(name, provider):
                     all_models.extend(provider.list_models())
                 else:
                     # Try offline model listing (e.g. Ollama manifests, HF cache)

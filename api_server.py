@@ -644,7 +644,9 @@ async def get_available_models():
     result: dict[str, list[str]] = {}
     for name, prov in router._providers.items():
         try:
-            if prov.is_available():
+            # [IMPROVE-12] router.is_available(name) hits the per-provider
+            # TTL cache — avoids re-probing every provider on every call.
+            if router.is_available(name):
                 result[name] = [m.name for m in prov.list_models()]
             else:
                 result[name] = []
@@ -826,7 +828,8 @@ async def get_chat_capable_models():
     all_models: list[dict] = []
     for name, prov in router._providers.items():
         try:
-            if not prov.is_available():
+            # [IMPROVE-12] cached probe — see router.is_available docstring.
+            if not router.is_available(name):
                 continue
             models = [m for m in prov.list_models() if _is_chat_model(m)]
             for m in models:
@@ -2399,7 +2402,9 @@ async def get_vllm_library(search: str = ""):
         vllm_serving: set[str] = set()
         if router:
             vllm_prov = router.get_provider("vllm")
-            if vllm_prov and vllm_prov.is_available():
+            # [IMPROVE-12] cached — the HF discover path was otherwise
+            # doing a fresh vLLM probe on every browse.
+            if vllm_prov and router.is_available("vllm"):
                 for m in vllm_prov.list_models():
                     vllm_serving.add(m.name)
 
