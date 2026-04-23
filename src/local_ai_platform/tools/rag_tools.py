@@ -7,6 +7,8 @@ from pathlib import Path
 from langchain_core.tools import StructuredTool
 from pydantic import BaseModel, Field
 
+from ..observability import emit
+
 WORKSPACE_ROOT = Path(os.getenv("LOCAL_AI_WORKSPACE", "./workspace")).resolve()
 
 
@@ -38,8 +40,26 @@ def _get_vector_memory():
 
 
 def _safe_path(user_path: str) -> Path:
+    """Resolve a user-provided path and verify it's inside the workspace.
+
+    Mirrors tools/file_ops._safe_path — see that file for the rationale
+    behind relative_to() vs the old startswith() check (sibling-prefix
+    escape: WORKSPACE_ROOT=/home/a/workspace would accept a resolved path
+    /home/a/workspace_other/secret.txt). Both helpers emit the same
+    "file_ops.path_rejected" event so observability has a single signal
+    for sandbox-escape attempts regardless of which tool was invoked.
+    """
     resolved = (WORKSPACE_ROOT / user_path).resolve()
-    if not str(resolved).startswith(str(WORKSPACE_ROOT)):
+    try:
+        resolved.relative_to(WORKSPACE_ROOT)
+    except ValueError:
+        emit(
+            "tool",
+            "file_ops.path_rejected",
+            status="error",
+            error_code="PathOutsideWorkspace",
+            context={"user_path": user_path[:200]},
+        )
         raise ValueError(f"Path '{user_path}' is outside the workspace directory")
     return resolved
 
