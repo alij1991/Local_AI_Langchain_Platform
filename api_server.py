@@ -3391,10 +3391,9 @@ async def agent_chat(req: ChatRequest):
             "image_count": len(req.image_paths or []),
             "streaming": False,
         }) as ev:
-            from local_ai_platform.memory import db_messages_to_langchain, langchain_to_chat_messages
-            db_msgs = list_messages(conv_id)
-            lc_history = db_messages_to_langchain(db_msgs[:-1])
-            chat_history = langchain_to_chat_messages(lc_history)
+            # [IMPROVE-19] shared helper — same trim/convert semantics
+            # previously duplicated here and in /chat/stream below.
+            chat_history = orchestrator.load_chat_history(conv_id)
 
             response = orchestrator.chat_with_agent(
                 agent_name,
@@ -3471,11 +3470,8 @@ async def agent_chat_stream(req: ChatRequest):
         orchestrator.definitions[agent_name].model_name,
     )
 
-    # Load conversation history from database (same as non-streaming endpoint)
-    from local_ai_platform.memory import db_messages_to_langchain, langchain_to_chat_messages
-    db_msgs = list_messages(conv_id)
-    lc_history = db_messages_to_langchain(db_msgs[:-1])  # exclude current user msg
-    chat_history = langchain_to_chat_messages(lc_history)
+    # [IMPROVE-19] shared helper — same trim/convert semantics as /chat.
+    chat_history = orchestrator.load_chat_history(conv_id)
 
     async def stream_gen():
         thread_id = req.thread_id or uuid.uuid4().hex

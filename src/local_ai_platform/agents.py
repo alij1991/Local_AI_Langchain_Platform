@@ -22,7 +22,12 @@ from langchain_core.tools import StructuredTool
 from langchain_ollama import ChatOllama
 
 from .config import AppConfig
-from .memory import SmartMemory, langchain_to_chat_messages, chat_messages_to_langchain
+from .memory import (
+    SmartMemory,
+    chat_messages_to_langchain,
+    db_messages_to_langchain,
+    langchain_to_chat_messages,
+)
 from .observability import emit, track_event
 from .providers import (
     ChatMessage,
@@ -32,6 +37,7 @@ from .providers import (
     build_router_from_config,
 )
 from .repositories import agent_tools_repo
+from .repositories.conversations import list_messages
 from .tools import build_default_tools
 
 logger = logging.getLogger(__name__)
@@ -591,6 +597,22 @@ class AgentOrchestrator:
         )
 
     # ── Public chat API ───────────────────────────────────────────
+
+    def load_chat_history(self, conversation_id: str) -> list[ChatMessage]:
+        """Return prior messages for a conversation as ChatMessage objects.
+
+        Drops the last row because /chat and /chat/stream always call
+        add_message(role="user", ...) before building the agent's
+        history_override — we don't want to feed the current user turn
+        back in as history.
+
+        [IMPROVE-19] — extracted from /chat and /chat/stream to kill
+        the three-line duplication. The semantics (trim last, convert
+        DB -> LangChain -> ChatMessage) are preserved exactly; any
+        future change to "what does history mean" lands here.
+        """
+        db_msgs = list_messages(conversation_id)
+        return langchain_to_chat_messages(db_messages_to_langchain(db_msgs[:-1]))
 
     def chat_with_agent(
         self,
