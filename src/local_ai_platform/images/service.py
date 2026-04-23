@@ -16,6 +16,7 @@ from typing import Any
 
 from local_ai_platform.config import AppConfig
 from local_ai_platform.formatting import format_bytes_human
+from local_ai_platform.observability import emit
 
 
 logger = logging.getLogger("local_ai_platform.images")
@@ -5204,7 +5205,19 @@ class ImageGenerationService:
         key = (model_id_or_path, mode, device, dtype_name, skip_text_encoders)
         if key in self._pipelines:
             logger.info("[IMG] Reusing cached pipeline: %s (mode=%s, device=%s, dtype=%s, skip_te=%s)", model_id_or_path, mode, device, dtype_name, skip_text_encoders)
+            emit("image", "load", status="ok", duration_ms=0,
+                 context={"model_id": model_id_or_path, "mode": mode, "device": device,
+                          "dtype": dtype_name, "cache_hit": True})
             return self._pipelines[key]
+
+        # Fresh-load bookkeeping: record a start event so long loads are
+        # distinguishable from hangs. Success emit happens at each return
+        # site below; error emit is the caller's responsibility since
+        # _load_pipeline raises on failure.
+        _load_t0 = time.monotonic()
+        _load_ctx = {"model_id": model_id_or_path, "mode": mode, "device": device,
+                     "dtype": dtype_name, "cache_hit": False, "low_mem": low_mem}
+        emit("image", "load.start", status="start", context=_load_ctx)
 
         # FREE memory from previously cached pipelines BEFORE loading the new
         # model.  Loading a new model with from_pretrained() allocates RAM for
@@ -5439,6 +5452,10 @@ class ImageGenerationService:
                                 pass
                     self._pipelines[key] = pipe
                     logger.info("[IMG] Nunchaku pipeline loaded in %.1fs", time.time() - load_start)
+                    emit("image", "load", status="ok",
+                         duration_ms=int((time.monotonic() - _load_t0) * 1000),
+                         context={**_load_ctx, "backend": "nunchaku"},
+                         perf={"cached_pipelines": len(self._pipelines)})
                     return pipe
                 else:
                     raise RuntimeError(
@@ -5851,6 +5868,10 @@ class ImageGenerationService:
         logger.info("[IMG] Pipeline loaded in %.1fs", load_elapsed)
 
         self._pipelines[key] = pipe
+        emit("image", "load", status="ok",
+             duration_ms=int((time.monotonic() - _load_t0) * 1000),
+             context=_load_ctx,
+             perf={"cached_pipelines": len(self._pipelines)})
         return pipe
 
     def _run_diffusers_isolated(
@@ -6967,6 +6988,26 @@ class ImageGenerationService:
             execution_plan["scheduler"] = scheduler
         if loras:
             execution_plan["loras"] = loras
+        _img_hints = execution_plan.get("model_hints") or {}
+        emit("image", "plan", status="ok",
+             context={
+                 "model_id": model_id,
+                 "model_family": _img_hints.get("model_family"),
+                 "model_variant": _img_hints.get("model_variant"),
+                 "device_plan": execution_plan.get("device_plan"),
+                 "inference_backend": execution_plan.get("inference_backend"),
+                 "torch_dtype": execution_plan.get("torch_dtype"),
+                 "has_lora": bool(loras),
+                 "has_init_image": bool(init_image_path),
+                 "has_mask": bool(mask_image_path),
+                 "scheduler": scheduler,
+             },
+             perf={
+                 "width": requested["width"],
+                 "height": requested["height"],
+                 "steps": requested["steps"],
+                 "expected_timeout_sec": execution_plan.get("expected_timeout_sec"),
+             })
         # Step previews: decode and save intermediate latents at each step
         if params.get("enable_step_previews"):
             execution_plan["enable_step_previews"] = True
@@ -7125,6 +7166,16 @@ class ImageGenerationService:
         logger.info("[IMG] === BASE GENERATION (in-process, cached) === device=%s, dtype=%s, size=%dx%d, steps=%d, guidance=%.1f, model=%s, mode=%s",
                      preferred, execution_plan.get("torch_dtype"), width, height, steps, guidance_scale, resolved_model,
                      "inpaint" if mask_image_path else ("img2img" if init_image_path else "txt2img"))
+        _infer_mode = "inpaint" if mask_image_path else ("img2img" if init_image_path else "txt2img")
+        _infer_ctx = {
+            "model_id": model_id,
+            "model_source": model_source,
+            "device": preferred,
+            "mode": _infer_mode,
+            "scheduler": scheduler,
+        }
+        _infer_t0 = time.monotonic()
+        emit("image", "infer.start", status="start", context=_infer_ctx)
         result = self._run_diffusers(
             model_id_or_path=resolved_model,
             model_source=model_source,
@@ -7143,6 +7194,16 @@ class ImageGenerationService:
         )
         logger.info("[IMG] Base generation result: ok=%s, error_code=%s, error=%s",
                      result.ok, result.error_code, result.error_message[:200] if result.error_message else None)
+        emit("image", "infer",
+             status="ok" if result.ok else "error",
+             duration_ms=int((time.monotonic() - _infer_t0) * 1000),
+             error_code=None if result.ok else (result.error_code or "unknown"),
+             error_message=None if result.ok else (result.error_message or None),
+             context=_infer_ctx,
+             perf={
+                 "width": width, "height": height, "steps": steps,
+                 "image_bytes": len(result.image_bytes or b"") if result.ok else 0,
+             })
 
         # NaN output fallback: retry with a safer dtype.
         if not result.ok and result.error_code == "nan_output" and preferred != "cpu":
@@ -7313,11 +7374,25 @@ class ImageGenerationService:
                 except Exception:
                     pass
             stages_run.append("upscale" if enable_upscale else "postprocess")
+            _pp_ctx = {"model_id": model_id,
+                       "upscale": enable_upscale,
+                       "postprocess": enable_postprocess,
+                       "input_bytes": len(image_bytes)}
+            _pp_t0 = time.monotonic()
             try:
                 image_bytes = self._apply_postprocess(image_bytes, upscale=enable_upscale, postprocess=enable_postprocess)
                 logger.info("[IMG] Postprocess done (%d bytes)", len(image_bytes))
+                emit("image", "postprocess", status="ok",
+                     duration_ms=int((time.monotonic() - _pp_t0) * 1000),
+                     context=_pp_ctx,
+                     perf={"output_bytes": len(image_bytes)})
             except Exception as exc:
                 logger.warning("[IMG] Postprocess FAILED: %s", exc)
+                emit("image", "postprocess", status="error",
+                     duration_ms=int((time.monotonic() - _pp_t0) * 1000),
+                     error_code=type(exc).__name__,
+                     error_message=str(exc),
+                     context=_pp_ctx)
                 execution_plan["warnings"] = list(execution_plan.get("warnings") or []) + [f"Postprocess stage failed: {exc}"]
 
         metadata = {

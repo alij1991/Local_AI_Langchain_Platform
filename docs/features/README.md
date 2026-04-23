@@ -13,7 +13,9 @@ End-to-end documentation for every feature in the Local AI Platform. Each chapte
 7. [Image editor](07-image-editor.md) — `ai_enhance.py`, Kontext/Nunchaku/CosXL, sessions, undo/redo, analyze, compare, export
 8. [Voice partner](08-partner.md) — persona engine, memory (facts/key/archived/graph), voice I/O, TTS & STT streaming
 9. [Observability & settings](09-observability.md) — runs, traces, benchmarks, system info, env-var master list
-10. [Improvement roadmap](10-improvements.md) *(pending)* — consolidated `[IMPROVE-N]` items ranked by impact × effort
+10. [Improvement roadmap](10-improvements.md) — consolidated `[IMPROVE-N]` items ranked by impact × effort
+11. [Open questions & integrated plan](11-open-questions-integrated-plan.md) — 37 questions classified, mapped to improvements, with a 30-minute triage session
+12. [Execution plan: Observe, Change, Verify](12-execution-plan.md) — Phase 0 observability bootstrap, per-improvement test cards, SQL queries, Monday-morning checklist. **Self-contained — work from this after `/compact`.**
 
 ## Conventions used in this guide
 

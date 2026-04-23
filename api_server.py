@@ -24,7 +24,7 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
 from local_ai_platform.config import load_config
-from local_ai_platform.db import init_db
+from local_ai_platform.db import init_db, get_conn
 from local_ai_platform.providers import (
     ChatMessage,
     GenerationSettings,
@@ -53,6 +53,7 @@ from local_ai_platform.repositories.tools_repo import (
 from local_ai_platform.repositories.models import upsert_model_entry, list_model_entries
 from local_ai_platform.repositories.systems import list_systems, get_system, upsert_system, delete_system
 from local_ai_platform.tracing import load_trace_config, TraceConfig, TraceRecorder, TraceStore, LocalTraceCallbackHandler
+from local_ai_platform.observability import emit, track_event
 
 logger = logging.getLogger("api_server")
 logger.setLevel(logging.INFO)
@@ -1008,9 +1009,13 @@ async def pull_ollama_model(req: ModelLoadRequest):
 
     _ollama_pulls[name] = {"status": "pulling", "progress": "Starting download...", "error": None}
     logger.info("Starting background pull for model: %s", name)
+    emit("model", "download.start", status="start",
+         context={"provider": "ollama", "model_id": name})
 
     def _do_pull():
         """Run the blocking pull in a worker thread."""
+        _pull_t0 = time.monotonic()
+        _last_pct_emitted = -1  # track which 10%-bucket we've emitted
         try:
             from local_ai_platform.providers.ollama_provider import OllamaProvider
             prov = OllamaProvider()
@@ -1025,6 +1030,15 @@ async def pull_ollama_model(req: ModelLoadRequest):
                     if total and completed:
                         pct = min(100, int(completed / total * 100))
                         last_status = f"{status} {pct}%"
+                        # Emit progress at every 10% bucket crossed
+                        _bucket = (pct // 10) * 10
+                        if _bucket > _last_pct_emitted and _bucket <= 100:
+                            emit("model", "download.progress", status="ok",
+                                 context={"provider": "ollama", "model_id": name,
+                                          "phase": status},
+                                 perf={"pct": _bucket, "completed_bytes": completed,
+                                       "total_bytes": total})
+                            _last_pct_emitted = _bucket
                     elif status:
                         last_status = status
                     _ollama_pulls[name]["progress"] = last_status
@@ -1036,10 +1050,18 @@ async def pull_ollama_model(req: ModelLoadRequest):
             _ollama_pulls[name]["progress"] = "Complete"
             _invalidate_cache("models:")
             logger.info("Pull complete: %s", name)
+            emit("model", "download.done", status="ok",
+                 duration_ms=int((time.monotonic() - _pull_t0) * 1000),
+                 context={"provider": "ollama", "model_id": name})
         except Exception as exc:
             _ollama_pulls[name]["status"] = "error"
             _ollama_pulls[name]["error"] = str(exc)
             logger.error("Pull failed for %s: %s", name, exc)
+            emit("model", "download.error", status="error",
+                 duration_ms=int((time.monotonic() - _pull_t0) * 1000),
+                 error_code=type(exc).__name__,
+                 error_message=str(exc),
+                 context={"provider": "ollama", "model_id": name})
 
     # Run in background thread so we don't block the event loop
     asyncio.get_event_loop().run_in_executor(None, _do_pull)
@@ -2452,6 +2474,12 @@ def _hf_download_worker(model_id: str, token: str | None, *, gguf_filename: str 
         "error": None,
         "thread": threading.current_thread().name,
     }
+    _hf_t0 = time.monotonic()
+    emit("model", "download.start", status="start",
+         context={"provider": "huggingface", "model_id": model_id,
+                  "gguf_filename": gguf_filename,
+                  "download_key": download_key,
+                  "has_token": bool(token)})
     try:
         from huggingface_hub import snapshot_download
 
@@ -2602,10 +2630,22 @@ def _hf_download_worker(model_id: str, token: str | None, *, gguf_filename: str 
                 image_service.refresh_models()
             except Exception:
                 pass
+        emit("model", "download.done", status="ok",
+             duration_ms=int((time.monotonic() - _hf_t0) * 1000),
+             context={"provider": "huggingface", "model_id": model_id,
+                      "gguf_filename": gguf_filename,
+                      "download_key": download_key})
     except Exception as exc:
         _hf_downloads[download_key]["status"] = "failed"
         _hf_downloads[download_key]["error"] = str(exc)
         logger.warning("HF download failed for %s: %s", model_id, exc)
+        emit("model", "download.error", status="error",
+             duration_ms=int((time.monotonic() - _hf_t0) * 1000),
+             error_code=type(exc).__name__,
+             error_message=str(exc),
+             context={"provider": "huggingface", "model_id": model_id,
+                      "gguf_filename": gguf_filename,
+                      "download_key": download_key})
 
 
 @app.get("/models/hf/downloads")
@@ -3335,38 +3375,50 @@ async def agent_chat(req: ChatRequest):
 
     # Non-streaming
     try:
-        from local_ai_platform.memory import db_messages_to_langchain, langchain_to_chat_messages
-        db_msgs = list_messages(conv_id)
-        lc_history = db_messages_to_langchain(db_msgs[:-1])
-        chat_history = langchain_to_chat_messages(lc_history)
-
-        response = orchestrator.chat_with_agent(
-            agent_name,
-            req.message,
-            image_paths=req.image_paths,
-            history_override=chat_history,
-            callbacks=callbacks,
-            run_id=run_id,
-            settings_override=req.settings,
-        )
-
-        add_message(
-            conv_id, "assistant", response,
-            agent=agent_name,
-            model=orchestrator.definitions[agent_name].model_name,
-            run_id=run_id,
-        )
-        trace_data = recorder.finalize(success=True)
-        if trace_store:
-            trace_store.save(trace_data)
-
-        return {
-            "assistant_reply": response,
-            "response": response,
-            "conversation_id": conv_id,
+        with track_event("chat", "send", context={
             "agent": agent_name,
+            "model": orchestrator.definitions[agent_name].model_name,
+            "provider": orchestrator.definitions[agent_name].provider,
+            "conversation_id": conv_id,
             "run_id": run_id,
-        }
+            "has_images": bool(req.image_paths),
+            "image_count": len(req.image_paths or []),
+            "streaming": False,
+        }) as ev:
+            from local_ai_platform.memory import db_messages_to_langchain, langchain_to_chat_messages
+            db_msgs = list_messages(conv_id)
+            lc_history = db_messages_to_langchain(db_msgs[:-1])
+            chat_history = langchain_to_chat_messages(lc_history)
+
+            response = orchestrator.chat_with_agent(
+                agent_name,
+                req.message,
+                image_paths=req.image_paths,
+                history_override=chat_history,
+                callbacks=callbacks,
+                run_id=run_id,
+                settings_override=req.settings,
+            )
+
+            add_message(
+                conv_id, "assistant", response,
+                agent=agent_name,
+                model=orchestrator.definitions[agent_name].model_name,
+                run_id=run_id,
+            )
+            trace_data = recorder.finalize(success=True)
+            if trace_store:
+                trace_store.save(trace_data)
+
+            ev.perf["response_length"] = len(response) if response else 0
+
+            return {
+                "assistant_reply": response,
+                "response": response,
+                "conversation_id": conv_id,
+                "agent": agent_name,
+                "run_id": run_id,
+            }
     except Exception as exc:
         trace_data = recorder.finalize(success=False, error=str(exc))
         if trace_store:
@@ -3428,66 +3480,95 @@ async def agent_chat_stream(req: ChatRequest):
         stream_start_time = time.monotonic()
         first_token_time: float | None = None
         token_count = 0
+        obs_ctx = {
+            "agent": agent_name,
+            "model": orchestrator.definitions[agent_name].model_name,
+            "provider": orchestrator.definitions[agent_name].provider,
+            "conversation_id": conv_id,
+            "run_id": run_id,
+            "thread_id": thread_id,
+            "has_images": bool(req.image_paths),
+            "image_count": len(req.image_paths or []),
+            "streaming": True,
+        }
+        # track_event handles start.emit + end.emit + duration automatically.
+        # The except clauses below use ev.mark_error/mark_cancelled because we
+        # yield an SSE error event to the client instead of re-raising.
         try:
-            async for event in orchestrator.astream_chat_with_agent(
-                agent_name, req.message,
-                history_override=chat_history,
-                settings_override=req.settings,
-                thread_id=thread_id,
-            ):
-                etype = event.get("type", "")
+            with track_event("chat", "send", context=obs_ctx) as ev:
+                try:
+                    async for event in orchestrator.astream_chat_with_agent(
+                        agent_name, req.message,
+                        history_override=chat_history,
+                        settings_override=req.settings,
+                        thread_id=thread_id,
+                    ):
+                        etype = event.get("type", "")
 
-                if etype == "token":
-                    text = event.get("text", "")
-                    if text:
-                        if first_token_time is None:
-                            first_token_time = time.monotonic()
-                        token_count += max(1, len(text.split()))
-                        full_response += text
-                        yield f"event: token\ndata: {json.dumps({'text': text})}\n\n"
+                        if etype == "token":
+                            text = event.get("text", "")
+                            if text:
+                                if first_token_time is None:
+                                    first_token_time = time.monotonic()
+                                token_count += max(1, len(text.split()))
+                                full_response += text
+                                yield f"event: token\ndata: {json.dumps({'text': text})}\n\n"
 
-                elif etype == "tool_call":
-                    yield f"event: tool_call\ndata: {json.dumps({'name': event.get('name', ''), 'args': event.get('args', ''), 'call_id': event.get('call_id', '')})}\n\n"
+                        elif etype == "tool_call":
+                            yield f"event: tool_call\ndata: {json.dumps({'name': event.get('name', ''), 'args': event.get('args', ''), 'call_id': event.get('call_id', '')})}\n\n"
 
-                elif etype == "tool_result":
-                    yield f"event: tool_result\ndata: {json.dumps({'name': event.get('name', ''), 'content': event.get('content', ''), 'call_id': event.get('call_id', '')})}\n\n"
+                        elif etype == "tool_result":
+                            yield f"event: tool_result\ndata: {json.dumps({'name': event.get('name', ''), 'content': event.get('content', ''), 'call_id': event.get('call_id', '')})}\n\n"
 
-                elif etype == "done":
-                    if not full_response:
-                        full_response = event.get("content", "") or "No response returned."
+                        elif etype == "done":
+                            if not full_response:
+                                full_response = event.get("content", "") or "No response returned."
 
-            # Performance metrics
-            total_time = time.monotonic() - stream_start_time
-            ttft = (first_token_time - stream_start_time) if first_token_time else 0
-            tokens_per_sec = token_count / total_time if total_time > 0 else 0
-            perf_data = {
-                "tokens": token_count,
-                "total_sec": round(total_time, 2),
-                "tokens_per_sec": round(tokens_per_sec, 1),
-                "ttft_sec": round(ttft, 3),
-            }
+                    # Performance metrics
+                    total_time = time.monotonic() - stream_start_time
+                    ttft = (first_token_time - stream_start_time) if first_token_time else 0
+                    tokens_per_sec = token_count / total_time if total_time > 0 else 0
+                    perf_data = {
+                        "tokens": token_count,
+                        "total_sec": round(total_time, 2),
+                        "tokens_per_sec": round(tokens_per_sec, 1),
+                        "ttft_sec": round(ttft, 3),
+                    }
 
-            add_message(
-                conv_id, "assistant", full_response,
-                agent=agent_name,
-                model=orchestrator.definitions[agent_name].model_name,
-                run_id=run_id,
-                perf=perf_data,
-            )
-            trace_data = recorder.finalize(success=True)
-            if trace_store:
-                trace_store.save(trace_data)
+                    add_message(
+                        conv_id, "assistant", full_response,
+                        agent=agent_name,
+                        model=orchestrator.definitions[agent_name].model_name,
+                        run_id=run_id,
+                        perf=perf_data,
+                    )
+                    trace_data = recorder.finalize(success=True)
+                    if trace_store:
+                        trace_store.save(trace_data)
 
-            logger.info("Stream complete: %d tokens, %.1f tok/s, TTFT=%.3fs, total=%.2fs",
-                         token_count, tokens_per_sec, ttft, total_time)
+                    logger.info("Stream complete: %d tokens, %.1f tok/s, TTFT=%.3fs, total=%.2fs",
+                                 token_count, tokens_per_sec, ttft, total_time)
 
-            yield f"event: end\ndata: {json.dumps({'conversation_id': conv_id, 'run_id': run_id, 'thread_id': thread_id, 'perf': perf_data})}\n\n"
+                    ev.perf = {**perf_data, "response_length": len(full_response)}
+                    yield f"event: end\ndata: {json.dumps({'conversation_id': conv_id, 'run_id': run_id, 'thread_id': thread_id, 'perf': perf_data})}\n\n"
 
-        except Exception as exc:
-            trace_data = recorder.finalize(success=False, error=str(exc))
-            if trace_store:
-                trace_store.save(trace_data)
-            yield f"event: error\ndata: {json.dumps({'error': str(exc)})}\n\n"
+                except Exception as exc:
+                    trace_data = recorder.finalize(success=False, error=str(exc))
+                    if trace_store:
+                        trace_store.save(trace_data)
+                    ev.perf = {"tokens": token_count}
+                    ev.mark_error(exc)
+                    yield f"event: error\ndata: {json.dumps({'error': str(exc)})}\n\n"
+                except BaseException as exc:
+                    # Client disconnect (GeneratorExit) or process signal.
+                    # Swallowing GeneratorExit is invalid per PEP 342 — re-raise.
+                    try:
+                        recorder.finalize(success=False, error=f"cancelled: {type(exc).__name__}")
+                    except Exception:
+                        pass
+                    ev.perf = {"tokens": token_count}
+                    ev.mark_cancelled(type(exc).__name__)
+                    raise
         finally:
             # Restore original model if overridden
             if req.model:
@@ -4383,21 +4464,44 @@ async def partner_chat_stream(body: dict[str, Any]):
 
     async def stream_gen():
         yield f"event: start\ndata: {json.dumps({'partner': partner.profile.name})}\n\n"
+        obs_ctx = {"partner": partner.profile.name,
+                   "model": model, "streaming": True,
+                   "thinking_pause": enable_pause,
+                   "message_length": len(message)}
         try:
-            async for event in partner.astream_chat(message, model, enable_thinking_pause=enable_pause):
-                etype = event.get("type", "")
-                if etype == "thinking_pause":
-                    yield f"event: thinking\ndata: {json.dumps({'duration_ms': event.get('duration_ms', 0)})}\n\n"
-                elif etype == "emotion":
-                    yield f"event: emotion\ndata: {json.dumps({'emotion': event.get('emotion', 'neutral')})}\n\n"
-                elif etype == "token":
-                    yield f"event: token\ndata: {json.dumps({'text': event.get('text', '')})}\n\n"
-                elif etype == "sentence_complete":
-                    yield f"event: sentence\ndata: {json.dumps({'sentence': event.get('sentence', '')})}\n\n"
-                elif etype == "done":
-                    yield f"event: end\ndata: {json.dumps({'full_reply': event.get('full_reply', '')[:200]})}\n\n"
-        except Exception as exc:
-            yield f"event: error\ndata: {json.dumps({'error': str(exc)})}\n\n"
+            with track_event("partner", "chat", context=obs_ctx) as ev:
+                try:
+                    async for event in partner.astream_chat(
+                        message, model, enable_thinking_pause=enable_pause,
+                    ):
+                        etype = event.get("type", "")
+                        if etype == "thinking_pause":
+                            yield f"event: thinking\ndata: {json.dumps({'duration_ms': event.get('duration_ms', 0)})}\n\n"
+                        elif etype == "emotion":
+                            yield f"event: emotion\ndata: {json.dumps({'emotion': event.get('emotion', 'neutral')})}\n\n"
+                        elif etype == "token":
+                            yield f"event: token\ndata: {json.dumps({'text': event.get('text', '')})}\n\n"
+                        elif etype == "sentence_complete":
+                            yield f"event: sentence\ndata: {json.dumps({'sentence': event.get('sentence', '')})}\n\n"
+                        elif etype == "done":
+                            yield f"event: end\ndata: {json.dumps({'full_reply': event.get('full_reply', '')[:200]})}\n\n"
+                        elif etype == "_metrics":
+                            # Engine's final metrics — copy onto ev.perf so the
+                            # track_event end-emit records token count + length.
+                            ev.perf = {
+                                "reply_length": event.get("reply_length", 0),
+                                "token_count": event.get("token_count", 0),
+                                "emotion_detected": event.get("emotion_detected", False),
+                            }
+                except Exception as exc:
+                    ev.mark_error(exc)
+                    yield f"event: error\ndata: {json.dumps({'error': str(exc)})}\n\n"
+                except BaseException as exc:
+                    # Client disconnect (GeneratorExit), task cancel, etc.
+                    ev.mark_cancelled(type(exc).__name__)
+                    raise
+        finally:
+            pass
 
     return StreamingResponse(stream_gen(), media_type="text/event-stream")
 
@@ -6032,6 +6136,74 @@ async def get_trace(run_id: str):
     if not trace:
         raise HTTPException(404, "Trace not found")
     return trace
+
+
+# ── Observability review endpoints (Phase 0) ─────────────────────
+
+@app.get("/observability/recent")
+async def obs_recent(
+    subsystem: str | None = None,
+    status: str | None = None,
+    action: str | None = None,
+    limit: int = 100,
+):
+    """Recent events, filterable. Use for ad-hoc debugging.
+
+    Example: GET /observability/recent?subsystem=image&status=error&limit=50
+    """
+    # Cap limit to protect the API from runaway queries
+    limit = max(1, min(int(limit or 100), 1000))
+    conn = get_conn()
+    q = "SELECT * FROM app_events WHERE 1=1"
+    params: list[Any] = []
+    if subsystem:
+        q += " AND subsystem = ?"
+        params.append(subsystem)
+    if status:
+        q += " AND status = ?"
+        params.append(status)
+    if action:
+        q += " AND action = ?"
+        params.append(action)
+    q += " ORDER BY id DESC LIMIT ?"
+    params.append(limit)
+    try:
+        rows = conn.execute(q, params).fetchall()
+        items = [dict(r) for r in rows]
+    finally:
+        conn.close()
+    return {"items": items, "count": len(items)}
+
+
+@app.get("/observability/summary")
+async def obs_summary(window_hours: int = 24):
+    """Error rate + avg/max duration per (subsystem, action).
+
+    Call with ?window_hours=168 for weekly rollup.
+    """
+    window_hours = max(1, min(int(window_hours or 24), 24 * 365))
+    conn = get_conn()
+    since = f"-{window_hours} hours"
+    try:
+        rows = conn.execute(
+            """
+            SELECT subsystem, action,
+                   COUNT(*) AS total,
+                   SUM(CASE WHEN status='error' THEN 1 ELSE 0 END) AS errors,
+                   SUM(CASE WHEN status='cancelled' THEN 1 ELSE 0 END) AS cancelled,
+                   AVG(duration_ms) AS avg_ms,
+                   MAX(duration_ms) AS max_ms
+            FROM app_events
+            WHERE ts > datetime('now', ?)
+            GROUP BY subsystem, action
+            ORDER BY errors DESC, total DESC
+            """,
+            (since,),
+        ).fetchall()
+        items = [dict(r) for r in rows]
+    finally:
+        conn.close()
+    return {"items": items, "window_hours": window_hours}
 
 
 # ── Generate system prompt ────────────────────────────────────────

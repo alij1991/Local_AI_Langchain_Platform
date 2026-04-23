@@ -18,6 +18,7 @@ from typing import Any
 from PIL import Image
 
 from . import processors, ai_enhance
+from ..observability import emit
 
 logger = logging.getLogger(__name__)
 
@@ -258,34 +259,53 @@ class ImageEditorService:
             image = session.current_image
         start = time.monotonic()
 
-        # Dispatch to classical, AI, or AI/CV composite
-        if operation in processors.OPERATIONS:
-            result = processors.apply_operation(image, operation, params)
-        elif operation in ai_enhance.AI_OPERATIONS:
-            op_info = ai_enhance.AI_OPERATIONS[operation]
-            fn = op_info["fn"]
-            import inspect
-            sig = inspect.signature(fn)
-            valid = {k: v for k, v in params.items() if k in sig.parameters and k != "image"}
-            result = fn(image, **valid)
-        else:
-            # Try AI/CV composite operations
-            try:
-                from . import ai_models
-                if operation in ai_models.AI_CV_OPERATIONS:
-                    op_info = ai_models.AI_CV_OPERATIONS[operation]
-                    fn = op_info["fn"]
-                    import inspect
-                    sig = inspect.signature(fn)
-                    valid = {k: v for k, v in params.items() if k in sig.parameters and k != "image"}
-                    result = fn(image, **valid)
-                elif operation == "analyze":
-                    # Special: analyze returns dict, not image
-                    return ai_models.analyze_image_quality(image)
-                else:
+        _edit_ctx = {"session_id": session_id, "operation": operation,
+                     "param_keys": sorted(list(params.keys())),
+                     "source": "original" if _use_original else "current"}
+        try:
+            # Dispatch to classical, AI, or AI/CV composite
+            if operation in processors.OPERATIONS:
+                _edit_ctx["dispatch"] = "classical"
+                result = processors.apply_operation(image, operation, params)
+            elif operation in ai_enhance.AI_OPERATIONS:
+                _edit_ctx["dispatch"] = "ai_enhance"
+                op_info = ai_enhance.AI_OPERATIONS[operation]
+                fn = op_info["fn"]
+                import inspect
+                sig = inspect.signature(fn)
+                valid = {k: v for k, v in params.items() if k in sig.parameters and k != "image"}
+                result = fn(image, **valid)
+            else:
+                # Try AI/CV composite operations
+                try:
+                    from . import ai_models
+                    if operation in ai_models.AI_CV_OPERATIONS:
+                        _edit_ctx["dispatch"] = "ai_cv"
+                        op_info = ai_models.AI_CV_OPERATIONS[operation]
+                        fn = op_info["fn"]
+                        import inspect
+                        sig = inspect.signature(fn)
+                        valid = {k: v for k, v in params.items() if k in sig.parameters and k != "image"}
+                        result = fn(image, **valid)
+                    elif operation == "analyze":
+                        # Special: analyze returns dict, not image
+                        _analyze_out = ai_models.analyze_image_quality(image)
+                        emit("editor", "op", status="ok",
+                             duration_ms=int((time.monotonic() - start) * 1000),
+                             context={**_edit_ctx, "dispatch": "analyze"},
+                             perf={"analyze_keys": len(_analyze_out) if isinstance(_analyze_out, dict) else 0})
+                        return _analyze_out
+                    else:
+                        raise ValueError(f"Unknown operation: {operation}")
+                except ImportError:
                     raise ValueError(f"Unknown operation: {operation}")
-            except ImportError:
-                raise ValueError(f"Unknown operation: {operation}")
+        except Exception as exc:
+            emit("editor", "op", status="error",
+                 duration_ms=int((time.monotonic() - start) * 1000),
+                 error_code=type(exc).__name__,
+                 error_message=str(exc),
+                 context=_edit_ctx)
+            raise
 
         duration_ms = int((time.monotonic() - start) * 1000)
 
@@ -322,6 +342,13 @@ class ImageEditorService:
 
         logger.info("Edit %s applied to session %s in %dms", operation, session_id, duration_ms)
 
+        emit("editor", "op", status="ok",
+             duration_ms=duration_ms,
+             context=_edit_ctx,
+             perf={"width": result.width, "height": result.height,
+                   "file_size": result_path.stat().st_size,
+                   "step_number": step_num})
+
         return {
             "session_id": session_id,
             "step_number": step_num,
@@ -336,6 +363,9 @@ class ImageEditorService:
     def undo(self, session_id: str) -> dict[str, Any]:
         session = self._sessions.get(session_id) or self._restore_session(session_id)
         if not session or session.current_step < 0:
+            emit("editor", "undo", status="error",
+                 error_code="NothingToUndo",
+                 context={"session_id": session_id})
             raise ValueError("Nothing to undo")
 
         # Push current step to redo stack
@@ -344,6 +374,10 @@ class ImageEditorService:
         session.current_step -= 1
 
         img = session.current_image
+        emit("editor", "undo", status="ok",
+             context={"session_id": session_id,
+                      "undone_operation": undone.operation,
+                      "current_step": session.current_step})
         return {
             "session_id": session_id,
             "current_step": session.current_step,
@@ -357,12 +391,19 @@ class ImageEditorService:
     def redo(self, session_id: str) -> dict[str, Any]:
         session = self._sessions.get(session_id) or self._restore_session(session_id)
         if not session or not session.redo_stack:
+            emit("editor", "redo", status="error",
+                 error_code="NothingToRedo",
+                 context={"session_id": session_id})
             raise ValueError("Nothing to redo")
 
         step = session.redo_stack.pop()
         session.current_step += 1
 
         img = session.current_image
+        emit("editor", "redo", status="ok",
+             context={"session_id": session_id,
+                      "redone_operation": step.operation,
+                      "current_step": session.current_step})
         return {
             "session_id": session_id,
             "current_step": session.current_step,
@@ -419,15 +460,32 @@ class ImageEditorService:
         """Export the current state to a specific format."""
         session = self._sessions.get(session_id) or self._restore_session(session_id)
         if not session:
+            emit("editor", "export", status="error",
+                 error_code="SessionNotFound",
+                 context={"session_id": session_id, "format": fmt})
             raise ValueError(f"Session not found: {session_id}")
 
-        with Image.open(session.current_path) as image:
-            data = processors.convert_format(image, fmt, quality)
-            w, h = image.width, image.height
+        _export_t0 = time.monotonic()
+        try:
+            with Image.open(session.current_path) as image:
+                data = processors.convert_format(image, fmt, quality)
+                w, h = image.width, image.height
 
-        ext = {"PNG": ".png", "JPEG": ".jpg", "WEBP": ".webp"}.get(fmt.upper(), ".png")
-        export_path = self._session_dir(session_id) / f"export{ext}"
-        export_path.write_bytes(data)
+            ext = {"PNG": ".png", "JPEG": ".jpg", "WEBP": ".webp"}.get(fmt.upper(), ".png")
+            export_path = self._session_dir(session_id) / f"export{ext}"
+            export_path.write_bytes(data)
+        except Exception as exc:
+            emit("editor", "export", status="error",
+                 duration_ms=int((time.monotonic() - _export_t0) * 1000),
+                 error_code=type(exc).__name__,
+                 error_message=str(exc),
+                 context={"session_id": session_id, "format": fmt, "quality": quality})
+            raise
+
+        emit("editor", "export", status="ok",
+             duration_ms=int((time.monotonic() - _export_t0) * 1000),
+             context={"session_id": session_id, "format": fmt.upper(), "quality": quality},
+             perf={"size": len(data), "width": w, "height": h})
 
         return {
             "path": str(export_path),

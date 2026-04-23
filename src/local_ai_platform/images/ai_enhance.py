@@ -9,11 +9,14 @@ import logging
 import re
 import sys
 import threading
+import time as _time_module
 from pathlib import Path
 from typing import Any
 
 import numpy as np
 from PIL import Image
+
+from ..observability import emit
 
 logger = logging.getLogger(__name__)
 
@@ -1990,6 +1993,20 @@ def instruct_edit(
     logger.info("instruct_edit: model=%s instruction='%s', guidance=%.1f, steps=%d",
                 model, instruction, actual_guidance, actual_steps)
 
+    # Observability: capture start + end/error around the whole edit run.
+    _ie_ctx = {
+        "model": model,
+        "requested_steps": actual_steps,
+        "requested_guidance": actual_guidance,
+        "has_negative_prompt": bool((negative_prompt or "").strip()),
+        "true_cfg_scale": float(true_cfg_scale or 1.0),
+        "input_width": image.size[0],
+        "input_height": image.size[1],
+        "seed_set": seed is not None,
+    }
+    _ie_t0 = _time_module.monotonic()
+    emit("instruct_edit", "run.start", status="start", context=_ie_ctx)
+
     # Model-specific error hints for better user messages
     _MODEL_HINTS = {
         "kontext": "Requires: diffusers>=0.35.0, pip install gguf, HF_TOKEN set, ~7GB VRAM, ~12GB system RAM (T5 on CPU)",
@@ -2028,7 +2045,11 @@ def instruct_edit(
                     pipe = _load_nunchaku_pipeline()
                 else:
                     pipe = _load_kontext_pipeline()
-            logger.info("[%s] Pipeline ready (%.1fs)", _tag, _time_k.monotonic() - t_load)
+            _load_dur_ms = int((_time_k.monotonic() - t_load) * 1000)
+            logger.info("[%s] Pipeline ready (%.1fs)", _tag, _load_dur_ms / 1000)
+            emit("instruct_edit", "load", status="ok",
+                 duration_ms=_load_dur_ms,
+                 context={"backend": "nunchaku" if _nunchaku_mode else "kontext"})
             _log_vram("Before inference")
 
             # Resize input image to fit in 8GB VRAM.
@@ -2458,16 +2479,33 @@ def instruct_edit(
             # Restart Ollama in background so chat works again
             if _read_env("KONTEXT_KILL_OLLAMA", "true").lower() in ("1", "true", "yes"):
                 _restart_ollama_service()
+            emit("instruct_edit", "run", status="ok",
+                 duration_ms=int((_time_module.monotonic() - _ie_t0) * 1000),
+                 context={**_ie_ctx, "backend": "nunchaku" if _nunchaku_mode else "kontext"},
+                 perf={"output_width": result.width, "output_height": result.height,
+                       "steady_mean_sec": (sum(step_stats["steady_steps"]) / len(step_stats["steady_steps"]))
+                                          if step_stats["steady_steps"] else None,
+                       "first_step_sec": step_stats.get("first_step_sec")})
             return result
-        except (ValueError, RuntimeError):
+        except (ValueError, RuntimeError) as _ve:
             # Restart Ollama even on error so chat isn't permanently broken
             if _read_env("KONTEXT_KILL_OLLAMA", "true").lower() in ("1", "true", "yes"):
                 _restart_ollama_service()
+            emit("instruct_edit", "run", status="error",
+                 duration_ms=int((_time_module.monotonic() - _ie_t0) * 1000),
+                 error_code=type(_ve).__name__,
+                 error_message=str(_ve),
+                 context={**_ie_ctx, "backend": "nunchaku" if _nunchaku_mode else "kontext"})
             raise
         except Exception as e:
             if _read_env("KONTEXT_KILL_OLLAMA", "true").lower() in ("1", "true", "yes"):
                 _restart_ollama_service()
             logger.error("[KONTEXT] Edit failed: %s", e, exc_info=True)
+            emit("instruct_edit", "run", status="error",
+                 duration_ms=int((_time_module.monotonic() - _ie_t0) * 1000),
+                 error_code=type(e).__name__,
+                 error_message=str(e),
+                 context={**_ie_ctx, "backend": "nunchaku" if _nunchaku_mode else "kontext"})
             raise RuntimeError(f"Kontext edit failed: {e}. {_MODEL_HINTS['kontext']}")
 
     # ── CosXL Edit ────────────────────────────────────────────────
@@ -2484,7 +2522,11 @@ def instruct_edit(
             t_load = _time_c.monotonic()
             with _cosxl_lock:
                 pipe = _load_cosxl_pipeline()
-            logger.info("[COSXL] Pipeline ready (%.1fs)", _time_c.monotonic() - t_load)
+            _load_dur_ms = int((_time_c.monotonic() - t_load) * 1000)
+            logger.info("[COSXL] Pipeline ready (%.1fs)", _load_dur_ms / 1000)
+            emit("instruct_edit", "load", status="ok",
+                 duration_ms=_load_dur_ms,
+                 context={"backend": "cosxl"})
             _log_vram("Before inference", tag="COSXL")
 
             # CRITICAL: re-verify every setting that matters for CosXL output
@@ -2984,14 +3026,36 @@ def instruct_edit(
                 )
 
             logger.info("[COSXL] ====== Edit complete ======")
+            emit("instruct_edit", "run", status="ok",
+                 duration_ms=int((_time_module.monotonic() - _ie_t0) * 1000),
+                 context={**_ie_ctx, "backend": "cosxl"},
+                 perf={"output_width": result.width, "output_height": result.height,
+                       "steady_mean_sec": (sum(step_stats["steady_steps"]) / len(step_stats["steady_steps"]))
+                                          if step_stats["steady_steps"] else None,
+                       "first_step_sec": step_stats.get("first_step_sec")})
             return result
-        except (ValueError, RuntimeError):
+        except (ValueError, RuntimeError) as _ve:
+            emit("instruct_edit", "run", status="error",
+                 duration_ms=int((_time_module.monotonic() - _ie_t0) * 1000),
+                 error_code=type(_ve).__name__,
+                 error_message=str(_ve),
+                 context={**_ie_ctx, "backend": "cosxl"})
             raise
         except Exception as e:
             logger.error("[COSXL] Edit failed: %s", e, exc_info=True)
+            emit("instruct_edit", "run", status="error",
+                 duration_ms=int((_time_module.monotonic() - _ie_t0) * 1000),
+                 error_code=type(e).__name__,
+                 error_message=str(e),
+                 context={**_ie_ctx, "backend": "cosxl"})
             raise RuntimeError(f"CosXL edit failed: {e}. {_MODEL_HINTS['cosxl']}")
 
     # Unknown model — should not reach here
+    emit("instruct_edit", "run", status="error",
+         duration_ms=int((_time_module.monotonic() - _ie_t0) * 1000),
+         error_code="UnknownModel",
+         error_message=f"Unknown instruct-edit model: {model}",
+         context=_ie_ctx)
     raise ValueError(f"Unknown instruct-edit model: {model}. Available: {list(INSTRUCT_MODELS.keys())}")
 
 

@@ -183,6 +183,22 @@ CREATE TABLE IF NOT EXISTS edit_history (
     created_at TEXT NOT NULL,
     FOREIGN KEY (session_id) REFERENCES editor_sessions(id) ON DELETE CASCADE
 );
+
+CREATE TABLE IF NOT EXISTS app_events (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    ts TEXT NOT NULL,
+    subsystem TEXT NOT NULL,
+    action TEXT NOT NULL,
+    status TEXT NOT NULL,
+    duration_ms INTEGER,
+    error_code TEXT,
+    error_message TEXT,
+    context_json TEXT,
+    perf_json TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_events_subsystem_ts ON app_events(subsystem, ts DESC);
+CREATE INDEX IF NOT EXISTS idx_events_status_ts ON app_events(status, ts DESC);
+CREATE INDEX IF NOT EXISTS idx_events_action ON app_events(action);
 """
 
 

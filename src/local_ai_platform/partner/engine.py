@@ -26,6 +26,7 @@ from .user_profile import (
     UserProfile, load_user_profile, save_user_profile,
 )
 from . import memory
+from ..observability import emit, track_event
 
 logger = logging.getLogger(__name__)
 
@@ -269,7 +270,19 @@ class PartnerEngine:
         model_str = model or self._get_best_model()
 
         settings = GenerationSettings(temperature=0.75, max_tokens=1024)
-        response = self.router.chat(model_str, messages, settings)
+        _chat_t0 = time.monotonic()
+        _chat_ctx = {"model": model_str, "streaming": False,
+                     "user_input_length": len(user_input)}
+        emit("partner", "chat.start", status="start", context=_chat_ctx)
+        try:
+            response = self.router.chat(model_str, messages, settings)
+        except Exception as _exc:
+            emit("partner", "chat", status="error",
+                 duration_ms=int((time.monotonic() - _chat_t0) * 1000),
+                 error_code=type(_exc).__name__,
+                 error_message=str(_exc),
+                 context=_chat_ctx)
+            raise
         raw_reply = response.content
 
         # Extract emotion tag BEFORE stripping (used for TTS voice selection)
@@ -322,6 +335,12 @@ class PartnerEngine:
         # Post-chat processing
         self._post_chat(user_input, reply)
 
+        emit("partner", "chat", status="ok",
+             duration_ms=int((time.monotonic() - _chat_t0) * 1000),
+             context=_chat_ctx,
+             perf={"reply_length": len(reply),
+                   "emotion": self._last_detected_emotion})
+
         return reply
 
     async def astream_chat(
@@ -346,6 +365,10 @@ class PartnerEngine:
         model_str = model or self._get_best_model()
         settings = GenerationSettings(temperature=0.75, max_tokens=1024)
 
+        # Note: observability for the streaming path lives at the HTTP
+        # endpoint (/partner/chat/stream) where track_event wraps the whole
+        # SSE lifecycle cleanly. The engine itself just yields typed events.
+
         # Artificial thinking pause (research: 0.5-2s, trivial to implement)
         if enable_thinking_pause:
             pause_ms = random.randint(500, 1500)
@@ -358,6 +381,7 @@ class PartnerEngine:
         current_sentence = ""
         first_sentence_sent = False  # Use shorter threshold for first sentence (faster TTFA)
         emotion_detected = False
+        _stream_token_count = 0  # reported via "_metrics" event at end
         _tag_buffer = ""  # buffer initial tokens to catch the tag
         _buffering = True  # buffer first ~50 chars to find tag
         _emotion_tag_pattern = re.compile(r'^\s*\[(\w+)\]\s*\n?', re.IGNORECASE)
@@ -374,6 +398,8 @@ class PartnerEngine:
                     tag_match = _emotion_tag_pattern.match(_tag_buffer)
                     if tag_match:
                         emotion = tag_match.group(1).lower()
+                        emit("partner", "emotion_detect", status="ok",
+                             context={"emotion": emotion, "source": "tag_prefix"})
                         yield {"type": "emotion", "emotion": emotion}
                         emotion_detected = True
                         # Strip tag from buffer, emit remaining as text
@@ -381,11 +407,13 @@ class PartnerEngine:
                         if clean:
                             visible_reply += clean
                             current_sentence += clean
+                            _stream_token_count += 1
                             yield {"type": "token", "text": clean}
                     else:
                         # No tag found — emit entire buffer
                         visible_reply += _tag_buffer
                         current_sentence += _tag_buffer
+                        _stream_token_count += 1
                         yield {"type": "token", "text": _tag_buffer}
                 continue  # don't emit while buffering
 
@@ -403,6 +431,7 @@ class PartnerEngine:
             visible_reply += chunk
             current_sentence += chunk
             if chunk:
+                _stream_token_count += 1
                 yield {"type": "token", "text": chunk}
 
             # Sentence boundary detection for TTS streaming
@@ -442,6 +471,8 @@ class PartnerEngine:
             from .user_profile import analyze_message_heuristic
             analysis = analyze_message_heuristic(visible_reply)
             emotion = analysis.get("emotion_label", "neutral")
+            emit("partner", "emotion_detect", status="ok",
+                 context={"emotion": emotion, "source": "heuristic_fallback"})
             yield {"type": "emotion", "emotion": emotion}
 
         # Clean up final reply — strip trailing emoji and thinking tags
@@ -454,6 +485,16 @@ class PartnerEngine:
         # Persist messages immediately (fast, SQLite)
         memory.add_message("user", user_input)
         memory.add_message("assistant", visible_reply)
+
+        # Expose metrics for the caller's track_event wrapper (if any) via
+        # one final typed event. /partner/chat/stream unpacks these onto
+        # ev.perf before the context manager exits.
+        yield {
+            "type": "_metrics",
+            "reply_length": len(visible_reply),
+            "token_count": _stream_token_count,
+            "emotion_detected": emotion_detected,
+        }
 
         # Post-chat processing in background thread — don't block the SSE stream.
         # This includes Mem0 add (~3s), LLM profiling (every 5 turns), KG extraction.
@@ -547,6 +588,8 @@ class PartnerEngine:
 
     def _extract_facts_fast(self, text: str) -> None:
         """Fast regex extraction for immediate facts (no LLM call)."""
+        _fe_t0 = time.monotonic()
+        _facts_before = len(memory.get_facts()) if hasattr(memory, "get_facts") else 0
         text_lower = text.lower()
 
         patterns = {
@@ -563,6 +606,7 @@ class PartnerEngine:
         # Detect significant life events as key memories
         life_events = {"died", "born", "married", "divorced", "broke up", "got fired",
                        "graduated", "promoted", "pregnant", "engaged", "moved", "quit"}
+        _life_event_hit = False
         for word in life_events:
             if word in text_lower:
                 memory.add_key_memory(
@@ -570,7 +614,15 @@ class PartnerEngine:
                     emotional_tone="significant_life_event",
                     importance=8,
                 )
+                _life_event_hit = True
                 break
+
+        _facts_after = len(memory.get_facts()) if hasattr(memory, "get_facts") else 0
+        emit("partner", "fact_extract", status="ok",
+             duration_ms=int((time.monotonic() - _fe_t0) * 1000),
+             context={"input_length": len(text),
+                      "life_event_detected": _life_event_hit},
+             perf={"new_facts": max(0, _facts_after - _facts_before)})
 
     def _create_session_summary(self) -> None:
         """Create a rolling summary using the LLM (research Tier 2: abstractive).
@@ -674,6 +726,8 @@ class PartnerEngine:
         - TTS: Kokoro-82M ONNX on CPU (sub-300ms)
         - VAD: Silero VAD (<1ms per chunk)
         """
+        _vi_t0 = time.monotonic()
+        emit("partner", "voice_init.start", status="start", context={})
         status = {"asr": False, "tts": False, "vad": False}
 
         # ASR: faster-whisper on CPU
@@ -736,14 +790,41 @@ class PartnerEngine:
         except Exception as e:
             logger.debug("Silero VAD init failed: %s", e)
 
+        emit("partner", "voice_init", status="ok",
+             duration_ms=int((time.monotonic() - _vi_t0) * 1000),
+             context={},
+             perf=dict(status))
         return status
 
     def transcribe(self, audio_path: str) -> str:
         """Transcribe audio file to text using faster-whisper."""
         if self._asr is None:
+            emit("partner", "stt", status="error",
+                 error_code="ASRNotInitialized",
+                 context={"source": "file"})
             raise RuntimeError("ASR not initialized. Call init_voice() first.")
-        segments, _ = self._asr.transcribe(audio_path, beam_size=5)
-        return " ".join(seg.text for seg in segments).strip()
+        _stt_t0 = time.monotonic()
+        try:
+            segments, _ = self._asr.transcribe(audio_path, beam_size=5)
+            text = " ".join(seg.text for seg in segments).strip()
+        except Exception as _exc:
+            emit("partner", "stt", status="error",
+                 duration_ms=int((time.monotonic() - _stt_t0) * 1000),
+                 error_code=type(_exc).__name__,
+                 error_message=str(_exc),
+                 context={"source": "file"})
+            raise
+        emit("partner", "stt", status="ok",
+             duration_ms=int((time.monotonic() - _stt_t0) * 1000),
+             context={"source": "file"},
+             perf={"text_length": len(text)})
+        return text
+
+    # STT partial throttle: empty-buffer results (silence) can fire dozens of
+    # times per second when VAD is running; coalesce them to one event per
+    # this interval so the events table stays small. Non-empty results always
+    # emit as `stt` immediately.
+    _STT_PARTIAL_MIN_INTERVAL_SEC = 5.0
 
     def transcribe_buffer(self, audio_float32: "np.ndarray") -> str:
         """Transcribe a float32 numpy audio buffer (16kHz mono) directly.
@@ -754,9 +835,51 @@ class PartnerEngine:
             raise RuntimeError("ASR not initialized.")
         if len(audio_float32) < 1600:  # < 0.1s at 16kHz, too short
             return ""
-        segments, _ = self._asr.transcribe(audio_float32, beam_size=3, vad_filter=True,
-                                            vad_parameters={"min_silence_duration_ms": 300})
-        return " ".join(seg.text for seg in segments).strip()
+        _stt_t0 = time.monotonic()
+        try:
+            segments, _ = self._asr.transcribe(audio_float32, beam_size=3, vad_filter=True,
+                                                vad_parameters={"min_silence_duration_ms": 300})
+            text = " ".join(seg.text for seg in segments).strip()
+        except Exception as _exc:
+            emit("partner", "stt", status="error",
+                 duration_ms=int((time.monotonic() - _stt_t0) * 1000),
+                 error_code=type(_exc).__name__,
+                 error_message=str(_exc),
+                 context={"source": "buffer", "samples": len(audio_float32)})
+            raise
+
+        _stt_dur_ms = int((time.monotonic() - _stt_t0) * 1000)
+        if text:
+            # Real transcription result — always record.
+            emit("partner", "stt", status="ok",
+                 duration_ms=_stt_dur_ms,
+                 context={"source": "buffer", "samples": len(audio_float32)},
+                 perf={"text_length": len(text)})
+        else:
+            # Empty result (silence / VAD filtered). Throttle to one event
+            # per _STT_PARTIAL_MIN_INTERVAL_SEC, carrying an aggregate of the
+            # coalesced calls so we can still spot runaway silence storms.
+            now = time.monotonic()
+            last = getattr(self, "_stt_partial_last_ts", 0.0)
+            count = getattr(self, "_stt_partial_coalesced", 0) + 1
+            samples_acc = getattr(self, "_stt_partial_samples_sum", 0) + len(audio_float32)
+            dur_acc = getattr(self, "_stt_partial_dur_ms_sum", 0) + _stt_dur_ms
+            if (now - last) >= self._STT_PARTIAL_MIN_INTERVAL_SEC:
+                emit("partner", "stt.partial", status="ok",
+                     duration_ms=dur_acc,
+                     context={"source": "buffer"},
+                     perf={"coalesced_count": count,
+                           "total_samples": samples_acc,
+                           "interval_sec": round(now - last, 2) if last else None})
+                self._stt_partial_last_ts = now
+                self._stt_partial_coalesced = 0
+                self._stt_partial_samples_sum = 0
+                self._stt_partial_dur_ms_sum = 0
+            else:
+                self._stt_partial_coalesced = count
+                self._stt_partial_samples_sum = samples_acc
+                self._stt_partial_dur_ms_sum = dur_acc
+        return text
 
     # Single consistent voice per gender — switching voices per emotion
     # sounds like a different person speaking each sentence.
@@ -867,12 +990,23 @@ class PartnerEngine:
         with exaggeration control and paralinguistic tags.
         Falls back to Kokoro with voice switching.
         """
+        _tts_t0 = time.monotonic()
+        _tts_ctx = {"emotion": emotion, "input_length": len(text) if text else 0,
+                    "path": "chatterbox" if (self._tts_emotional is not None and self._tts_mode == "chatterbox") else "kokoro"}
         # ── Path A: Chatterbox-Turbo (full emotional TTS) ──
         if self._tts_emotional is not None and self._tts_mode == "chatterbox":
-            return self._synthesize_chatterbox(text, emotion)
+            out = self._synthesize_chatterbox(text, emotion)
+            emit("partner", "tts", status="ok" if out else "error",
+                 duration_ms=int((time.monotonic() - _tts_t0) * 1000),
+                 error_code=None if out else "ChatterboxFailed",
+                 context=_tts_ctx,
+                 perf={"output_bytes": len(out) if out else 0})
+            return out
 
         # ── Path B: Kokoro (fast, voice switching) ──
         if self._tts is None:
+            emit("partner", "tts", status="error",
+                 error_code="TTSNotInitialized", context=_tts_ctx)
             return None
 
         if voice is None:
@@ -882,6 +1016,10 @@ class PartnerEngine:
         text = self._preprocess_text_for_tts(text, emotion)
 
         if not text:
+            emit("partner", "tts", status="ok",
+                 duration_ms=int((time.monotonic() - _tts_t0) * 1000),
+                 context={**_tts_ctx, "voice": voice, "skipped_empty": True},
+                 perf={"output_bytes": 0})
             return None
 
         try:
@@ -902,9 +1040,20 @@ class PartnerEngine:
             import numpy as np
             pcm = (np.clip(samples, -1, 1) * 32767).astype(np.int16)
             buf.write(pcm.tobytes())
-            return buf.getvalue()
+            data = buf.getvalue()
+            emit("partner", "tts", status="ok",
+                 duration_ms=int((time.monotonic() - _tts_t0) * 1000),
+                 context={**_tts_ctx, "voice": voice},
+                 perf={"output_bytes": len(data), "sample_rate": sample_rate,
+                       "audio_sec": num_samples / sample_rate if sample_rate else None})
+            return data
         except Exception as e:
             logger.warning("TTS synthesis failed: %s", e)
+            emit("partner", "tts", status="error",
+                 duration_ms=int((time.monotonic() - _tts_t0) * 1000),
+                 error_code=type(e).__name__,
+                 error_message=str(e),
+                 context={**_tts_ctx, "voice": voice})
             return None
 
     def _synthesize_chatterbox(self, text: str, emotion: str) -> bytes | None:

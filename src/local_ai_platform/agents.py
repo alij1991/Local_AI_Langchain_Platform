@@ -1,8 +1,10 @@
 from __future__ import annotations
 
 import base64
+import inspect
 import logging
 import mimetypes
+import time
 import uuid
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -21,6 +23,7 @@ from langchain_ollama import ChatOllama
 
 from .config import AppConfig
 from .memory import SmartMemory, langchain_to_chat_messages, chat_messages_to_langchain
+from .observability import emit, track_event
 from .providers import (
     ChatMessage,
     ChatResponse,
@@ -68,7 +71,7 @@ class AgentOrchestrator:
     def __init__(self, config: AppConfig, router: ProviderRouter | None = None) -> None:
         self.config = config
         self.router = router or build_router_from_config(config)
-        self.tools: list[StructuredTool] = build_default_tools()
+        self.tools: list[StructuredTool] = [self._instrument_tool(t) for t in build_default_tools()]
         self.definitions: dict[str, AgentDefinition] = {}
         self.chat_histories: dict[str, list[ChatMessage]] = {}
         self._agent_tool_ids: dict[str, list[str]] = {}
@@ -282,11 +285,11 @@ class AgentOrchestrator:
             return f"Tool `{name}` guidance: {instructions}\nTask: {task}"
 
         self.tools.append(
-            StructuredTool.from_function(
+            self._instrument_tool(StructuredTool.from_function(
                 func=instruction_tool,
                 name=name,
                 description=f"User-defined instruction tool: {instructions}",
-            )
+            ))
         )
 
     def add_agent_delegate_tool(self, name: str, target_agent: str) -> None:
@@ -294,12 +297,75 @@ class AgentOrchestrator:
             return self.chat_with_agent(target_agent, task)
 
         self.tools.append(
-            StructuredTool.from_function(
+            self._instrument_tool(StructuredTool.from_function(
                 func=delegate_tool,
                 name=name,
                 description=f"Delegate a task to agent `{target_agent}`.",
-            )
+            ))
         )
+
+    @staticmethod
+    def _instrument_tool(tool: StructuredTool) -> StructuredTool:
+        """Wrap a tool's underlying callable(s) so every invocation emits
+        a `tool.invoke` event with duration and arg/result sizes.
+
+        Swallows no exceptions — the tool still raises exactly what it always did.
+        Emits are best-effort (see observability.emit docstring).
+        """
+        tool_name = tool.name
+        is_dangerous = bool((tool.metadata or {}).get("dangerous"))
+        original_func = tool.func
+        original_coroutine = tool.coroutine
+
+        def _arg_size(args, kwargs) -> int:
+            try:
+                return sum(len(str(a)) for a in args) + sum(len(str(v)) for v in kwargs.values())
+            except Exception:
+                return -1
+
+        if original_func is not None and not inspect.iscoroutinefunction(original_func):
+            def wrapped_func(*args, **kwargs):
+                t0 = time.monotonic()
+                ctx = {"tool": tool_name, "dangerous": is_dangerous,
+                       "arg_size": _arg_size(args, kwargs)}
+                try:
+                    result = original_func(*args, **kwargs)
+                    emit("tool", "invoke", status="ok",
+                         duration_ms=int((time.monotonic() - t0) * 1000),
+                         context=ctx,
+                         perf={"result_size": len(str(result)) if result is not None else 0})
+                    return result
+                except Exception as exc:
+                    emit("tool", "invoke", status="error",
+                         duration_ms=int((time.monotonic() - t0) * 1000),
+                         error_code=type(exc).__name__,
+                         error_message=str(exc),
+                         context=ctx)
+                    raise
+            tool.func = wrapped_func
+
+        if original_coroutine is not None:
+            async def wrapped_coro(*args, **kwargs):
+                t0 = time.monotonic()
+                ctx = {"tool": tool_name, "dangerous": is_dangerous,
+                       "arg_size": _arg_size(args, kwargs)}
+                try:
+                    result = await original_coroutine(*args, **kwargs)
+                    emit("tool", "invoke", status="ok",
+                         duration_ms=int((time.monotonic() - t0) * 1000),
+                         context=ctx,
+                         perf={"result_size": len(str(result)) if result is not None else 0})
+                    return result
+                except Exception as exc:
+                    emit("tool", "invoke", status="error",
+                         duration_ms=int((time.monotonic() - t0) * 1000),
+                         error_code=type(exc).__name__,
+                         error_message=str(exc),
+                         context=ctx)
+                    raise
+            tool.coroutine = wrapped_coro
+
+        return tool
 
     def get_tool_names(self) -> list[str]:
         return [tool.name for tool in self.tools]
@@ -687,6 +753,14 @@ class AgentOrchestrator:
                                 for tc in chunk.tool_call_chunks:
                                     if tc.get("name"):
                                         logger.info("Tool call: %s args=%s", tc.get("name"), str(tc.get("args", ""))[:200])
+                                        emit("agent", "tool_call", status="ok",
+                                             context={
+                                                 "agent": agent_name,
+                                                 "tool": tc.get("name", ""),
+                                                 "call_id": tc.get("id", ""),
+                                                 "args_preview": str(tc.get("args", ""))[:200],
+                                                 "thread_id": tid,
+                                             })
                                         yield {
                                             "type": "tool_call",
                                             "name": tc.get("name", ""),
@@ -698,6 +772,14 @@ class AgentOrchestrator:
                         output = data.get("output", "")
                         tool_name = event.get("name", "")
                         logger.info("Tool result: %s len=%d", tool_name, len(str(output)))
+                        emit("agent", "tool_result", status="ok",
+                             context={
+                                 "agent": agent_name,
+                                 "tool": tool_name,
+                                 "call_id": event.get("run_id", ""),
+                                 "thread_id": tid,
+                             },
+                             perf={"output_length": len(str(output))})
                         yield {
                             "type": "tool_result",
                             "name": tool_name,
@@ -740,6 +822,13 @@ class AgentOrchestrator:
                 if "does not support tools" in str(exc).lower():
                     self._models_without_tool_support.add(definition.model_name)
                     logger.info("Model %s doesn't support tools, falling back to direct stream", definition.model_name)
+                    emit("agent", "fallback", status="ok",
+                         context={
+                             "agent": agent_name,
+                             "model": definition.model_name,
+                             "provider": definition.provider,
+                             "reason": "model_does_not_support_tools",
+                         })
                     # Fall through to Path B
                 else:
                     raise
@@ -947,11 +1036,21 @@ Guidelines:
 
         # Execute graph with routing
         run_id = str(uuid.uuid4())
+        system_name = system_definition.get("name") or system_definition.get("id") or "unnamed"
         total_start = _time.monotonic()
         node_outputs: list[dict[str, Any]] = []
         accumulated_context = ""
         visited: set[str] = set()
         max_steps = len(nodes) * 2  # prevent infinite loops
+
+        emit("system", "run.start", status="start",
+             context={
+                 "run_id": run_id,
+                 "system_name": system_name,
+                 "conversation_id": conversation_id,
+                 "node_count": len(nodes),
+                 "edge_count": len(edges),
+             })
 
         step = 0
         while current_nodes and step < max_steps:
@@ -976,6 +1075,11 @@ Guidelines:
                         "text": f"(agent '{agent_name}' not found)", "status": "skipped",
                         "duration_ms": 0,
                     })
+                    emit("system", "node_end", status="skipped",
+                         duration_ms=0,
+                         context={"run_id": run_id, "system_name": system_name,
+                                  "node_id": nid, "agent": agent_name, "role": role,
+                                  "reason": "agent_not_found"})
                     continue
 
                 # Build prompt
@@ -986,6 +1090,10 @@ Guidelines:
 
                 # Execute
                 node_start = _time.monotonic()
+                emit("system", "node_start", status="start",
+                     context={"run_id": run_id, "system_name": system_name,
+                              "node_id": nid, "agent": agent_name, "role": role,
+                              "step": step})
                 try:
                     output = self.chat_with_agent(agent_name, prompt)
                     duration_ms = int((_time.monotonic() - node_start) * 1000)
@@ -994,6 +1102,11 @@ Guidelines:
                         "text": output, "status": "ok",
                         "duration_ms": duration_ms,
                     })
+                    emit("system", "node_end", status="ok",
+                         duration_ms=duration_ms,
+                         context={"run_id": run_id, "system_name": system_name,
+                                  "node_id": nid, "agent": agent_name, "role": role},
+                         perf={"output_length": len(output) if output else 0})
                     accumulated_context += f"\n[{agent_name} ({role})]: {output}\n"
                 except Exception as exc:
                     duration_ms = int((_time.monotonic() - node_start) * 1000)
@@ -1002,6 +1115,12 @@ Guidelines:
                         "text": str(exc), "status": "error",
                         "duration_ms": duration_ms,
                     })
+                    emit("system", "node_end", status="error",
+                         duration_ms=duration_ms,
+                         error_code=type(exc).__name__,
+                         error_message=str(exc),
+                         context={"run_id": run_id, "system_name": system_name,
+                                  "node_id": nid, "agent": agent_name, "role": role})
                     output = str(exc)
 
                 # Evaluate edge routing rules to determine next nodes
@@ -1030,6 +1149,18 @@ Guidelines:
 
         total_ms = int((_time.monotonic() - total_start) * 1000)
         final_text = node_outputs[-1]["text"] if node_outputs else "No output produced."
+
+        errors = sum(1 for n in node_outputs if n.get("status") == "error")
+        emit("system", "run_done", status="error" if errors else "ok",
+             duration_ms=total_ms,
+             context={"run_id": run_id, "system_name": system_name,
+                      "conversation_id": conversation_id},
+             perf={
+                 "nodes_executed": len(node_outputs),
+                 "error_count": errors,
+                 "final_text_length": len(final_text) if final_text else 0,
+                 "steps": step,
+             })
 
         return {
             "final_text": final_text,
