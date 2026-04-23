@@ -52,6 +52,7 @@ from local_ai_platform.repositories.tools_repo import (
 )
 from local_ai_platform.repositories.models import upsert_model_entry, list_model_entries
 from local_ai_platform.repositories.systems import list_systems, get_system, upsert_system, delete_system
+from local_ai_platform.systems_validator import SystemValidationError, check_no_cycles
 from local_ai_platform.tracing import load_trace_config, TraceConfig, TraceRecorder, TraceStore, LocalTraceCallbackHandler
 from local_ai_platform.observability import emit, track_event
 
@@ -4249,6 +4250,47 @@ async def recommend_systems():
 
 # ── Systems (custom graph-based systems, kept for backward compat) ─
 
+def _validate_system_or_400(name: str, definition: dict) -> None:
+    """Reject cycle-containing system definitions at save time.
+
+    [IMPROVE-37] — runs Kahn's topological sort via
+    systems_validator.check_no_cycles. Emits a system.validate event
+    (ok or error) so the weekly /observability/summary review can
+    count rejected saves alongside other subsystem errors. On cycle,
+    raises HTTPException 400 with a structured body the Flutter client
+    can render directly.
+    """
+    try:
+        check_no_cycles(definition)
+        emit(
+            "system",
+            "validate",
+            status="ok",
+            context={
+                "system_name": name,
+                "node_count": len(definition.get("nodes") or []),
+                "edge_count": len(definition.get("edges") or []),
+            },
+        )
+    except SystemValidationError as exc:
+        emit(
+            "system",
+            "validate",
+            status="error",
+            error_code="CycleDetected",
+            error_message=str(exc),
+            context={"system_name": name, "cyclic_nodes": exc.cyclic_nodes},
+        )
+        raise HTTPException(
+            400,
+            {
+                "error": "cycle_detected",
+                "message": str(exc),
+                "cyclic_nodes": exc.cyclic_nodes,
+            },
+        )
+
+
 @app.get("/systems")
 async def get_systems():
     """Return custom systems in the format Flutter expects: {items: [...]}."""
@@ -4261,12 +4303,15 @@ async def create_system(body: dict[str, Any]):
     definition = body.get("definition", body)
     if not name:
         raise HTTPException(400, "name is required")
+    _validate_system_or_400(name, definition)
     return upsert_system(name, definition)
 
 
 @app.put("/systems/{name}")
 async def save_system(name: str, body: dict[str, Any]):
-    return upsert_system(name, body.get("definition", body))
+    definition = body.get("definition", body)
+    _validate_system_or_400(name, definition)
+    return upsert_system(name, definition)
 
 
 @app.get("/systems/{name}")
@@ -4322,6 +4367,10 @@ async def clone_system(name: str, body: dict[str, Any] = None):
     definition = system.get("definition_json", system.get("definition", {}))
     if isinstance(definition, str):
         definition = json.loads(definition)
+    # Also validate on clone — a legacy cyclic row in DB should not
+    # propagate into a new row via clone. The source row stays
+    # untouched; only the cloned copy is blocked.
+    _validate_system_or_400(new_name, definition)
     return upsert_system(new_name, definition)
 
 
@@ -4350,6 +4399,7 @@ async def import_system(body: dict[str, Any]):
     definition = body.get("definition", {})
     if not name:
         raise HTTPException(400, "name is required in import data")
+    _validate_system_or_400(name, definition)
     return upsert_system(name, definition)
 
 

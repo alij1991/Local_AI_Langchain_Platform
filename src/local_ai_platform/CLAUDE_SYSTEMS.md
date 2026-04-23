@@ -17,7 +17,7 @@
 3. **No schema validation on `definition`.** The `definition` JSON blob is stored as-is. Garbage in → runtime errors deep in the executor. When accepting user input, validate structure up front.
 4. **Timestamps are UTC ISO strings, not Unix epoch.** Don't compare with `time.time()`. Use `datetime.fromisoformat()`.
 5. **Agent names in edges are free-text, not FK.** If a template references an agent that doesn't exist at runtime, the node fails silently and downstream nodes receive `None`. Always check agent exists before executing.
-6. **No explicit cycle detection.** The BFS walker in `execute_system_graph` guards against re-entry with a `visited` set; `max_steps = 2 * len(nodes)` is a belt-and-suspenders cap that almost never trips. A cycle like `A→B→A` executes A once, then B once, then stops — and the run reports `status="ok"` with whichever nodes it reached. If a cyclic graph "succeeds" but produces only partial output, this is why. Kahn-based pre-flight cycle rejection on save is planned under [IMPROVE-37] but not shipped.
+6. **Save-time cycle rejection; run-time `visited` set is the safety net.** `/systems` create/update/clone/import run Kahn's topological sort via `systems_validator.check_no_cycles()` and reject cyclic definitions with HTTP 400 + `{error: "cycle_detected", cyclic_nodes: [...]}`. Existing DB rows saved before [IMPROVE-37] shipped may still contain cycles — the runtime BFS walker in `execute_system_graph` guards those with a `visited` set + `max_steps = 2 * len(nodes)` cap, so a cyclic legacy graph executes partially and reports `status="ok"` with whichever nodes it reached. If a legacy cyclic graph "succeeds" but produces only partial output, this is why.
 
 ## Conventions
 
