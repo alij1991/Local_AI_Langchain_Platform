@@ -7,14 +7,36 @@ from pathlib import Path
 from langchain_core.tools import StructuredTool
 from pydantic import BaseModel, Field
 
+from ..observability import emit
+
 # Sandbox root — all file operations are restricted to this directory
 WORKSPACE_ROOT = Path(os.getenv("LOCAL_AI_WORKSPACE", "./workspace")).resolve()
 
 
 def _safe_path(user_path: str) -> Path:
-    """Resolve a user-provided path and verify it's within the workspace."""
+    """Resolve a user-provided path and verify it's inside the workspace.
+
+    Uses Path.relative_to() for strict containment. The previous
+    str(resolved).startswith(str(WORKSPACE_ROOT)) check was vulnerable to
+    sibling-prefix escape — e.g. WORKSPACE_ROOT=/home/a/workspace and
+    resolved=/home/a/workspace_other/file satisfied startswith() but is
+    plainly outside the sandbox. relative_to() raises ValueError whenever
+    the resolved path is not an ancestor-descendant of WORKSPACE_ROOT,
+    which is the actual containment semantics we want.
+    """
     resolved = (WORKSPACE_ROOT / user_path).resolve()
-    if not str(resolved).startswith(str(WORKSPACE_ROOT)):
+    try:
+        resolved.relative_to(WORKSPACE_ROOT)
+    except ValueError:
+        # Record every sandbox escape attempt so the weekly observability
+        # review can flag repeated attacks or a misbehaving agent.
+        emit(
+            "tool",
+            "file_ops.path_rejected",
+            status="error",
+            error_code="PathOutsideWorkspace",
+            context={"user_path": user_path[:200]},
+        )
         raise ValueError(f"Path '{user_path}' is outside the workspace directory")
     return resolved
 
