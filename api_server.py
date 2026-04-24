@@ -2337,7 +2337,7 @@ async def discover_hf_models(
             # Check if the base model is installed locally
             _base_installed = False
             if _base_model_id:
-                _base_cache = Path(os.getenv("HF_HOME") or (Path.home() / ".cache" / "huggingface")) / "hub" / f"models--{_base_model_id.replace('/', '--')}"
+                _base_cache = Path(get_settings().hf_home or (Path.home() / ".cache" / "huggingface")) / "hub" / f"models--{_base_model_id.replace('/', '--')}"
                 _base_installed = _base_cache.exists() and any((_base_cache / "snapshots").iterdir()) if (_base_cache / "snapshots").exists() else False
 
             items.append({
@@ -2852,7 +2852,7 @@ async def get_hf_model_readme(model_id: str):
         _readme_base_model = str(card_meta.get("base_model") or "")
     _readme_base_installed = False
     if _readme_base_model:
-        _bc = Path(os.getenv("HF_HOME") or (Path.home() / ".cache" / "huggingface")) / "hub" / f"models--{_readme_base_model.replace('/', '--')}"
+        _bc = Path(get_settings().hf_home or (Path.home() / ".cache" / "huggingface")) / "hub" / f"models--{_readme_base_model.replace('/', '--')}"
         _readme_base_installed = _bc.exists() and (_bc / "snapshots").exists() and any((_bc / "snapshots").iterdir()) if (_bc / "snapshots").exists() else False
 
     # ── Compute actual size & hardware fit from authoritative data ──

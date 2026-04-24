@@ -2,10 +2,10 @@ from __future__ import annotations
 
 import json
 import logging
-import os
 from pathlib import Path
 from typing import Any, Generator
 
+from ..config import get_settings
 from .base import (
     BaseProvider,
     ChatMessage,
@@ -19,8 +19,13 @@ logger = logging.getLogger(__name__)
 
 
 def _default_ollama_home() -> Path:
-    """Return the default Ollama data directory (platform-aware)."""
-    env = os.getenv("OLLAMA_MODELS")
+    """Return the default Ollama data directory (platform-aware).
+
+    [IMPROVE-69] Reads ``OLLAMA_MODELS`` via ``AppSettings.ollama_models``
+    so ``.env`` values are honored consistently. Empty string (the
+    schema default) is falsy — the Path.home() fallback still kicks in.
+    """
+    env = get_settings().ollama_models
     if env:
         return Path(env)
     # Windows: C:\Users\<user>\.ollama

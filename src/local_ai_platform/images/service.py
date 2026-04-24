@@ -629,7 +629,7 @@ def _hf_cache_dir(model_id: str) -> Path | None:
     We resolve to the most recent snapshot so callers get the actual model
     files (model_index.json, scheduler/, unet/, etc.), not the repo root.
     """
-    root = Path(os.getenv("HF_HOME") or (Path.home() / ".cache" / "huggingface"))
+    root = Path(get_settings().hf_home or (Path.home() / ".cache" / "huggingface"))
     repo_dir = root / "hub" / f"models--{model_id.replace('/', '--')}"
     if not repo_dir.exists():
         return None
@@ -751,7 +751,7 @@ def _detect_component_base_model(model_id: str) -> str:
         return "sd15"
     # If none matched, try reading config from HF cache snapshot
     try:
-        hf_root = Path(os.getenv("HF_HOME") or (Path.home() / ".cache" / "huggingface"))
+        hf_root = Path(get_settings().hf_home or (Path.home() / ".cache" / "huggingface"))
         repo_dir = hf_root / "hub" / f"models--{model_id.replace('/', '--')}" / "snapshots"
         if repo_dir.exists():
             snaps = sorted([s for s in repo_dir.iterdir() if s.is_dir()],
@@ -3693,7 +3693,7 @@ class ImageGenerationService:
     @staticmethod
     def _hf_repo_root(model_id: str) -> Path | None:
         """Return the HF cache repo root directory (models--org--name/)."""
-        root = Path(os.getenv("HF_HOME") or (Path.home() / ".cache" / "huggingface"))
+        root = Path(get_settings().hf_home or (Path.home() / ".cache" / "huggingface"))
         repo_dir = root / "hub" / f"models--{model_id.replace('/', '--')}"
         return repo_dir if repo_dir.exists() else None
 
@@ -3785,7 +3785,7 @@ class ImageGenerationService:
 
         # 2. Scan HF cache for LoRA repos (they typically have adapter_config.json)
         try:
-            hf_root = Path(os.getenv("HF_HOME") or (Path.home() / ".cache" / "huggingface"))
+            hf_root = Path(get_settings().hf_home or (Path.home() / ".cache" / "huggingface"))
             hub_dir = hf_root / "hub"
             if hub_dir.exists():
                 for d in hub_dir.iterdir():
@@ -5092,7 +5092,7 @@ class ImageGenerationService:
     def _scan_hf_cache_models(self) -> list[dict[str, Any]]:
         """Scan HuggingFace cache for diffusers image models."""
         image_models: list[dict[str, Any]] = []
-        hf_root = Path(os.getenv("HF_HOME") or (Path.home() / ".cache" / "huggingface"))
+        hf_root = Path(get_settings().hf_home or (Path.home() / ".cache" / "huggingface"))
         hub_dir = hf_root / "hub"
         if not hub_dir.exists():
             return image_models
@@ -5592,7 +5592,7 @@ class ImageGenerationService:
                 # Find the quantized weights file
                 _snap = Path(model_id_or_path) if Path(model_id_or_path).exists() else None
                 if not _snap:
-                    _hf_root = Path(os.getenv("HF_HOME") or (Path.home() / ".cache" / "huggingface"))
+                    _hf_root = Path(get_settings().hf_home or (Path.home() / ".cache" / "huggingface"))
                     _repo_dir = _hf_root / "hub" / f"models--{model_id_or_path.replace('/', '--')}"
                     if (_repo_dir / "snapshots").exists():
                         _snaps = sorted(
@@ -5626,17 +5626,17 @@ class ImageGenerationService:
                     except Exception as _attn_err:
                         logger.info("[IMG] Nunchaku: fp16 attention not available: %s", _attn_err)
 
-                    # Get HF token for gated FLUX repos
-                    _nk_token = os.getenv("HF_TOKEN") or os.getenv("HF_API_TOKEN") or os.getenv("HUGGING_FACE_HUB_TOKEN")
-                    if not _nk_token:
-                        # Try loading from .env file directly
-                        _env_path = Path(__file__).resolve().parents[3] / ".env"
-                        if _env_path.exists():
-                            for _line in _env_path.read_text(encoding="utf-8").splitlines():
-                                _line = _line.strip()
-                                if _line.startswith("HF_TOKEN=") or _line.startswith("HF_API_TOKEN="):
-                                    _nk_token = _line.split("=", 1)[1].strip().strip("'\"")
-                                    break
+                    # Get HF token for gated FLUX repos.
+                    # [IMPROVE-69] AppSettings.hf_token covers HF_TOKEN /
+                    # HUGGING_FACE_HUB_TOKEN / HUGGINGFACE_TOKEN via
+                    # AliasChoices and auto-loads .env, so the old
+                    # manual .env-parse fallback is no longer needed.
+                    # HF_API_TOKEN is still its own field (separate
+                    # env name preserved by AppConfig) and acts as a
+                    # secondary fallback, matching the pre-IMPROVE-69
+                    # priority (HF_TOKEN before HF_API_TOKEN).
+                    _s = get_settings()
+                    _nk_token = _s.hf_token or _s.hf_api_token
                     _nk_pipe_kwargs: dict[str, Any] = {
                         "transformer": transformer,
                         "torch_dtype": resolved_dtype,

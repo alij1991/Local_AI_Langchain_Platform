@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import json
-import os
 import time
 import uuid
 from dataclasses import asdict, dataclass, is_dataclass
@@ -11,6 +10,8 @@ from pathlib import Path
 from typing import Any
 
 from langchain_core.callbacks import BaseCallbackHandler
+
+from .config import get_settings
 
 
 REDACT_KEYS = {
@@ -255,8 +256,13 @@ class TraceStore:
 
 
 def load_trace_config() -> TraceConfig:
+    # [IMPROVE-69] Delegated to AppSettings so .env overrides work.
+    # Defaults (True / False / "./data/traces") are identical to the
+    # pre-migration os.getenv path; pydantic-settings' bool coercion
+    # matches the previous ``{"1", "true", "yes", "on"}`` set.
+    s = get_settings()
     return TraceConfig(
-        enabled=os.getenv("TRACE_ENABLED", "true").strip().lower() in {"1", "true", "yes", "on"},
-        verbose=os.getenv("TRACE_VERBOSE", "false").strip().lower() in {"1", "true", "yes", "on"},
-        store_dir=os.getenv("TRACE_STORE_DIR", "./data/traces"),
+        enabled=s.trace_enabled,
+        verbose=s.trace_verbose,
+        store_dir=s.trace_store_dir,
     )

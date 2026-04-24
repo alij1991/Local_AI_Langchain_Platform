@@ -458,32 +458,30 @@ INSTRUCT_MODELS = {
 
 
 def _get_hf_token() -> str | None:
-    """Get HuggingFace token from env, .env file, or HF CLI cache."""
-    import os
+    """Get HuggingFace token from AppSettings or the HF CLI cache.
 
-    # 1. Check environment variables
-    token = os.getenv("HF_TOKEN") or os.getenv("HUGGING_FACE_HUB_TOKEN") or os.getenv("HUGGINGFACE_TOKEN")
+    [IMPROVE-69] Pre-migration this function had three tiers: shell
+    env → direct ``.env`` parse → ``huggingface-cli`` cache. Tiers 1
+    and 2 are now collapsed into ``AppSettings.hf_token`` — that
+    field uses ``AliasChoices(HF_TOKEN, HUGGING_FACE_HUB_TOKEN,
+    HUGGINGFACE_TOKEN)`` and ``.env`` is auto-loaded with the same
+    "file wins over shell" priority the old hand-rolled parser
+    advertised, so the observable behavior for the env/.env path is
+    unchanged.
+
+    The CLI cache fallback is deliberately kept. Users who ran
+    ``huggingface-cli login`` but never populated ``.env`` (common on
+    personal machines) would break on FLUX.1-dev access without it,
+    and there's no observable warning — the gated-model request just
+    returns 401. Keeping the tier preserves the working setup.
+    """
+    # Tier 1: AppSettings (shell env or .env — AliasChoices covers
+    # HF_TOKEN / HUGGING_FACE_HUB_TOKEN / HUGGINGFACE_TOKEN).
+    token = get_settings().hf_token.strip()
     if token:
-        return token.strip()
+        return token
 
-    # 2. Try loading from .env file directly (dotenv may not be installed)
-    for env_path in (".env", "../.env"):
-        try:
-            p = Path(env_path)
-            if p.exists():
-                for line in p.read_text().splitlines():
-                    line = line.strip()
-                    if line.startswith("#") or "=" not in line:
-                        continue
-                    key, _, val = line.partition("=")
-                    key = key.strip()
-                    val = val.strip().strip('"').strip("'")
-                    if key in ("HF_TOKEN", "HUGGING_FACE_HUB_TOKEN", "HUGGINGFACE_TOKEN") and val:
-                        return val
-        except Exception:
-            pass
-
-    # 3. Try the HF CLI cached token (from `huggingface-cli login`)
+    # Tier 2: huggingface-cli login cache (~/.cache/huggingface/token).
     try:
         from huggingface_hub import HfFolder
         return HfFolder.get_token()

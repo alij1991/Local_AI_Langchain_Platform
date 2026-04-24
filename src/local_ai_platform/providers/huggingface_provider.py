@@ -7,6 +7,7 @@ import time
 from pathlib import Path
 from typing import Any, Generator
 
+from ..config import get_settings
 from .base import (
     BaseProvider,
     ChatMessage,
@@ -712,11 +713,13 @@ class HuggingFaceProvider(BaseProvider):
 
     @staticmethod
     def _hf_root() -> Path:
-        return Path(os.getenv("HF_HOME") or (Path.home() / ".cache" / "huggingface"))
+        # [IMPROVE-69] Read HF_HOME via AppSettings for .env parity.
+        return Path(get_settings().hf_home or (Path.home() / ".cache" / "huggingface"))
 
     @staticmethod
     def _hf_hub_cache() -> Path:
-        return Path(os.getenv("HF_HUB_CACHE") or (HuggingFaceProvider._hf_root() / "hub"))
+        # [IMPROVE-69] Same for HF_HUB_CACHE.
+        return Path(get_settings().hf_hub_cache or (HuggingFaceProvider._hf_root() / "hub"))
 
     def _scan_cache_repo(self, model_id: str) -> dict[str, Any]:
         out: dict[str, Any] = {"installed": False, "location": None, "size_bytes": None, "resolved_snapshot_path": None}

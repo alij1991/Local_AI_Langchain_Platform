@@ -1,9 +1,9 @@
 from __future__ import annotations
 
-import os
 from pathlib import Path
 from typing import Any, Generator
 
+from ..config import get_settings
 from .base import (
     BaseProvider,
     ChatMessage,
@@ -30,8 +30,14 @@ class LlamaCppProvider(BaseProvider):
 
     @staticmethod
     def _hf_cache_dir() -> Path:
-        """Return the HuggingFace cache hub directory."""
-        return Path(os.getenv("HF_HOME") or (Path.home() / ".cache" / "huggingface")) / "hub"
+        """Return the HuggingFace cache hub directory.
+
+        [IMPROVE-69] ``HF_HOME`` via ``AppSettings.hf_home`` — empty
+        string is falsy so the ``~/.cache/huggingface`` fallback
+        triggers identically to the old ``os.getenv("HF_HOME") or ...``
+        expression.
+        """
+        return Path(get_settings().hf_home or (Path.home() / ".cache" / "huggingface")) / "hub"
 
     def _get_model(self, model_path: str) -> Any:
         if model_path in self._model_cache:
