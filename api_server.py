@@ -160,6 +160,15 @@ def get_image_service(request: Request) -> ImageGenerationService:
     return svc
 
 
+def get_image_service_or_none(request: Request) -> ImageGenerationService | None:
+    """Optional variant of ``get_image_service`` for endpoints that
+    have a graceful fallback (e.g. return ``{"items": []}``) instead
+    of a 503 when the service isn't ready. Preserves pre-[IMPROVE-5]
+    behavior for list/query endpoints the Flutter UI polls on boot —
+    a 503 there would flash errors in the UI every cold start."""
+    return getattr(request.app.state, "image_service", None)
+
+
 def get_ollama_pulls_state(request: Request) -> dict[str, dict[str, Any]]:
     """In-flight Ollama pull state. Mutating the returned dict is safe
     under Starlette's single-process model (same invariant the old
@@ -5496,7 +5505,10 @@ async def serve_step_preview(session_id: str, image_id: str, filename: str):
 
 
 @app.get("/images/models")
-async def get_image_models(refresh: bool = False):
+async def get_image_models(
+    refresh: bool = False,
+    image_service: ImageGenerationService | None = Depends(get_image_service_or_none),
+):
     """Return available image generation models with hardware fit info."""
     if not image_service:
         return {"items": []}
@@ -5523,7 +5535,9 @@ async def get_image_models(refresh: bool = False):
 
 
 @app.post("/images/models/refresh")
-async def refresh_image_models():
+async def refresh_image_models(
+    image_service: ImageGenerationService | None = Depends(get_image_service_or_none),
+):
     if not image_service:
         return {"status": "ok", "items": []}
     try:
@@ -5535,7 +5549,11 @@ async def refresh_image_models():
 
 
 @app.get("/images/runtime")
-async def get_image_runtime(model_id: str | None = None):
+async def get_image_runtime(
+    model_id: str | None = None,
+    image_service: ImageGenerationService | None = Depends(get_image_service_or_none),
+    config: AppConfig = Depends(get_app_config),
+):
     """Return image generation runtime info."""
     if not image_service:
         cuda = False
@@ -5553,7 +5571,10 @@ async def get_image_runtime(model_id: str | None = None):
 
 
 @app.post("/images/validate-model")
-async def validate_image_model(body: dict[str, Any]):
+async def validate_image_model(
+    body: dict[str, Any],
+    image_service: ImageGenerationService | None = Depends(get_image_service_or_none),
+):
     if not image_service:
         return {"loadable": False, "reason": "Image service not initialized"}
     model_id = body.get("model_id", "")
@@ -5563,7 +5584,10 @@ async def validate_image_model(body: dict[str, Any]):
 
 
 @app.get("/images/recommendations")
-async def get_image_recommendations(model_id: str | None = None):
+async def get_image_recommendations(
+    model_id: str | None = None,
+    image_service: ImageGenerationService | None = Depends(get_image_service_or_none),
+):
     if not image_service or not model_id:
         return {"recommended_width": 512, "recommended_height": 512, "recommended_steps": 20}
     try:
@@ -5573,7 +5597,9 @@ async def get_image_recommendations(model_id: str | None = None):
 
 
 @app.get("/images/generate/progress")
-async def get_generation_progress():
+async def get_generation_progress(
+    image_service: ImageGenerationService | None = Depends(get_image_service_or_none),
+):
     """Poll current image generation progress (stage, step, elapsed time)."""
     if not image_service:
         return {"active": False}
@@ -5581,7 +5607,10 @@ async def get_generation_progress():
 
 
 @app.get("/images/model-hints")
-async def get_model_hints(model_id: str):
+async def get_model_hints(
+    model_id: str,
+    image_service: ImageGenerationService | None = Depends(get_image_service_or_none),
+):
     """Return recommended parameters for a specific model.
 
     The Flutter client uses these to pre-fill the UI with optimal settings
@@ -5603,7 +5632,9 @@ async def get_model_hints(model_id: str):
 
 
 @app.get("/images/loras")
-async def list_image_loras():
+async def list_image_loras(
+    image_service: ImageGenerationService | None = Depends(get_image_service_or_none),
+):
     """Return available LoRA files (local + HF cache)."""
     if not image_service:
         return {"items": []}
@@ -5615,7 +5646,10 @@ async def list_image_loras():
 
 
 @app.post("/images/loras/download")
-async def download_lora(body: dict[str, Any]):
+async def download_lora(
+    body: dict[str, Any],
+    config: AppConfig = Depends(get_app_config),
+):
     """Download a LoRA from HuggingFace Hub to data/loras/."""
     repo_id = (body.get("repo_id") or "").strip()
     filename = (body.get("filename") or "").strip()
@@ -5709,7 +5743,10 @@ def _extract_json_from_llm(text: str) -> dict | None:
 
 
 @app.post("/images/enhance-prompt")
-async def enhance_image_prompt(body: dict[str, Any]):
+async def enhance_image_prompt(
+    body: dict[str, Any],
+    router: ProviderRouter = Depends(get_router),
+):
     """Use Ollama or HuggingFace LLM to enhance a simple description into a detailed SD prompt + negative prompt."""
     user_prompt = (body.get("prompt") or "").strip()
     if not user_prompt:
@@ -5812,7 +5849,7 @@ async def enhance_image_prompt(body: dict[str, Any]):
     # Goes through router.get_provider("ollama"), so OLLAMA_BASE_URL is
     # honored and the [IMPROVE-12] availability cache is shared.
     if not ollama_model:
-        ollama_model = _pick_small_ollama_model() or ""
+        ollama_model = _pick_small_ollama_model(router) or ""
     if not ollama_model:
         raise HTTPException(503, "No Ollama model available. Install one with: ollama pull gemma3:1b")
 
@@ -5862,7 +5899,7 @@ Output ONLY this JSON format, nothing else:
         "prompt_weighting": use_prompt_weighting,
     }) as ev:
         content = await _ollama_generate_via_router(
-            ollama_model, generate_prompt,
+            router, ollama_model, generate_prompt,
             temperature=0.7, max_tokens=256, timeout_sec=timeout_sec,
         )
         # Strip thinking tags and /no_think echoes from all model responses
@@ -6010,7 +6047,9 @@ Output ONLY this JSON format, nothing else:
 
 
 @app.post("/images/generate/cancel")
-async def cancel_image_generation():
+async def cancel_image_generation(
+    image_service: ImageGenerationService | None = Depends(get_image_service_or_none),
+):
     """Cancel the current image generation by killing the worker process."""
     if not image_service:
         return {"cancelled": False, "reason": "Image service not initialized"}
@@ -6019,12 +6058,12 @@ async def cancel_image_generation():
 
 
 @app.post("/images/generate")
-def generate_image(body: dict[str, Any]):
+def generate_image(
+    body: dict[str, Any],
+    image_service: ImageGenerationService = Depends(get_image_service),
+):
     """Generate an image. Runs in a threadpool worker (sync def) so the event loop
     stays free for progress polling, cancel requests, and other endpoints."""
-    if not image_service:
-        raise HTTPException(503, "Image service not initialized")
-
     model_id = body.get("model_id", "")
     prompt = body.get("prompt", "")
     if not model_id or not prompt:
@@ -6145,11 +6184,11 @@ def generate_image(body: dict[str, Any]):
 
 
 @app.post("/images/edit")
-def edit_image(body: dict[str, Any]):
+def edit_image(
+    body: dict[str, Any],
+    image_service: ImageGenerationService = Depends(get_image_service),
+):
     """Edit an image. Runs in threadpool (sync def) to avoid blocking the event loop."""
-    if not image_service:
-        raise HTTPException(503, "Image service not initialized")
-
     model_id = body.get("model_id", "")
     # Accept both "prompt" and "instruction" (Flutter sends "instruction")
     prompt = body.get("prompt") or body.get("instruction", "")
@@ -6236,11 +6275,11 @@ def edit_image(body: dict[str, Any]):
 
 
 @app.post("/images/upscale")
-def upscale_image_endpoint(body: dict[str, Any]):
+def upscale_image_endpoint(
+    body: dict[str, Any],
+    image_service: ImageGenerationService = Depends(get_image_service),
+):
     """Upscale an image using ML super-resolution (RealESRGAN) or LANCZOS fallback."""
-    if not image_service:
-        raise HTTPException(503, "Image service not initialized")
-
     image_id = body.get("image_id", "")
     session_id = body.get("session_id", "")
     prompt = body.get("prompt", "high quality, detailed")
@@ -6288,10 +6327,11 @@ def upscale_image_endpoint(body: dict[str, Any]):
 
 
 @app.post("/images/preprocess")
-async def preprocess_control_image_endpoint(body: dict[str, Any]):
+async def preprocess_control_image_endpoint(
+    body: dict[str, Any],
+    image_service: ImageGenerationService = Depends(get_image_service),
+):
     """Preview a ControlNet preprocessor result."""
-    if not image_service:
-        raise HTTPException(503, "Image service not initialized")
     cn_type = body.get("controlnet_type", "")
     image_path = body.get("image_path", "")
     if not cn_type or not image_path:
