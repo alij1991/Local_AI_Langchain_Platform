@@ -100,172 +100,34 @@ config = load_config()
 
 # ── DI helpers (Depends targets) ──────────────────────────────────
 #
-# These are thin accessors over ``request.app.state.*``. They raise
-# ``HTTPException(503)`` when the singleton isn't ready yet so
-# endpoint bodies don't need the ``if not orchestrator: raise 503``
-# boilerplate that the module-globals pattern required.
+# [IMPROVE-1] The actual definitions live in
+# ``local_ai_platform.api.deps`` so router modules can import them
+# without circular-import risk. They're re-exported here under their
+# original names because the test suite (e.g. test_app_state_lifespan)
+# reaches for ``api_server.get_orchestrator`` directly, and the
+# pre-[IMPROVE-1] external API is preserved.
 #
 # ``get_settings`` is the AppSettings singleton getter from
-# [IMPROVE-6] — it's already Depends-compatible (no request arg,
-# cached) so FastAPI treats it as a regular Depends target.
-
-
-def get_app_config(request: Request) -> AppConfig:
-    """Legacy AppConfig dataclass (bridged from AppSettings in load_config)."""
-    cfg = getattr(request.app.state, "config", None)
-    if cfg is None:
-        raise HTTPException(503, "App config not initialized")
-    return cfg
-
-
-def get_router(request: Request) -> ProviderRouter:
-    router_ = getattr(request.app.state, "router", None)
-    if router_ is None:
-        raise HTTPException(503, "Provider router not initialized")
-    return router_
-
-
-def get_orchestrator(request: Request) -> AgentOrchestrator:
-    orch = getattr(request.app.state, "orchestrator", None)
-    if orch is None:
-        raise HTTPException(503, "Agent orchestrator not initialized")
-    return orch
-
-
-def get_ollama_ctrl(request: Request) -> OllamaController:
-    ctrl = getattr(request.app.state, "ollama_ctrl", None)
-    if ctrl is None:
-        raise HTTPException(503, "Ollama controller not initialized")
-    return ctrl
-
-
-def get_hf_ctrl(request: Request) -> HuggingFaceController:
-    ctrl = getattr(request.app.state, "hf_ctrl", None)
-    if ctrl is None:
-        raise HTTPException(503, "HuggingFace controller not initialized")
-    return ctrl
-
-
-def get_trace_store(request: Request) -> TraceStore:
-    store = getattr(request.app.state, "trace_store", None)
-    if store is None:
-        raise HTTPException(503, "Trace store not initialized")
-    return store
-
-
-def get_image_service(request: Request) -> ImageGenerationService:
-    svc = getattr(request.app.state, "image_service", None)
-    if svc is None:
-        raise HTTPException(503, "Image generation service not available")
-    return svc
-
-
-def get_orchestrator_or_none(request: Request) -> AgentOrchestrator | None:
-    """Optional variant of ``get_orchestrator``. Used by endpoints that
-    return a soft default (e.g. ``{"supports_streaming": False}``)
-    rather than 503 when the orchestrator isn't ready — same rationale
-    as ``get_image_service_or_none``."""
-    return getattr(request.app.state, "orchestrator", None)
-
-
-def get_router_or_none(request: Request) -> ProviderRouter | None:
-    """Optional variant of ``get_router`` for endpoints that degrade
-    gracefully when the provider router is missing."""
-    return getattr(request.app.state, "router", None)
-
-
-def get_ollama_ctrl_or_none(request: Request) -> OllamaController | None:
-    """Optional variant of ``get_ollama_ctrl`` for endpoints like
-    ``/models/ollama/library`` that render a curated catalog even when
-    the Ollama controller isn't ready (e.g. daemon is down). Returning
-    503 there would blank the Flutter model browser."""
-    return getattr(request.app.state, "ollama_ctrl", None)
-
-
-def get_hf_ctrl_or_none(request: Request) -> HuggingFaceController | None:
-    """Optional variant of ``get_hf_ctrl`` for endpoints like
-    ``/model-catalog/{provider}/.../details`` that fall back to a
-    minimal response when the HF controller is missing."""
-    return getattr(request.app.state, "hf_ctrl", None)
-
-
-def get_trace_store_or_none(request: Request) -> TraceStore | None:
-    """Optional variant of ``get_trace_store``. /runs, /runs/compare,
-    and /traces all degrade to empty-list responses when tracing is
-    disabled or the store isn't ready — otherwise the Runs tab in
-    Flutter would 503 on any clean install that hasn't opted in."""
-    return getattr(request.app.state, "trace_store", None)
-
-
-def get_image_service_or_none(request: Request) -> ImageGenerationService | None:
-    """Optional variant of ``get_image_service`` for endpoints that
-    have a graceful fallback (e.g. return ``{"items": []}``) instead
-    of a 503 when the service isn't ready. Preserves pre-[IMPROVE-5]
-    behavior for list/query endpoints the Flutter UI polls on boot —
-    a 503 there would flash errors in the UI every cold start."""
-    return getattr(request.app.state, "image_service", None)
-
-
-def get_editor_service(request: Request):
-    """Lazy-init the ImageEditorService on ``app.state`` and return it.
-
-    [IMPROVE-5] Replaces the module-global ``_editor_service`` +
-    ``_get_editor()`` factory. First call on a cold process builds
-    the service and caches it on ``app.state._editor_service``;
-    subsequent calls reuse it. The service is heavy-ish (imports
-    OpenCV / PIL plugins), so the factory pattern is preserved —
-    we just move the cache slot off the module global.
-    """
-    svc = getattr(request.app.state, "_editor_service", None)
-    if svc is None:
-        from local_ai_platform.images.editor import ImageEditorService
-        svc = ImageEditorService()
-        request.app.state._editor_service = svc
-    return svc
-
-
-def get_partner_engine(
-    request: Request,
-    router: ProviderRouter = Depends(get_router),
-    config: AppConfig = Depends(get_app_config),
-):
-    """Lazy-init the PartnerEngine on ``app.state`` and return it.
-
-    [IMPROVE-5] Replaces the module-global ``_partner_engine`` +
-    ``_get_partner()`` factory. PartnerEngine owns voice models,
-    mem0 retry state, and a few model-specific kwargs — same
-    cache-on-first-use pattern as ``get_editor_service``.
-
-    Takes ``router`` and ``config`` as nested Depends so the
-    constructor args don't have to reach for module globals. The
-    resolved dependencies come from ``app.state.router`` /
-    ``app.state.config`` through the standard Depends chain.
-    """
-    engine = getattr(request.app.state, "_partner_engine", None)
-    if engine is None:
-        from local_ai_platform.partner.engine import PartnerEngine
-        engine = PartnerEngine(router, config)
-        request.app.state._partner_engine = engine
-    return engine
-
-
-def get_ollama_pulls_state(request: Request) -> dict[str, dict[str, Any]]:
-    """In-flight Ollama pull state. Mutating the returned dict is safe
-    under Starlette's single-process model (same invariant the old
-    module-global ``_ollama_pulls`` relied on).
-
-    Named ``*_state`` to avoid shadowing the ``/models/ollama/pulls``
-    route handler — endpoint callables need to own their plain names
-    so ``app.get(...)`` decorator discovery stays clean.
-    """
-    return request.app.state._ollama_pulls
-
-
-def get_hf_downloads_state(request: Request) -> dict[str, dict[str, Any]]:
-    """In-flight HF download state. Same mutation invariant + naming
-    rationale as ``get_ollama_pulls_state`` (the
-    ``/models/hf/downloads`` handler is called ``get_hf_downloads``)."""
-    return request.app.state._hf_downloads
+# [IMPROVE-6] — already Depends-compatible (no request arg, cached).
+from local_ai_platform.api.deps import (  # noqa: E402  (must come after config)
+    get_app_config,
+    get_router,
+    get_orchestrator,
+    get_ollama_ctrl,
+    get_hf_ctrl,
+    get_trace_store,
+    get_image_service,
+    get_orchestrator_or_none,
+    get_router_or_none,
+    get_ollama_ctrl_or_none,
+    get_hf_ctrl_or_none,
+    get_trace_store_or_none,
+    get_image_service_or_none,
+    get_editor_service,
+    get_partner_engine,
+    get_ollama_pulls_state,
+    get_hf_downloads_state,
+)
 
 
 # ── TTL cache for expensive operations ────────────────────────────
@@ -2174,222 +2036,16 @@ def _classify_hf_model(model_id: str, pipeline_tag: str, tags: list[str]) -> str
 
 
 # ── Hardware-aware model suitability assessment ──────────────────
-# Used by /models/hf/discover to annotate each model with fit info.
+# [IMPROVE-1] The implementations now live in
+# ``local_ai_platform.api.helpers`` because /images/models also calls
+# ``_assess_hardware_fit`` (cross-router). Re-exported under their
+# original names so existing imports inside api_server keep working.
 
-def _get_gpu_vram_gb() -> float:
-    """Return primary GPU VRAM in GB (cached).  0.0 if no GPU detected."""
-    try:
-        from local_ai_platform.system_info import get_cached_hardware
-        hw = get_cached_hardware()
-        return hw.best_gpu_vram_mb / 1024.0 if hw.best_gpu_vram_mb else 0.0
-    except Exception:
-        return 0.0
-
-
-# Measured peak VRAM for known diffusion architectures.
-# These are real-world numbers WITH the optimizations the app auto-applies
-# on <=8 GB cards (model CPU offload, TinyVAE, fp16, attention slicing).
-# With CPU offload only the largest single component (UNet/transformer)
-# sits on GPU at a time, so peak VRAM ≈ UNet size + ~0.5-1 GB overhead.
-# Longer / more-specific patterns MUST come before shorter ones so
-# "stable-diffusion-3-medium" matches before "stable-diffusion-3" etc.
-_DIFFUSION_PEAK_VRAM_GB: list[tuple[str, float]] = [
-    # SD 1.5 / 2.x  (UNet ~1.7 GB fp16 + VAE overhead)
-    ("stable-diffusion-v1-5",       3.5),
-    ("stable-diffusion-v1-4",       3.5),
-    ("stable-diffusion-v1",         3.5),
-    ("stable-diffusion-2-1",        3.8),
-    ("stable-diffusion-2",          3.8),
-    ("sd-turbo",                    3.5),
-    # SDXL (UNet ~5 GB fp16 with CPU offload → peak ~5.5 GB)
-    ("sdxl-turbo",                  5.5),
-    ("sdxl-lightning",              5.5),
-    ("sdxl-base",                   5.5),
-    ("stable-diffusion-xl",         5.5),
-    # SD 3 / 3.5
-    ("stable-diffusion-3.5",        8.0),
-    ("stable-diffusion-3-medium",   7.5),
-    ("stable-diffusion-3",          7.5),
-    # Flux — transformer is ~24 GB fp16, needs GGUF quantization
-    ("flux.1-kontext",              22.0),
-    ("flux.1-schnell",              22.0),
-    ("flux.1-dev",                  22.0),
-    ("flux-schnell",                22.0),
-    ("flux-dev",                    22.0),
-    # Z-Image (turbo before base — turbo is smaller)
-    ("z-image-turbo",               5.0),
-    ("z-image",                     12.0),
-    # PixArt
-    ("pixart-sigma",                4.0),
-    ("pixart-alpha",                4.0),
-    # Kandinsky
-    ("kandinsky",                   5.0),
-    # HunyuanDiT
-    ("hunyuandit",                  7.0),
-    ("hunyuan-dit",                 7.0),
-    # AnimateDiff
-    ("animatediff",                 4.0),
-    # Kolors
-    ("kolors",                      12.0),
-]
-
-
-def _estimate_vram_required_gb(
-    size_bytes: int | None,
-    param_count: int | None,
-    pipeline_tag: str,
-    model_id: str = "",
-    *,
-    is_single_file: bool = False,
-    quantization: dict[str, Any] | None = None,
-) -> float:
-    """Estimate peak runtime VRAM needed in GB.
-
-    For diffusion models, uses measured peak VRAM for known architectures.
-    The app auto-applies CPU offloading on <=8 GB cards, so peak VRAM
-    equals the largest single component (UNet/transformer) + overhead,
-    NOT the entire pipeline loaded at once.
-
-    For unknown diffusion repos, uses 0.6x download size as a heuristic
-    (the UNet is typically 50-60% of total download, plus ~10% overhead
-    for activations during the forward pass).
-
-    For single-file models (e.g. individual GGUF variants), the file IS
-    the model weight, so peak VRAM ≈ file_size * 1.2 (dequant buffers +
-    activations overhead).
-
-    For LLMs/transformers, fp16 inference needs ~2 bytes/param + KV cache.
-
-    If *quantization* is provided (from ``_detect_quantization``), the
-    FP16 baseline VRAM is scaled by ``vram_factor`` (e.g. 0.30 for INT4).
-    """
-    is_diffusion = pipeline_tag in ("text-to-image", "image-to-image", "text-to-video", "image-to-video")
-    qfactor = quantization["vram_factor"] if quantization else 1.0
-
-    # 1. Check known architecture lookup (most accurate)
-    if is_diffusion and model_id and not is_single_file:
-        model_lower = model_id.lower()
-        for pattern, peak_gb in _DIFFUSION_PEAK_VRAM_GB:
-            if pattern in model_lower:
-                return round(peak_gb * qfactor, 1)
-
-    if size_bytes and size_bytes > 0:
-        if is_single_file:
-            # Single GGUF file: the file IS the model weight.
-            # Peak VRAM ≈ file size + ~20% for dequantization buffers,
-            # KV cache, and activation memory during forward pass.
-            return round(size_bytes * 1.2 / (1024 ** 3), 1)
-        if is_diffusion:
-            # Multi-file diffusion repo with CPU offload: only the
-            # UNet/transformer needs GPU at a time.
-            # UNet is typically 50-60% of the total download size.
-            # Add ~15% for VAE decode + activations overhead.
-            return round(size_bytes * 0.6 / (1024 ** 3), 1)
-        # Text/other models: on-disk safetensors ≈ fp16 weights; runtime adds ~30% for KV/activations
-        return round(size_bytes * 1.3 / (1024 ** 3), 1)
-    if param_count and param_count > 0:
-        if is_diffusion:
-            # Diffusion param counts include ALL components; UNet is ~60%
-            return round(param_count * 2 * 0.65 / (1024 ** 3), 1)
-        # fp16: 2 bytes/param + overhead
-        return round(param_count * 2.2 / (1024 ** 3), 1)
-    return 0.0
-
-
-def _assess_hardware_fit(
-    size_bytes: int | None,
-    param_count: int | None,
-    pipeline_tag: str,
-    model_id: str,
-    *,
-    is_single_file: bool = False,
-    quantization: dict[str, Any] | None = None,
-) -> dict[str, Any]:
-    """Evaluate whether a model fits on the user's GPU.
-
-    Returns dict with:
-      fit:         "fits" | "tight" | "wont_fit" | "unknown"
-      vram_required_gb:  estimated runtime VRAM (float)
-      gpu_vram_gb:       detected GPU VRAM (float)
-      badge:       short UI label ("OK for 8 GB", "Needs 24 GB", etc.)
-      note:        one-line human explanation
-      suggestion:  optional recommendation (e.g. "Use Q4_K_M GGUF variant")
-    """
-    gpu_vram = _get_gpu_vram_gb()
-    vram_req = _estimate_vram_required_gb(
-        size_bytes, param_count, pipeline_tag, model_id,
-        is_single_file=is_single_file,
-        quantization=quantization,
-    )
-    gpu_label = f"{gpu_vram:.0f} GB" if gpu_vram > 0 else "no GPU"
-    is_diffusion = pipeline_tag in ("text-to-image", "image-to-image", "text-to-video", "image-to-video")
-
-    result: dict[str, Any] = {
-        "gpu_vram_gb": round(gpu_vram, 1),
-        "vram_required_gb": vram_req,
-        "fit": "unknown",
-        "badge": "",
-        "note": "",
-        "suggestion": None,
-    }
-
-    if gpu_vram <= 0 or vram_req <= 0:
-        result["fit"] = "unknown"
-        result["badge"] = "Unknown"
-        result["note"] = "Could not estimate VRAM requirements."
-        return result
-
-    headroom = gpu_vram - vram_req
-    ratio = vram_req / gpu_vram
-
-    if ratio <= 0.75:
-        # Comfortable fit
-        result["fit"] = "fits"
-        result["badge"] = f"Fits {gpu_label}"
-        result["note"] = f"Needs ~{vram_req:.1f} GB VRAM. Your {gpu_label} GPU has plenty of headroom."
-    elif ratio <= 1.0:
-        # Tight but workable with optimizations
-        result["fit"] = "tight"
-        result["badge"] = f"Tight on {gpu_label}"
-        result["note"] = f"Needs ~{vram_req:.1f} GB VRAM. Will fit on your {gpu_label} GPU with memory optimizations (CPU offload, TinyVAE)."
-        if is_diffusion:
-            result["suggestion"] = "Enable low-memory mode. CPU offloading will be used automatically."
-    else:
-        # Won't fit
-        result["fit"] = "wont_fit"
-        result["badge"] = f"Needs ~{vram_req:.0f} GB"
-        result["note"] = f"Needs ~{vram_req:.1f} GB VRAM but your GPU only has {gpu_label}. This model will not fit."
-
-        # Suggest GGUF alternatives for known large diffusion models
-        model_lower = model_id.lower()
-        if is_diffusion:
-            if any(k in model_lower for k in ("flux", "flux.1", "flux1")):
-                result["suggestion"] = (
-                    "Look for a GGUF-quantized variant (e.g., Q4_K_M ~7 GB, Q3_K_S ~5 GB) "
-                    "which can run on 8 GB cards with CPU offloading."
-                )
-            elif "sdxl" in model_lower or "stable-diffusion-xl" in model_lower:
-                result["suggestion"] = (
-                    "SDXL may still work with aggressive optimizations: NF4 quantization, "
-                    "TinyVAE, and sequential CPU offloading. Set quality tier to 'performance'."
-                )
-            elif vram_req > gpu_vram * 2:
-                result["suggestion"] = (
-                    "Consider a smaller model or a quantized variant. "
-                    f"This model needs {vram_req:.0f} GB — far more than your {gpu_label} GPU."
-                )
-        else:
-            # Text/LLM models: suggest quantization
-            if param_count:
-                params_b = param_count / 1e9
-                if params_b >= 70:
-                    result["suggestion"] = f"A {params_b:.0f}B model is too large. Consider a smaller model (7B-14B) with Q4_K_M quantization."
-                elif params_b >= 14:
-                    result["suggestion"] = f"Try a Q4_K_M or Q3_K_S quantized variant to fit in {gpu_label}."
-                elif params_b >= 7:
-                    result["suggestion"] = f"Try a Q4_K_M quantized variant, or use Ollama which handles quantization automatically."
-
-    return result
+from local_ai_platform.api.helpers import (  # noqa: E402
+    _get_gpu_vram_gb,
+    _estimate_vram_required_gb,
+    _assess_hardware_fit,
+)
 
 
 @app.get("/models/hf/discover")
