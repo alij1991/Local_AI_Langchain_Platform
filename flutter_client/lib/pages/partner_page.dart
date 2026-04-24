@@ -53,6 +53,9 @@ class _PartnerPageState extends State<PartnerPage> {
   bool _playingAudio = false;
   bool _isRecording = false;
   bool _chatterboxAvailable = false;
+  // 'turbo' | 'legacy' | null. Null means the server is up but /info didn't
+  // identify the build, or Chatterbox isn't running at all.
+  String? _chatterboxVariant;
   String _ttsMode = 'kokoro'; // kokoro | chatterbox
   String _voiceGender = 'female'; // female | male
   final AudioPlayer _audioPlayer = AudioPlayer();
@@ -99,10 +102,12 @@ class _PartnerPageState extends State<PartnerPage> {
     try {
       final res = await widget.api.get('/partner/voice/status') as Map<String, dynamic>;
       if (!mounted) return;
+      final variant = res['tts_emotional_variant']?.toString();
       setState(() {
         _voiceAvailable = res['asr_available'] == true;
         _ttsAvailable = res['tts_available'] == true || res['tts_emotional_available'] == true;
         _chatterboxAvailable = res['tts_emotional_available'] == true;
+        _chatterboxVariant = (variant == 'turbo' || variant == 'legacy') ? variant : null;
         _ttsMode = res['tts_mode']?.toString() ?? 'kokoro';
         _voiceGender = res['voice_gender']?.toString() ?? 'female';
       });
@@ -114,10 +119,14 @@ class _PartnerPageState extends State<PartnerPage> {
     try {
       final res = await widget.api.post('/partner/voice/init', {}) as Map<String, dynamic>;
       if (!mounted) return;
+      // init_voice returns 'unknown' when /info probe fails; normalize to null
+      // so the picker shows no extra badge in that case.
+      final variant = res['tts_emotional_variant']?.toString();
       setState(() {
         _voiceAvailable = res['asr'] == true;
         _ttsAvailable = res['tts'] == true;
         _chatterboxAvailable = res['tts_emotional'] == true;
+        _chatterboxVariant = (variant == 'turbo' || variant == 'legacy') ? variant : null;
       });
 
       // Keep Kokoro as default TTS — it's much faster (~200ms vs 2-6s per sentence)
@@ -1151,6 +1160,56 @@ class _PartnerPageState extends State<PartnerPage> {
                         _ttsMode == 'chatterbox' ? 'Emotional' : 'Fast',
                         style: TextStyle(fontSize: 10, fontWeight: FontWeight.w600,
                             color: _ttsMode == 'chatterbox' ? colors.onPrimaryContainer : colors.onSurfaceVariant),
+                      ),
+                    ),
+                  ),
+                ],
+                // [IMPROVE-64-followup] Surface the Chatterbox variant so users see
+                // the latency tradeoff before switching modes. Null variant means
+                // the server is up but the /info probe couldn't identify the build.
+                if (_chatterboxAvailable && _chatterboxVariant == 'turbo') ...[
+                  const SizedBox(width: 6),
+                  Tooltip(
+                    message: 'Chatterbox-Turbo detected — sub-200ms latency, ~6x realtime on consumer GPUs',
+                    child: Container(
+                      padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
+                      decoration: BoxDecoration(
+                        color: colors.tertiaryContainer,
+                        borderRadius: BorderRadius.circular(10),
+                      ),
+                      child: Row(mainAxisSize: MainAxisSize.min, children: [
+                        Icon(Icons.bolt, size: 11, color: colors.onTertiaryContainer),
+                        const SizedBox(width: 2),
+                        Text('sub-200ms',
+                            style: TextStyle(fontSize: 10, fontWeight: FontWeight.w600, color: colors.onTertiaryContainer)),
+                      ]),
+                    ),
+                  ),
+                ],
+                if (_chatterboxAvailable && _chatterboxVariant == 'legacy') ...[
+                  const SizedBox(width: 6),
+                  Tooltip(
+                    message: 'Legacy Chatterbox detected. Upgrade to Chatterbox-Turbo for sub-200ms latency.',
+                    child: InkWell(
+                      borderRadius: BorderRadius.circular(10),
+                      onTap: () async {
+                        final uri = Uri.parse('https://github.com/resemble-ai/chatterbox');
+                        try {
+                          await launchUrl(uri, mode: LaunchMode.externalApplication);
+                        } catch (_) {}
+                      },
+                      child: Container(
+                        padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
+                        decoration: BoxDecoration(
+                          color: colors.secondaryContainer,
+                          borderRadius: BorderRadius.circular(10),
+                        ),
+                        child: Row(mainAxisSize: MainAxisSize.min, children: [
+                          Icon(Icons.upgrade, size: 11, color: colors.onSecondaryContainer),
+                          const SizedBox(width: 2),
+                          Text('Upgrade',
+                              style: TextStyle(fontSize: 10, fontWeight: FontWeight.w600, color: colors.onSecondaryContainer)),
+                        ]),
                       ),
                     ),
                   ),
