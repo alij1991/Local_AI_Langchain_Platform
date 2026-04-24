@@ -309,12 +309,29 @@ class _ChatPageState extends State<ChatPage> {
   Future<void> _createConversation() async {
     final body = await widget.api.post('/conversations', {'title': 'New chat'}) as Map<String, dynamic>;
     _conversationId = body['id']?.toString();
-    _threadId = null; // Reset thread for new conversation
+    // [IMPROVE-18] Server now mints a stable thread_id at create-time
+    // and returns it in the POST response. Picking it up here means
+    // the very FIRST /chat/stream turn already has the right thread_id
+    // — no more "server-minted per-turn UUID" churn.
+    _threadId = body['thread_id']?.toString();
     await _load();
   }
 
   Future<void> _selectConversation(String id) async {
-    setState(() { _conversationId = id; _threadId = null; });
+    // [IMPROVE-18] Look up the conversation's persisted thread_id in
+    // the cached _conversations list so multi-turn continuity survives
+    // reloads and conversation switches. Falls back to null if the row
+    // is pre-IMPROVE-18 (no thread_id column yet populated) — the
+    // server will lazy-mint one on the next /chat/stream and it'll
+    // come back in the 'start' event anyway.
+    String? priorThread;
+    for (final c in _conversations) {
+      if (c['id']?.toString() == id) {
+        priorThread = c['thread_id']?.toString();
+        break;
+      }
+    }
+    setState(() { _conversationId = id; _threadId = priorThread; });
     final messages = await widget.api.get('/conversations/$id/messages') as List<dynamic>;
     if (!mounted) return;
     setState(() => _messages = messages.cast<Map<String, dynamic>>().map(_fromServerMessage).toList());

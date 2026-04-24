@@ -11,17 +11,54 @@ def _now() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
-def create_conversation(title: str | None = None) -> dict:
+def create_conversation(
+    title: str | None = None,
+    thread_id: str | None = None,
+) -> dict:
+    """Create a new conversation row.
+
+    [IMPROVE-18] ``thread_id`` is minted server-side (uuid4 hex) when
+    the caller doesn't supply one, so every conversation has a stable
+    LangGraph thread identity from creation onwards. This means
+    SqliteSaver checkpoints accumulate on a predictable key across
+    turns — tool-approval interrupts survive reloads, and history
+    doesn't have to be replayed on every turn.
+
+    Passing an explicit ``thread_id`` (e.g. during import/restore)
+    preserves the caller-supplied value verbatim.
+    """
     cid = str(uuid.uuid4())
     now = _now()
+    # uuid4().hex matches what LangGraph threads use and what
+    # /chat/stream previously minted per-request (api_server.py:3512).
+    resolved_thread_id = thread_id or uuid.uuid4().hex
     conn = get_conn()
     try:
         conn.execute(
-            "INSERT INTO conversations (id, title, created_at, updated_at, last_agent, last_model) VALUES (?, ?, ?, ?, ?, ?)",
-            (cid, title, now, now, None, None),
+            "INSERT INTO conversations (id, title, created_at, updated_at, last_agent, last_model, thread_id) VALUES (?, ?, ?, ?, ?, ?, ?)",
+            (cid, title, now, now, None, None, resolved_thread_id),
         )
         conn.commit()
         return get_conversation(cid)
+    finally:
+        conn.close()
+
+
+def set_conversation_thread_id(conversation_id: str, thread_id: str) -> None:
+    """Persist a thread_id onto an existing conversation row.
+
+    [IMPROVE-18] Used by /chat/stream when a pre-IMPROVE-18 conversation
+    (created before the column existed, so thread_id IS NULL) gets its
+    first post-migration request. The endpoint mints a thread_id, then
+    calls this helper so subsequent turns can reuse it.
+    """
+    conn = get_conn()
+    try:
+        conn.execute(
+            "UPDATE conversations SET thread_id = ?, updated_at = ? WHERE id = ?",
+            (thread_id, _now(), conversation_id),
+        )
+        conn.commit()
     finally:
         conn.close()
 

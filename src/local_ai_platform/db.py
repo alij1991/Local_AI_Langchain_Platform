@@ -23,7 +23,15 @@ CREATE TABLE IF NOT EXISTS conversations (
     created_at TEXT NOT NULL,
     updated_at TEXT NOT NULL,
     last_agent TEXT,
-    last_model TEXT
+    last_model TEXT,
+    -- [IMPROVE-18] Per ch 3 section 3.20 and Q18 (answer: B — column on
+    -- conversations, one per conv, simple). Stable thread_id per
+    -- conversation means LangGraph SqliteSaver checkpoints actually get
+    -- reused across turns, and tool-approval interrupts can survive a
+    -- client reload. Minted server-side at create_conversation time
+    -- (or lazily on first /chat/stream for legacy rows where the column
+    -- was added by migration below).
+    thread_id TEXT
 );
 
 CREATE TABLE IF NOT EXISTS messages (
@@ -214,6 +222,17 @@ def init_db() -> None:
         if "perf_json" not in cols:
             conn.execute("ALTER TABLE messages ADD COLUMN perf_json TEXT")
 
+        # [IMPROVE-18] Add thread_id column to conversations on existing
+        # DBs. CREATE TABLE IF NOT EXISTS above won't alter an existing
+        # table, so legacy databases need this ALTER to pick up the new
+        # column. Rows created before the migration stay NULL until
+        # /chat/stream lazily mints and persists one.
+        conv_cols = [r[1] for r in conn.execute(
+            "PRAGMA table_info(conversations)"
+        ).fetchall()]
+        if "thread_id" not in conv_cols:
+            conn.execute("ALTER TABLE conversations ADD COLUMN thread_id TEXT")
+
         conn.commit()
     finally:
         conn.close()
@@ -280,6 +299,14 @@ class AsyncDB:
                     await conn.execute("ALTER TABLE messages ADD COLUMN run_id TEXT")
                 if "perf_json" not in cols:
                     await conn.execute("ALTER TABLE messages ADD COLUMN perf_json TEXT")
+
+                # [IMPROVE-18] Same thread_id migration as init_db() above.
+                cursor = await conn.execute("PRAGMA table_info(conversations)")
+                conv_cols = [r[1] for r in await cursor.fetchall()]
+                if "thread_id" not in conv_cols:
+                    await conn.execute(
+                        "ALTER TABLE conversations ADD COLUMN thread_id TEXT"
+                    )
 
                 await conn.commit()
         except ImportError:

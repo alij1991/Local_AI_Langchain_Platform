@@ -44,6 +44,7 @@ from local_ai_platform.repositories.conversations import (
     delete_conversation,
     add_message,
     list_messages,
+    set_conversation_thread_id,
 )
 from local_ai_platform.repositories.agents_repo import save_agent, list_agents_db, get_agent_db, delete_agent_db
 from local_ai_platform.repositories.tools_repo import (
@@ -3508,8 +3509,32 @@ async def agent_chat_stream(req: ChatRequest):
     # [IMPROVE-19] shared helper — same trim/convert semantics as /chat.
     chat_history = orchestrator.load_chat_history(conv_id)
 
+    # [IMPROVE-18] Resolve a stable thread_id per conversation so
+    # LangGraph SqliteSaver checkpoints actually get reused across
+    # turns. Priority: client-supplied > persisted on conversation row
+    # > mint-and-persist (lazy migration for pre-IMPROVE-18 rows).
+    # Resolved outside stream_gen so it's available to trace context
+    # above and persisted BEFORE the response streams — otherwise a
+    # client reconnecting mid-stream wouldn't see the same thread_id.
+    resolved_thread_id = req.thread_id
+    if not resolved_thread_id:
+        try:
+            _conv_row = get_conversation(conv_id)
+            resolved_thread_id = (_conv_row or {}).get("thread_id") or None
+        except Exception:
+            resolved_thread_id = None
+    if not resolved_thread_id:
+        resolved_thread_id = uuid.uuid4().hex
+        try:
+            set_conversation_thread_id(conv_id, resolved_thread_id)
+        except Exception as _pt_err:
+            # Don't fail the chat turn if persistence fails — the
+            # feature degrades to pre-IMPROVE-18 behavior (per-request
+            # UUID) rather than breaking the whole handler.
+            logger.debug("thread_id persist failed for %s: %s", conv_id, _pt_err)
+
     async def stream_gen():
-        thread_id = req.thread_id or uuid.uuid4().hex
+        thread_id = resolved_thread_id
         # Send start event
         yield f"event: start\ndata: {json.dumps({'conversation_id': conv_id, 'run_id': run_id, 'thread_id': thread_id})}\n\n"
 
