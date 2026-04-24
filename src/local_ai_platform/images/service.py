@@ -1069,9 +1069,17 @@ def _detect_model_hints(model_path: str | Path) -> dict[str, Any]:
           or "stable-diffusion-v1" in metadata_hits
           or "stable-diffusion-v2" in metadata_hits
           or "sd_v1" in metadata_hits or "sd_v2" in metadata_hits):
+        # Path-string SD2 detection uses a whitelist of explicit markers
+        # instead of a bare ``"2" in path_str_lower`` check — the old check
+        # misfired on any folder whose name happened to contain a digit-2
+        # (e.g. ``sd15_2024_beta`` → classified as SD2, ``my-v1.2-model``
+        # → classified as SD2, pytest's own ``pytest-of-<user>/pytest-12/``
+        # tmp parent → intermittently classified as SD2 depending on the
+        # pytest counter). Authoritative metadata still wins when present.
+        _sd2_path_markers = ("sd_v2", "sd-v2", "stable-diffusion-2", "sd2-", "-sd2")
         is_v2 = (
-            "2" in path_str_lower or "v2" in path_str_lower
-            or "stable-diffusion-v2" in metadata_hits or "sd_v2" in metadata_hits
+            "stable-diffusion-v2" in metadata_hits or "sd_v2" in metadata_hits
+            or any(marker in path_str_lower for marker in _sd2_path_markers)
         )
         if is_v2:
             hints.update({

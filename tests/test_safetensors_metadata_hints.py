@@ -225,39 +225,53 @@ def test_sdxl_turbo_via_metadata_keywords(tmp_path, captured_emits):
     assert hints["recommended_guidance_scale"] == 0.0
 
 
-def test_sd15_detected_via_sd_v1(monkeypatch, captured_emits):
-    # NOTE: the existing ``is_v2 = "2" in path_str_lower or "v2" ...``
-    # heuristic is a known false-positive trap: pytest's ``tmp_path``
-    # parent is ``pytest-of-<user>/pytest-N/`` and any counter with a
-    # "2" in it would misclassify this test as SD2 — nothing to do with
-    # IMPROVE-47. Instead of relying on tmp_path here we stub the
-    # metadata read and pass a digit-free non-existent path, which
-    # makes the assertion deterministic across pytest runs and keeps
-    # the test focused on the metadata-signal claim.
-    clean_path = Path("C:/nonexistent/sd_clean_one_base")
-    monkeypatch.setattr(
-        svc, "_read_safetensors_metadata",
-        lambda p: {"ss_base_model_version": "sd_v1"},
+def test_sd15_detected_via_sd_v1(tmp_path, captured_emits):
+    # After IMPROVE-47-followup the ``is_v2`` check uses a whitelist of
+    # explicit path markers instead of ``"2" in path_str_lower``, so the
+    # pytest ``tmp_path`` parent (which can contain an incidental digit-2
+    # from the counter) no longer flips this test's classification. That
+    # means we can exercise the real file path end-to-end again — which
+    # is what proves the fix actually works in practice, not just that
+    # the stub matches our expectations.
+    repo = tmp_path / "models--hash_sd15"
+    _write_safetensors(
+        repo / "unet" / "model.safetensors",
+        {"ss_base_model_version": "sd_v1"},
     )
-    hints = svc._detect_model_hints(clean_path)
+    hints = svc._detect_model_hints(repo)
     assert hints["model_family"] == "sd15"
     assert hints["model_variant"] == "base"
 
 
-def test_sd2_detected_via_modelspec(monkeypatch, captured_emits):
-    # Use the same stubbed-read + clean-path approach as the sd15 test
-    # above — otherwise the assertion would pass for the wrong reason
-    # (the existing "2" in path_str_lower heuristic would trigger on
-    # the folder name ``models--hash_sd2`` even without metadata,
-    # weakening the claim that this suite proves metadata-driven
-    # detection).
-    clean_path = Path("C:/nonexistent/sd_clean_later")
-    monkeypatch.setattr(
-        svc, "_read_safetensors_metadata",
-        lambda p: {"modelspec.architecture": "stable-diffusion-v2"},
+def test_sd2_detected_via_modelspec(tmp_path, captured_emits):
+    # Hash-style folder name with no "sd2"/"stable-diffusion-2" marker,
+    # so the ONLY signal that can flip is_v2=True is the safetensors
+    # ``modelspec.architecture`` — proving the metadata path carries the
+    # SD2 classification without the old bare-digit-2 shortcut.
+    repo = tmp_path / "models--hash_sdtwo"
+    _write_safetensors(
+        repo / "unet" / "model.safetensors",
+        {"modelspec.architecture": "stable-diffusion-v2"},
     )
-    hints = svc._detect_model_hints(clean_path)
+    hints = svc._detect_model_hints(repo)
     assert hints["model_family"] == "sd2"
+
+
+def test_sd15_not_misclassified_by_incidental_digit_2(tmp_path, captured_emits):
+    # Regression for IMPROVE-47-followup: a user folder that happens to
+    # contain a digit-2 (year, beta tag, whatever) but whose metadata
+    # clearly says ``sd_v1`` must classify as SD 1.5, not SD 2.x. Under
+    # the old ``"2" in path_str_lower`` heuristic this would flip to
+    # ``model_family == "sd2"`` purely because of the "2024" in the
+    # directory name — the whitelist fix is precisely to prevent that.
+    repo = tmp_path / "my-sd15-2024-beta"
+    _write_safetensors(
+        repo / "unet" / "model.safetensors",
+        {"ss_base_model_version": "sd_v1"},
+    )
+    hints = svc._detect_model_hints(repo)
+    assert hints["model_family"] == "sd15"
+    assert hints["model_variant"] == "base"
 
 
 def test_pixart_alpha_via_metadata(tmp_path, captured_emits):
