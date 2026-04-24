@@ -160,6 +160,20 @@ def get_image_service(request: Request) -> ImageGenerationService:
     return svc
 
 
+def get_orchestrator_or_none(request: Request) -> AgentOrchestrator | None:
+    """Optional variant of ``get_orchestrator``. Used by endpoints that
+    return a soft default (e.g. ``{"supports_streaming": False}``)
+    rather than 503 when the orchestrator isn't ready — same rationale
+    as ``get_image_service_or_none``."""
+    return getattr(request.app.state, "orchestrator", None)
+
+
+def get_router_or_none(request: Request) -> ProviderRouter | None:
+    """Optional variant of ``get_router`` for endpoints that degrade
+    gracefully when the provider router is missing."""
+    return getattr(request.app.state, "router", None)
+
+
 def get_image_service_or_none(request: Request) -> ImageGenerationService | None:
     """Optional variant of ``get_image_service`` for endpoints that
     have a graceful fallback (e.g. return ``{"items": []}``) instead
@@ -3881,10 +3895,10 @@ async def resume_chat(
 # ── Agent Workflow ────────────────────────────────────────────────
 
 @app.post("/workflow")
-async def run_workflow(req: WorkflowRequest):
-    if not orchestrator:
-        raise HTTPException(503, "Not initialized")
-
+async def run_workflow(
+    req: WorkflowRequest,
+    orchestrator: AgentOrchestrator = Depends(get_orchestrator),
+):
     outputs = orchestrator.run_agent_workflow(req.user_input, req.sequence)
     return {"outputs": outputs}
 
@@ -3892,11 +3906,10 @@ async def run_workflow(req: WorkflowRequest):
 # ── Agents CRUD ───────────────────────────────────────────────────
 
 @app.get("/agents")
-async def get_agents():
+async def get_agents(
+    orchestrator: AgentOrchestrator = Depends(get_orchestrator),
+):
     """Return agents in the format Flutter expects: {agents: [name list], definitions: [...]}."""
-    if not orchestrator:
-        raise HTTPException(503, "Not initialized")
-
     agent_names = orchestrator.list_agents()
     definitions = []
     for name in agent_names:
@@ -3922,7 +3935,11 @@ async def get_agents():
 
 
 @app.get("/agents/{name}/capabilities")
-async def get_agent_capabilities(name: str):
+async def get_agent_capabilities(
+    name: str,
+    orchestrator: AgentOrchestrator | None = Depends(get_orchestrator_or_none),
+    router: ProviderRouter | None = Depends(get_router_or_none),
+):
     """Return agent capabilities (streaming support etc)."""
     if not orchestrator:
         return {"supports_streaming": False}
@@ -3945,10 +3962,10 @@ async def get_agent_capabilities(name: str):
 
 
 @app.post("/agents")
-async def create_agent(req: AgentCreateRequest):
-    if not orchestrator:
-        raise HTTPException(503, "Not initialized")
-
+async def create_agent(
+    req: AgentCreateRequest,
+    orchestrator: AgentOrchestrator = Depends(get_orchestrator),
+):
     orchestrator.add_agent(
         name=req.name,
         model_name=req.resolved_model,
@@ -3966,10 +3983,11 @@ async def create_agent(req: AgentCreateRequest):
 
 
 @app.put("/agents/{name}")
-async def update_agent(name: str, req: AgentCreateRequest):
-    if not orchestrator:
-        raise HTTPException(503, "Not initialized")
-
+async def update_agent(
+    name: str,
+    req: AgentCreateRequest,
+    orchestrator: AgentOrchestrator = Depends(get_orchestrator),
+):
     orchestrator.add_agent(
         name=name,
         model_name=req.resolved_model,
@@ -3987,10 +4005,10 @@ async def update_agent(name: str, req: AgentCreateRequest):
 
 
 @app.post("/agents/supervisor")
-async def create_supervisor_agent(req: SupervisorCreateRequest):
-    if not orchestrator:
-        raise HTTPException(503, "Not initialized")
-
+async def create_supervisor_agent(
+    req: SupervisorCreateRequest,
+    orchestrator: AgentOrchestrator = Depends(get_orchestrator),
+):
     orchestrator.create_supervisor(
         name=req.name,
         model_name=req.model_name,
@@ -4009,9 +4027,12 @@ async def create_supervisor_agent(req: SupervisorCreateRequest):
 
 
 @app.get("/agents/{name}/definition")
-async def get_agent_definition(name: str):
+async def get_agent_definition(
+    name: str,
+    orchestrator: AgentOrchestrator = Depends(get_orchestrator),
+):
     """Return agent definition details for the agent editor."""
-    if not orchestrator or name not in orchestrator.definitions:
+    if name not in orchestrator.definitions:
         raise HTTPException(404, f"Agent '{name}' not found")
 
     defn = orchestrator.definitions[name]
@@ -4032,9 +4053,13 @@ async def get_agent_definition(name: str):
 
 
 @app.post("/agents/{name}/test")
-async def test_agent(name: str, body: dict[str, Any]):
+async def test_agent(
+    name: str,
+    body: dict[str, Any],
+    orchestrator: AgentOrchestrator = Depends(get_orchestrator),
+):
     """Quick test of an agent with a single message."""
-    if not orchestrator or name not in orchestrator.definitions:
+    if name not in orchestrator.definitions:
         raise HTTPException(404, f"Agent '{name}' not found")
 
     import time
@@ -4046,7 +4071,12 @@ async def test_agent(name: str, body: dict[str, Any]):
 
 
 @app.delete("/agents/{name}")
-async def remove_agent(name: str):
+async def remove_agent(
+    name: str,
+    orchestrator: AgentOrchestrator | None = Depends(get_orchestrator_or_none),
+):
+    # Graceful: DELETE must succeed even if the orchestrator never
+    # booted — the DB row still needs cleaning up.
     if orchestrator and name in orchestrator.definitions:
         del orchestrator.definitions[name]
     delete_agent_db(name)
@@ -4054,19 +4084,24 @@ async def remove_agent(name: str):
 
 
 @app.post("/agents/{name}/model")
-async def update_agent_model(name: str, model_name: str, provider: str | None = None):
-    if not orchestrator or name not in orchestrator.definitions:
+async def update_agent_model(
+    name: str,
+    model_name: str,
+    provider: str | None = None,
+    orchestrator: AgentOrchestrator = Depends(get_orchestrator),
+):
+    if name not in orchestrator.definitions:
         raise HTTPException(404, f"Agent '{name}' not found")
     orchestrator.set_agent_model(name, model_name, provider)
     return {"status": "updated"}
 
 
 @app.post("/agents/prompt-draft")
-async def generate_prompt_draft(body: dict[str, Any]):
+async def generate_prompt_draft(
+    body: dict[str, Any],
+    orchestrator: AgentOrchestrator = Depends(get_orchestrator),
+):
     """Generate a system prompt from a description (for the prompt builder)."""
-    if not orchestrator:
-        raise HTTPException(503, "Not initialized")
-
     goal = body.get("goal", "")
     context = body.get("context", "")
     requirements = body.get("requirements", "")
@@ -6566,8 +6601,9 @@ async def obs_summary(window_hours: int = 24):
 # ── Generate system prompt ────────────────────────────────────────
 
 @app.post("/generate-prompt")
-async def generate_prompt(description: str):
-    if not orchestrator:
-        raise HTTPException(503, "Not initialized")
+async def generate_prompt(
+    description: str,
+    orchestrator: AgentOrchestrator = Depends(get_orchestrator),
+):
     prompt = orchestrator.generate_system_prompt(description)
     return {"prompt": prompt}
