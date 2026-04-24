@@ -2955,6 +2955,88 @@ async def delete_hf_token():
 
 # ── Chat Prompt Enhancement ─────────────────────────────────────
 
+
+# [IMPROVE-14] Small helpers that keep /chat/enhance-prompt and
+# /chat/generate-image from hand-rolling urllib calls to Ollama. Both
+# endpoints now route through the provider layer so they honor
+# OLLAMA_BASE_URL, share the [IMPROVE-12] availability cache, and
+# surface errors through the unified HTTPException contract.
+
+_SMALL_OLLAMA_KEYWORDS = ("1b", "2b", "3b", "tiny", "mini", "small", "phi", "qwen2")
+
+
+def _pick_small_ollama_model() -> str | None:
+    """Return the first small chat-capable Ollama model name, or None.
+
+    Replaces the open-coded OllamaProvider() instantiation that used to
+    live inline in both endpoints. Goes through router.get_provider so
+    the existing base_url / timeout config is respected.
+    """
+    if not router:
+        return None
+    prov = router.get_provider("ollama")
+    if prov is None:
+        return None
+    try:
+        models = prov.list_models()
+    except Exception as exc:
+        logger.debug("_pick_small_ollama_model list_models failed: %s", exc)
+        return None
+    names = [m.name for m in models if getattr(m.capabilities, "supports_chat", True)]
+    if not names:
+        return None
+    for kw in _SMALL_OLLAMA_KEYWORDS:
+        for n in names:
+            if kw in n.lower():
+                return n
+    return names[0]
+
+
+async def _ollama_generate_via_router(
+    model: str,
+    prompt: str,
+    *,
+    temperature: float = 0.7,
+    max_tokens: int = 512,
+    timeout_sec: int = 120,
+) -> str:
+    """Single-shot Ollama completion through ProviderRouter.achat.
+
+    Wraps one ChatMessage(user, prompt) call with a GenerationSettings.
+    Maps connection/timeout failures to HTTPException so the endpoint
+    layer can propagate them without extra try/except boilerplate.
+    """
+    import asyncio
+
+    from local_ai_platform.providers import ChatMessage, GenerationSettings
+
+    if not router:
+        raise HTTPException(503, "Provider router not initialized")
+
+    settings = GenerationSettings(temperature=temperature, max_tokens=max_tokens)
+    messages = [ChatMessage(role="user", content=prompt)]
+
+    try:
+        response = await asyncio.wait_for(
+            router.achat(f"ollama:{model}", messages, settings),
+            timeout=timeout_sec,
+        )
+    except asyncio.TimeoutError:
+        raise HTTPException(504, f"Ollama generation timed out after {timeout_sec}s")
+    except HTTPException:
+        raise
+    except Exception as exc:
+        # Check both the message and the exception class name — some
+        # errors (e.g. ConnectionRefusedError) stringify to just the
+        # `errno` message without any connection-related keyword.
+        low = (str(exc) + " " + type(exc).__name__).lower()
+        if "connection" in low or "refused" in low or "connecterror" in low:
+            raise HTTPException(503, "Cannot connect to Ollama. Is it running? Start with: ollama serve")
+        raise HTTPException(500, f"Ollama generation failed: {exc}")
+
+    return (getattr(response, "content", "") or "").strip()
+
+
 @app.post("/chat/enhance-prompt")
 async def enhance_chat_prompt(body: dict[str, Any]):
     """Use a local LLM to detect prompt type (text/image/code) and enhance accordingly."""
@@ -2964,26 +3046,9 @@ async def enhance_chat_prompt(body: dict[str, Any]):
     ollama_model = (body.get("ollama_model") or "").strip()
     timeout_sec = int(body.get("timeout_sec") or 120)
 
-    # Find a working Ollama model
+    # [IMPROVE-14] Model picker goes through the router now.
     if not ollama_model:
-        try:
-            from local_ai_platform.providers.ollama_provider import OllamaProvider
-            prov = OllamaProvider()
-            models = prov.list_models()
-            if models:
-                small_kw = ["1b", "2b", "3b", "tiny", "mini", "small", "phi", "qwen2"]
-                names = [m.name for m in models if m.capabilities.supports_chat]
-                picked = None
-                for kw in small_kw:
-                    for n in names:
-                        if kw in n.lower():
-                            picked = n
-                            break
-                    if picked:
-                        break
-                ollama_model = picked or (names[0] if names else "")
-        except Exception:
-            pass
+        ollama_model = _pick_small_ollama_model() or ""
     if not ollama_model:
         raise HTTPException(503, "No Ollama model available. Install one with: ollama pull gemma3:1b")
 
@@ -3020,10 +3085,8 @@ async def enhance_chat_prompt(body: dict[str, Any]):
         # Ambiguous — ask the LLM to classify
         prompt_type = "text"  # default
         try:
-            import urllib.request
-            classify_body = json.dumps({
-                "model": ollama_model,
-                "prompt": f"""/no_think
+            # [IMPROVE-14] Router-mediated classification call.
+            classify_prompt = f"""/no_think
 Classify this user prompt into exactly one category. Reply with ONLY the category word, nothing else.
 
 Categories:
@@ -3033,18 +3096,14 @@ Categories:
 
 User prompt: {user_prompt}
 
-Category:""",
-                "stream": False,
-                "options": {"temperature": 0.1, "num_predict": 10},
-            }).encode()
-            req = urllib.request.Request(
-                "http://localhost:11434/api/generate",
-                data=classify_body,
-                headers={"Content-Type": "application/json"},
-            )
-            with urllib.request.urlopen(req, timeout=15) as resp:
-                cdata = json.loads(resp.read().decode())
-            _cls = (cdata.get("response") or "").strip().upper()
+Category:"""
+            _cls = (await _ollama_generate_via_router(
+                ollama_model,
+                classify_prompt,
+                temperature=0.1,
+                max_tokens=10,
+                timeout_sec=15,
+            )).upper()
             if "IMAGE" in _cls:
                 prompt_type = "image"
             elif "CODE" in _cls:
@@ -3103,25 +3162,25 @@ User's original request:
 """
         max_tokens = 1024
 
-    try:
-        import urllib.request
-        import urllib.error
-        req_body = json.dumps({
-            "model": ollama_model,
-            "prompt": system_prompt + user_prompt,
-            "stream": False,
-            "options": {"temperature": 0.7, "num_predict": max_tokens},
-        }).encode()
-        req = urllib.request.Request(
-            "http://localhost:11434/api/generate",
-            data=req_body,
-            headers={"Content-Type": "application/json"},
+    # [IMPROVE-14] Main enhancement now routes through the provider
+    # layer; wrap in track_event so /observability/summary captures
+    # enhance-prompt latency + error rate alongside other chat events.
+    with track_event("chat", "enhance_prompt", context={
+        "prompt_length": len(user_prompt),
+        "model_hint": body.get("ollama_model") or "auto",
+        "detected_type": prompt_type,
+    }) as ev:
+        content = await _ollama_generate_via_router(
+            ollama_model,
+            system_prompt + user_prompt,
+            temperature=0.7,
+            max_tokens=max_tokens,
+            timeout_sec=timeout_sec,
         )
-        with urllib.request.urlopen(req, timeout=timeout_sec) as resp:
-            data = json.loads(resp.read().decode())
-        content = (data.get("response", "") or "").strip()
 
         if not content or len(content) < 5:
+            ev.perf = {"resolved_model": ollama_model, "output_length": 0,
+                       "fallback": "empty_response"}
             return {"prompt": user_prompt, "original_prompt": user_prompt,
                     "error": "LLM response was empty", "model": ollama_model,
                     "prompt_type": prompt_type}
@@ -3133,16 +3192,13 @@ User's original request:
                 content = content[len(prefix):].strip().lstrip(":\n")
         content = content.strip().strip("`").strip('"').strip("'").strip()
 
+        ev.perf = {"resolved_model": ollama_model, "output_length": len(content)}
         return {
             "prompt": content,
             "original_prompt": user_prompt,
             "model": ollama_model,
             "prompt_type": prompt_type,
         }
-    except Exception as exc:
-        if "URLError" in str(type(exc).__name__) or "Connection refused" in str(exc):
-            raise HTTPException(503, "Cannot connect to Ollama. Is it running? Start with: ollama serve")
-        raise HTTPException(500, f"Prompt enhancement failed: {exc}")
 
 
 # ── Chat Image Generation ───────────────────────────────────────
@@ -3191,47 +3247,26 @@ async def chat_generate_image(body: dict[str, Any]):
                     context_lines.append(f"{role}: {content}")
             context_str = "\n".join(context_lines)
 
-            # Use LLM to create an optimized image prompt from conversation context
+            # [IMPROVE-14] Router-mediated prompt enhancement.
             if context_str:
-                from local_ai_platform.providers.ollama_provider import OllamaProvider
-                prov = OllamaProvider()
-                models = prov.list_models()
-                if models:
-                    small_kw = ["1b", "2b", "3b", "tiny", "mini", "phi", "qwen2"]
-                    names = [m.name for m in models if m.capabilities.supports_chat]
-                    picked = None
-                    for kw in small_kw:
-                        for n in names:
-                            if kw in n.lower():
-                                picked = n
-                                break
-                        if picked:
-                            break
-                    ollama_model = picked or (names[0] if names else "")
-                    if ollama_model:
-                        import urllib.request
-                        enhance_body = json.dumps({
-                            "model": ollama_model,
-                            "prompt": f"""/no_think
+                ollama_model = _pick_small_ollama_model()
+                if ollama_model:
+                    enhance_prompt_text = f"""/no_think
 Based on this conversation context and the user's image request, write a concise Stable Diffusion image prompt (max 50 words). Include quality tags. Output ONLY the prompt text, nothing else.
 
 Conversation:
 {context_str}
 
-Image request: {prompt}""",
-                            "stream": False,
-                            "options": {"temperature": 0.7, "num_predict": 200},
-                        }).encode()
-                        req = urllib.request.Request(
-                            "http://localhost:11434/api/generate",
-                            data=enhance_body,
-                            headers={"Content-Type": "application/json"},
-                        )
-                        with urllib.request.urlopen(req, timeout=30) as resp:
-                            data = json.loads(resp.read().decode())
-                        llm_prompt = (data.get("response") or "").strip()
-                        if llm_prompt and len(llm_prompt) > 10:
-                            enhanced_prompt = llm_prompt
+Image request: {prompt}"""
+                    llm_prompt = await _ollama_generate_via_router(
+                        ollama_model,
+                        enhance_prompt_text,
+                        temperature=0.7,
+                        max_tokens=200,
+                        timeout_sec=30,
+                    )
+                    if llm_prompt and len(llm_prompt) > 10:
+                        enhanced_prompt = llm_prompt
         except Exception as exc:
             logger.warning("Chat image context enhancement failed, using raw prompt: %s", exc)
 
