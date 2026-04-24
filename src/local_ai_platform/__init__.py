@@ -1,6 +1,12 @@
 """Local AI Platform - Multi-provider agent framework."""
 
-from .config import AppConfig, load_config
+from .config import (
+    AppConfig,
+    AppSettings,
+    get_settings,
+    load_config,
+    reset_settings_cache,
+)
 from .providers import (
     BaseProvider,
     ChatMessage,
@@ -14,7 +20,10 @@ from .memory import SmartMemory, VectorMemory
 
 __all__ = [
     "AppConfig",
+    "AppSettings",
+    "get_settings",
     "load_config",
+    "reset_settings_cache",
     "BaseProvider",
     "ChatMessage",
     "ChatResponse",
