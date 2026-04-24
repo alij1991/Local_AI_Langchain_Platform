@@ -76,26 +76,26 @@ if not _lp_logger.handlers:
 
 # ── Globals ───────────────────────────────────────────────────────
 #
-# [IMPROVE-5] Migration note: these module-level singletons are being
-# replaced with ``app.state.*`` attachments + ``Depends(...)`` helpers.
-# During the migration (Commits 1–2 of [IMPROVE-5]) both paths coexist:
-# lifespan assigns each object to ``app.state.X`` *and* the matching
-# module global so existing handlers (and tests that patch
-# ``api_server.orchestrator`` etc.) keep working. Commit 3 deletes the
-# globals once every handler has been switched to Depends.
+# [IMPROVE-5] Post-migration: every stateful singleton now lives on
+# ``app.state.*`` and is fetched via ``Depends(get_X)``. The module
+# globals that used to live here (``router``, ``orchestrator``,
+# ``ollama_ctrl``, ``hf_ctrl``, ``trace_store``, ``image_service``,
+# ``_partner_engine``, ``_editor_service``) were removed in Commit 3
+# — the only remaining module-level objects are:
 #
-# Lifespan also populates ``app.state.config`` / ``app.state.settings`` /
-# ``app.state._ollama_pulls`` / ``app.state._hf_downloads`` so routers
-# split out by [IMPROVE-1] can access shared state via DI without
-# importing this module.
+#   * ``config`` — built at import time because lifespan reads it and
+#     build_router_from_config / AgentOrchestrator need an AppConfig
+#     in hand before the first ``await``. Also attached to
+#     ``app.state.config`` so endpoints can Depends(get_app_config).
+#   * ``_ollama_pulls`` / ``_hf_downloads`` — plain dicts (not
+#     heavyweight singletons). Declared near the endpoints that use
+#     them; lifespan aliases them onto ``app.state`` so routers split
+#     out by [IMPROVE-1] can share the same in-flight download state.
+#
+# See test_app_state_lifespan.py::test_api_server_has_no_stateful_singletons
+# for the invariant this module enforces at import time.
 
 config = load_config()
-router: ProviderRouter | None = None
-orchestrator: AgentOrchestrator | None = None
-ollama_ctrl: OllamaController | None = None
-hf_ctrl: HuggingFaceController | None = None
-trace_store: TraceStore | None = None
-image_service: ImageGenerationService | None = None
 
 
 # ── DI helpers (Depends targets) ──────────────────────────────────
@@ -318,10 +318,10 @@ def _invalidate_cache(prefix: str = "") -> None:
 async def lifespan(app: FastAPI):
     """FastAPI lifespan — build singletons, attach to app.state, tear down.
 
-    [IMPROVE-5] During the migration both ``app.state.X`` *and* the
-    module-level globals (``router``, ``orchestrator``, …) point at the
-    same object. Commit 3 removes the module globals once every
-    endpoint reads through Depends.
+    [IMPROVE-5] Post-Commit-3: every singleton is a local variable
+    here and only reaches the outside world via ``app.state``. Endpoints
+    read them through ``Depends(get_X)``. No module globals, no
+    ``global`` statements.
 
     Construction order matters — keep ProviderRouter before
     AgentOrchestrator (orchestrator depends on router), and keep
@@ -329,8 +329,6 @@ async def lifespan(app: FastAPI):
     ``config.load`` retry and the ``app.lifespan.start`` emit below
     have somewhere to land.
     """
-    global router, orchestrator, ollama_ctrl, hf_ctrl, trace_store, image_service
-
     t0 = time.monotonic()
     logger.info("Starting up Local AI Platform…")
     init_db()
@@ -345,9 +343,8 @@ async def lifespan(app: FastAPI):
     trace_store = TraceStore(load_trace_config())
     image_service = ImageGenerationService(config)
 
-    # Attach to app.state so Depends(get_X) helpers can find them.
-    # Mirrors each module global 1-for-1. Kept in sync here during
-    # the migration; Commit 3 of [IMPROVE-5] removes the globals.
+    # Attach to app.state — the only path endpoints (and future
+    # APIRouter splits from [IMPROVE-1]) reach these objects.
     app.state.config = config
     app.state.settings = get_settings()
     app.state.router = router
@@ -356,9 +353,11 @@ async def lifespan(app: FastAPI):
     app.state.hf_ctrl = hf_ctrl
     app.state.trace_store = trace_store
     app.state.image_service = image_service
-    # In-flight state dicts (see get_ollama_pulls / get_hf_downloads
-    # helpers). Bound to the module globals below during the migration
-    # so old-style ``api_server._ollama_pulls[...]`` access still works.
+    # In-flight state dicts (see get_ollama_pulls_state /
+    # get_hf_downloads_state helpers). Still declared at module level
+    # because the endpoint blocks that mutate them are also at module
+    # scope (historical layout); lifespan aliases them so a hypothetical
+    # APIRouter split can share the same dict via app.state.
     app.state._ollama_pulls = _ollama_pulls
     app.state._hf_downloads = _hf_downloads
 
@@ -4826,15 +4825,10 @@ async def remove_system(name: str):
 
 
 # ── AI Partner ────────────────────────────────────────────────────
-
-_partner_engine = None
-
-def _get_partner():
-    global _partner_engine
-    if _partner_engine is None:
-        from local_ai_platform.partner.engine import PartnerEngine
-        _partner_engine = PartnerEngine(router, config)
-    return _partner_engine
+#
+# [IMPROVE-5] ``_partner_engine`` + ``_get_partner`` factory were
+# removed in Commit 3 — endpoints use ``Depends(get_partner_engine)``
+# which lazy-caches the engine on ``app.state._partner_engine``.
 
 
 @app.get("/partner/profile")
@@ -5011,22 +5005,32 @@ async def partner_reset_user_profile(partner=Depends(get_partner_engine)):
 
 
 @app.post("/partner/voice/init")
-async def partner_voice_init(partner=Depends(get_partner_engine)):
+async def partner_voice_init(
+    partner=Depends(get_partner_engine),
+    image_service: ImageGenerationService | None = Depends(get_image_service_or_none),
+):
     """Initialize voice pipeline (ASR + TTS + VAD).
 
     Also frees GPU VRAM by unloading image generation pipelines.
     Partner mode needs GPU memory for Ollama LLM inference.
     """
     # Free VRAM from image editing/generation pipelines
-    freed = _free_gpu_for_partner()
+    freed = _free_gpu_for_partner(image_service)
     result = partner.init_voice()
     if freed:
         result["vram_freed"] = True
     return result
 
 
-def _free_gpu_for_partner() -> bool:
-    """Unload all cached image pipelines to free GPU VRAM for LLM inference."""
+def _free_gpu_for_partner(
+    image_service: ImageGenerationService | None,
+) -> bool:
+    """Unload all cached image pipelines to free GPU VRAM for LLM inference.
+
+    [IMPROVE-5] ``image_service`` is passed in explicitly (was a module
+    global before Commit 3). Pass ``None`` when no image service is up
+    — the editing-pipeline cleanup still runs.
+    """
     freed = False
     try:
         import torch
@@ -5042,7 +5046,6 @@ def _free_gpu_for_partner() -> bool:
 
         # 2. Unload image generation pipelines
         try:
-            global image_service
             if image_service and hasattr(image_service, '_pipelines') and image_service._pipelines:
                 count = len(image_service._pipelines)
                 for _key, _pipe in list(image_service._pipelines.items()):
@@ -5465,15 +5468,10 @@ async def partner_voice_upload(
 
 
 # ── Image Editor ──────────────────────────────────────────────────
-
-_editor_service = None
-
-def _get_editor():
-    global _editor_service
-    if _editor_service is None:
-        from local_ai_platform.images.editor import ImageEditorService
-        _editor_service = ImageEditorService()
-    return _editor_service
+#
+# [IMPROVE-5] ``_editor_service`` + ``_get_editor`` factory were
+# removed in Commit 3 — endpoints use ``Depends(get_editor_service)``
+# which lazy-caches the service on ``app.state._editor_service``.
 
 
 @app.post("/editor/enhance-prompt")

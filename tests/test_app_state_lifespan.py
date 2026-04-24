@@ -201,3 +201,58 @@ def test_lifespan_populates_app_state_and_emits_events(monkeypatch, tmp_path):
     actions = [r["action"] for r in rows]
     assert "lifespan.start" in actions
     assert "lifespan.stop" in actions
+
+
+# ── Post-migration invariant: no stateful singletons at module level ──
+
+
+def test_api_server_has_no_stateful_singletons():
+    """Lock in the [IMPROVE-5] Commit 3 outcome: import ``api_server``
+    fresh and assert the module has no pre-lifespan stateful singleton
+    objects at the top level.
+
+    The pre-migration file had ``router``, ``orchestrator``,
+    ``ollama_ctrl``, ``hf_ctrl``, ``trace_store``, ``image_service``
+    (all ``None`` until lifespan ran) plus ``_partner_engine``,
+    ``_editor_service`` (initialized lazily on first request). Each
+    one was a circular-import landmine for the [IMPROVE-1] APIRouter
+    split: importing a router module at module scope would pin a
+    reference to ``None``, and no amount of lifespan setup would fix
+    that later read.
+
+    After Commit 3, endpoints reach singletons through ``Depends(get_X)``
+    which resolves to ``request.app.state.X`` at request time — no
+    module-global binding, no circular imports, no stale ``None``.
+
+    What's still allowed at module level:
+      * ``config`` — a plain AppConfig dataclass (no network / GPU).
+      * ``_ollama_pulls`` / ``_hf_downloads`` — plain mutable dicts;
+        lifespan aliases them into ``app.state`` so an APIRouter split
+        can share the same in-flight state. They're data, not singletons.
+    """
+    import api_server
+
+    # These names must not appear as module-level attributes any more.
+    forbidden = {
+        "router", "orchestrator", "ollama_ctrl", "hf_ctrl",
+        "trace_store", "image_service",
+        "_partner_engine", "_editor_service",
+        "_get_partner", "_get_editor",
+    }
+    present = forbidden & set(vars(api_server).keys())
+    assert not present, (
+        f"api_server still exposes stateful singletons at module level: "
+        f"{sorted(present)}. [IMPROVE-5] Commit 3 was supposed to remove "
+        f"them — switch the handler(s) to Depends(get_X) and delete the "
+        f"module-level binding."
+    )
+
+    # What IS allowed: config + the two in-flight state dicts.
+    assert hasattr(api_server, "config"), "config dataclass still expected"
+    assert isinstance(api_server._ollama_pulls, dict), (
+        "_ollama_pulls must remain a module-level dict so lifespan can "
+        "alias it into app.state for APIRouter splits."
+    )
+    assert isinstance(api_server._hf_downloads, dict), (
+        "_hf_downloads must remain a module-level dict for the same reason."
+    )

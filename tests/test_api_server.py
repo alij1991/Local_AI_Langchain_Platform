@@ -11,8 +11,15 @@ client = TestClient(api_server.app)
 
 
 # Entering the TestClient as a context manager is what triggers FastAPI's
-# lifespan — without it ``api_server.orchestrator``/``image_service`` stay
-# ``None`` and nearly every test 503s or AttributeErrors on a NoneType.
+# lifespan — without it ``app.state.orchestrator`` / ``app.state.image_service``
+# stay unset and nearly every test 503s or AttributeErrors on a NoneType.
+#
+# [IMPROVE-5] Commit 3 removed the module globals. Tests reach live
+# singletons via ``api_server.app.state.*`` (set by lifespan). The
+# existing tests patch attributes *on* those objects — that keeps
+# working since ``app.state.X`` and the injected ``Depends(get_X)``
+# value are the same reference. ``app.dependency_overrides`` is the
+# alternative for tests that want to swap the dependency wholesale.
 @pytest.fixture(scope="module", autouse=True)
 def _run_lifespan():
     with client:
@@ -47,11 +54,11 @@ def _run_lifespan():
 #      codebase. See docs/features/10-improvements.md §10.5 Wave 2
 #      residuals.
 #
-# After [IMPROVE-5] Commit 3 removes the module globals, the
-# ``monkeypatch.setattr(api_server.orchestrator, ...)`` calls below
-# will need to switch to
-# ``app.dependency_overrides[get_orchestrator] = lambda: fake``.
-# Until then, both paths coexist (see api_server.py:80).
+# Post-[IMPROVE-5] Commit 3: the patch targets below use
+# ``api_server.app.state.orchestrator`` / ``.image_service`` to reach
+# the singletons that lifespan built. See the ``_run_lifespan``
+# fixture comment above for the reasoning on keeping this pattern
+# instead of ``app.dependency_overrides``.
 
 
 def test_health_endpoint():
@@ -66,7 +73,7 @@ def test_health_endpoint():
     strict=False,
 )
 def test_agents_crud_and_validation(monkeypatch):
-    monkeypatch.setitem(api_server.orchestrator.definitions, 'assistant', object())
+    monkeypatch.setitem(api_server.app.state.orchestrator.definitions, 'assistant', object())
 
     bad = client.post('/agents', json={'name': 'a', 'provider': 'ollama', 'model_id': 'x', 'tool_ids': ['missing']})
     assert bad.status_code == 400
@@ -108,7 +115,7 @@ def test_agents_crud_and_validation(monkeypatch):
 
 
 def test_agent_tool_creation(monkeypatch):
-    monkeypatch.setitem(api_server.orchestrator.definitions, 'assistant', object())
+    monkeypatch.setitem(api_server.app.state.orchestrator.definitions, 'assistant', object())
     response = client.post('/tools', json={
         'name': 'call_assistant',
         'type': 'agent_tool',
@@ -187,7 +194,7 @@ def test_prompt_draft_missing_goal_returns_422():
 
 def test_prompt_draft_fallback_path(monkeypatch):
     monkeypatch.setattr(
-        api_server.orchestrator,
+        api_server.app.state.orchestrator,
         'generate_system_prompt',
         lambda *_args, **_kwargs: (_ for _ in ()).throw(RuntimeError('offline')),
     )
@@ -197,7 +204,7 @@ def test_prompt_draft_fallback_path(monkeypatch):
 
 
 def test_agent_create_with_valid_builtin_tool_id_succeeds(monkeypatch):
-    monkeypatch.setattr(api_server.orchestrator, 'chat_with_agent', lambda *args, **kwargs: 'ok')
+    monkeypatch.setattr(api_server.app.state.orchestrator, 'chat_with_agent', lambda *args, **kwargs: 'ok')
     response = client.post('/agents', json={
         'name': 'tool-agent',
         'description': 'test',
@@ -266,7 +273,7 @@ def test_images_models_refresh_endpoint(monkeypatch):
     # /images/models/refresh returns {status, items}; the older
     # ``refreshed`` boolean field was dropped.
     monkeypatch.setattr(
-        api_server.image_service,
+        api_server.app.state.image_service,
         'refresh_models',
         lambda: {'items': [{'model_id': 'local:test'}], 'local_text_models': []},
     )
@@ -280,7 +287,7 @@ def test_models_refresh_endpoint(monkeypatch):
     # /models/refresh shares the image_service refresh; same shape note
     # as test_images_models_refresh_endpoint.
     monkeypatch.setattr(
-        api_server.image_service,
+        api_server.app.state.image_service,
         'refresh_models',
         lambda: {'items': [], 'local_text_models': [{'model_id': 'local:text'}]},
     )
@@ -294,7 +301,7 @@ def test_images_runtime_endpoint(monkeypatch):
     # field was dropped. We still verify device-status wiring via the
     # ``effective_device`` round-trip.
     monkeypatch.setattr(
-        api_server.image_service,
+        api_server.app.state.image_service,
         'get_device_status',
         lambda: {'cuda_available': False, 'effective_device': 'cpu', 'device_preference': 'auto'},
     )
@@ -315,7 +322,7 @@ def test_images_session_and_generate_with_placeholder(monkeypatch):
         image_bytes = b"fake-png-bytes"
         metadata = {"runtime": "placeholder"}
 
-    monkeypatch.setattr(api_server.image_service, 'generate', lambda **kwargs: _FakeResult())
+    monkeypatch.setattr(api_server.app.state.image_service, 'generate', lambda **kwargs: _FakeResult())
 
     sess = client.post('/images/sessions', json={'title': 'img test'})
     assert sess.status_code == 200
@@ -335,7 +342,7 @@ def test_images_session_and_generate_with_placeholder(monkeypatch):
 
 
 def test_images_validate_model_endpoint(monkeypatch):
-    monkeypatch.setattr(api_server.image_service, 'validate_model', lambda model_id: {
+    monkeypatch.setattr(api_server.app.state.image_service, 'validate_model', lambda model_id: {
         'model_id': model_id,
         'resolved_path': '/tmp/models/x',
         'detected_type': 'diffusers_local',
@@ -349,7 +356,7 @@ def test_images_validate_model_endpoint(monkeypatch):
 
 
 def test_images_recommendations_endpoint(monkeypatch):
-    monkeypatch.setattr(api_server.image_service, 'recommended_settings', lambda model_id: {
+    monkeypatch.setattr(api_server.app.state.image_service, 'recommended_settings', lambda model_id: {
         'recommended_width': 512,
         'recommended_height': 512,
         'recommended_steps': 16,
