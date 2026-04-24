@@ -3107,15 +3107,16 @@ async def delete_hf_token():
 _SMALL_OLLAMA_KEYWORDS = ("1b", "2b", "3b", "tiny", "mini", "small", "phi", "qwen2")
 
 
-def _pick_small_ollama_model() -> str | None:
+def _pick_small_ollama_model(router: ProviderRouter) -> str | None:
     """Return the first small chat-capable Ollama model name, or None.
 
     Replaces the open-coded OllamaProvider() instantiation that used to
     live inline in both endpoints. Goes through router.get_provider so
     the existing base_url / timeout config is respected.
+
+    [IMPROVE-5] Router is now passed in (Depends-injected at the
+    endpoint layer) rather than read from the module global.
     """
-    if not router:
-        return None
     prov = router.get_provider("ollama")
     if prov is None:
         return None
@@ -3135,6 +3136,7 @@ def _pick_small_ollama_model() -> str | None:
 
 
 async def _ollama_generate_via_router(
+    router: ProviderRouter,
     model: str,
     prompt: str,
     *,
@@ -3147,13 +3149,13 @@ async def _ollama_generate_via_router(
     Wraps one ChatMessage(user, prompt) call with a GenerationSettings.
     Maps connection/timeout failures to HTTPException so the endpoint
     layer can propagate them without extra try/except boilerplate.
+
+    [IMPROVE-5] Router is now passed in explicitly (Depends-injected
+    at the endpoint layer) rather than read from the module global.
     """
     import asyncio
 
     from local_ai_platform.providers import ChatMessage, GenerationSettings
-
-    if not router:
-        raise HTTPException(503, "Provider router not initialized")
 
     settings = GenerationSettings(temperature=temperature, max_tokens=max_tokens)
     messages = [ChatMessage(role="user", content=prompt)]
@@ -3180,7 +3182,10 @@ async def _ollama_generate_via_router(
 
 
 @app.post("/chat/enhance-prompt")
-async def enhance_chat_prompt(body: dict[str, Any]):
+async def enhance_chat_prompt(
+    body: dict[str, Any],
+    router: ProviderRouter = Depends(get_router),
+):
     """Use a local LLM to detect prompt type (text/image/code) and enhance accordingly."""
     user_prompt = (body.get("prompt") or "").strip()
     if not user_prompt:
@@ -3190,7 +3195,7 @@ async def enhance_chat_prompt(body: dict[str, Any]):
 
     # [IMPROVE-14] Model picker goes through the router now.
     if not ollama_model:
-        ollama_model = _pick_small_ollama_model() or ""
+        ollama_model = _pick_small_ollama_model(router) or ""
     if not ollama_model:
         raise HTTPException(503, "No Ollama model available. Install one with: ollama pull gemma3:1b")
 
@@ -3240,6 +3245,7 @@ User prompt: {user_prompt}
 
 Category:"""
             _cls = (await _ollama_generate_via_router(
+                router,
                 ollama_model,
                 classify_prompt,
                 temperature=0.1,
@@ -3313,6 +3319,7 @@ User's original request:
         "detected_type": prompt_type,
     }) as ev:
         content = await _ollama_generate_via_router(
+            router,
             ollama_model,
             system_prompt + user_prompt,
             temperature=0.7,
@@ -3346,15 +3353,16 @@ User's original request:
 # ── Chat Image Generation ───────────────────────────────────────
 
 @app.post("/chat/generate-image")
-async def chat_generate_image(body: dict[str, Any]):
+async def chat_generate_image(
+    body: dict[str, Any],
+    image_service: ImageGenerationService = Depends(get_image_service),
+    router: ProviderRouter = Depends(get_router),
+):
     """Generate an image within a conversation and store it as a message.
 
     Optionally uses conversation context + an LLM to build a better prompt.
     Returns the image URL and message info.
     """
-    if not image_service:
-        raise HTTPException(503, "Image generation service not available")
-
     prompt = (body.get("prompt") or "").strip()
     conversation_id = (body.get("conversation_id") or "").strip()
     use_context = body.get("use_context", True)
@@ -3391,7 +3399,7 @@ async def chat_generate_image(body: dict[str, Any]):
 
             # [IMPROVE-14] Router-mediated prompt enhancement.
             if context_str:
-                ollama_model = _pick_small_ollama_model()
+                ollama_model = _pick_small_ollama_model(router)
                 if ollama_model:
                     enhance_prompt_text = f"""/no_think
 Based on this conversation context and the user's image request, write a concise Stable Diffusion image prompt (max 50 words). Include quality tags. Output ONLY the prompt text, nothing else.
@@ -3401,6 +3409,7 @@ Conversation:
 
 Image request: {prompt}"""
                     llm_prompt = await _ollama_generate_via_router(
+                        router,
                         ollama_model,
                         enhance_prompt_text,
                         temperature=0.7,
@@ -3492,10 +3501,10 @@ Image request: {prompt}"""
 # ── Direct Chat (no agent) ───────────────────────────────────────
 
 @app.post("/chat/direct")
-async def direct_chat(req: DirectChatRequest):
-    if not router:
-        raise HTTPException(503, "Not initialized")
-
+async def direct_chat(
+    req: DirectChatRequest,
+    router: ProviderRouter = Depends(get_router),
+):
     messages = [ChatMessage(role=m["role"], content=m["content"]) for m in req.messages]
     settings = GenerationSettings.from_dict(req.settings)
 
@@ -3519,11 +3528,12 @@ async def direct_chat(req: DirectChatRequest):
 # ── Agent Chat ────────────────────────────────────────────────────
 
 @app.post("/chat")
-async def agent_chat(req: ChatRequest):
+async def agent_chat(
+    req: ChatRequest,
+    orchestrator: AgentOrchestrator = Depends(get_orchestrator),
+    trace_store: TraceStore = Depends(get_trace_store),
+):
     """Non-streaming agent chat. Flutter sends {agent, message, conversation_id}."""
-    if not orchestrator:
-        raise HTTPException(503, "Not initialized")
-
     agent_name = req.resolved_agent
     if agent_name not in orchestrator.definitions:
         raise HTTPException(404, f"Agent '{agent_name}' not found")
@@ -3614,11 +3624,12 @@ async def agent_chat(req: ChatRequest):
 
 
 @app.post("/chat/stream")
-async def agent_chat_stream(req: ChatRequest):
+async def agent_chat_stream(
+    req: ChatRequest,
+    orchestrator: AgentOrchestrator = Depends(get_orchestrator),
+    trace_store: TraceStore = Depends(get_trace_store),
+):
     """SSE streaming agent chat. Flutter expects events: start, token, end, error."""
-    if not orchestrator:
-        raise HTTPException(503, "Not initialized")
-
     agent_name = req.resolved_agent
     if agent_name not in orchestrator.definitions:
         raise HTTPException(404, f"Agent '{agent_name}' not found")
@@ -3784,10 +3795,11 @@ async def agent_chat_stream(req: ChatRequest):
 # ── Supervisor Chat ───────────────────────────────────────────────
 
 @app.post("/chat/supervisor/{supervisor_name}")
-async def supervisor_chat(supervisor_name: str, req: ChatRequest):
-    if not orchestrator:
-        raise HTTPException(503, "Not initialized")
-
+async def supervisor_chat(
+    supervisor_name: str,
+    req: ChatRequest,
+    orchestrator: AgentOrchestrator = Depends(get_orchestrator),
+):
     result = orchestrator.chat_with_supervisor(supervisor_name, req.message)
     return result
 
@@ -3795,11 +3807,11 @@ async def supervisor_chat(supervisor_name: str, req: ChatRequest):
 # ── Chat Resume (after human-in-the-loop interrupt) ──────────────
 
 @app.post("/chat/resume")
-async def resume_chat(body: dict[str, Any]):
+async def resume_chat(
+    body: dict[str, Any],
+    orchestrator: AgentOrchestrator = Depends(get_orchestrator),
+):
     """Resume an interrupted agent after human approval/rejection."""
-    if not orchestrator:
-        raise HTTPException(503, "Not initialized")
-
     agent_name = body.get("agent", body.get("agent_name", ""))
     thread_id = body.get("thread_id", "")
     action = body.get("action", "approve")  # "approve" or "reject"
