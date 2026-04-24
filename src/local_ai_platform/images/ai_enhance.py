@@ -713,6 +713,33 @@ def _get_kontext_gguf_variant() -> str:
     return requested
 
 
+def _resolve_kontext_gguf_quant(requested: str | None) -> str:
+    """Resolve the effective Kontext GGUF quant for one edit call.
+
+    [IMPROVE-49] Per ch 7 section IMPROVE-49, callers (editor route
+    → instruct_edit) can now override the quant per-call. The pure-
+    function split keeps the resolution testable without touching the
+    full 5GB pipeline load path.
+
+    Returns the upper-cased quant string when it's valid. Raises
+    ValueError on an unknown value (surfaced by the route as HTTP 400,
+    better than silently ignoring a typo). When ``requested`` is None
+    or blank, falls back to ``_get_kontext_gguf_variant()`` (env-based,
+    pre-IMPROVE-49 behavior).
+    """
+    if requested is None:
+        return _get_kontext_gguf_variant()
+    canonical = str(requested).strip().upper()
+    if not canonical:
+        return _get_kontext_gguf_variant()
+    if canonical not in _KONTEXT_GGUF_VARIANTS:
+        raise ValueError(
+            f"Unknown Kontext GGUF quant '{requested}'. "
+            f"Valid values: {', '.join(_KONTEXT_GGUF_VARIANTS.keys())}"
+        )
+    return canonical
+
+
 def _download_kontext_gguf(variant: str | None = None) -> str:
     """Download FLUX.1 Kontext dev GGUF (variant selected via env var) if not present.
 
@@ -960,7 +987,7 @@ def _load_nunchaku_pipeline() -> Any:
     return pipe
 
 
-def _load_kontext_pipeline() -> Any:
+def _load_kontext_pipeline(gguf_quant: str | None = None) -> Any:
     """Load FLUX.1 Kontext for 8GB VRAM (GGUF backend).
 
     Memory strategy:
@@ -968,29 +995,43 @@ def _load_kontext_pipeline() -> Any:
     - GGUF transformer: stays on CPU until denoising, then cycled to GPU per step.
     - CLIP + VAE: small, moved to GPU normally.
     Peak VRAM ≈ 5.5-7.0GB depending on variant. Requires ~12GB system RAM.
+
+    [IMPROVE-49] ``gguf_quant`` optionally overrides the KONTEXT_GGUF_QUANT
+    env var for this load. Pass one of the keys in _KONTEXT_GGUF_VARIANTS
+    (e.g. ``"Q3_K_S"``, ``"Q5_K_M"``) to switch quant without a server
+    restart — users on 12/16 GB cards can opt into higher-quality quants
+    for a specific edit. Invalid names raise ValueError. None (default)
+    preserves the pre-IMPROVE-49 env-only behavior.
+
+    Cache is keyed ``"kontext:<quant>"`` so different quants can coexist
+    in RAM when hardware allows (rare on 8 GB, common on 16 GB+). On
+    8 GB cards _unload_other_pipelines() will still evict the old quant
+    when a new one loads, since eviction keys-exact-mismatch.
     """
     import os
     import time as _time
     global _instruct_pipes
-    if "kontext" in _instruct_pipes:
-        logger.info("[KONTEXT] Using cached pipeline")
-        return _instruct_pipes["kontext"]
+
+    _gguf_variant = _resolve_kontext_gguf_quant(gguf_quant)
+    _cache_key = f"kontext:{_gguf_variant}"
+    if _cache_key in _instruct_pipes:
+        logger.info("[KONTEXT] Using cached pipeline (quant=%s)", _gguf_variant)
+        return _instruct_pipes[_cache_key]
 
     import torch
 
-    logger.info("[KONTEXT] Backend: GGUF")
+    logger.info("[KONTEXT] Backend: GGUF (quant=%s)", _gguf_variant)
     logger.info("[KONTEXT] ====== Starting Kontext pipeline load ======")
     _log_vram("Before load")
-    _unload_other_pipelines("kontext")
+    _unload_other_pipelines(_cache_key)
     # Evict Ollama LLM from VRAM — it holds ~7GB which leaves no room for the
     # 6.7GB GGUF transformer. Ollama reloads automatically on next chat request.
     _evict_ollama_from_gpu()
     _log_vram("After unloading other pipelines + Ollama eviction")
 
-    # Resolve the active GGUF variant and compute required VRAM from its table
-    # entry. This lets us scale the precheck threshold to the actual transformer
-    # size rather than hard-coding 7GB (which was Q4_K_S-specific).
-    _gguf_variant = _get_kontext_gguf_variant()
+    # Load the size metadata from _KONTEXT_GGUF_VARIANTS for the already-
+    # resolved quant so the precheck threshold tracks the actual transformer
+    # size (not a hard-coded Q4_K_S-era number).
     _gguf_filename, _gguf_size_gb, _gguf_desc = _KONTEXT_GGUF_VARIANTS[_gguf_variant]
     _required_free_gb = _gguf_size_gb + 0.3  # weights + modest activation headroom
     logger.info("[KONTEXT] Active GGUF variant: %s (~%.1fGB, %s)",
@@ -1245,7 +1286,11 @@ def _load_kontext_pipeline() -> Any:
         if comp is not None and hasattr(comp, "device"):
             logger.info("[KONTEXT] Component '%s' device: %s", comp_name, comp.device)
 
-    _instruct_pipes["kontext"] = pipe
+    # Cache under the quant-aware key so a later load with a different
+    # quant gets a fresh pipeline rather than accidentally hitting this
+    # one. _unload_other_pipelines(_cache_key) above already evicted any
+    # sibling quant on 8 GB cards.
+    _instruct_pipes[_cache_key] = pipe
     _cache_suffix = f", {_cache_applied}" if _cache_applied else ""
     logger.info("[KONTEXT] ====== Pipeline ready — cpu_offload active, T5 on CPU%s (total: %.1fs) ======",
                 _cache_suffix, _time.monotonic() - t0)
@@ -1953,6 +1998,7 @@ def instruct_edit(
     negative_prompt: str = "",
     seed: int | None = None,
     true_cfg_scale: float = 1.0,
+    gguf_quant: str | None = None,
     # Legacy params kept for API compat but unused now
     passes: int = 1,
     preserve_color: float = 0.0,
@@ -1982,6 +2028,13 @@ def instruct_edit(
       TRUE classifier-free guidance with a second uncond forward pass per
       step (doubles inference time). Recommended for strengthening weak
       edits: 2.0-4.0 with negative_prompt="blurry, same as input, unchanged".
+    - gguf_quant: [IMPROVE-49] Kontext GGUF path ONLY. Override the
+      KONTEXT_GGUF_QUANT env var for this call. One of the keys in
+      _KONTEXT_GGUF_VARIANTS (e.g. "Q3_K_S", "Q4_K_S", "Q5_K_M"). None
+      (default) uses the env-configured quant — preserves pre-IMPROVE-49
+      behavior. Ignored for nunchaku (SVDQuant INT4 has no quant choice)
+      and cosxl (not a GGUF model). Invalid values raise ValueError,
+      which the /editor/{session}/edit route converts to HTTP 400.
     """
     if not instruction or not instruction.strip():
         raise ValueError("Edit instruction cannot be empty. Describe what you want to change.")
@@ -2003,6 +2056,11 @@ def instruct_edit(
         "input_width": image.size[0],
         "input_height": image.size[1],
         "seed_set": seed is not None,
+        # [IMPROVE-49] Non-null when the caller opted for a specific quant,
+        # null when falling back to KONTEXT_GGUF_QUANT env default. The
+        # weekly review can answer "how often do users override?" and
+        # "which quants are they picking?" from this column.
+        "gguf_quant_requested": gguf_quant,
     }
     _ie_t0 = _time_module.monotonic()
     emit("instruct_edit", "run.start", status="start", context=_ie_ctx)
@@ -2044,12 +2102,20 @@ def instruct_edit(
                     logger.info("[%s] Backend: nunchaku (SVDQuant INT4)", _tag)
                     pipe = _load_nunchaku_pipeline()
                 else:
-                    pipe = _load_kontext_pipeline()
+                    # [IMPROVE-49] Thread per-call quant override. None
+                    # falls back to KONTEXT_GGUF_QUANT env inside the loader.
+                    pipe = _load_kontext_pipeline(gguf_quant=gguf_quant)
             _load_dur_ms = int((_time_k.monotonic() - t_load) * 1000)
             logger.info("[%s] Pipeline ready (%.1fs)", _tag, _load_dur_ms / 1000)
+            _load_context = {"backend": "nunchaku" if _nunchaku_mode else "kontext"}
+            # Record which quant served the call so a weekly review can
+            # answer "are users actually using the override?".
+            if not _nunchaku_mode:
+                _load_context["gguf_quant"] = _resolve_kontext_gguf_quant(gguf_quant)
+                _load_context["gguf_quant_overridden"] = gguf_quant is not None
             emit("instruct_edit", "load", status="ok",
                  duration_ms=_load_dur_ms,
-                 context={"backend": "nunchaku" if _nunchaku_mode else "kontext"})
+                 context=_load_context)
             _log_vram("Before inference")
 
             # Resize input image to fit in 8GB VRAM.

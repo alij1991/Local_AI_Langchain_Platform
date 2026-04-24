@@ -73,6 +73,11 @@ class _EditorPageState extends State<EditorPage> {
   // Kontext-specific — seed for reproducibility, true_cfg_scale for real CFG
   final _seedController = TextEditingController();  // empty = random
   double _trueCfgScale = 1.0;  // 1.0 = distilled only (default); >1.0 = real CFG
+  // [IMPROVE-49] Per-call Kontext GGUF quant override.
+  // null = use KONTEXT_GGUF_QUANT env default on the server.
+  // One of the keys in _KONTEXT_GGUF_VARIANTS (ai_enhance.py:~687).
+  // Nunchaku doesn't expose this (SVDQuant INT4 has no quant choice).
+  String? _kontextGgufQuant;
   final _negPromptController = TextEditingController(
     text: 'blurry, low quality, distorted, deformed, ugly, grayscale',
   );
@@ -1292,6 +1297,45 @@ class _EditorPageState extends State<EditorPage> {
 
             // ── Model-specific controls ──
 
+            // [IMPROVE-49] Kontext-only: per-call GGUF quant override.
+            // Nunchaku is INT4 SVDQuant end-to-end, no quant options. Lower
+            // quants (Q2_K, Q3_K_S) fit on 8 GB with headroom; higher ones
+            // (Q5_K_S+) need 12 GB+. Null = use server's env default.
+            if (_instructModel == 'kontext')
+              Padding(
+                padding: const EdgeInsets.symmetric(vertical: 4),
+                child: Row(
+                  children: [
+                    const Text('GGUF Quant', style: TextStyle(fontSize: 11)),
+                    const SizedBox(width: 8),
+                    Expanded(
+                      child: DropdownButtonFormField<String?>(
+                        value: _kontextGgufQuant,
+                        isDense: true,
+                        decoration: const InputDecoration(
+                          isDense: true,
+                          contentPadding: EdgeInsets.symmetric(horizontal: 8, vertical: 6),
+                          border: OutlineInputBorder(),
+                        ),
+                        items: const [
+                          DropdownMenuItem<String?>(value: null, child: Text('Default (server env)', style: TextStyle(fontSize: 11))),
+                          DropdownMenuItem<String?>(value: 'Q2_K', child: Text('Q2_K — ~3.7 GB, lowest quality (8 GB + headroom)', style: TextStyle(fontSize: 11))),
+                          DropdownMenuItem<String?>(value: 'Q3_K_S', child: Text('Q3_K_S — ~4.9 GB, good (8 GB recommended)', style: TextStyle(fontSize: 11))),
+                          DropdownMenuItem<String?>(value: 'Q3_K_M', child: Text('Q3_K_M — ~5.0 GB, better', style: TextStyle(fontSize: 11))),
+                          DropdownMenuItem<String?>(value: 'Q4_0', child: Text('Q4_0 — ~6.3 GB, tight on 8 GB', style: TextStyle(fontSize: 11))),
+                          DropdownMenuItem<String?>(value: 'Q4_K_S', child: Text('Q4_K_S — ~6.3 GB, tight on 8 GB', style: TextStyle(fontSize: 11))),
+                          DropdownMenuItem<String?>(value: 'Q4_K_M', child: Text('Q4_K_M — ~6.5 GB, needs clean GPU', style: TextStyle(fontSize: 11))),
+                          DropdownMenuItem<String?>(value: 'Q5_K_S', child: Text('Q5_K_S — ~7.7 GB, needs 12 GB+', style: TextStyle(fontSize: 11))),
+                          DropdownMenuItem<String?>(value: 'Q6_K', child: Text('Q6_K — ~9.2 GB, needs 12 GB+', style: TextStyle(fontSize: 11))),
+                          DropdownMenuItem<String?>(value: 'Q8_0', child: Text('Q8_0 — ~11.8 GB, needs 16 GB+', style: TextStyle(fontSize: 11))),
+                        ],
+                        onChanged: (v) => setState(() => _kontextGgufQuant = v),
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+
             // Kontext / Nunchaku: guidance + steps + seed + true_cfg + negative_prompt
             if (_instructModel == 'kontext' || _instructModel == 'nunchaku') ...[
               _editSlider('Guidance', _editGuidance, 1.0, 10.0, (v) => _editGuidance = v,
@@ -1464,6 +1508,12 @@ class _EditorPageState extends State<EditorPage> {
                           editParams['negative_prompt'] = neg;
                         }
                       }
+                    }
+                    // [IMPROVE-49] Per-call GGUF quant override (kontext only).
+                    // Only forward when the user explicitly picked one — null
+                    // leaves the server's KONTEXT_GGUF_QUANT env as the default.
+                    if (_instructModel == 'kontext' && _kontextGgufQuant != null) {
+                      editParams['gguf_quant'] = _kontextGgufQuant;
                     }
                     _applyEdit('instruct_edit', editParams);
                   },
