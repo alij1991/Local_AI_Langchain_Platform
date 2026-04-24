@@ -7,26 +7,84 @@ imports the routers at the bottom of its body, so any router module
 that did ``from api_server import _foo`` at module scope would race
 the partial-init state of api_server).
 
-The single hardware-fit chain lives here:
+Two clusters of cross-router helpers:
 
-  _get_gpu_vram_gb()
-    └── used by _assess_hardware_fit, _hf_download_worker (models)
-  _estimate_vram_required_gb()
-    └── used only by _assess_hardware_fit
-  _assess_hardware_fit()
-    └── used by /models/* (4 callsites) and /images/models (1 callsite)
+  Cache layer (used by ``system`` for /health+/providers, by ``models``
+  for /models/* catalog, ollama-library, hf-discover, etc.):
+    _cache, _CACHE_TTL, _cached, _set_cache, _is_empty_result,
+    _invalidate_cache.
+
+  Hardware-fit chain (used by ``models`` for /models/hf/discover and by
+  ``images`` for /images/models):
+    _get_gpu_vram_gb, _estimate_vram_required_gb, _assess_hardware_fit.
 
 Everything else stayed module-local in api_server.py because it's only
-used by a single router (caches/quant detection → models, JSON-from-LLM
+used by a single router (quant detection → models, JSON-from-LLM
 extraction → images, system validation → systems, etc.).
+
+The cache is a single in-process dict guarded only by Starlette's
+single-threaded async loop — same invariant the pre-[IMPROVE-1] code
+relied on. Don't add a lock unless we move to a multi-process layout.
 
 References (2025–2026):
 * PyTorch CUDA memory model — https://pytorch.org/docs/stable/notes/cuda.html
 * HuggingFace memory estimation — https://huggingface.co/docs/accelerate/usage_guides/model_size_estimator
+* FastAPI Bigger Applications — https://fastapi.tiangolo.com/tutorial/bigger-applications/
 """
 from __future__ import annotations
 
+import time
 from typing import Any
+
+
+# ── TTL cache ─────────────────────────────────────────────────────
+
+
+_cache: dict[str, tuple[float, Any]] = {}
+_CACHE_TTL = 30  # seconds
+
+
+def _cached(key: str, ttl: float = _CACHE_TTL) -> Any | None:
+    """Return cached value if still fresh, else None."""
+    entry = _cache.get(key)
+    if entry and (time.monotonic() - entry[0]) < ttl:
+        return entry[1]
+    return None
+
+
+def _set_cache(key: str, value: Any, skip_empty: bool = False) -> Any:
+    """Store value in cache and return it. Skip caching empty results if requested."""
+    if skip_empty and _is_empty_result(value):
+        return value
+    _cache[key] = (time.monotonic(), value)
+    return value
+
+
+def _is_empty_result(value: Any) -> bool:
+    """Check if a value is an empty result that shouldn't be cached."""
+    if isinstance(value, dict):
+        items = value.get("items", value.get("models", None))
+        if isinstance(items, list) and len(items) == 0:
+            return True
+        # dict like {"ollama": [], "huggingface": []} → all empty
+        if all(isinstance(v, list) and len(v) == 0 for v in value.values()):
+            return True
+    if isinstance(value, list) and len(value) == 0:
+        return True
+    return False
+
+
+def _invalidate_cache(prefix: str = "") -> None:
+    """Clear cache entries matching prefix (or all if empty)."""
+    if not prefix:
+        _cache.clear()
+    else:
+        for k in list(_cache):
+            if k.startswith(prefix):
+                del _cache[k]
+
+
+# ── Hardware-fit estimator chain ──────────────────────────────────
 
 
 def _get_gpu_vram_gb() -> float:
