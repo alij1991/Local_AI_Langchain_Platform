@@ -174,6 +174,21 @@ def get_router_or_none(request: Request) -> ProviderRouter | None:
     return getattr(request.app.state, "router", None)
 
 
+def get_ollama_ctrl_or_none(request: Request) -> OllamaController | None:
+    """Optional variant of ``get_ollama_ctrl`` for endpoints like
+    ``/models/ollama/library`` that render a curated catalog even when
+    the Ollama controller isn't ready (e.g. daemon is down). Returning
+    503 there would blank the Flutter model browser."""
+    return getattr(request.app.state, "ollama_ctrl", None)
+
+
+def get_hf_ctrl_or_none(request: Request) -> HuggingFaceController | None:
+    """Optional variant of ``get_hf_ctrl`` for endpoints like
+    ``/model-catalog/{provider}/.../details`` that fall back to a
+    minimal response when the HF controller is missing."""
+    return getattr(request.app.state, "hf_ctrl", None)
+
+
 def get_image_service_or_none(request: Request) -> ImageGenerationService | None:
     """Optional variant of ``get_image_service`` for endpoints that
     have a graceful fallback (e.g. return ``{"items": []}``) instead
@@ -757,9 +772,9 @@ async def quick_benchmark(
 # ── Models ────────────────────────────────────────────────────────
 
 @app.get("/models")
-async def get_all_models():
-    if not router:
-        raise HTTPException(503, "Not initialized")
+async def get_all_models(
+    router: ProviderRouter = Depends(get_router),
+):
     models = router.list_all_models()
     return {
         "models": [
@@ -793,11 +808,9 @@ async def get_model_catalog(
     supports_vision: bool = False,
     supports_streaming: bool = False,
     scope: str | None = None,
+    router: ProviderRouter = Depends(get_router),
 ):
     """Unified model catalog for the Flutter Models page."""
-    if not router:
-        raise HTTPException(503, "Not initialized")
-
     items: list[dict[str, Any]] = []
 
     # Collect models from requested providers (with TTL cache)
@@ -840,11 +853,10 @@ async def get_model_catalog(
 
 
 @app.get("/models/available")
-async def get_available_models():
+async def get_available_models(
+    router: ProviderRouter = Depends(get_router),
+):
     """Return models grouped by provider for agent creation dropdowns."""
-    if not router:
-        raise HTTPException(503, "Not initialized")
-
     cached = _cached("models:available")
     if cached is not None:
         return cached
@@ -865,11 +877,11 @@ async def get_available_models():
 
 
 @app.get("/models/chat-capable")
-async def get_chat_capable_models():
+async def get_chat_capable_models(
+    router: ProviderRouter = Depends(get_router),
+    image_service: ImageGenerationService | None = Depends(get_image_service_or_none),
+):
     """Return models that support chat, with rich metadata for the chat page."""
-    if not router:
-        raise HTTPException(503, "Not initialized")
-
     cached = _cached("models:chat-capable")
     if cached is not None:
         return cached
@@ -1148,14 +1160,16 @@ async def refresh_models(provider: str | None = None):
 
 
 @app.post("/models/unload")
-async def unload_model(model_name: str = "", provider: str = ""):
+async def unload_model(
+    model_name: str = "",
+    provider: str = "",
+    router: ProviderRouter = Depends(get_router),
+):
     """Unload a model from memory to free GPU/CPU RAM.
 
     Useful when switching between large models or before image generation
     to reclaim VRAM on constrained hardware.
     """
-    if not router:
-        raise HTTPException(503, "Not initialized")
     unloaded = []
     for name, prov in router._providers.items():
         if provider and name != provider:
@@ -1180,9 +1194,9 @@ async def unload_model(model_name: str = "", provider: str = ""):
 
 
 @app.get("/models/ollama")
-async def get_ollama_models():
-    if not ollama_ctrl:
-        raise HTTPException(503, "Not initialized")
+async def get_ollama_models(
+    ollama_ctrl: OllamaController = Depends(get_ollama_ctrl),
+):
     ok, infos, err = ollama_ctrl.list_local_models_detailed()
     if not ok:
         raise HTTPException(500, err)
@@ -1207,25 +1221,31 @@ _ollama_pulls: dict[str, dict[str, Any]] = {}  # name → {status, progress, err
 
 
 @app.post("/models/ollama/pull")
-async def pull_ollama_model(req: ModelLoadRequest):
+async def pull_ollama_model(
+    req: ModelLoadRequest,
+    ollama_ctrl: OllamaController = Depends(get_ollama_ctrl),
+    pulls_state: dict[str, dict[str, Any]] = Depends(get_ollama_pulls_state),
+):
     """Start pulling an Ollama model in the background.  Returns immediately."""
-    if not ollama_ctrl:
-        raise HTTPException(503, "Not initialized")
     name = req.resolved_name
     if not name:
         raise HTTPException(400, "model_name is required")
 
     # If already pulling this model, return current status
-    if name in _ollama_pulls and _ollama_pulls[name]["status"] == "pulling":
-        return {"status": "pulling", "model": name, "progress": _ollama_pulls[name].get("progress", "")}
+    if name in pulls_state and pulls_state[name]["status"] == "pulling":
+        return {"status": "pulling", "model": name, "progress": pulls_state[name].get("progress", "")}
 
-    _ollama_pulls[name] = {"status": "pulling", "progress": "Starting download...", "error": None}
+    pulls_state[name] = {"status": "pulling", "progress": "Starting download...", "error": None}
     logger.info("Starting background pull for model: %s", name)
     emit("model", "download.start", status="start",
          context={"provider": "ollama", "model_id": name})
 
     def _do_pull():
-        """Run the blocking pull in a worker thread."""
+        """Run the blocking pull in a worker thread.
+
+        Captures ``pulls_state`` from the enclosing coroutine so the
+        worker mutates the same dict the next /pull/status GET reads.
+        """
         _pull_t0 = time.monotonic()
         _last_pct_emitted = -1  # track which 10%-bucket we've emitted
         try:
@@ -1253,21 +1273,21 @@ async def pull_ollama_model(req: ModelLoadRequest):
                             _last_pct_emitted = _bucket
                     elif status:
                         last_status = status
-                    _ollama_pulls[name]["progress"] = last_status
+                    pulls_state[name]["progress"] = last_status
                 elif hasattr(progress, "status"):
                     last_status = progress.status or ""
-                    _ollama_pulls[name]["progress"] = last_status
+                    pulls_state[name]["progress"] = last_status
 
-            _ollama_pulls[name]["status"] = "done"
-            _ollama_pulls[name]["progress"] = "Complete"
+            pulls_state[name]["status"] = "done"
+            pulls_state[name]["progress"] = "Complete"
             _invalidate_cache("models:")
             logger.info("Pull complete: %s", name)
             emit("model", "download.done", status="ok",
                  duration_ms=int((time.monotonic() - _pull_t0) * 1000),
                  context={"provider": "ollama", "model_id": name})
         except Exception as exc:
-            _ollama_pulls[name]["status"] = "error"
-            _ollama_pulls[name]["error"] = str(exc)
+            pulls_state[name]["status"] = "error"
+            pulls_state[name]["error"] = str(exc)
             logger.error("Pull failed for %s: %s", name, exc)
             emit("model", "download.error", status="error",
                  duration_ms=int((time.monotonic() - _pull_t0) * 1000),
@@ -1281,19 +1301,25 @@ async def pull_ollama_model(req: ModelLoadRequest):
 
 
 @app.get("/models/ollama/pull/status")
-async def get_ollama_pull_status(model: str | None = None):
+async def get_ollama_pull_status(
+    model: str | None = None,
+    pulls_state: dict[str, dict[str, Any]] = Depends(get_ollama_pulls_state),
+):
     """Check progress of active Ollama model pulls."""
     if model:
-        info = _ollama_pulls.get(model)
+        info = pulls_state.get(model)
         if not info:
             return {"status": "unknown", "model": model}
         return {"model": model, **info}
     # Return all active pulls
-    return {"pulls": {k: v for k, v in _ollama_pulls.items()}}
+    return {"pulls": {k: v for k, v in pulls_state.items()}}
 
 
 @app.delete("/models/ollama/{model_id:path}")
-async def delete_ollama_model(model_id: str):
+async def delete_ollama_model(
+    model_id: str,
+    config: AppConfig = Depends(get_app_config),
+):
     """Delete an Ollama model locally."""
     try:
         import urllib.request
@@ -1342,13 +1368,21 @@ def _estimate_ollama_variant_size(variant_str: str) -> dict[str, Any]:
 
 
 @app.get("/models/ollama/library")
-async def get_ollama_library(search: str | None = None, tag: str | None = None):
+async def get_ollama_library(
+    search: str | None = None,
+    tag: str | None = None,
+    ollama_ctrl: OllamaController | None = Depends(get_ollama_ctrl_or_none),
+    router: ProviderRouter | None = Depends(get_router_or_none),
+):
     """Return comprehensive Ollama model library with variants grouped under base model.
 
     Combines: (1) trending models from /api/tags, (2) scraping ollama.com/search for
     broader results, and (3) a curated catalog of popular models for when the remote
     is unavailable.  Each model is grouped by base name with available parameter
     sizes listed as variants (e.g. llama3.2 → [1b, 3b]).
+
+    Graceful: if ollama_ctrl/router aren't ready the curated catalog still
+    renders — Flutter's model browser must not flash 503 during boot.
     """
     cache_key = f"ollama:library:{search or ''}:{tag or ''}"
     cached = _cached(cache_key, ttl=300)
@@ -1609,9 +1643,9 @@ async def get_ollama_library(search: str | None = None, tag: str | None = None):
 
 
 @app.get("/models/huggingface")
-async def get_hf_models():
-    if not hf_ctrl:
-        raise HTTPException(503, "Not initialized")
+async def get_hf_models(
+    hf_ctrl: HuggingFaceController = Depends(get_hf_ctrl),
+):
     models = hf_ctrl.configured_models()
     return {
         "models": [
@@ -1622,9 +1656,11 @@ async def get_hf_models():
 
 
 @app.get("/models/huggingface/{model_id:path}/metadata")
-async def get_hf_metadata(model_id: str, refresh: bool = False):
-    if not hf_ctrl:
-        raise HTTPException(503, "Not initialized")
+async def get_hf_metadata(
+    model_id: str,
+    refresh: bool = False,
+    hf_ctrl: HuggingFaceController = Depends(get_hf_ctrl),
+):
     return hf_ctrl.model_metadata(model_id, refresh=refresh)
 
 
@@ -2589,7 +2625,10 @@ async def discover_hf_models(
 
 
 @app.get("/models/vllm/library")
-async def get_vllm_library(search: str = ""):
+async def get_vllm_library(
+    search: str = "",
+    router: ProviderRouter | None = Depends(get_router_or_none),
+):
     """Return popular vLLM-compatible models from HuggingFace."""
     items: list[dict[str, Any]] = []
     try:
@@ -2667,7 +2706,14 @@ async def get_vllm_library(search: str = ""):
 _hf_downloads: dict[str, dict[str, Any]] = {}  # model_id → {status, progress, error, ...}
 
 
-def _hf_download_worker(model_id: str, token: str | None, *, gguf_filename: str | None = None) -> None:
+def _hf_download_worker(
+    model_id: str,
+    token: str | None,
+    *,
+    gguf_filename: str | None = None,
+    downloads_state: dict[str, dict[str, Any]],
+    image_service: ImageGenerationService | None = None,
+) -> None:
     """Background thread that downloads a HF model via snapshot_download.
 
     If *gguf_filename* is provided, downloads ONLY that specific GGUF file
@@ -2677,10 +2723,14 @@ def _hf_download_worker(model_id: str, token: str | None, *, gguf_filename: str 
 
     Without *gguf_filename*, uses allow_patterns to grab the pipeline files
     that diffusers/transformers need (safetensors weights, configs, tokenizers).
+
+    [IMPROVE-5] ``downloads_state`` + ``image_service`` are passed
+    explicitly instead of read from module globals so Commit 3 can
+    delete those globals without the worker going stale.
     """
     import threading
     download_key = f"{model_id}:{gguf_filename}" if gguf_filename else model_id
-    _hf_downloads[download_key] = {
+    downloads_state[download_key] = {
         "model_id": model_id,
         "gguf_filename": gguf_filename,
         "status": "downloading",
@@ -2834,8 +2884,8 @@ def _hf_download_worker(model_id: str, token: str | None, *, gguf_filename: str 
                 ignore_patterns=_ignore,
             )
 
-        _hf_downloads[download_key]["status"] = "completed"
-        _hf_downloads[download_key]["progress"] = 1.0
+        downloads_state[download_key]["status"] = "completed"
+        downloads_state[download_key]["progress"] = 1.0
         logger.info("HF download completed: %s%s", model_id, f" ({gguf_filename})" if gguf_filename else "")
         # Invalidate model caches so new model shows up
         _invalidate_cache("models")
@@ -2850,8 +2900,8 @@ def _hf_download_worker(model_id: str, token: str | None, *, gguf_filename: str 
                       "gguf_filename": gguf_filename,
                       "download_key": download_key})
     except Exception as exc:
-        _hf_downloads[download_key]["status"] = "failed"
-        _hf_downloads[download_key]["error"] = str(exc)
+        downloads_state[download_key]["status"] = "failed"
+        downloads_state[download_key]["error"] = str(exc)
         logger.warning("HF download failed for %s: %s", model_id, exc)
         emit("model", "download.error", status="error",
              duration_ms=int((time.monotonic() - _hf_t0) * 1000),
@@ -2863,10 +2913,13 @@ def _hf_download_worker(model_id: str, token: str | None, *, gguf_filename: str 
 
 
 @app.get("/models/hf/downloads")
-async def get_hf_downloads(limit: int = 20):
+async def get_hf_downloads(
+    limit: int = 20,
+    downloads_state: dict[str, dict[str, Any]] = Depends(get_hf_downloads_state),
+):
     """Return active/recent HF download jobs."""
     items = []
-    for mid, info in list(_hf_downloads.items()):
+    for mid, info in list(downloads_state.items()):
         items.append({
             "model_id": info["model_id"],
             "status": info["status"],
@@ -2877,7 +2930,12 @@ async def get_hf_downloads(limit: int = 20):
 
 
 @app.post("/models/hf/download")
-async def start_hf_download(body: dict[str, Any]):
+async def start_hf_download(
+    body: dict[str, Any],
+    config: AppConfig = Depends(get_app_config),
+    downloads_state: dict[str, dict[str, Any]] = Depends(get_hf_downloads_state),
+    image_service: ImageGenerationService | None = Depends(get_image_service_or_none),
+):
     """Start downloading a HF model in a background thread.
 
     Body:
@@ -2896,15 +2954,22 @@ async def start_hf_download(body: dict[str, Any]):
     download_key = f"{model_id}:{gguf_filename}" if gguf_filename else model_id
 
     # Check if already downloading
-    existing = _hf_downloads.get(download_key)
+    existing = downloads_state.get(download_key)
     if existing and existing.get("status") == "downloading":
         return {"status": "already_downloading", "model_id": model_id}
 
     token = (config.hf_api_token or "").strip() or None
+    # Pass state dict + image_service to the worker so the background
+    # thread can mutate progress + refresh the image catalog without
+    # reaching for module globals that Commit 3 will delete.
     thread = threading.Thread(
         target=_hf_download_worker,
         args=(model_id, token),
-        kwargs={"gguf_filename": gguf_filename},
+        kwargs={
+            "gguf_filename": gguf_filename,
+            "downloads_state": downloads_state,
+            "image_service": image_service,
+        },
         daemon=True,
     )
     thread.start()
@@ -2916,7 +2981,13 @@ async def start_hf_download(body: dict[str, Any]):
 
 
 @app.get("/model-catalog/{provider}/{model_id:path}/details")
-async def get_model_details(provider: str, model_id: str, refresh: bool = False):
+async def get_model_details(
+    provider: str,
+    model_id: str,
+    refresh: bool = False,
+    hf_ctrl: HuggingFaceController | None = Depends(get_hf_ctrl_or_none),
+    router: ProviderRouter | None = Depends(get_router_or_none),
+):
     """Get detailed metadata for a specific model."""
     if provider == "huggingface" and hf_ctrl:
         return hf_ctrl.model_metadata(model_id, refresh=refresh)
@@ -2930,7 +3001,10 @@ async def get_model_details(provider: str, model_id: str, refresh: bool = False)
 
 
 @app.get("/models/hf/{model_id:path}/readme")
-async def get_hf_model_readme(model_id: str):
+async def get_hf_model_readme(
+    model_id: str,
+    config: AppConfig = Depends(get_app_config),
+):
     """Fetch model card README + rich metadata from HuggingFace.
 
     Uses model_info() for structured data (gated status, files, storage,
