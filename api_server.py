@@ -189,6 +189,14 @@ def get_hf_ctrl_or_none(request: Request) -> HuggingFaceController | None:
     return getattr(request.app.state, "hf_ctrl", None)
 
 
+def get_trace_store_or_none(request: Request) -> TraceStore | None:
+    """Optional variant of ``get_trace_store``. /runs, /runs/compare,
+    and /traces all degrade to empty-list responses when tracing is
+    disabled or the store isn't ready — otherwise the Runs tab in
+    Flutter would 503 on any clean install that hasn't opted in."""
+    return getattr(request.app.state, "trace_store", None)
+
+
 def get_image_service_or_none(request: Request) -> ImageGenerationService | None:
     """Optional variant of ``get_image_service`` for endpoints that
     have a graceful fallback (e.g. return ``{"items": []}``) instead
@@ -591,7 +599,12 @@ def _model_info_to_catalog_item(m: Any, provider_name: str | None = None) -> dic
 # ── Health & Info ─────────────────────────────────────────────────
 
 @app.get("/health")
-async def health():
+async def health(
+    router: ProviderRouter | None = Depends(get_router_or_none),
+    orchestrator: AgentOrchestrator | None = Depends(get_orchestrator_or_none),
+):
+    # Graceful on purpose: /health must answer 200 even during
+    # lifespan startup so container/readiness probes don't flap.
     providers = _cached("providers:available")
     if providers is None and router:
         providers = _set_cache("providers:available", router.available_providers)
@@ -603,9 +616,9 @@ async def health():
 
 
 @app.get("/providers")
-async def list_providers():
-    if not router:
-        raise HTTPException(503, "Not initialized")
+async def list_providers(
+    router: ProviderRouter = Depends(get_router),
+):
     providers = _cached("providers:available")
     if providers is None:
         providers = _set_cache("providers:available", router.available_providers)
@@ -686,15 +699,13 @@ async def quick_benchmark(
     provider: str = Query("ollama", description="Provider name"),
     prompt: str = Query("Explain the concept of recursion in programming.", description="Test prompt"),
     max_tokens: int = Query(128, description="Max tokens to generate"),
+    router: ProviderRouter = Depends(get_router),
 ):
     """Run a quick benchmark: TTFT, decode tok/s, peak memory.
 
     Based on the reproducible benchmark protocol from
     "Local AI on consumer laptops 2024-2026" research.
     """
-    if not router:
-        raise HTTPException(503, "Not initialized")
-
     import gc
     from local_ai_platform.providers.base import ChatMessage as CM, GenerationSettings as GS
 
@@ -3178,7 +3189,9 @@ async def get_hf_model_readme(
 # ── HuggingFace Token Management ─────────────────────────────────
 
 @app.get("/settings/hf-token")
-async def get_hf_token_status():
+async def get_hf_token_status(
+    config: AppConfig = Depends(get_app_config),
+):
     """Check if a HuggingFace token is configured (never exposes the token)."""
     token = (config.hf_api_token or "").strip()
     if not token:
@@ -3192,7 +3205,10 @@ async def get_hf_token_status():
 
 
 @app.post("/settings/hf-token")
-async def set_hf_token(body: dict[str, Any]):
+async def set_hf_token(
+    body: dict[str, Any],
+    config: AppConfig = Depends(get_app_config),
+):
     """Validate and save a HuggingFace token."""
     token = (body.get("token") or "").strip()
     if not token:
@@ -3217,13 +3233,18 @@ async def set_hf_token(body: dict[str, Any]):
     else:
         env_path.write_text(f"HF_API_TOKEN={token}\n", encoding="utf-8")
 
-    # Update in-memory config
+    # Mutating the shared AppConfig instance is intentional — the
+    # module global and app.state.config point at the same object, so
+    # updating it here keeps /models/hf/* and friends in sync without
+    # a process restart.
     config.hf_api_token = token
     return {"configured": True, "username": username}
 
 
 @app.delete("/settings/hf-token")
-async def delete_hf_token():
+async def delete_hf_token(
+    config: AppConfig = Depends(get_app_config),
+):
     """Remove the HuggingFace token."""
     env_path = Path(".env")
     if env_path.exists():
@@ -4298,7 +4319,10 @@ async def get_conversation_metrics(cid: str):
 
 
 @app.get("/runs/compare")
-async def compare_runs(run_ids: str = Query(..., description="Comma-separated run IDs")):
+async def compare_runs(
+    run_ids: str = Query(..., description="Comma-separated run IDs"),
+    trace_store: TraceStore | None = Depends(get_trace_store_or_none),
+):
     """Compare performance metrics between two runs."""
     ids = [r.strip() for r in run_ids.split(",") if r.strip()]
     if len(ids) < 2:
@@ -4554,10 +4578,12 @@ async def get_system_templates():
 
 
 @app.post("/systems/deploy/{template_id}")
-async def deploy_system_template(template_id: str, body: dict[str, Any] | None = None):
+async def deploy_system_template(
+    template_id: str,
+    body: dict[str, Any] | None = None,
+    orchestrator: AgentOrchestrator = Depends(get_orchestrator),
+):
     """Deploy a system template as a new agent."""
-    if not orchestrator:
-        raise HTTPException(503, "Not initialized")
     if body is None:
         body = {}
 
@@ -4604,11 +4630,14 @@ async def deploy_system_template(template_id: str, body: dict[str, Any] | None =
 
 
 @app.get("/systems/recommend")
-async def recommend_systems():
+async def recommend_systems(
+    router: ProviderRouter | None = Depends(get_router_or_none),
+):
     """Recommend system templates based on available models."""
     from local_ai_platform.system_templates import SYSTEM_TEMPLATES
 
-    # Get available Ollama models
+    # Get available Ollama models (graceful — render catalog even if
+    # the router isn't up yet, e.g. Ollama daemon is down).
     available_models: list[str] = []
     try:
         if router:
@@ -4709,11 +4738,12 @@ async def get_single_system(name: str):
 
 
 @app.post("/systems/{name}/chat")
-async def chat_with_system(name: str, request: Request):
+async def chat_with_system(
+    name: str,
+    request: Request,
+    orchestrator: AgentOrchestrator = Depends(get_orchestrator),
+):
     """Execute a system's agent graph with a user message."""
-    if not orchestrator:
-        raise HTTPException(503, "Not initialized")
-
     # Handle both JSON and multipart form data
     content_type = request.headers.get("content-type", "")
     if "multipart" in content_type:
@@ -6637,7 +6667,11 @@ async def list_controlnet_types():
 # ── Runs (trace viewer) ──────────────────────────────────────────
 
 @app.get("/runs")
-async def get_runs(limit: int = 20, agent: str | None = None):
+async def get_runs(
+    limit: int = 20,
+    agent: str | None = None,
+    trace_store: TraceStore | None = Depends(get_trace_store_or_none),
+):
     """Return runs/traces for the Runs page."""
     if not trace_store:
         return {"items": []}
@@ -6648,10 +6682,11 @@ async def get_runs(limit: int = 20, agent: str | None = None):
 
 
 @app.get("/runs/{run_id}/view")
-async def get_run_view(run_id: str):
+async def get_run_view(
+    run_id: str,
+    trace_store: TraceStore = Depends(get_trace_store),
+):
     """Return detailed run view."""
-    if not trace_store:
-        raise HTTPException(503, "Tracing not enabled")
     trace = trace_store.get(run_id)
     if not trace:
         raise HTTPException(404, "Run not found")
@@ -6682,16 +6717,21 @@ async def get_run_view(run_id: str):
 # ── Traces ────────────────────────────────────────────────────────
 
 @app.get("/traces")
-async def get_traces(conversation_id: str | None = None, limit: int = 20):
+async def get_traces(
+    conversation_id: str | None = None,
+    limit: int = 20,
+    trace_store: TraceStore | None = Depends(get_trace_store_or_none),
+):
     if not trace_store:
         return {"traces": []}
     return {"traces": trace_store.list(conversation_id=conversation_id, limit=limit)}
 
 
 @app.get("/traces/{run_id}")
-async def get_trace(run_id: str):
-    if not trace_store:
-        raise HTTPException(503, "Tracing not enabled")
+async def get_trace(
+    run_id: str,
+    trace_store: TraceStore = Depends(get_trace_store),
+):
     trace = trace_store.get(run_id)
     if not trace:
         raise HTTPException(404, "Trace not found")
