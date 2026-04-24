@@ -20,8 +20,8 @@ def test_load_config_defaults(monkeypatch):
     assert config.ollama_base_url == "http://127.0.0.1:11434"
     assert config.default_model == "gemma3:1b"
     assert config.prompt_builder_model == "gemma3:1b"
-    assert config.hf_default_model == "google/flan-t5-base"
-    assert "microsoft/Phi-3-mini-4k-instruct" in config.hf_model_catalog
+    assert config.hf_default_model == ""
+    assert config.hf_model_catalog == ""
     assert config.hf_device == "auto"
     assert config.gradio_share is False
     assert config.gradio_server_port == 7860
