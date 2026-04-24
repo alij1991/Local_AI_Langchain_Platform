@@ -773,12 +773,76 @@ def _detect_component_base_model(model_id: str) -> str:
     return "unknown"
 
 
+def _read_safetensors_metadata(model_path: str | Path) -> dict[str, str]:
+    """Return the ``__metadata__`` dict from a safetensors file under model_path.
+
+    Diffusers, Kohya SS, and ComfyUI all stamp ground-truth identity into
+    the safetensors header — ``modelspec.architecture`` (``flux-1-dev``,
+    ``stable-diffusion-xl-v1-base``, ...) and ``ss_base_model_version``
+    (``flux1``, ``sdxl_base_v1-0``, ``sd_v1``, ``sd_v2``) are the two
+    useful ones.
+
+    Fast: ``safe_open`` only parses the JSON header — no tensor data is
+    read — so this stays sub-millisecond even on sharded FLUX checkpoints.
+    Returns ``{}`` on any failure (missing file, corrupt, safetensors
+    missing). The caller must treat metadata as a supplement to the
+    existing ``model_index.json`` / path-string signals, NOT the sole
+    source of truth — per ch 6 §IMPROVE-47, many checkpoints omit
+    metadata entirely or carry stale training-time values.
+
+    Sources:
+      - safetensors metadata spec:
+        https://huggingface.co/docs/safetensors/metadata_parsing
+      - ModelSpec architecture tags (Stability AI):
+        https://github.com/Stability-AI/ModelSpec
+    """
+    model_path = Path(model_path)
+    if not model_path.exists():
+        return {}
+
+    # Priority: transformer/ (FLUX, DiT), unet/ (SD family), then whatever
+    # bare .safetensors sits at the root for single-file checkpoints. We
+    # return on the FIRST file that has non-empty metadata — sharded
+    # FLUX checkpoints copy the same header into every shard, so shard 1
+    # is sufficient.
+    candidates: list[Path] = []
+    for sub in ("transformer", "unet"):
+        sub_dir = model_path / sub
+        if sub_dir.is_dir():
+            candidates.extend(sorted(sub_dir.glob("*.safetensors")))
+    if model_path.is_file() and model_path.suffix == ".safetensors":
+        candidates.append(model_path)
+    elif model_path.is_dir():
+        candidates.extend(sorted(model_path.glob("*.safetensors")))
+
+    for f in candidates:
+        try:
+            from safetensors import safe_open
+            with safe_open(str(f), framework="pt") as sf:
+                md = sf.metadata() or {}
+            if md:
+                return dict(md)
+        except Exception:
+            logger.debug(
+                "Failed to read safetensors metadata from %s", f, exc_info=True,
+            )
+            continue
+    return {}
+
+
 def _detect_model_hints(model_path: str | Path) -> dict[str, Any]:
     """Detect the model architecture and return optimal parameter hints.
 
-    Reads model_index.json and scheduler_config.json to identify the model
-    type (SD 1.5, SDXL, Turbo, Flux, DiT, etc.) and returns the best
+    Reads model_index.json, scheduler_config.json, text_encoder/config.json,
+    AND the primary safetensors ``__metadata__`` header to identify the
+    model type (SD 1.5, SDXL, Turbo, Flux, DiT, etc.) and returns the best
     default parameters for that specific architecture.
+
+    Metadata is checked alongside the other signals in each family branch;
+    when present it's authoritative (a filename is easy to fake, a
+    ``modelspec.architecture`` header is not), but it's often missing, so
+    the existing ``model_index.json`` + path-string detection remains the
+    fallback. See [IMPROVE-47] in ch 6 for the full rationale.
     """
     model_path = Path(model_path)
     # Use the full path string for name-based matching (the .name might be a hash)
@@ -832,6 +896,14 @@ def _detect_model_hints(model_path: str | Path) -> dict[str, Any]:
     sched_class = str(sched_data.get("_class_name") or "")
     te_arch = str(te_data.get("architectures", [""])[0] if te_data.get("architectures") else "")
 
+    # Ground-truth signals from the safetensors header, when available.
+    # Combined into a single lowercased haystack the branches below OR
+    # into their existing pipeline_class / path_str_lower checks.
+    st_metadata = _read_safetensors_metadata(model_path)
+    metadata_arch = str(st_metadata.get("modelspec.architecture") or "").lower()
+    metadata_kohya = str(st_metadata.get("ss_base_model_version") or "").lower()
+    metadata_hits = f"{metadata_arch} {metadata_kohya}"
+
     # ── Detect model family from pipeline + scheduler + text encoder ──
 
     # ── Detect model family from pipeline + scheduler + text encoder ──
@@ -868,8 +940,10 @@ def _detect_model_hints(model_path: str | Path) -> dict[str, Any]:
         })
 
     # Flux models
-    elif "Flux" in pipeline_class or "flux" in path_str_lower:
-        is_schnell = "schnell" in path_str_lower
+    # Metadata: ``flux-1-dev``/``flux-1-schnell`` (modelspec) or ``flux1``
+    # (Kohya SS) — authoritative when present.
+    elif "Flux" in pipeline_class or "flux" in path_str_lower or "flux" in metadata_hits:
+        is_schnell = "schnell" in path_str_lower or "schnell" in metadata_hits
         hints.update({
             "model_family": "flux",
             "model_variant": "schnell" if is_schnell else "dev",
@@ -902,8 +976,15 @@ def _detect_model_hints(model_path: str | Path) -> dict[str, Any]:
         })
 
     # SDXL Turbo / Lightning / LCM (distilled SDXL)
-    elif ("SDXL" in pipeline_class or "stable-diffusion-xl" in path_str_lower or "sdxl" in path_str_lower):
-        is_turbo = any(k in path_str_lower for k in ("turbo", "lightning", "lcm", "hyper"))
+    # Metadata: ``stable-diffusion-xl-v1-base`` (modelspec) or
+    # ``sdxl_base_v1-0`` (Kohya SS).
+    elif ("SDXL" in pipeline_class or "stable-diffusion-xl" in path_str_lower
+          or "sdxl" in path_str_lower or "sdxl" in metadata_hits
+          or "stable-diffusion-xl" in metadata_hits):
+        is_turbo = (
+            any(k in path_str_lower for k in ("turbo", "lightning", "lcm", "hyper"))
+            or any(k in metadata_hits for k in ("turbo", "lightning", "lcm", "hyper"))
+        )
         if is_turbo:
             hints.update({
                 "model_family": "sdxl",
@@ -952,8 +1033,14 @@ def _detect_model_hints(model_path: str | Path) -> dict[str, Any]:
             })
 
     # SD 1.5 Turbo / LCM variants
-    elif any(k in path_str_lower for k in ("turbo", "lightning", "lcm", "hyper")) and \
-         "xl" not in path_str_lower:
+    # Metadata path: only reached when Flux + SDXL branches above already
+    # missed, so we just require a turbo/lcm-like keyword and no "xl" in
+    # the metadata hits (guards against an exotic ``sdxl_turbo_v1`` that
+    # somehow didn't match SDXL pipeline_class).
+    elif (any(k in path_str_lower for k in ("turbo", "lightning", "lcm", "hyper")) and
+          "xl" not in path_str_lower) or (
+          any(k in metadata_hits for k in ("turbo", "lightning", "lcm", "hyper")) and
+          "xl" not in metadata_hits):
         hints.update({
             "model_family": "sd15",
             "model_variant": "turbo",
@@ -976,8 +1063,16 @@ def _detect_model_hints(model_path: str | Path) -> dict[str, Any]:
         })
 
     # Standard SD 1.x / 2.x
-    elif "StableDiffusion" in pipeline_class or "stable-diffusion" in path_str_lower:
-        is_v2 = "2" in path_str_lower or "v2" in path_str_lower
+    # Metadata: ``stable-diffusion-v1`` / ``stable-diffusion-v2``
+    # (modelspec) or ``sd_v1`` / ``sd_v2`` (Kohya SS).
+    elif ("StableDiffusion" in pipeline_class or "stable-diffusion" in path_str_lower
+          or "stable-diffusion-v1" in metadata_hits
+          or "stable-diffusion-v2" in metadata_hits
+          or "sd_v1" in metadata_hits or "sd_v2" in metadata_hits):
+        is_v2 = (
+            "2" in path_str_lower or "v2" in path_str_lower
+            or "stable-diffusion-v2" in metadata_hits or "sd_v2" in metadata_hits
+        )
         if is_v2:
             hints.update({
                 "model_family": "sd2",
@@ -1035,8 +1130,10 @@ def _detect_model_hints(model_path: str | Path) -> dict[str, Any]:
             })
 
     # Pixart / DiT-based models
-    elif "PixArt" in pipeline_class or "pixart" in path_str_lower:
-        is_sigma = "sigma" in path_str_lower
+    # Metadata: ``pixart-alpha`` / ``pixart-sigma`` (modelspec).
+    elif ("PixArt" in pipeline_class or "pixart" in path_str_lower
+          or "pixart" in metadata_hits):
+        is_sigma = "sigma" in path_str_lower or "sigma" in metadata_hits
         hints.update({
             "model_family": "pixart",
             "model_variant": "sigma" if is_sigma else "alpha",
@@ -1123,6 +1220,31 @@ def _detect_model_hints(model_path: str | Path) -> dict[str, Any]:
                 "Negative prompts have no effect",
             ],
         })
+
+    # Record which signals were available, so a later review query can
+    # answer "how often did safetensors metadata contribute vs. pipeline
+    # class vs. path-string matching?" — the whole point of IMPROVE-47 is
+    # improving the signal mix, and we can only tell if we log it. The
+    # event fires once per detect call (user-triggered, not hot-path).
+    try:
+        emit(
+            "images", "detect_hints",
+            status="ok" if hints["model_family"] != "unknown" else "error",
+            error_code=None if hints["model_family"] != "unknown" else "UnknownFamily",
+            context={
+                "family": hints["model_family"],
+                "variant": hints.get("model_variant"),
+                "has_pipeline_class": bool(pipeline_class),
+                "has_sched_class": bool(sched_class),
+                "has_te_arch": bool(te_arch),
+                "has_safetensors_metadata": bool(st_metadata),
+                "metadata_arch": metadata_arch or None,
+                "metadata_kohya": metadata_kohya or None,
+            },
+        )
+    except Exception:
+        # Never let telemetry break detection.
+        logger.debug("emit(images.detect_hints) failed", exc_info=True)
 
     return hints
 
