@@ -201,6 +201,31 @@ def get_editor_service(request: Request):
     return svc
 
 
+def get_partner_engine(
+    request: Request,
+    router: ProviderRouter = Depends(get_router),
+    config: AppConfig = Depends(get_app_config),
+):
+    """Lazy-init the PartnerEngine on ``app.state`` and return it.
+
+    [IMPROVE-5] Replaces the module-global ``_partner_engine`` +
+    ``_get_partner()`` factory. PartnerEngine owns voice models,
+    mem0 retry state, and a few model-specific kwargs — same
+    cache-on-first-use pattern as ``get_editor_service``.
+
+    Takes ``router`` and ``config`` as nested Depends so the
+    constructor args don't have to reach for module globals. The
+    resolved dependencies come from ``app.state.router`` /
+    ``app.state.config`` through the standard Depends chain.
+    """
+    engine = getattr(request.app.state, "_partner_engine", None)
+    if engine is None:
+        from local_ai_platform.partner.engine import PartnerEngine
+        engine = PartnerEngine(router, config)
+        request.app.state._partner_engine = engine
+    return engine
+
+
 def get_ollama_pulls_state(request: Request) -> dict[str, dict[str, Any]]:
     """In-flight Ollama pull state. Mutating the returned dict is safe
     under Starlette's single-process model (same invariant the old
@@ -4699,46 +4724,61 @@ def _get_partner():
 
 
 @app.get("/partner/profile")
-async def partner_get_profile():
-    return _get_partner().get_profile()
+async def partner_get_profile(partner=Depends(get_partner_engine)):
+    return partner.get_profile()
 
 
 @app.put("/partner/profile")
-async def partner_update_profile(body: dict[str, Any]):
-    return _get_partner().update_profile(body)
+async def partner_update_profile(
+    body: dict[str, Any],
+    partner=Depends(get_partner_engine),
+):
+    return partner.update_profile(body)
 
 
 @app.get("/partner/stats")
-async def partner_stats():
-    return _get_partner().get_stats()
+async def partner_stats(partner=Depends(get_partner_engine)):
+    return partner.get_stats()
 
 
 @app.get("/partner/memories")
-async def partner_memories():
-    return _get_partner().get_memories()
+async def partner_memories(partner=Depends(get_partner_engine)):
+    return partner.get_memories()
 
 
 @app.post("/partner/memories/facts")
-async def partner_add_fact(body: dict[str, Any]):
-    _get_partner().add_fact(body.get("key", ""), body.get("value", ""), body.get("category", "general"))
+async def partner_add_fact(
+    body: dict[str, Any],
+    partner=Depends(get_partner_engine),
+):
+    partner.add_fact(body.get("key", ""), body.get("value", ""), body.get("category", "general"))
     return {"status": "ok"}
 
 
 @app.delete("/partner/memories/facts/{key}")
-async def partner_remove_fact(key: str):
-    _get_partner().remove_fact(key)
+async def partner_remove_fact(
+    key: str,
+    partner=Depends(get_partner_engine),
+):
+    partner.remove_fact(key)
     return {"status": "ok"}
 
 
 @app.post("/partner/memories/key")
-async def partner_add_memory(body: dict[str, Any]):
-    mid = _get_partner().add_memory(body.get("content", ""), body.get("tone", "neutral"), body.get("importance", 5))
+async def partner_add_memory(
+    body: dict[str, Any],
+    partner=Depends(get_partner_engine),
+):
+    mid = partner.add_memory(body.get("content", ""), body.get("tone", "neutral"), body.get("importance", 5))
     return {"id": mid}
 
 
 @app.delete("/partner/memories/key/{memory_id}")
-async def partner_remove_memory(memory_id: int):
-    _get_partner().remove_memory(memory_id)
+async def partner_remove_memory(
+    memory_id: int,
+    partner=Depends(get_partner_engine),
+):
+    partner.remove_memory(memory_id)
     return {"status": "ok"}
 
 
@@ -4767,22 +4807,27 @@ async def partner_archived_memories(limit: int = 50):
 
 
 @app.post("/partner/chat")
-async def partner_chat_sync(body: dict[str, Any]):
+async def partner_chat_sync(
+    body: dict[str, Any],
+    partner=Depends(get_partner_engine),
+):
     message = body.get("message", "")
     model = body.get("model")
     if not message:
         raise HTTPException(400, "message is required")
-    reply = _get_partner().chat(message, model)
+    reply = partner.chat(message, model)
     return {"reply": reply}
 
 
 @app.post("/partner/chat/stream")
-async def partner_chat_stream(body: dict[str, Any]):
+async def partner_chat_stream(
+    body: dict[str, Any],
+    partner=Depends(get_partner_engine),
+):
     """SSE streaming partner chat with typed events.
 
     Events: thinking_pause, token, sentence_complete, done, error
     """
-    partner = _get_partner()
     message = body.get("message", "")
     model = body.get("model")
     enable_pause = body.get("thinking_pause", True)
@@ -4840,19 +4885,19 @@ async def partner_history(limit: int = 50):
 
 
 @app.get("/partner/user-profile")
-async def partner_user_profile():
+async def partner_user_profile(partner=Depends(get_partner_engine)):
     """Return the full user profile (profile dashboard)."""
-    return _get_partner().get_user_profile()
+    return partner.get_user_profile()
 
 
 @app.delete("/partner/user-profile")
-async def partner_reset_user_profile():
+async def partner_reset_user_profile(partner=Depends(get_partner_engine)):
     """One-click profile reset (ethical requirement from research)."""
-    return _get_partner().reset_user_profile()
+    return partner.reset_user_profile()
 
 
 @app.post("/partner/voice/init")
-async def partner_voice_init():
+async def partner_voice_init(partner=Depends(get_partner_engine)):
     """Initialize voice pipeline (ASR + TTS + VAD).
 
     Also frees GPU VRAM by unloading image generation pipelines.
@@ -4860,7 +4905,7 @@ async def partner_voice_init():
     """
     # Free VRAM from image editing/generation pipelines
     freed = _free_gpu_for_partner()
-    result = _get_partner().init_voice()
+    result = partner.init_voice()
     if freed:
         result["vram_freed"] = True
     return result
@@ -4907,18 +4952,20 @@ def _free_gpu_for_partner() -> bool:
 
 
 @app.get("/partner/voice/status")
-async def partner_voice_status():
-    return _get_partner().get_voice_status()
+async def partner_voice_status(partner=Depends(get_partner_engine)):
+    return partner.get_voice_status()
 
 
 @app.post("/partner/voice/synthesize-sentence")
-async def partner_voice_synthesize_sentence(body: dict[str, Any]):
+async def partner_voice_synthesize_sentence(
+    body: dict[str, Any],
+    partner=Depends(get_partner_engine),
+):
     """Synthesize a single sentence — for streaming TTS during chat."""
     sentence = body.get("sentence", body.get("text", ""))
     emotion = body.get("emotion", "neutral")
     if not sentence:
         raise HTTPException(400, "sentence is required")
-    partner = _get_partner()
     t0 = time.monotonic()
     wav_bytes = await asyncio.get_event_loop().run_in_executor(
         None, lambda: partner.synthesize_sentence(sentence, emotion)
@@ -4948,7 +4995,19 @@ async def partner_voice_tts_stream(websocket: WebSocket):
     from fastapi.websockets import WebSocketDisconnect
     await websocket.accept()
 
-    partner = _get_partner()
+    # [IMPROVE-5] WebSocket endpoints can't use HTTP-Request-typed
+    # Depends (``get_partner_engine`` takes ``Request``). Use the
+    # same lazy-init pattern against ``websocket.app.state`` so
+    # the cached engine is shared with the HTTP handlers.
+    partner = getattr(websocket.app.state, "_partner_engine", None)
+    if partner is None:
+        from local_ai_platform.partner.engine import PartnerEngine
+        partner = PartnerEngine(
+            websocket.app.state.router,
+            websocket.app.state.config,
+        )
+        websocket.app.state._partner_engine = partner
+
     if partner._tts is None and partner._tts_emotional is None:
         await websocket.send_json({"error": "TTS not initialized. Call /partner/voice/init first."})
         await websocket.close()
@@ -5007,34 +5066,43 @@ async def partner_voice_tts_stream(websocket: WebSocket):
 
 
 @app.post("/partner/voice/mode")
-async def partner_voice_mode(body: dict[str, Any]):
+async def partner_voice_mode(
+    body: dict[str, Any],
+    partner=Depends(get_partner_engine),
+):
     """Switch TTS mode: 'kokoro' (fast, CPU) or 'chatterbox' (emotional, GPU/CPU)."""
     mode = body.get("mode", "kokoro")
-    result = _get_partner().set_tts_mode(mode)
-    return {"status": result, "mode": _get_partner()._tts_mode}
+    result = partner.set_tts_mode(mode)
+    return {"status": result, "mode": partner._tts_mode}
 
 
 @app.post("/partner/voice/gender")
-async def partner_voice_gender(body: dict[str, Any]):
+async def partner_voice_gender(
+    body: dict[str, Any],
+    partner=Depends(get_partner_engine),
+):
     """Set voice gender: 'female' or 'male'."""
     gender = body.get("gender", "female")
-    result = _get_partner().set_voice_gender(gender)
-    return {"status": result, "gender": _get_partner().get_voice_gender()}
+    result = partner.set_voice_gender(gender)
+    return {"status": result, "gender": partner.get_voice_gender()}
 
 
 @app.get("/partner/voice/gender")
-async def partner_voice_gender_get():
-    return {"gender": _get_partner().get_voice_gender()}
+async def partner_voice_gender_get(partner=Depends(get_partner_engine)):
+    return {"gender": partner.get_voice_gender()}
 
 
 @app.post("/partner/voice/transcribe")
-async def partner_voice_transcribe(body: dict[str, Any]):
+async def partner_voice_transcribe(
+    body: dict[str, Any],
+    partner=Depends(get_partner_engine),
+):
     """Transcribe audio to text via faster-whisper."""
     audio_path = body.get("audio_path", "")
     if not audio_path:
         raise HTTPException(400, "audio_path is required")
     try:
-        text = _get_partner().transcribe(audio_path)
+        text = partner.transcribe(audio_path)
         return {"text": text}
     except RuntimeError as e:
         raise HTTPException(422, str(e))
@@ -5053,7 +5121,18 @@ async def partner_voice_stream_transcribe(websocket: WebSocket):
     from fastapi.websockets import WebSocketDisconnect
     await websocket.accept()
 
-    partner = _get_partner()
+    # [IMPROVE-5] Same ``app.state`` lazy-init pattern as
+    # partner_voice_tts_stream — WebSocket can't use HTTP-Request
+    # Depends helpers.
+    partner = getattr(websocket.app.state, "_partner_engine", None)
+    if partner is None:
+        from local_ai_platform.partner.engine import PartnerEngine
+        partner = PartnerEngine(
+            websocket.app.state.router,
+            websocket.app.state.config,
+        )
+        websocket.app.state._partner_engine = partner
+
     if partner._asr is None:
         await websocket.send_json({"error": "ASR not initialized. Call /partner/voice/init first."})
         await websocket.close()
@@ -5158,14 +5237,16 @@ async def partner_voice_stream_transcribe(websocket: WebSocket):
 
 
 @app.post("/partner/voice/synthesize")
-async def partner_voice_synthesize(body: dict[str, Any]):
+async def partner_voice_synthesize(
+    body: dict[str, Any],
+    partner=Depends(get_partner_engine),
+):
     """Synthesize text to speech via Kokoro TTS. Returns WAV audio."""
     text = body.get("text", "")
     voice = body.get("voice")
     emotion = body.get("emotion", "neutral")
     if not text:
         raise HTTPException(400, "text is required")
-    partner = _get_partner()
     wav_bytes = await asyncio.get_event_loop().run_in_executor(
         None, lambda: partner.synthesize(text, voice=voice, emotion=emotion)
     )
@@ -5176,13 +5257,15 @@ async def partner_voice_synthesize(body: dict[str, Any]):
 
 
 @app.post("/partner/voice/chat")
-async def partner_voice_chat(body: dict[str, Any]):
+async def partner_voice_chat(
+    body: dict[str, Any],
+    partner=Depends(get_partner_engine),
+):
     """Full voice loop: text message → LLM reply → TTS audio.
 
     Accepts text (already transcribed by client) and returns both
     the text reply and the synthesized audio as base64 WAV.
     """
-    partner = _get_partner()
     message = body.get("message", "")
     voice = body.get("voice", "af_heart")
     model = body.get("model")
@@ -5215,13 +5298,14 @@ async def partner_voice_chat(body: dict[str, Any]):
 
 
 @app.post("/partner/voice/upload")
-async def partner_voice_upload(request: Request):
+async def partner_voice_upload(
+    request: Request,
+    partner=Depends(get_partner_engine),
+):
     """Upload audio file for transcription + chat + TTS response.
 
     Full pipeline: audio upload → ASR → LLM → TTS → audio response.
     """
-    partner = _get_partner()
-
     # Read raw audio bytes from request body
     body = await request.body()
     if not body:
