@@ -14,13 +14,26 @@ from __future__ import annotations
 import json
 import logging
 import math
+import os
+import time
 from datetime import datetime, timezone
 from typing import Any
+
+from ..observability import emit
 
 logger = logging.getLogger(__name__)
 
 _mem0_instance = None
 _mem0_available: bool | None = None  # None = not checked yet
+
+# [IMPROVE-62] If Mem0 init fails, cache the False for this long before
+# trying again. Previously _mem0_available=False stuck permanently, so
+# a transient issue (Ollama down at boot, race with ChromaDB, user
+# installs mem0ai after startup) required a full server restart. 5
+# minutes matches the ticket and costs at most one retry per 5 min
+# of partner use when the failure is permanent.
+_MEM0_RETRY_TTL_SEC: float = float(os.getenv("PARTNER_MEM0_RETRY_TTL_SEC", "300"))
+_mem0_last_failure_monotonic: float = 0.0
 
 
 def _now() -> str:
@@ -160,21 +173,39 @@ def _migrate_schemas(conn) -> None:
 # ── Mem0 Integration ────────────────────────────────────────────
 
 def _init_mem0():
-    """Initialize Mem0 with ChromaDB backend + Ollama embeddings."""
-    global _mem0_instance, _mem0_available
+    """Initialize Mem0 with ChromaDB backend + Ollama embeddings.
 
-    if _mem0_available is False:
-        return None
+    [IMPROVE-62] Failures are cached for _MEM0_RETRY_TTL_SEC rather
+    than permanently. On next call after the TTL elapses, we retry —
+    covers transient startup races (Ollama not up yet, ChromaDB lock)
+    and the "installed mem0ai after first call" case without requiring
+    a server restart. Successful init is still cached forever.
+    """
+    global _mem0_instance, _mem0_available, _mem0_last_failure_monotonic
+
+    # Fast path: cached success lives forever.
     if _mem0_instance is not None:
         return _mem0_instance
 
+    # Failure path: serve cached False until the TTL elapses, then retry.
+    is_retry = False
+    if _mem0_available is False:
+        since_failure = time.monotonic() - _mem0_last_failure_monotonic
+        if since_failure < _MEM0_RETRY_TTL_SEC:
+            return None
+        logger.debug(
+            "Mem0 retry after TTL (%.0fs since last failure)", since_failure
+        )
+        is_retry = True
+        _mem0_available = None  # reset so the "have we tried yet" flag is right
+
+    t0 = time.monotonic()
+    ollama_url = os.getenv("OLLAMA_BASE_URL", "http://localhost:11434")
+    llm_model = os.getenv("PARTNER_LLM_MODEL", "qwen3:8b")
+    embed_model = os.getenv("PARTNER_EMBED_MODEL", "nomic-embed-text:latest")
+
     try:
         from mem0 import Memory
-        import os
-
-        ollama_url = os.getenv("OLLAMA_BASE_URL", "http://localhost:11434")
-        llm_model = os.getenv("PARTNER_LLM_MODEL", "qwen3:8b")
-        embed_model = os.getenv("PARTNER_EMBED_MODEL", "nomic-embed-text:latest")
 
         config = {
             "vector_store": {
@@ -203,16 +234,59 @@ def _init_mem0():
 
         _mem0_instance = Memory.from_config(config)
         _mem0_available = True
-        logger.info("Mem0 initialized with ChromaDB + Ollama embeddings (%s)", embed_model)
+        logger.info(
+            "Mem0 initialized with ChromaDB + Ollama embeddings (%s)%s",
+            embed_model,
+            " (after retry)" if is_retry else "",
+        )
+        emit(
+            "partner",
+            "mem0_init",
+            status="ok",
+            duration_ms=int((time.monotonic() - t0) * 1000),
+            context={
+                "llm_model": llm_model,
+                "embed_model": embed_model,
+                "retry": is_retry,
+            },
+        )
         return _mem0_instance
 
-    except ImportError:
-        logger.info("mem0ai or chromadb not installed — using SQLite-only memory")
+    except ImportError as e:
+        logger.info(
+            "mem0ai or chromadb not installed — using SQLite-only memory "
+            "(will retry in %.0fs)",
+            _MEM0_RETRY_TTL_SEC,
+        )
         _mem0_available = False
+        _mem0_last_failure_monotonic = time.monotonic()
+        emit(
+            "partner",
+            "mem0_init",
+            status="error",
+            duration_ms=int((time.monotonic() - t0) * 1000),
+            error_code="ImportError",
+            error_message=str(e),
+            context={"retry": is_retry, "retry_in_sec": _MEM0_RETRY_TTL_SEC},
+        )
         return None
     except Exception as e:
-        logger.warning("Mem0 init failed (%s) — using SQLite-only memory", e)
+        logger.warning(
+            "Mem0 init failed (%s) — using SQLite-only memory (will retry in %.0fs)",
+            e,
+            _MEM0_RETRY_TTL_SEC,
+        )
         _mem0_available = False
+        _mem0_last_failure_monotonic = time.monotonic()
+        emit(
+            "partner",
+            "mem0_init",
+            status="error",
+            duration_ms=int((time.monotonic() - t0) * 1000),
+            error_code=type(e).__name__,
+            error_message=str(e),
+            context={"retry": is_retry, "retry_in_sec": _MEM0_RETRY_TTL_SEC},
+        )
         return None
 
 
