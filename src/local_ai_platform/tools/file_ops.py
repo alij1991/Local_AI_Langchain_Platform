@@ -1,16 +1,23 @@
 """File operation tools: read, write, list, search files."""
 from __future__ import annotations
 
-import os
 from pathlib import Path
 
 from langchain_core.tools import StructuredTool
 from pydantic import BaseModel, Field
 
+from ..config import get_settings
 from ..observability import emit
 
-# Sandbox root — all file operations are restricted to this directory
-WORKSPACE_ROOT = Path(os.getenv("LOCAL_AI_WORKSPACE", "./workspace")).resolve()
+# Sandbox root — all file operations are restricted to this directory.
+# [IMPROVE-69] Reads via ``AppSettings.local_ai_workspace`` so ``.env``
+# overrides are honored (the pre-IMPROVE-6 ``os.getenv`` only saw shell
+# env). The value is captured at import time to preserve the "workspace
+# is a boot-time constant" contract; tests that override
+# ``LOCAL_AI_WORKSPACE`` need to call ``reset_settings_cache()`` before
+# reloading this module (see tests/test_file_ops_security.py for the
+# idiom).
+WORKSPACE_ROOT = Path(get_settings().local_ai_workspace).resolve()
 
 
 def _safe_path(user_path: str) -> Path:

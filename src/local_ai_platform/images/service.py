@@ -14,7 +14,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from local_ai_platform.config import AppConfig
+from local_ai_platform.config import AppConfig, get_settings
 from local_ai_platform.formatting import format_bytes_human
 from local_ai_platform.observability import emit
 
@@ -5334,11 +5334,14 @@ class ImageGenerationService:
         """
         if not device.startswith("cuda"):
             return
-        warmup_env = os.getenv("IMAGE_WARMUP_AFTER_LOAD", "1").strip().lower()
-        if warmup_env in ("0", "false", "no"):
-            logger.info(
-                "[IMG] Warmup skipped (IMAGE_WARMUP_AFTER_LOAD=%s)", warmup_env
-            )
+        # [IMPROVE-69] IMAGE_WARMUP_AFTER_LOAD now flows through
+        # AppSettings (bool, default True). Pydantic handles the
+        # "0"/"false"/"no" parsing identically to the pre-IMPROVE-69
+        # hand-rolled check, so the skip path triggers for the same
+        # set of values. Users opt out via .env or shell env exactly
+        # as before.
+        if not get_settings().image_warmup_after_load:
+            logger.info("[IMG] Warmup skipped (IMAGE_WARMUP_AFTER_LOAD=off)")
             return
 
         t0 = time.monotonic()

@@ -23,7 +23,7 @@ from fastapi.responses import FileResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
-from local_ai_platform.config import load_config
+from local_ai_platform.config import load_config, get_settings
 from local_ai_platform.db import init_db, get_conn
 from local_ai_platform.providers import (
     ChatMessage,
@@ -4086,8 +4086,9 @@ async def remove_tool(tool_id: str):
 
 @app.get("/tools/tavily/status")
 async def tavily_status():
-    import os
-    key = os.getenv("TAVILY_API_KEY", "").strip()
+    # [IMPROVE-69] Routed through AppSettings so .env values are
+    # honored consistently with tools/web.py's web_search path.
+    key = get_settings().tavily_api_key.strip()
     return {"present": bool(key)}
 
 

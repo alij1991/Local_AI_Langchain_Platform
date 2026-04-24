@@ -2,11 +2,12 @@
 from __future__ import annotations
 
 import json
-import os
 from urllib import request as urllib_request
 
 from langchain_core.tools import StructuredTool
 from pydantic import BaseModel, Field
+
+from ..config import get_settings
 
 
 class MCPQueryInput(BaseModel):
@@ -15,8 +16,12 @@ class MCPQueryInput(BaseModel):
 
 def mcp_query(prompt: str) -> str:
     """Call a configured MCP server tool endpoint."""
-    endpoint = os.getenv("MCP_SERVER_URL", "").strip()
-    method = os.getenv("MCP_TOOL_METHOD", "tools/call").strip() or "tools/call"
+    settings = get_settings()
+    endpoint = settings.mcp_server_url.strip()
+    # mcp_tool_method defaults to "tools/call"; ``.strip() or "tools/call"``
+    # preserves the pre-IMPROVE-69 behavior of falling back when a user
+    # sets the env var to an all-whitespace value.
+    method = settings.mcp_tool_method.strip() or "tools/call"
     if not endpoint:
         return "MCP server not configured. Set MCP_SERVER_URL."
 

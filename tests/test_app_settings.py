@@ -113,10 +113,13 @@ _SETTINGS_ENV_KEYS = (
 
 @pytest.fixture
 def clean_env(monkeypatch, tmp_path):
-    """Nuke all settings-relevant env vars + chdir to an empty tmp dir.
+    """Nuke settings-relevant env vars, chdir to a clean tmp dir, init DB.
 
     Gives tests a clean slate: defaults hold, any .env created inside
-    ``tmp_path`` is the only .env pydantic-settings can see.
+    ``tmp_path`` is the only .env pydantic-settings can see, and the
+    ``app_events`` table exists so ``_emit_config_load`` can actually
+    emit (see its docstring for the boot-order reason the table probe
+    exists).
     """
     for k in _SETTINGS_ENV_KEYS:
         monkeypatch.delenv(k, raising=False)
@@ -125,6 +128,12 @@ def clean_env(monkeypatch, tmp_path):
     for k in _SETTINGS_ENV_KEYS:
         monkeypatch.delenv(k.lower(), raising=False)
     monkeypatch.chdir(tmp_path)
+    # Point the DB at a tmp-path file and run init_db() so app_events
+    # exists — otherwise _emit_config_load will defer and tests that
+    # assert on emit calls would see zero events.
+    from local_ai_platform import db as db_mod
+    monkeypatch.setattr(db_mod, "DB_PATH", tmp_path / "data" / "app.db")
+    db_mod.init_db()
     # Reset the cached settings so any previous test's singleton
     # doesn't leak into this one.
     from local_ai_platform.config import reset_settings_cache
@@ -458,6 +467,64 @@ def test_config_load_event_reports_env_file_presence(clean_env, monkeypatch):
     assert calls[0]["env_file_path"] is not None
     # At least one override — we set OLLAMA_BASE_URL to a non-default.
     assert calls[0]["override_count"] >= 1
+
+
+def test_config_load_event_deferred_until_app_events_table_exists(
+    monkeypatch, tmp_path
+):
+    """``config.load`` must retry across calls until ``init_db`` has run.
+
+    Regression test for a Commit 1 oversight: ``api_server.py`` calls
+    ``load_config()`` at module scope, BEFORE ``init_db()`` creates the
+    ``app_events`` table. The first ``get_settings()`` call therefore
+    runs against a DB without the events table — if we naively emit
+    once and mark ``_SETTINGS_EMITTED = True``, the event is silently
+    dropped on every boot and the weekly review never sees any
+    ``config.load`` row. The fix: defer the emit until the table
+    exists, set the flag only after a successful emit.
+    """
+    # Fresh-isolation — don't use clean_env because this test needs
+    # the "no table yet" state.
+    for k in _SETTINGS_ENV_KEYS:
+        monkeypatch.delenv(k, raising=False)
+    monkeypatch.chdir(tmp_path)
+
+    from local_ai_platform import config as cfg_mod
+    from local_ai_platform import db as db_mod
+    import local_ai_platform.observability as obs_mod
+
+    db_path = tmp_path / "data" / "app.db"
+    monkeypatch.setattr(db_mod, "DB_PATH", db_path)
+    # Deliberately do NOT run init_db() yet — mimics api_server.py's
+    # boot ordering where load_config() runs first.
+    db_path.parent.mkdir(parents=True, exist_ok=True)
+
+    calls: list[dict] = []
+
+    def _fake(subsystem, action, status="ok", **kwargs):
+        if subsystem == "config" and action == "load":
+            calls.append(kwargs.get("context") or {})
+
+    monkeypatch.setattr(obs_mod, "emit", _fake)
+    cfg_mod.reset_settings_cache()
+
+    # First call: no table yet. Settings cached, but emit must defer.
+    cfg_mod.get_settings()
+    cfg_mod.get_settings()
+    cfg_mod.get_settings()
+    assert calls == [], "emit must defer until app_events table exists"
+
+    # Now simulate init_db running.
+    db_mod.init_db()
+
+    # Next get_settings() call should retry and land the event.
+    cfg_mod.get_settings()
+    assert len(calls) == 1
+
+    # Further calls don't re-emit — still one-shot per process.
+    cfg_mod.get_settings()
+    cfg_mod.get_settings()
+    assert len(calls) == 1
 
 
 # ── Legacy bridge ───────────────────────────────────────────────────

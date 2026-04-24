@@ -14,11 +14,11 @@ from __future__ import annotations
 import json
 import logging
 import math
-import os
 import time
 from datetime import datetime, timezone
 from typing import Any
 
+from ..config import get_settings
 from ..observability import emit
 
 logger = logging.getLogger(__name__)
@@ -32,7 +32,13 @@ _mem0_available: bool | None = None  # None = not checked yet
 # installs mem0ai after startup) required a full server restart. 5
 # minutes matches the ticket and costs at most one retry per 5 min
 # of partner use when the failure is permanent.
-_MEM0_RETRY_TTL_SEC: float = float(os.getenv("PARTNER_MEM0_RETRY_TTL_SEC", "300"))
+#
+# [IMPROVE-69] Value pulled from AppSettings so .env overrides apply.
+# Kept as a module-level name because tests/test_partner_mem0_retry.py
+# monkeypatches this attribute directly (see that file's
+# `memory_mod` fixture) — in-lining the get_settings() call inside
+# _init_mem0 would silently break the existing test seam.
+_MEM0_RETRY_TTL_SEC: float = get_settings().partner_mem0_retry_ttl_sec
 _mem0_last_failure_monotonic: float = 0.0
 
 
@@ -200,9 +206,14 @@ def _init_mem0():
         _mem0_available = None  # reset so the "have we tried yet" flag is right
 
     t0 = time.monotonic()
-    ollama_url = os.getenv("OLLAMA_BASE_URL", "http://localhost:11434")
-    llm_model = os.getenv("PARTNER_LLM_MODEL", "qwen3:8b")
-    embed_model = os.getenv("PARTNER_EMBED_MODEL", "nomic-embed-text:latest")
+    # [IMPROVE-69] Read through AppSettings. Pre-IMPROVE-6 the default
+    # here was "http://localhost:11434"; AppSettings uses the equivalent
+    # "http://127.0.0.1:11434" (matching the rest of the codebase).
+    # Ollama resolves both to the same local daemon.
+    _settings = get_settings()
+    ollama_url = _settings.ollama_base_url
+    llm_model = _settings.partner_llm_model
+    embed_model = _settings.partner_embed_model
 
     try:
         from mem0 import Memory

@@ -21,8 +21,19 @@ import pytest
 
 
 def _load_with_workspace(tmp_root: Path):
-    """Import tools.file_ops with LOCAL_AI_WORKSPACE pointing at tmp_root."""
+    """Import tools.file_ops with LOCAL_AI_WORKSPACE pointing at tmp_root.
+
+    Post-IMPROVE-69 tools/file_ops resolves WORKSPACE_ROOT via
+    ``AppSettings.local_ai_workspace`` instead of ``os.getenv``. The
+    AppSettings singleton is process-scoped, so a stale cache from an
+    earlier test would override our fresh env var — explicitly reset
+    it here so the module reload below sees the value we just set.
+    """
     os.environ["LOCAL_AI_WORKSPACE"] = str(tmp_root)
+    # Invalidate the cached AppSettings so the module-level
+    # ``get_settings().local_ai_workspace`` read picks up our env.
+    from local_ai_platform.config import reset_settings_cache
+    reset_settings_cache()
     mod_name = "local_ai_platform.tools.file_ops"
     if mod_name in sys.modules:
         del sys.modules[mod_name]

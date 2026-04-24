@@ -41,6 +41,23 @@ import pytest
 from local_ai_platform.images import service as svc
 
 
+@pytest.fixture(autouse=True)
+def _reset_settings_each_test():
+    """Reset the AppSettings cache around every warmup test.
+
+    [IMPROVE-69] ``_warmup_pipeline`` now reads
+    ``AppSettings.image_warmup_after_load`` instead of calling
+    ``os.getenv(...)`` directly. Since AppSettings is a process-scoped
+    singleton, the per-test ``monkeypatch.setenv`` / ``delenv`` calls
+    below wouldn't affect the cached instance — invalidating here
+    forces each test's first read to reparse the current environment.
+    """
+    from local_ai_platform.config import reset_settings_cache
+    reset_settings_cache()
+    yield
+    reset_settings_cache()
+
+
 @pytest.fixture
 def captured_emits(monkeypatch):
     """Replace service.emit with a recorder."""

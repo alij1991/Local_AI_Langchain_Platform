@@ -1,15 +1,18 @@
 """Agentic RAG tools: index and search documents for knowledge retrieval."""
 from __future__ import annotations
 
-import os
 from pathlib import Path
 
 from langchain_core.tools import StructuredTool
 from pydantic import BaseModel, Field
 
+from ..config import get_settings
 from ..observability import emit
 
-WORKSPACE_ROOT = Path(os.getenv("LOCAL_AI_WORKSPACE", "./workspace")).resolve()
+# [IMPROVE-69] See tools/file_ops.py for the WORKSPACE_ROOT rationale —
+# these two modules share the workspace sandbox contract and migrate
+# together.
+WORKSPACE_ROOT = Path(get_settings().local_ai_workspace).resolve()
 
 
 class IndexDocumentInput(BaseModel):

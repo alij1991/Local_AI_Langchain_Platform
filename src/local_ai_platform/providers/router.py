@@ -1,10 +1,10 @@
 from __future__ import annotations
 
 import logging
-import os
 import time
 from typing import Any, AsyncGenerator, Generator
 
+from ..config import get_settings
 from ..observability import emit
 from .base import (
     BaseProvider,
@@ -49,9 +49,14 @@ class ProviderRouter:
         # invalidate_availability() after config changes.
         # Shape: {provider_name: (is_available, expires_monotonic_ts)}
         self._availability_cache: dict[str, tuple[bool, float]] = {}
-        self._availability_ttl_sec: float = float(
-            os.getenv("PROVIDER_AVAILABILITY_TTL_SEC", self._DEFAULT_AVAILABILITY_TTL_SEC)
-        )
+        # [IMPROVE-69] Read TTL via AppSettings so ``.env`` overrides
+        # are honored (previously ``os.getenv`` only saw shell env,
+        # which meant the setting was effectively undocumented for
+        # anyone keeping their knobs in .env). The AppSettings default
+        # (30.0) matches _DEFAULT_AVAILABILITY_TTL_SEC — kept separate
+        # constants so the "class knows its own default" property
+        # holds even if AppSettings construction is bypassed in a test.
+        self._availability_ttl_sec: float = get_settings().provider_availability_ttl_sec
 
     def register(self, name: str, provider: BaseProvider) -> None:
         self._providers[name] = provider

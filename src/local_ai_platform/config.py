@@ -327,17 +327,21 @@ def get_settings() -> AppSettings:
     """Return the cached ``AppSettings`` instance, loading ``.env`` on first call.
 
     Emits a single ``config.load`` observability event the first time
-    the settings are materialized, so the weekly review can see which
-    deployments have custom .env overrides active (no values logged —
-    the event only reports file path, whether the file was found,
-    and how many fields differ from their schema defaults).
+    the settings are materialized AND the ``app_events`` table is
+    available. On server boot the settings are typically loaded
+    before ``init_db()`` runs (``api_server.py`` calls
+    ``load_config()`` at module scope), so the first few calls here
+    may run against a DB that doesn't have the events table yet —
+    those early calls skip the emit and we retry on subsequent
+    calls until the schema catches up. Each call still reuses the
+    same cached ``AppSettings`` instance; only the emit side-effect
+    is retried.
     """
     global _SETTINGS, _SETTINGS_EMITTED
     if _SETTINGS is None:
         _SETTINGS = AppSettings()
-        if not _SETTINGS_EMITTED:
-            _SETTINGS_EMITTED = True
-            _emit_config_load(_SETTINGS)
+    if not _SETTINGS_EMITTED and _emit_config_load(_SETTINGS):
+        _SETTINGS_EMITTED = True
     return _SETTINGS
 
 
@@ -353,16 +357,46 @@ def reset_settings_cache() -> None:
     _SETTINGS_EMITTED = False
 
 
-def _emit_config_load(settings: AppSettings) -> None:
-    """One-shot observability emit on first settings load.
+def _emit_config_load(settings: AppSettings) -> bool:
+    """Attempt to emit the one-shot ``config.load`` observability event.
 
-    Deliberately logs no field values — some are secrets (HF_TOKEN,
-    TAVILY_API_KEY) and even non-secret URLs can leak internal
+    Returns True when the event landed (or we've decided to give up —
+    don't retry any more). Returns False when the ``app_events`` table
+    isn't set up yet so the caller should retry on the next
+    ``get_settings()`` call. This matters because ``api_server.py``
+    calls ``load_config()`` at module scope, before ``init_db()``
+    creates the events table — without the retry the event would be
+    silently dropped on every boot and the weekly review would never
+    see which overrides were active.
+
+    Deliberately logs no field values — some are secrets (``HF_TOKEN``,
+    ``TAVILY_API_KEY``) and even non-secret URLs can leak internal
     topology. The override count gives the weekly review a coarse
     "is this deployment heavily configured?" signal without exposing
     what the overrides are.
     """
     try:
+        # Probe whether init_db() has created the events table yet.
+        # Done via a cheap sqlite_master lookup rather than attempting
+        # the INSERT and inferring failure — emit() swallows its own
+        # errors so we can't tell from the outside whether the row
+        # actually landed.
+        from local_ai_platform.db import get_conn
+
+        conn = get_conn()
+        try:
+            has_table = conn.execute(
+                "SELECT 1 FROM sqlite_master WHERE type='table' AND name='app_events'"
+            ).fetchone() is not None
+        finally:
+            conn.close()
+        if not has_table:
+            # Defer — init_db hasn't run yet. Next get_settings() call
+            # will retry. Once init_db lands and the user does anything
+            # that triggers a settings read, the event will finally
+            # make it to the table.
+            return False
+
         env_file = Path(".env")
         env_file_found = env_file.exists()
         env_file_path = str(env_file.resolve()) if env_file_found else None
@@ -388,12 +422,13 @@ def _emit_config_load(settings: AppSettings) -> None:
                 "override_count": override_count,
             },
         )
+        return True
     except Exception:
         # Settings are already loaded — emit failure must never
-        # cascade into startup. observability.emit itself swallows
-        # errors, but the import + path resolution above can fail in
-        # unusual environments (frozen bundles, read-only fs, etc.).
-        pass
+        # cascade into startup. Return True so we don't retry
+        # forever on a genuinely broken environment (read-only fs,
+        # frozen bundle without sqlite, etc.).
+        return True
 
 
 # ── Legacy bridge ───────────────────────────────────────────────────

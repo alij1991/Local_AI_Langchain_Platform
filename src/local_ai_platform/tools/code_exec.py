@@ -10,7 +10,13 @@ from pathlib import Path
 from langchain_core.tools import StructuredTool
 from pydantic import BaseModel, Field
 
-WORKSPACE_ROOT = Path(os.getenv("LOCAL_AI_WORKSPACE", "./workspace")).resolve()
+from ..config import get_settings
+
+# [IMPROVE-69] See tools/file_ops.py for the WORKSPACE_ROOT rationale.
+# ``os`` is still imported — it's used for ``os.environ`` (subprocess
+# env inheritance) and ``os.unlink`` (temp file cleanup), both
+# unrelated to config reads.
+WORKSPACE_ROOT = Path(get_settings().local_ai_workspace).resolve()
 MAX_OUTPUT = 4000  # characters
 
 

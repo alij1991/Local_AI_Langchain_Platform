@@ -1,11 +1,12 @@
 """Web search and fetching tools."""
 from __future__ import annotations
 
-import os
 import re
 
 from langchain_core.tools import StructuredTool
 from pydantic import BaseModel, Field
+
+from ..config import get_settings
 
 
 class WebSearchInput(BaseModel):
@@ -21,7 +22,7 @@ class FetchWebpageInput(BaseModel):
 def web_search(query: str, max_results: int = 5) -> str:
     """Search the web. Uses Tavily if API key available, otherwise DuckDuckGo."""
     # Try Tavily first
-    tavily_key = os.getenv("TAVILY_API_KEY", "").strip()
+    tavily_key = get_settings().tavily_api_key.strip()
     if tavily_key:
         try:
             from langchain_tavily import TavilySearch

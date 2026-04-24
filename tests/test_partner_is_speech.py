@@ -67,7 +67,13 @@ def test_vad_exactly_at_default_threshold_is_not_speech():
 
 
 def test_vad_env_threshold_override(monkeypatch):
+    # [IMPROVE-69] is_speech now reads via AppSettings, which is a
+    # cached singleton. Setting the env alone isn't enough — we also
+    # have to invalidate the cache so the next get_settings() call
+    # re-parses the env.
+    from local_ai_platform.config import reset_settings_cache
     monkeypatch.setenv("PARTNER_VAD_SPEECH_THRESHOLD", "0.2")
+    reset_settings_cache()
     engine = _make_engine(vad=_make_fake_vad(prob=0.3))  # above 0.2, below 0.5
     audio = np.full(1600, 0.1, dtype=np.float32)
     assert engine.is_speech(_pcm_bytes(audio)) is True
@@ -76,7 +82,9 @@ def test_vad_env_threshold_override(monkeypatch):
 def test_vad_early_exit_on_speech_window(monkeypatch):
     """Once any 32ms window scores above threshold, we should stop probing
     further windows — the first speech signal is enough."""
+    from local_ai_platform.config import reset_settings_cache
     monkeypatch.setenv("PARTNER_VAD_SPEECH_THRESHOLD", "0.5")
+    reset_settings_cache()
     model = MagicMock()
     # Window 1: speech. Window 2+: silence. We should stop after window 1.
     probs = [0.9, 0.1, 0.1, 0.1]

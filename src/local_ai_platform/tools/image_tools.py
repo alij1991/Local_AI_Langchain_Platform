@@ -7,12 +7,13 @@ Supports two modes:
 from __future__ import annotations
 
 import json
-import os
 from typing import Any
 from urllib import request as urllib_request
 
 from langchain_core.tools import StructuredTool
 from pydantic import BaseModel, Field
+
+from ..config import get_settings
 
 
 # ── Direct service reference (set by api_server.py at startup) ────
@@ -63,7 +64,7 @@ def generate_image(session_id: str, model_id: str, prompt: str) -> str:
             return f"Image generation failed: {exc}"
 
     # Fallback: HTTP call to API server
-    api_base = os.getenv("LOCAL_AI_API_URL", "http://127.0.0.1:8000").rstrip("/")
+    api_base = get_settings().local_ai_api_url.rstrip("/")
     try:
         return _post_json(f"{api_base}/images/generate", {"session_id": session_id, "model_id": model_id, "prompt": prompt})
     except Exception as exc:
@@ -86,7 +87,7 @@ def edit_image(session_id: str, base_image_id: str, model_id: str, instruction: 
         except Exception as exc:
             return f"Image edit failed: {exc}"
 
-    api_base = os.getenv("LOCAL_AI_API_URL", "http://127.0.0.1:8000").rstrip("/")
+    api_base = get_settings().local_ai_api_url.rstrip("/")
     try:
         return _post_json(
             f"{api_base}/images/edit",

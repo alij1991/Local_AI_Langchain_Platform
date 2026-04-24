@@ -16,6 +16,7 @@ from typing import Any
 import numpy as np
 from PIL import Image
 
+from ..config import get_settings
 from ..observability import emit
 
 logger = logging.getLogger(__name__)
@@ -576,7 +577,7 @@ def _evict_ollama_from_gpu() -> None:
     # context is never actually freed. We must stop the service first, THEN
     # kill any remaining process. The service will be restarted automatically
     # when the user next uses the Chat page (via _restart_ollama_service).
-    if _read_env("KONTEXT_KILL_OLLAMA", "true").lower() in ("1", "true", "yes"):
+    if get_settings().kontext_kill_ollama:
         try:
             import subprocess
             import time as _tkill
@@ -662,27 +663,12 @@ def _unload_other_pipelines(keep: str) -> None:
 # Picked via KONTEXT_GGUF_QUANT env var — default Q4_K_S preserves prior
 # behavior. On 8GB cards where other processes hold ~1GB of VRAM, Q3_K_S or
 # Q2_K is strongly recommended to avoid paging to shared GPU memory.
-def _read_env(key: str, default: str = "") -> str:
-    """Read a config value: .env file (priority) > shell env var > default."""
-    import os
-    for _ep in (".env", "../.env"):
-        try:
-            _p = Path(_ep)
-            if _p.exists():
-                for _line in _p.read_text().splitlines():
-                    _line = _line.strip()
-                    if _line.startswith("#") or "=" not in _line:
-                        continue
-                    _k, _, _v = _line.partition("=")
-                    _k = _k.strip()
-                    _v = _v.strip().strip('"').strip("'")
-                    if _k == key and _v:
-                        return _v
-        except Exception:
-            pass
-    return os.environ.get(key, default)
-
-
+#
+# [IMPROVE-69] The pre-IMPROVE-69 hand-rolled ``_read_env`` helper that
+# used to live here was replaced by ``AppSettings`` (see
+# ``src/local_ai_platform/config.py``). AppSettings preserves the same
+# priority (.env file > shell env > default) and auto-loads .env at
+# startup, removing the need to re-parse the file on every call.
 _KONTEXT_GGUF_VARIANTS = {
     "Q2_K":    ("flux1-kontext-dev-Q2_K.gguf",    3.7,  "lowest quality, ~3.7GB, leaves ~3GB headroom on 8GB"),
     "Q3_K_S":  ("flux1-kontext-dev-Q3_K_S.gguf",  4.9,  "good quality, ~4.9GB, leaves ~1.8GB headroom (RECOMMENDED for 8GB)"),
@@ -699,10 +685,13 @@ _KONTEXT_GGUF_VARIANTS = {
 def _get_kontext_gguf_variant() -> str:
     """Resolve the active GGUF variant from KONTEXT_GGUF_QUANT.
 
-    Priority: .env file > shell environment variable > default (Q4_K_S).
-    Falls back to Q4_K_S with a warning if the value is not a known variant.
+    Priority: .env file > shell environment variable > default (Q4_K_S)
+    — preserved from the pre-IMPROVE-69 ``_read_env``-backed version.
+    Falls back to Q4_K_S with a warning if the value is not a known
+    variant. Test seam: ``test_kontext_gguf_quant_override.py``
+    monkeypatches this function directly, so keep the name stable.
     """
-    requested = _read_env("KONTEXT_GGUF_QUANT", "Q4_K_S").strip().upper()
+    requested = get_settings().kontext_gguf_quant.strip().upper()
     if requested not in _KONTEXT_GGUF_VARIANTS:
         logger.warning(
             "[KONTEXT] KONTEXT_GGUF_QUANT='%s' is not a known variant. "
@@ -1191,7 +1180,7 @@ def _load_kontext_pipeline(gguf_quant: str | None = None) -> Any:
     # The attention matrix for 768px (2304 image tokens) is ~40MB per head at
     # bf16. Slicing avoids materializing the full matrix at once, reducing the
     # activation peak that can push Q4_K_S over the VRAM limit.
-    if _read_env("KONTEXT_ATTENTION_SLICING", "true").lower() in ("1", "true", "yes"):
+    if get_settings().kontext_attention_slicing:
         pipe.enable_attention_slicing("auto")
         logger.info("[KONTEXT] Attention slicing enabled (reduces peak activation VRAM)")
     else:
@@ -1201,7 +1190,7 @@ def _load_kontext_pipeline(gguf_quant: str | None = None) -> Any:
     # where fine details (faces, textures) are formed. At fixed step count,
     # this can improve quality without speed cost. The scheduler already uses
     # FlowMatchEulerDiscreteScheduler — karras modifies the sigma distribution.
-    if _read_env("KONTEXT_KARRAS_SIGMAS", "true").lower() in ("1", "true", "yes"):
+    if get_settings().kontext_karras_sigmas:
         try:
             pipe.scheduler.config.use_karras_sigmas = True
             logger.info("[KONTEXT] Karras sigmas enabled (better detail at same step count)")
@@ -1243,13 +1232,15 @@ def _load_kontext_pipeline(gguf_quant: str | None = None) -> Any:
     # generation-quality value is 0.05-0.08. Set 0 or unset to disable.
     t5 = _time.monotonic()
     _cache_applied = None
-    _fbc_threshold_env = os.environ.get("KONTEXT_FBC_THRESHOLD", "").strip()
-    try:
-        _fbc_threshold = float(_fbc_threshold_env) if _fbc_threshold_env else 0.0
-    except ValueError:
-        logger.warning("[KONTEXT] KONTEXT_FBC_THRESHOLD='%s' is not a valid float — treating as disabled",
-                       _fbc_threshold_env)
-        _fbc_threshold = 0.0
+    # [IMPROVE-69] AppSettings.kontext_fbc_threshold is Optional[float]
+    # — ``None`` (unset) means the cache is disabled, matching the
+    # pre-IMPROVE-69 "empty string means off" semantic. Pydantic
+    # validates the float during AppSettings construction, so the
+    # "not a valid float" fallback path no longer needs to run here
+    # (a malformed env value surfaces as a validation error at
+    # startup instead of silently being ignored).
+    _fbc_threshold_cfg = get_settings().kontext_fbc_threshold
+    _fbc_threshold = _fbc_threshold_cfg if _fbc_threshold_cfg is not None else 0.0
 
     if _fbc_threshold > 0.0:
         logger.info("[KONTEXT] KONTEXT_FBC_THRESHOLD=%.3f — enabling FirstBlockCache (user opt-in)",
@@ -2132,7 +2123,7 @@ def instruct_edit(
             # cost drops by ~3.2× on top of the paging elimination.
             original_rgb = image.convert("RGB")
             orig_w, orig_h = original_rgb.size
-            MAX_SIDE = int(_read_env("KONTEXT_MAX_SIDE", "768"))
+            MAX_SIDE = get_settings().kontext_max_side
             if orig_w > MAX_SIDE or orig_h > MAX_SIDE:
                 scale = min(MAX_SIDE / orig_w, MAX_SIDE / orig_h)
                 new_w = max(64, (int(orig_w * scale) // 64) * 64)
@@ -2543,7 +2534,7 @@ def instruct_edit(
 
             logger.info("[KONTEXT] ====== Edit complete ======")
             # Restart Ollama in background so chat works again
-            if _read_env("KONTEXT_KILL_OLLAMA", "true").lower() in ("1", "true", "yes"):
+            if get_settings().kontext_kill_ollama:
                 _restart_ollama_service()
             emit("instruct_edit", "run", status="ok",
                  duration_ms=int((_time_module.monotonic() - _ie_t0) * 1000),
@@ -2555,7 +2546,7 @@ def instruct_edit(
             return result
         except (ValueError, RuntimeError) as _ve:
             # Restart Ollama even on error so chat isn't permanently broken
-            if _read_env("KONTEXT_KILL_OLLAMA", "true").lower() in ("1", "true", "yes"):
+            if get_settings().kontext_kill_ollama:
                 _restart_ollama_service()
             emit("instruct_edit", "run", status="error",
                  duration_ms=int((_time_module.monotonic() - _ie_t0) * 1000),
@@ -2564,7 +2555,7 @@ def instruct_edit(
                  context={**_ie_ctx, "backend": "nunchaku" if _nunchaku_mode else "kontext"})
             raise
         except Exception as e:
-            if _read_env("KONTEXT_KILL_OLLAMA", "true").lower() in ("1", "true", "yes"):
+            if get_settings().kontext_kill_ollama:
                 _restart_ollama_service()
             logger.error("[KONTEXT] Edit failed: %s", e, exc_info=True)
             emit("instruct_edit", "run", status="error",

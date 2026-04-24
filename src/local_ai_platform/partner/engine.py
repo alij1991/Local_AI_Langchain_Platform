@@ -944,13 +944,16 @@ class PartnerEngine:
             return rms > self._VAD_RMS_FALLBACK_THRESHOLD
 
         try:
-            import os
-
             import torch
 
-            threshold = float(
-                os.getenv("PARTNER_VAD_SPEECH_THRESHOLD", str(self._VAD_DEFAULT_THRESHOLD))
-            )
+            # [IMPROVE-69] AppSettings.partner_vad_speech_threshold
+            # honors .env overrides; default (0.5) matches
+            # _VAD_DEFAULT_THRESHOLD. Looked up per-call rather than
+            # captured on the engine instance so users can hot-swap the
+            # value via the (future) /settings UI without restarting
+            # the partner pipeline.
+            from ..config import get_settings
+            threshold = get_settings().partner_vad_speech_threshold
             model, _utils = self._vad
             audio_f32 = samples.astype(np.float32) / 32768.0
             audio_tensor = torch.from_numpy(audio_f32)

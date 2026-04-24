@@ -16,8 +16,15 @@ import pytest
 
 
 def _load_with_workspace(tmp_root: Path):
-    """Import tools.rag_tools with LOCAL_AI_WORKSPACE pointing at tmp_root."""
+    """Import tools.rag_tools with LOCAL_AI_WORKSPACE pointing at tmp_root.
+
+    See tests/test_file_ops_security.py for the matching idiom. Post-
+    IMPROVE-69 the WORKSPACE_ROOT is resolved via ``AppSettings``, so
+    we reset the settings cache before reloading the module.
+    """
     os.environ["LOCAL_AI_WORKSPACE"] = str(tmp_root)
+    from local_ai_platform.config import reset_settings_cache
+    reset_settings_cache()
     mod_name = "local_ai_platform.tools.rag_tools"
     if mod_name in sys.modules:
         del sys.modules[mod_name]
