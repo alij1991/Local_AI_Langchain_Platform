@@ -5633,31 +5633,15 @@ async def enhance_image_prompt(body: dict[str, Any]):
             raise HTTPException(500, f"HF prompt enhancement failed: {exc}")
 
     # ── Ollama path ─────────────────────────────────────────────────
-    # Find a working Ollama model — prefer small/fast models for prompt enhancement
+    # [IMPROVE-14-followup] Model picker via the router-mediated
+    # helper — same swap that [IMPROVE-14] applied to /chat/enhance-prompt.
+    # Goes through router.get_provider("ollama"), so OLLAMA_BASE_URL is
+    # honored and the [IMPROVE-12] availability cache is shared.
     if not ollama_model:
-        try:
-            from local_ai_platform.providers.ollama_provider import OllamaProvider
-            prov = OllamaProvider()
-            models = prov.list_models()
-            if models:
-                # Prefer smallest model for speed (sort by parameter count hint in name)
-                small_keywords = ["1b", "2b", "3b", "tiny", "mini", "small", "phi", "qwen2"]
-                names = [m.name for m in models]
-                picked = None
-                for kw in small_keywords:
-                    for n in names:
-                        if kw in n.lower():
-                            picked = n
-                            break
-                    if picked:
-                        break
-                ollama_model = picked or names[0]
-        except Exception:
-            pass
+        ollama_model = _pick_small_ollama_model() or ""
     if not ollama_model:
         raise HTTPException(503, "No Ollama model available. Install one with: ollama pull gemma3:1b")
 
-    # Use /api/generate (simpler, works better with thinking models via /no_think)
     # Only prepend /no_think for Qwen models (other models output it as literal text)
     no_think = "/no_think\n" if "qwen" in ollama_model.lower() else ""
 
@@ -5689,23 +5673,24 @@ RULES:
 Output ONLY this JSON format, nothing else:
 {{"prompt": "your enhanced prompt here", "negative_prompt": "worst quality, low quality, blurry, deformed, ugly, bad anatomy, watermark, text, plus scene-specific negatives"}}"""
 
-    try:
-        import urllib.request
-        import urllib.error
-        req_body = json.dumps({
-            "model": ollama_model,
-            "prompt": generate_prompt,
-            "stream": False,
-            "options": {"temperature": 0.7, "num_predict": 256},
-        }).encode()
-        req = urllib.request.Request(
-            "http://localhost:11434/api/generate",
-            data=req_body,
-            headers={"Content-Type": "application/json"},
+    # [IMPROVE-14-followup] Primary call now goes through the provider
+    # router (was a hand-rolled urllib.request to localhost:11434).
+    # Wrapped in track_event so /observability/summary captures
+    # image.enhance_prompt latency + error rate alongside image.* events.
+    # The legacy /api/chat fallback below still uses urllib — it relies on
+    # the dedicated `thinking` field that router.achat doesn't surface,
+    # and reworking the cleanup logic that depends on it is out of scope
+    # for this follow-up.
+    with track_event("image", "enhance_prompt", context={
+        "prompt_length": len(user_prompt),
+        "model_family": model_family,
+        "model_hint": body.get("ollama_model") or "auto",
+        "prompt_weighting": use_prompt_weighting,
+    }) as ev:
+        content = await _ollama_generate_via_router(
+            ollama_model, generate_prompt,
+            temperature=0.7, max_tokens=256, timeout_sec=timeout_sec,
         )
-        with urllib.request.urlopen(req, timeout=timeout_sec) as resp:
-            data = json.loads(resp.read().decode())
-        content = (data.get("response", "") or "").strip()
         # Strip thinking tags and /no_think echoes from all model responses
         content = _re.sub(r'<think>.*?</think>', '', content, flags=_re.DOTALL).strip()
         content = content.replace('/no_think', '').strip()
@@ -5714,6 +5699,8 @@ Output ONLY this JSON format, nothing else:
         # Try to extract JSON
         result = _extract_json_from_llm(content)
         if result and isinstance(result.get("prompt"), str) and result["prompt"].strip():
+            ev.perf = {"resolved_model": ollama_model, "output_length": len(content),
+                       "format": "json_primary"}
             return {
                 "prompt": result["prompt"].strip(),
                 "negative_prompt": (result.get("negative_prompt") or "").strip(),
@@ -5721,115 +5708,131 @@ Output ONLY this JSON format, nothing else:
                 "ollama_model": ollama_model,
             }
 
-        # If /api/generate didn't work (some models still think), try /api/chat as fallback
-        logger.info("enhance-prompt: /api/generate didn't yield JSON, trying /api/chat fallback")
-        chat_body = json.dumps({
-            "model": ollama_model,
-            "messages": [
-                {"role": "user", "content": generate_prompt},
-            ],
-            "stream": False,
-            "options": {"temperature": 0.7, "num_predict": 256},
-        }).encode()
-        chat_req = urllib.request.Request(
-            "http://localhost:11434/api/chat",
-            data=chat_body,
-            headers={"Content-Type": "application/json"},
-        )
-        with urllib.request.urlopen(chat_req, timeout=timeout_sec) as resp2:
-            data2 = json.loads(resp2.read().decode())
-        msg = data2.get("message", {})
-        chat_content = (msg.get("content", "") or "").strip()
-        chat_content = _re.sub(r'<think>.*?</think>', '', chat_content, flags=_re.DOTALL).strip()
-        chat_content = chat_content.replace('/no_think', '').strip()
-        chat_thinking = (msg.get("thinking", "") or "").strip()
-        logger.info("enhance-prompt chat content (%d chars), thinking (%d chars)", len(chat_content), len(chat_thinking))
+        # If the router call didn't yield JSON, fall back to a direct
+        # /api/chat probe — some thinking models surface the prompt only
+        # through the dedicated `thinking` field, which router.achat
+        # collapses into the inline <think>...</think> tag we just stripped.
+        try:
+            import urllib.request
+            import urllib.error
+            logger.info("enhance-prompt: router call didn't yield JSON, trying /api/chat fallback")
+            chat_body = json.dumps({
+                "model": ollama_model,
+                "messages": [
+                    {"role": "user", "content": generate_prompt},
+                ],
+                "stream": False,
+                "options": {"temperature": 0.7, "num_predict": 256},
+            }).encode()
+            chat_req = urllib.request.Request(
+                "http://localhost:11434/api/chat",
+                data=chat_body,
+                headers={"Content-Type": "application/json"},
+            )
+            with urllib.request.urlopen(chat_req, timeout=timeout_sec) as resp2:
+                data2 = json.loads(resp2.read().decode())
+            msg = data2.get("message", {})
+            chat_content = (msg.get("content", "") or "").strip()
+            chat_content = _re.sub(r'<think>.*?</think>', '', chat_content, flags=_re.DOTALL).strip()
+            chat_content = chat_content.replace('/no_think', '').strip()
+            chat_thinking = (msg.get("thinking", "") or "").strip()
+            logger.info("enhance-prompt chat content (%d chars), thinking (%d chars)", len(chat_content), len(chat_thinking))
 
-        for text_source in [chat_content, chat_thinking]:
-            if not text_source:
-                continue
-            result = _extract_json_from_llm(text_source)
-            if result and isinstance(result.get("prompt"), str) and result["prompt"].strip():
-                return {
-                    "prompt": result["prompt"].strip(),
-                    "negative_prompt": (result.get("negative_prompt") or "").strip(),
-                    "original_prompt": user_prompt,
-                    "ollama_model": ollama_model,
-                }
+            for text_source in [chat_content, chat_thinking]:
+                if not text_source:
+                    continue
+                result = _extract_json_from_llm(text_source)
+                if result and isinstance(result.get("prompt"), str) and result["prompt"].strip():
+                    ev.perf = {"resolved_model": ollama_model, "output_length": len(text_source),
+                               "format": "json_chat_fallback"}
+                    return {
+                        "prompt": result["prompt"].strip(),
+                        "negative_prompt": (result.get("negative_prompt") or "").strip(),
+                        "original_prompt": user_prompt,
+                        "ollama_model": ollama_model,
+                    }
 
-        # Fallback for thinking models: extract quoted prompt strings from thinking text
-        if chat_thinking and not chat_content:
-            prompt_quotes = _re.findall(r'["\u201c]([^"\u201d]{20,})["\u201d]', chat_thinking)
-            if prompt_quotes:
-                best = max(prompt_quotes, key=len)
-                neg = ""
-                neg_section = chat_thinking.lower().find("negative")
-                if neg_section >= 0:
-                    neg_quotes = _re.findall(r'["\u201c]([^"\u201d]{10,})["\u201d]', chat_thinking[neg_section:])
-                    if neg_quotes:
-                        neg = neg_quotes[0]
-                return {
-                    "prompt": best.strip().rstrip(","),
-                    "negative_prompt": neg.strip() if neg else "worst quality, low quality, blurry, deformed, ugly, bad anatomy, watermark, text",
-                    "original_prompt": user_prompt,
-                    "ollama_model": ollama_model,
-                    "source": "extracted from model reasoning",
-                }
+            # Fallback for thinking models: extract quoted prompt strings from thinking text
+            if chat_thinking and not chat_content:
+                prompt_quotes = _re.findall(r'["\u201c]([^"\u201d]{20,})["\u201d]', chat_thinking)
+                if prompt_quotes:
+                    best = max(prompt_quotes, key=len)
+                    neg = ""
+                    neg_section = chat_thinking.lower().find("negative")
+                    if neg_section >= 0:
+                        neg_quotes = _re.findall(r'["\u201c]([^"\u201d]{10,})["\u201d]', chat_thinking[neg_section:])
+                        if neg_quotes:
+                            neg = neg_quotes[0]
+                    ev.perf = {"resolved_model": ollama_model, "output_length": len(best),
+                               "format": "thinking_quote_extract"}
+                    return {
+                        "prompt": best.strip().rstrip(","),
+                        "negative_prompt": neg.strip() if neg else "worst quality, low quality, blurry, deformed, ugly, bad anatomy, watermark, text",
+                        "original_prompt": user_prompt,
+                        "ollama_model": ollama_model,
+                        "source": "extracted from model reasoning",
+                    }
 
-        # Fallback: use any available text — the LLM may have returned a verbose
-        # explanation with the prompt buried inside.  Try to extract it.
-        combined = content or chat_content or chat_thinking or ""
-        if combined and combined != user_prompt:
-            cleaned = combined
-            for fence in ("```json", "```", "`"):
-                cleaned = cleaned.replace(fence, "")
-            cleaned = cleaned.strip()
+            # Fallback: use any available text — the LLM may have returned a verbose
+            # explanation with the prompt buried inside.  Try to extract it.
+            combined = content or chat_content or chat_thinking or ""
+            if combined and combined != user_prompt:
+                cleaned = combined
+                for fence in ("```json", "```", "`"):
+                    cleaned = cleaned.replace(fence, "")
+                cleaned = cleaned.strip()
 
-            # If the response is too long, the LLM likely included an explanation.
-            # Try to extract just the prompt portion (look for quoted strings or
-            # lines after "prompt:" / "enhanced:" markers).
-            if cleaned and len(cleaned) > 2000:
-                # Try to find the actual prompt in verbose output
-                _extracted = None
-                # Look for "prompt:" or "enhanced prompt:" followed by text
-                _prompt_match = _re.search(
-                    r'(?:enhanced\s+)?prompt\s*[:=]\s*["\u201c]?(.{20,800}?)["\u201d]?\s*(?:\n|negative|$)',
-                    cleaned, _re.IGNORECASE | _re.DOTALL,
-                )
-                if _prompt_match:
-                    _extracted = _prompt_match.group(1).strip().rstrip(",")
-                else:
-                    # Take the longest quoted string as the prompt
-                    _quotes = _re.findall(r'["\u201c]([^"\u201d]{20,})["\u201d]', cleaned)
-                    if _quotes:
-                        _extracted = max(_quotes, key=len).strip().rstrip(",")
-                if _extracted and len(_extracted) < 1500:
-                    cleaned = _extracted
-                    logger.info("enhance-prompt: extracted prompt (%d chars) from verbose %d-char response", len(cleaned), len(combined))
-                else:
-                    # Truncate to first 1500 chars as last resort
-                    cleaned = cleaned[:1500].rsplit(",", 1)[0].strip()
+                # If the response is too long, the LLM likely included an explanation.
+                # Try to extract just the prompt portion (look for quoted strings or
+                # lines after "prompt:" / "enhanced:" markers).
+                if cleaned and len(cleaned) > 2000:
+                    # Try to find the actual prompt in verbose output
+                    _extracted = None
+                    # Look for "prompt:" or "enhanced prompt:" followed by text
+                    _prompt_match = _re.search(
+                        r'(?:enhanced\s+)?prompt\s*[:=]\s*["\u201c]?(.{20,800}?)["\u201d]?\s*(?:\n|negative|$)',
+                        cleaned, _re.IGNORECASE | _re.DOTALL,
+                    )
+                    if _prompt_match:
+                        _extracted = _prompt_match.group(1).strip().rstrip(",")
+                    else:
+                        # Take the longest quoted string as the prompt
+                        _quotes = _re.findall(r'["\u201c]([^"\u201d]{20,})["\u201d]', cleaned)
+                        if _quotes:
+                            _extracted = max(_quotes, key=len).strip().rstrip(",")
+                    if _extracted and len(_extracted) < 1500:
+                        cleaned = _extracted
+                        logger.info("enhance-prompt: extracted prompt (%d chars) from verbose %d-char response", len(cleaned), len(combined))
+                    else:
+                        # Truncate to first 1500 chars as last resort
+                        cleaned = cleaned[:1500].rsplit(",", 1)[0].strip()
 
-            if cleaned:
-                return {
-                    "prompt": cleaned,
-                    "negative_prompt": "worst quality, low quality, blurry, deformed, ugly, bad anatomy, watermark, text",
-                    "original_prompt": user_prompt,
-                    "ollama_model": ollama_model,
-                    "warning": "LLM did not return structured JSON; using raw text as prompt",
-                }
+                if cleaned:
+                    ev.perf = {"resolved_model": ollama_model, "output_length": len(cleaned),
+                               "format": "raw_text"}
+                    return {
+                        "prompt": cleaned,
+                        "negative_prompt": "worst quality, low quality, blurry, deformed, ugly, bad anatomy, watermark, text",
+                        "original_prompt": user_prompt,
+                        "ollama_model": ollama_model,
+                        "warning": "LLM did not return structured JSON; using raw text as prompt",
+                    }
 
-        # Nothing usable
-        return {
-            "prompt": user_prompt,
-            "negative_prompt": "worst quality, low quality, blurry, deformed, watermark, text",
-            "original_prompt": user_prompt,
-            "error": "LLM response was empty or unusable",
-        }
-    except urllib.error.URLError as exc:
-        raise HTTPException(503, f"Cannot connect to Ollama at localhost:11434. Is it running? Start with: ollama serve  (Error: {exc})")
-    except Exception as exc:
-        raise HTTPException(500, f"Prompt enhancement failed: {exc}")
+            # Nothing usable
+            ev.perf = {"resolved_model": ollama_model, "output_length": 0,
+                       "format": "empty"}
+            return {
+                "prompt": user_prompt,
+                "negative_prompt": "worst quality, low quality, blurry, deformed, watermark, text",
+                "original_prompt": user_prompt,
+                "error": "LLM response was empty or unusable",
+            }
+        except HTTPException:
+            raise
+        except urllib.error.URLError as exc:
+            raise HTTPException(503, f"Cannot connect to Ollama at localhost:11434. Is it running? Start with: ollama serve  (Error: {exc})")
+        except Exception as exc:
+            raise HTTPException(500, f"Prompt enhancement failed: {exc}")
 
 
 @app.post("/images/generate/cancel")
