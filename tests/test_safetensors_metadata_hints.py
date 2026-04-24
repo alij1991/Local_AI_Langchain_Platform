@@ -225,24 +225,38 @@ def test_sdxl_turbo_via_metadata_keywords(tmp_path, captured_emits):
     assert hints["recommended_guidance_scale"] == 0.0
 
 
-def test_sd15_detected_via_sd_v1(tmp_path, captured_emits):
-    repo = tmp_path / "models--hash_sd"
-    _write_safetensors(
-        repo / "unet" / "model.safetensors",
-        {"ss_base_model_version": "sd_v1"},
+def test_sd15_detected_via_sd_v1(monkeypatch, captured_emits):
+    # NOTE: the existing ``is_v2 = "2" in path_str_lower or "v2" ...``
+    # heuristic is a known false-positive trap: pytest's ``tmp_path``
+    # parent is ``pytest-of-<user>/pytest-N/`` and any counter with a
+    # "2" in it would misclassify this test as SD2 — nothing to do with
+    # IMPROVE-47. Instead of relying on tmp_path here we stub the
+    # metadata read and pass a digit-free non-existent path, which
+    # makes the assertion deterministic across pytest runs and keeps
+    # the test focused on the metadata-signal claim.
+    clean_path = Path("C:/nonexistent/sd_clean_one_base")
+    monkeypatch.setattr(
+        svc, "_read_safetensors_metadata",
+        lambda p: {"ss_base_model_version": "sd_v1"},
     )
-    hints = svc._detect_model_hints(repo)
+    hints = svc._detect_model_hints(clean_path)
     assert hints["model_family"] == "sd15"
     assert hints["model_variant"] == "base"
 
 
-def test_sd2_detected_via_modelspec(tmp_path, captured_emits):
-    repo = tmp_path / "models--hash_sd2"
-    _write_safetensors(
-        repo / "unet" / "model.safetensors",
-        {"modelspec.architecture": "stable-diffusion-v2"},
+def test_sd2_detected_via_modelspec(monkeypatch, captured_emits):
+    # Use the same stubbed-read + clean-path approach as the sd15 test
+    # above — otherwise the assertion would pass for the wrong reason
+    # (the existing "2" in path_str_lower heuristic would trigger on
+    # the folder name ``models--hash_sd2`` even without metadata,
+    # weakening the claim that this suite proves metadata-driven
+    # detection).
+    clean_path = Path("C:/nonexistent/sd_clean_later")
+    monkeypatch.setattr(
+        svc, "_read_safetensors_metadata",
+        lambda p: {"modelspec.architecture": "stable-diffusion-v2"},
     )
-    hints = svc._detect_model_hints(repo)
+    hints = svc._detect_model_hints(clean_path)
     assert hints["model_family"] == "sd2"
 
 

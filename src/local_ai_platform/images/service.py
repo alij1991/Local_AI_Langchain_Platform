@@ -5289,6 +5289,100 @@ class ImageGenerationService:
                     pass
         return "remote", model_id
 
+    def _warmup_pipeline(self, pipe: Any, mode: str, device: str) -> None:
+        """Run a throwaway 4-step 64x64 generation to pay kernel costs upfront.
+
+        First real generation after load hits cuDNN autotune, Triton /
+        bitsandbytes JIT compilation, torch.compile graph capture, and
+        VAE-decode kernel warmup — per chapter 6 section IMPROVE-48,
+        users see it as "why is the first image always slow?". Running
+        a discardable 4-step generation immediately after load moves
+        those costs behind the same progress spinner that already
+        covers model loading, so steady-state timing is visible from
+        the FIRST user-visible generation instead of the second.
+
+        Gates:
+          - CUDA-only. On CPU a 4-step warmup takes longer than the
+            savings on the first real generation, so the whole thing
+            is a net loss.
+          - Env opt-out: ``IMAGE_WARMUP_AFTER_LOAD=0`` skips it (e.g.
+            when debugging load failures, where warmup would mask the
+            actual load-time crash behind a warmup-time crash).
+
+        Failures are swallowed. The loaded pipeline is already cached
+        by the caller before we get here, so a broken warmup simply
+        preserves the pre-IMPROVE-48 behavior (cold first generation)
+        rather than breaking the whole load.
+
+        Observability (section 12.10): one ``image.warmup`` event with
+        duration_ms and status=ok/error — the dashboard compares its
+        duration against the first real generation's duration to tell
+        whether the warmup is actually buying us anything.
+
+        Sources (2025):
+          - NVIDIA Developer Blog: "Optimizing FLUX.1 Kontext for Image
+            Editing with Low-Precision Quantization" — warmup discussion.
+          - PyTorch 2.x torch.compile notes on warmup semantics.
+        """
+        if not device.startswith("cuda"):
+            return
+        warmup_env = os.getenv("IMAGE_WARMUP_AFTER_LOAD", "1").strip().lower()
+        if warmup_env in ("0", "false", "no"):
+            logger.info(
+                "[IMG] Warmup skipped (IMAGE_WARMUP_AFTER_LOAD=%s)", warmup_env
+            )
+            return
+
+        t0 = time.monotonic()
+        try:
+            import torch
+            from PIL import Image as _PILImage
+
+            gen = torch.Generator(device=device).manual_seed(0)
+            kwargs: dict[str, Any] = {
+                "prompt": "warmup",
+                "num_inference_steps": 4,
+                # guidance_scale=0.0 runs the distilled single-pass path
+                # (FLUX Schnell, Z-Image, SDXL Turbo). Non-distilled
+                # pipelines still JIT the same kernels — output quality
+                # is irrelevant because we discard it.
+                "guidance_scale": 0.0,
+                # 64x64 is the minimum that survives VAE scale factors
+                # we care about: SD 1.5/SDXL (÷8 → 8x8 latent), FLUX
+                # (÷16 → 4x4 latent, still valid), Z-Image (÷16).
+                "width": 64,
+                "height": 64,
+                "generator": gen,
+            }
+            if mode == "img2img":
+                kwargs["image"] = _PILImage.new("RGB", (64, 64), (0, 0, 0))
+
+            _ = pipe(**kwargs)
+
+            duration_ms = int((time.monotonic() - t0) * 1000)
+            logger.info(
+                "[IMG] Warmup complete in %dms (mode=%s, device=%s)",
+                duration_ms, mode, device,
+            )
+            emit(
+                "image", "warmup", status="ok",
+                duration_ms=duration_ms,
+                context={"mode": mode, "device": device},
+            )
+        except Exception as exc:
+            duration_ms = int((time.monotonic() - t0) * 1000)
+            # DEBUG level — warmup is best-effort, users see load succeed.
+            logger.debug(
+                "[IMG] Warmup failed (non-fatal): %s", exc, exc_info=True,
+            )
+            emit(
+                "image", "warmup", status="error",
+                duration_ms=duration_ms,
+                error_code="WarmupFailed",
+                error_message=str(exc)[:200],
+                context={"mode": mode, "device": device},
+            )
+
     def _load_pipeline(
         self,
         model_id_or_path: str,
@@ -5578,6 +5672,7 @@ class ImageGenerationService:
                          duration_ms=int((time.monotonic() - _load_t0) * 1000),
                          context={**_load_ctx, "backend": "nunchaku"},
                          perf={"cached_pipelines": len(self._pipelines)})
+                    self._warmup_pipeline(pipe, mode, device)
                     return pipe
                 else:
                     raise RuntimeError(
@@ -5994,6 +6089,7 @@ class ImageGenerationService:
              duration_ms=int((time.monotonic() - _load_t0) * 1000),
              context=_load_ctx,
              perf={"cached_pipelines": len(self._pipelines)})
+        self._warmup_pipeline(pipe, mode, device)
         return pipe
 
     def _run_diffusers_isolated(
