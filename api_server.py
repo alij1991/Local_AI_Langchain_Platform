@@ -17,13 +17,13 @@ import uuid
 from contextlib import asynccontextmanager
 from typing import Any
 
-from fastapi import FastAPI, HTTPException, Query, Request, WebSocket
+from fastapi import Depends, FastAPI, HTTPException, Query, Request, WebSocket
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
-from local_ai_platform.config import load_config, get_settings
+from local_ai_platform.config import AppConfig, AppSettings, load_config, get_settings
 from local_ai_platform.db import init_db, get_conn
 from local_ai_platform.providers import (
     ChatMessage,
@@ -75,6 +75,19 @@ if not _lp_logger.handlers:
     _lp_logger.addHandler(_lp_handler)
 
 # ── Globals ───────────────────────────────────────────────────────
+#
+# [IMPROVE-5] Migration note: these module-level singletons are being
+# replaced with ``app.state.*`` attachments + ``Depends(...)`` helpers.
+# During the migration (Commits 1–2 of [IMPROVE-5]) both paths coexist:
+# lifespan assigns each object to ``app.state.X`` *and* the matching
+# module global so existing handlers (and tests that patch
+# ``api_server.orchestrator`` etc.) keep working. Commit 3 deletes the
+# globals once every handler has been switched to Depends.
+#
+# Lifespan also populates ``app.state.config`` / ``app.state.settings`` /
+# ``app.state._ollama_pulls`` / ``app.state._hf_downloads`` so routers
+# split out by [IMPROVE-1] can access shared state via DI without
+# importing this module.
 
 config = load_config()
 router: ProviderRouter | None = None
@@ -83,6 +96,87 @@ ollama_ctrl: OllamaController | None = None
 hf_ctrl: HuggingFaceController | None = None
 trace_store: TraceStore | None = None
 image_service: ImageGenerationService | None = None
+
+
+# ── DI helpers (Depends targets) ──────────────────────────────────
+#
+# These are thin accessors over ``request.app.state.*``. They raise
+# ``HTTPException(503)`` when the singleton isn't ready yet so
+# endpoint bodies don't need the ``if not orchestrator: raise 503``
+# boilerplate that the module-globals pattern required.
+#
+# ``get_settings`` is the AppSettings singleton getter from
+# [IMPROVE-6] — it's already Depends-compatible (no request arg,
+# cached) so FastAPI treats it as a regular Depends target.
+
+
+def get_app_config(request: Request) -> AppConfig:
+    """Legacy AppConfig dataclass (bridged from AppSettings in load_config)."""
+    cfg = getattr(request.app.state, "config", None)
+    if cfg is None:
+        raise HTTPException(503, "App config not initialized")
+    return cfg
+
+
+def get_router(request: Request) -> ProviderRouter:
+    router_ = getattr(request.app.state, "router", None)
+    if router_ is None:
+        raise HTTPException(503, "Provider router not initialized")
+    return router_
+
+
+def get_orchestrator(request: Request) -> AgentOrchestrator:
+    orch = getattr(request.app.state, "orchestrator", None)
+    if orch is None:
+        raise HTTPException(503, "Agent orchestrator not initialized")
+    return orch
+
+
+def get_ollama_ctrl(request: Request) -> OllamaController:
+    ctrl = getattr(request.app.state, "ollama_ctrl", None)
+    if ctrl is None:
+        raise HTTPException(503, "Ollama controller not initialized")
+    return ctrl
+
+
+def get_hf_ctrl(request: Request) -> HuggingFaceController:
+    ctrl = getattr(request.app.state, "hf_ctrl", None)
+    if ctrl is None:
+        raise HTTPException(503, "HuggingFace controller not initialized")
+    return ctrl
+
+
+def get_trace_store(request: Request) -> TraceStore:
+    store = getattr(request.app.state, "trace_store", None)
+    if store is None:
+        raise HTTPException(503, "Trace store not initialized")
+    return store
+
+
+def get_image_service(request: Request) -> ImageGenerationService:
+    svc = getattr(request.app.state, "image_service", None)
+    if svc is None:
+        raise HTTPException(503, "Image generation service not available")
+    return svc
+
+
+def get_ollama_pulls_state(request: Request) -> dict[str, dict[str, Any]]:
+    """In-flight Ollama pull state. Mutating the returned dict is safe
+    under Starlette's single-process model (same invariant the old
+    module-global ``_ollama_pulls`` relied on).
+
+    Named ``*_state`` to avoid shadowing the ``/models/ollama/pulls``
+    route handler — endpoint callables need to own their plain names
+    so ``app.get(...)`` decorator discovery stays clean.
+    """
+    return request.app.state._ollama_pulls
+
+
+def get_hf_downloads_state(request: Request) -> dict[str, dict[str, Any]]:
+    """In-flight HF download state. Same mutation invariant + naming
+    rationale as ``get_ollama_pulls_state`` (the
+    ``/models/hf/downloads`` handler is called ``get_hf_downloads``)."""
+    return request.app.state._hf_downloads
 
 
 # ── TTL cache for expensive operations ────────────────────────────
@@ -133,10 +227,27 @@ def _invalidate_cache(prefix: str = "") -> None:
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    """FastAPI lifespan — build singletons, attach to app.state, tear down.
+
+    [IMPROVE-5] During the migration both ``app.state.X`` *and* the
+    module-level globals (``router``, ``orchestrator``, …) point at the
+    same object. Commit 3 removes the module globals once every
+    endpoint reads through Depends.
+
+    Construction order matters — keep ProviderRouter before
+    AgentOrchestrator (orchestrator depends on router), and keep
+    ``init_db()`` first so the ``app_events`` table exists before the
+    ``config.load`` retry and the ``app.lifespan.start`` emit below
+    have somewhere to land.
+    """
     global router, orchestrator, ollama_ctrl, hf_ctrl, trace_store, image_service
 
+    t0 = time.monotonic()
     logger.info("Starting up Local AI Platform…")
     init_db()
+
+    # Build singletons. Order: router → orchestrator (depends on router)
+    # → controllers → trace store → image service (heaviest, last).
     router = build_router_from_config(config)
     orchestrator = AgentOrchestrator(config, router=router)
     await orchestrator.ainit()  # Upgrade to SQLite checkpointer for persistent conversations
@@ -144,6 +255,23 @@ async def lifespan(app: FastAPI):
     hf_ctrl = HuggingFaceController(config)
     trace_store = TraceStore(load_trace_config())
     image_service = ImageGenerationService(config)
+
+    # Attach to app.state so Depends(get_X) helpers can find them.
+    # Mirrors each module global 1-for-1. Kept in sync here during
+    # the migration; Commit 3 of [IMPROVE-5] removes the globals.
+    app.state.config = config
+    app.state.settings = get_settings()
+    app.state.router = router
+    app.state.orchestrator = orchestrator
+    app.state.ollama_ctrl = ollama_ctrl
+    app.state.hf_ctrl = hf_ctrl
+    app.state.trace_store = trace_store
+    app.state.image_service = image_service
+    # In-flight state dicts (see get_ollama_pulls / get_hf_downloads
+    # helpers). Bound to the module globals below during the migration
+    # so old-style ``api_server._ollama_pulls[...]`` access still works.
+    app.state._ollama_pulls = _ollama_pulls
+    app.state._hf_downloads = _hf_downloads
 
     # Wire image service directly to tools (avoids circular HTTP calls)
     try:
@@ -209,9 +337,22 @@ async def lifespan(app: FastAPI):
             except Exception:
                 logger.info("Default agent '%s' created (tool binding failed)", default_name)
 
+    startup_ms = int((time.monotonic() - t0) * 1000)
     logger.info("Startup complete — %d agents loaded", agents_loaded)
+    # [IMPROVE-5] One boot event per process. Shows up in
+    # /observability/summary so before/after of this wave is visible.
+    emit(
+        "app", "lifespan.start",
+        duration_ms=startup_ms,
+        context={
+            "agents_loaded": agents_loaded,
+            "image_service_ready": image_service is not None,
+            "trace_enabled": bool(trace_store and getattr(trace_store.cfg, "enabled", False)),
+        },
+    )
     yield
     logger.info("Shutting down Local AI Platform")
+    emit("app", "lifespan.stop")
 
 
 app = FastAPI(title="Local AI Platform", version="2.0.0", lifespan=lifespan)
