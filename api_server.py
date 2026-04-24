@@ -4274,8 +4274,12 @@ async def delete_conv(cid: str):
 # ── Tools ─────────────────────────────────────────────────────────
 
 @app.get("/tools")
-async def get_tools():
+async def get_tools(
+    orchestrator: AgentOrchestrator | None = Depends(get_orchestrator_or_none),
+):
     """Return tools in the format Flutter expects: {items: [...]}."""
+    # Graceful: Flutter polls /tools on cold boot; returning [] while the
+    # orchestrator is still initializing is better than flashing a 503.
     runtime = orchestrator.get_tool_names() if orchestrator else []
     saved = list_tools_db()
     items = []
@@ -4287,7 +4291,10 @@ async def get_tools():
 
 
 @app.post("/tools")
-async def create_tool(body: dict[str, Any]):
+async def create_tool(
+    body: dict[str, Any],
+    orchestrator: AgentOrchestrator | None = Depends(get_orchestrator_or_none),
+):
     tool_type = body.get("type", "custom")
     name = body.get("name", "").strip()
     description = body.get("description", "").strip()
@@ -4303,7 +4310,9 @@ async def create_tool(body: dict[str, Any]):
         is_enabled=body.get("is_enabled", True),
     )
 
-    # Also register as a runtime tool in the orchestrator
+    # Also register as a runtime tool in the orchestrator. Graceful: the
+    # DB row is the source of truth; runtime registration is a warm-cache
+    # optimization that the next orchestrator boot will pick up from DB.
     if orchestrator and name:
         if tool_type == "instruction":
             # Instruction tool: wraps an LLM call with a custom system prompt
@@ -4333,11 +4342,12 @@ async def tavily_status():
 
 
 @app.post("/tools/{tool_id}/test")
-async def test_tool(tool_id: str, body: dict[str, Any]):
+async def test_tool(
+    tool_id: str,
+    body: dict[str, Any],
+    orchestrator: AgentOrchestrator = Depends(get_orchestrator),
+):
     """Test a tool with sample input."""
-    if not orchestrator:
-        raise HTTPException(503, "Not initialized")
-
     for tool in orchestrator.tools:
         if tool.name == tool_id:
             try:
