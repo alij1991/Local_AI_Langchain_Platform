@@ -169,6 +169,24 @@ def get_image_service_or_none(request: Request) -> ImageGenerationService | None
     return getattr(request.app.state, "image_service", None)
 
 
+def get_editor_service(request: Request):
+    """Lazy-init the ImageEditorService on ``app.state`` and return it.
+
+    [IMPROVE-5] Replaces the module-global ``_editor_service`` +
+    ``_get_editor()`` factory. First call on a cold process builds
+    the service and caches it on ``app.state._editor_service``;
+    subsequent calls reuse it. The service is heavy-ish (imports
+    OpenCV / PIL plugins), so the factory pattern is preserved —
+    we just move the cache slot off the module global.
+    """
+    svc = getattr(request.app.state, "_editor_service", None)
+    if svc is None:
+        from local_ai_platform.images.editor import ImageEditorService
+        svc = ImageEditorService()
+        request.app.state._editor_service = svc
+    return svc
+
+
 def get_ollama_pulls_state(request: Request) -> dict[str, dict[str, Any]]:
     """In-flight Ollama pull state. Mutating the returned dict is safe
     under Starlette's single-process model (same invariant the old
@@ -5226,7 +5244,11 @@ def _get_editor():
 
 
 @app.post("/editor/enhance-prompt")
-async def editor_enhance_prompt(body: dict[str, Any]):
+async def editor_enhance_prompt(
+    body: dict[str, Any],
+    router: ProviderRouter = Depends(get_router),
+    config: AppConfig = Depends(get_app_config),
+):
     """Enhance an image editing instruction for better results.
 
     Body:
@@ -5258,15 +5280,19 @@ async def editor_enhance_prompt(body: dict[str, Any]):
 
 
 @app.get("/editor/operations/list")
-async def editor_list_operations():
+async def editor_list_operations(
+    editor=Depends(get_editor_service),
+):
     """List all available edit operations (classical + AI + CV composite) with status."""
-    return {"operations": _get_editor().get_available_operations()}
+    return {"operations": editor.get_available_operations()}
 
 
 @app.post("/editor/{session_id}/analyze")
-async def editor_analyze(session_id: str):
+async def editor_analyze(
+    session_id: str,
+    editor=Depends(get_editor_service),
+):
     """Analyze image quality and get AI-powered tool suggestions."""
-    editor = _get_editor()
     session = editor.get_session(session_id)
     if not session:
         raise HTTPException(404, "Session not found")
@@ -5277,9 +5303,11 @@ async def editor_analyze(session_id: str):
 
 
 @app.post("/editor/open")
-async def editor_open(body: dict[str, Any]):
+async def editor_open(
+    body: dict[str, Any],
+    editor=Depends(get_editor_service),
+):
     """Open an image for editing. Accepts image_path, or session_id + image_id from generation."""
-    editor = _get_editor()
     image_path = body.get("image_path", "")
     source_type = body.get("source_type", "file")
     source_session_id = body.get("source_session_id")
@@ -5317,8 +5345,10 @@ async def editor_serve_file(session_id: str, filename: str):
 
 
 @app.get("/editor/{session_id}")
-async def editor_get_session(session_id: str):
-    editor = _get_editor()
+async def editor_get_session(
+    session_id: str,
+    editor=Depends(get_editor_service),
+):
     session = editor.get_session(session_id)
     if not session:
         raise HTTPException(404, f"Editor session '{session_id}' not found")
@@ -5326,15 +5356,21 @@ async def editor_get_session(session_id: str):
 
 
 @app.delete("/editor/{session_id}")
-async def editor_close(session_id: str):
-    _get_editor().close_session(session_id)
+async def editor_close(
+    session_id: str,
+    editor=Depends(get_editor_service),
+):
+    editor.close_session(session_id)
     return {"status": "closed"}
 
 
 @app.post("/editor/{session_id}/edit")
-async def editor_apply_edit(session_id: str, body: dict[str, Any]):
+async def editor_apply_edit(
+    session_id: str,
+    body: dict[str, Any],
+    editor=Depends(get_editor_service),
+):
     """Apply an edit operation. Body: {operation: str, params: {}}"""
-    editor = _get_editor()
     operation = body.get("operation", "")
     params = body.get("params", {})
 
@@ -5352,40 +5388,58 @@ async def editor_apply_edit(session_id: str, body: dict[str, Any]):
 
 
 @app.post("/editor/{session_id}/undo")
-async def editor_undo(session_id: str):
+async def editor_undo(
+    session_id: str,
+    editor=Depends(get_editor_service),
+):
     try:
-        return _get_editor().undo(session_id)
+        return editor.undo(session_id)
     except ValueError as e:
         raise HTTPException(400, str(e))
 
 
 @app.post("/editor/{session_id}/redo")
-async def editor_redo(session_id: str):
+async def editor_redo(
+    session_id: str,
+    editor=Depends(get_editor_service),
+):
     try:
-        return _get_editor().redo(session_id)
+        return editor.redo(session_id)
     except ValueError as e:
         raise HTTPException(400, str(e))
 
 
 @app.get("/editor/{session_id}/history")
-async def editor_history(session_id: str):
-    return {"steps": _get_editor().get_history(session_id)}
+async def editor_history(
+    session_id: str,
+    editor=Depends(get_editor_service),
+):
+    return {"steps": editor.get_history(session_id)}
 
 
 @app.get("/editor/{session_id}/compare")
-async def editor_compare(session_id: str, a: int = -1, b: int = -1):
+async def editor_compare(
+    session_id: str,
+    a: int = -1,
+    b: int = -1,
+    editor=Depends(get_editor_service),
+):
     try:
-        return _get_editor().compare(session_id, a, b)
+        return editor.compare(session_id, a, b)
     except ValueError as e:
         raise HTTPException(400, str(e))
 
 
 @app.post("/editor/{session_id}/export")
-async def editor_export(session_id: str, body: dict[str, Any]):
+async def editor_export(
+    session_id: str,
+    body: dict[str, Any],
+    editor=Depends(get_editor_service),
+):
     fmt = body.get("format", "PNG")
     quality = body.get("quality", 95)
     try:
-        return _get_editor().export(session_id, fmt, quality)
+        return editor.export(session_id, fmt, quality)
     except ValueError as e:
         raise HTTPException(400, str(e))
 
