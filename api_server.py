@@ -4828,17 +4828,12 @@ async def partner_voice_stream_transcribe(websocket: WebSocket):
     # 10s is the sweet spot: Whisper handles it in ~600-800ms and gets great accuracy.
     MAX_WINDOW_BYTES = 320000        # 10s at 16kHz 16-bit
 
-    # Energy-based silence detection threshold
-    SILENCE_RMS_THRESHOLD = 500
+    # [IMPROVE-65] Silence detection now lives on the partner engine
+    # (partner.is_speech) so the loaded Silero VAD model is actually
+    # consulted. Falls back to RMS when Silero didn't load. Reduces
+    # false-positive transcriptions on ambient noise and catches
+    # whisper-level speech that the old 500-RMS threshold missed.
     silent_chunk_count = 0
-
-    def _is_speech(pcm_bytes: bytes) -> bool:
-        """Fast energy-based speech detection (~0.01ms)."""
-        if len(pcm_bytes) < 64:
-            return False
-        samples = np.frombuffer(pcm_bytes, dtype=np.int16)
-        rms = np.sqrt(np.mean(samples.astype(np.float32) ** 2))
-        return rms > SILENCE_RMS_THRESHOLD
 
     try:
         while True:
@@ -4853,7 +4848,7 @@ async def partner_voice_stream_transcribe(websocket: WebSocket):
                 audio_buffer.extend(raw)
 
                 # Track speech vs silence
-                if _is_speech(raw):
+                if partner.is_speech(raw):
                     new_bytes_count += len(raw)
                     silent_chunk_count = 0
                 else:

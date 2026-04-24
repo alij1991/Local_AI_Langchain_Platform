@@ -826,6 +826,73 @@ class PartnerEngine:
     # emit as `stt` immediately.
     _STT_PARTIAL_MIN_INTERVAL_SEC = 5.0
 
+    # [IMPROVE-65] Silero VAD was loaded in init_voice but unused by the
+    # streaming STT path — the WebSocket handler relied on a plain RMS
+    # threshold which fires on ambient noise and misses whisper-level
+    # speech. is_speech() below routes detection through Silero when
+    # available and keeps RMS as a safe fallback.
+    _VAD_CHUNK_SAMPLES = 512  # Silero v5 expects 32ms at 16kHz
+    _VAD_DEFAULT_THRESHOLD = 0.5
+    _VAD_RMS_FALLBACK_THRESHOLD = 500.0
+
+    def is_speech(self, pcm_bytes: bytes) -> bool:
+        """Return True if the PCM16/16kHz/mono chunk contains speech.
+
+        Uses Silero VAD when self._vad is loaded; otherwise falls back
+        to an RMS energy threshold — the same behavior as before
+        [IMPROVE-65] for installs where torch.hub couldn't fetch Silero.
+
+        Silero's probability threshold is env-configurable via
+        PARTNER_VAD_SPEECH_THRESHOLD (default 0.5). Chunks shorter than
+        Silero's 512-sample window are zero-padded. Multi-chunk buffers
+        return True if any 32ms window scores above the threshold, so
+        a burst of speech inside a mostly-silent buffer still counts.
+        """
+        if len(pcm_bytes) < 64:
+            return False
+
+        import numpy as np
+
+        samples = np.frombuffer(pcm_bytes, dtype=np.int16)
+
+        if self._vad is None:
+            # Legacy RMS fallback — unchanged threshold for parity.
+            rms = float(np.sqrt(np.mean(samples.astype(np.float32) ** 2)))
+            return rms > self._VAD_RMS_FALLBACK_THRESHOLD
+
+        try:
+            import os
+
+            import torch
+
+            threshold = float(
+                os.getenv("PARTNER_VAD_SPEECH_THRESHOLD", str(self._VAD_DEFAULT_THRESHOLD))
+            )
+            model, _utils = self._vad
+            audio_f32 = samples.astype(np.float32) / 32768.0
+            audio_tensor = torch.from_numpy(audio_f32)
+
+            # Split into Silero's expected window; pad the final partial
+            # chunk. Take the max probability across windows so a short
+            # burst of speech inside a longer buffer still registers.
+            chunk_size = self._VAD_CHUNK_SAMPLES
+            max_prob = 0.0
+            for start in range(0, len(audio_tensor), chunk_size):
+                chunk = audio_tensor[start:start + chunk_size]
+                if len(chunk) < chunk_size:
+                    chunk = torch.nn.functional.pad(chunk, (0, chunk_size - len(chunk)))
+                prob = float(model(chunk, 16000).item())
+                if prob > max_prob:
+                    max_prob = prob
+                if max_prob > threshold:
+                    # Early exit — we already know it's speech.
+                    return True
+            return max_prob > threshold
+        except Exception as exc:
+            logger.debug("Silero VAD classify failed, falling back to RMS: %s", exc)
+            rms = float(np.sqrt(np.mean(samples.astype(np.float32) ** 2)))
+            return rms > self._VAD_RMS_FALLBACK_THRESHOLD
+
     def transcribe_buffer(self, audio_float32: "np.ndarray") -> str:
         """Transcribe a float32 numpy audio buffer (16kHz mono) directly.
 
