@@ -45,6 +45,14 @@ class PartnerEngine:
         self._asr = None           # faster-whisper
         self._tts = None           # Kokoro (fast, CPU)
         self._tts_emotional = None # Chatterbox-Turbo (emotional, GPU or CPU)
+        # Variant of the external Chatterbox server (set in init_voice):
+        #   "turbo"   — Chatterbox-Turbo (~350M params, sub-200ms latency,
+        #               ~6x realtime on consumer GPUs; current default in 2026)
+        #   "legacy"  — older Chatterbox build (still works, just slower)
+        #   None      — server not running or variant undetectable
+        # Per ch 8 §IMPROVE-64: users switching to chatterbox mode should
+        # see in the response whether they're getting Turbo or legacy.
+        self._chatterbox_variant: str | None = None
         self._vad = None           # Silero VAD
         self._tts_mode = "kokoro"  # "kokoro" (fast) | "chatterbox" (emotional)
         self._voice_gender = "female"  # "female" | "male"
@@ -718,6 +726,53 @@ class PartnerEngine:
 
     # ── Voice Pipeline (research: ASR → LLM → TTS) ───────────────
 
+    # [IMPROVE-64] Chatterbox server variant probe.
+    # Tried in order after /health succeeds; the first path to respond
+    # with any content determines the variant. 1-second per-path timeout
+    # bounds worst-case probing to ~3s at init (once per session).
+    _CHATTERBOX_INFO_PATHS: tuple[str, ...] = ("/info", "/model", "/version")
+    _CHATTERBOX_PROBE_TIMEOUT_SEC: float = 1.0
+
+    def _detect_chatterbox_variant(self, base_url: str) -> str | None:
+        """Probe a Chatterbox server to identify the model variant.
+
+        Returns one of:
+          ``"turbo"``  — response body contains the substring ``turbo``
+                         (Chatterbox-Turbo; ~350M params, sub-200ms
+                         latency, 6x realtime on consumer GPUs per the
+                         Resemble.ai 2026 release notes).
+          ``"legacy"`` — response body was non-empty but no Turbo marker.
+          ``None``     — no info endpoint responded (server too old to
+                         expose one, or unreachable).
+
+        The body is checked as-is (case-insensitive substring) so the
+        detector works with both JSON and plain-text server responses —
+        the Chatterbox OSS server has varied across builds and we don't
+        want a JSON-parse failure to hide an otherwise clear "turbo"
+        marker in the raw bytes.
+
+        Sources (2025-2026):
+          - Resemble.ai Chatterbox TTS Review (ReviewNexa, 2026)
+          - Chatterbox vs Kokoro TTS comparison (Slashdot, 2026)
+          - Real-time voice agent benchmarks (Inworld, 2026)
+        """
+        import urllib.request
+        for path in self._CHATTERBOX_INFO_PATHS:
+            try:
+                url = base_url.rstrip("/") + path
+                with urllib.request.urlopen(
+                    url, timeout=self._CHATTERBOX_PROBE_TIMEOUT_SEC,
+                ) as resp:
+                    body = resp.read().decode("utf-8", errors="replace")
+            except Exception:
+                continue
+            haystack = body.lower()
+            if "turbo" in haystack:
+                return "turbo"
+            if haystack.strip():
+                return "legacy"
+        return None
+
     def init_voice(self) -> dict:
         """Initialize voice pipeline components.
 
@@ -764,15 +819,43 @@ class PartnerEngine:
         # NOTE: chatterbox-tts pins torch==2.6.0 which conflicts with our torch 2.11+cu130.
         # It must be installed in a SEPARATE venv and run as a subprocess server.
         # For now, check if a Chatterbox server is running on port 8282.
+        #
+        # [IMPROVE-64] After the /health probe succeeds we run a second
+        # probe against /info|/model|/version to identify the variant.
+        # Chatterbox-Turbo (2026 default, 350M, sub-200ms latency, 6x
+        # realtime on consumer GPUs) is the target — users on a legacy
+        # Chatterbox build get a log hint to upgrade and a flag in the
+        # voice status that the UI can surface when switching modes.
         try:
             import urllib.request as _ur
             _ur.urlopen("http://127.0.0.1:8282/health", timeout=1)
             self._tts_emotional = "http://127.0.0.1:8282"
+            self._chatterbox_variant = self._detect_chatterbox_variant(
+                self._tts_emotional
+            )
             status["tts_emotional"] = True
+            # Captured in perf of the voice_init event so a weekly query
+            # can answer "what fraction of users are on Turbo?".
+            status["tts_emotional_variant"] = self._chatterbox_variant or "unknown"
             # Don't auto-switch to chatterbox — keep kokoro as default.
             # Kokoro is ~20x faster and supports female/male voice mapping.
             # User can switch manually via /partner/voice/mode.
-            logger.info("TTS Emotional: Chatterbox server detected at port 8282 (available but not default)")
+            if self._chatterbox_variant == "turbo":
+                logger.info(
+                    "TTS Emotional: Chatterbox-Turbo detected at port 8282 "
+                    "(sub-200ms latency) — available but not default"
+                )
+            elif self._chatterbox_variant == "legacy":
+                logger.info(
+                    "TTS Emotional: legacy Chatterbox detected at port 8282 — "
+                    "available but not default. Upgrade to Chatterbox-Turbo "
+                    "for sub-200ms latency (https://github.com/resemble-ai/chatterbox)."
+                )
+            else:
+                logger.info(
+                    "TTS Emotional: Chatterbox server detected at port 8282 "
+                    "(variant=unknown — /info endpoint missing) — available but not default"
+                )
         except Exception:
             logger.info("Chatterbox server not running at port 8282 — using Kokoro only. "
                         "To enable: install chatterbox-tts in a separate venv and run the server.")
@@ -1275,12 +1358,26 @@ class PartnerEngine:
                 logger.warning("stream_synthesize Kokoro failed: %s", e)
 
     def set_tts_mode(self, mode: str) -> str:
-        """Switch between TTS engines: 'kokoro' (fast) or 'chatterbox' (emotional)."""
+        """Switch between TTS engines: 'kokoro' (fast) or 'chatterbox' (emotional).
+
+        When switching to chatterbox, the response cites the detected
+        variant so users see the speed/quality tradeoff upfront — Turbo
+        is sub-200ms at 6x realtime (ch 8 §IMPROVE-64), legacy is several
+        hundred ms slower.
+        """
         if mode == "chatterbox" and self._tts_emotional is None:
             return "chatterbox not available — install: pip install chatterbox-tts"
         if mode == "kokoro" and self._tts is None:
             return "kokoro not available — download model files"
         self._tts_mode = mode
+        if mode == "chatterbox":
+            if self._chatterbox_variant == "turbo":
+                return "TTS mode set to: chatterbox (Turbo variant — sub-200ms latency)"
+            if self._chatterbox_variant == "legacy":
+                return (
+                    "TTS mode set to: chatterbox (legacy variant — upgrade to "
+                    "Chatterbox-Turbo for sub-200ms latency)"
+                )
         return f"TTS mode set to: {mode}"
 
     def get_voice_status(self) -> dict:
@@ -1288,6 +1385,11 @@ class PartnerEngine:
             "asr_available": self._asr is not None,
             "tts_available": self._tts is not None,
             "tts_emotional_available": self._tts_emotional is not None,
+            # [IMPROVE-64] one of 'turbo' / 'legacy' / None — the Flutter
+            # voice picker can render a "sub-200ms latency" badge when
+            # the variant is 'turbo'. Null-safe; older clients that don't
+            # read this field continue to work.
+            "tts_emotional_variant": self._chatterbox_variant,
             "tts_mode": self._tts_mode,
             "voice_gender": self._voice_gender,
             "vad_available": self._vad is not None,

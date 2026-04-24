@@ -64,3 +64,28 @@ py-cpuinfo>=9.0.0
 
 # ── Web UI (optional) ──
 gradio>=5.0.0
+
+# ── Chatterbox-Turbo (Emotional TTS) — sidecar, NOT installed here ──
+# [IMPROVE-64] Chatterbox-Turbo (2026 default, ~350M params, sub-200ms
+# latency, 6x realtime on consumer GPUs) delivers the best emotional
+# speech currently open-sourced. We intentionally do NOT pin it in this
+# file because ``chatterbox-tts`` pins ``torch==2.6.0``, which conflicts
+# with the torch 2.11+cu130 / 2.1.0+ baseline this platform runs on.
+#
+# Sidecar setup (recommended):
+#   1. Create a separate venv:   python -m venv .chatterbox-venv
+#   2. Activate it and install:  pip install chatterbox-tts
+#   3. Run the server on :8282 (see chatterbox-tts docs)
+#
+# The partner engine auto-detects a server on http://127.0.0.1:8282 at
+# init_voice() time and probes /info | /model | /version to distinguish
+# Turbo from legacy builds. If no server is running, the partner falls
+# back to Kokoro (fast CPU TTS; no emotional range) and everything else
+# keeps working. See src/local_ai_platform/partner/engine.py::init_voice.
+#
+# Sources:
+#   - Chatterbox TTS Review: https://reviewnexa.com/chatterbox-tts-review/
+#   - Chatterbox vs Kokoro (Slashdot, 2026):
+#     https://slashdot.org/software/comparison/Chatterbox-Voice-Cloning-vs-Kokoro-TTS/
+#   - Real-time TTS benchmarks (Inworld, 2026):
+#     https://inworld.ai/resources/best-voice-ai-tts-apis-for-real-time-voice-agents-2026-benchmarks
