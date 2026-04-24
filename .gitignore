@@ -64,5 +64,8 @@ hf_token*
 Thumbs.db
 .DS_Store
 
+# ── Claude Code worktrees (embedded repos; never track in the main repo) ──
+.claude/worktrees/
+
 # ── Lock files (large, regenerated) ──
 uv.lock
