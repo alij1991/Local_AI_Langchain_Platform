@@ -299,10 +299,12 @@ if _static_dir.exists():
 from local_ai_platform.api.routers import system as _system_router  # noqa: E402
 from local_ai_platform.api.routers import observability as _observability_router  # noqa: E402
 from local_ai_platform.api.routers import chat as _chat_router  # noqa: E402
+from local_ai_platform.api.routers import tools as _tools_router  # noqa: E402
 
 app.include_router(_system_router.router)
 app.include_router(_observability_router.router)
 app.include_router(_chat_router.router)
+app.include_router(_tools_router.router)
 
 
 # ── Request logging middleware ───────────────────────────────────
@@ -2925,181 +2927,7 @@ async def generate_prompt_draft(
 # api/routers/observability.py.
 
 
-# ── Tools ─────────────────────────────────────────────────────────
-
-@app.get("/tools")
-async def get_tools(
-    orchestrator: AgentOrchestrator | None = Depends(get_orchestrator_or_none),
-):
-    """Return tools in the format Flutter expects: {items: [...]}."""
-    # Graceful: Flutter polls /tools on cold boot; returning [] while the
-    # orchestrator is still initializing is better than flashing a 503.
-    runtime = orchestrator.get_tool_names() if orchestrator else []
-    saved = list_tools_db()
-    items = []
-    for name in runtime:
-        items.append({"name": name, "type": "builtin", "is_enabled": True})
-    for tool in saved:
-        items.append(tool)
-    return {"items": items}
-
-
-@app.post("/tools")
-async def create_tool(
-    body: dict[str, Any],
-    orchestrator: AgentOrchestrator | None = Depends(get_orchestrator_or_none),
-):
-    tool_type = body.get("type", "custom")
-    name = body.get("name", "").strip()
-    description = body.get("description", "").strip()
-    config = body.get("config_json", {})
-
-    # Persist to DB
-    result = upsert_tool(
-        tool_id=None,
-        name=name,
-        tool_type=tool_type,
-        description=description,
-        config=config,
-        is_enabled=body.get("is_enabled", True),
-    )
-
-    # Also register as a runtime tool in the orchestrator. Graceful: the
-    # DB row is the source of truth; runtime registration is a warm-cache
-    # optimization that the next orchestrator boot will pick up from DB.
-    if orchestrator and name:
-        if tool_type == "instruction":
-            # Instruction tool: wraps an LLM call with a custom system prompt
-            instructions = config.get("instructions", description)
-            orchestrator.add_instruction_tool(name, instructions)
-        elif tool_type == "agent_tool":
-            # Agent delegation tool
-            target = config.get("target_agent", "")
-            if target:
-                orchestrator.add_agent_delegate_tool(name, target)
-
-    return result
-
-
-@app.delete("/tools/{tool_id}")
-async def remove_tool(tool_id: str):
-    delete_tool_db(tool_id)
-    return {"status": "deleted"}
-
-
-@app.get("/tools/tavily/status")
-async def tavily_status():
-    # [IMPROVE-69] Routed through AppSettings so .env values are
-    # honored consistently with tools/web.py's web_search path.
-    key = get_settings().tavily_api_key.strip()
-    return {"present": bool(key)}
-
-
-@app.post("/tools/{tool_id}/test")
-async def test_tool(
-    tool_id: str,
-    body: dict[str, Any],
-    orchestrator: AgentOrchestrator = Depends(get_orchestrator),
-):
-    """Test a tool with sample input."""
-    for tool in orchestrator.tools:
-        if tool.name == tool_id:
-            try:
-                result = tool.invoke(body.get("input", ""))
-                return {"result": result}
-            except Exception as exc:
-                return {"error": str(exc)}
-
-    raise HTTPException(404, f"Tool '{tool_id}' not found")
-
-
-# ── MCP Servers ───────────────────────────────────────────────────
-
-@app.post("/mcp/servers/json")
-async def create_mcp_server(body: dict[str, Any]):
-    return upsert_mcp_server(
-        server_id=None,
-        name=body.get("name", ""),
-        transport="stdio",
-        command=body.get("config_json", {}).get("command", ""),
-    )
-
-
-@app.get("/tools/categories")
-async def get_tool_categories():
-    """Return tools grouped by category."""
-    from local_ai_platform.tools import get_tools_by_category
-    return {"categories": get_tools_by_category()}
-
-
-@app.post("/mcp/servers/{server_id}/discover")
-async def discover_mcp_tools(server_id: str):
-    """Discover tools from an MCP server."""
-    from local_ai_platform.repositories.tools_repo import list_mcp_servers, upsert_mcp_discovered_tools
-    servers = list_mcp_servers()
-    server = next((s for s in servers if s["id"] == server_id), None)
-    if not server:
-        raise HTTPException(404, f"MCP server '{server_id}' not found")
-
-    try:
-        from local_ai_platform.tools.mcp_tools import discover_mcp_server_tools
-        import asyncio
-        tools = await discover_mcp_server_tools(server)
-        if tools and not any("error" in t for t in tools):
-            upsert_mcp_discovered_tools(server_id, tools)
-        return {"items": tools}
-    except Exception as exc:
-        return {"items": [], "error": str(exc)}
-
-
-@app.post("/mcp/servers/{server_id}/tools/{tool_name}/invoke")
-async def invoke_mcp_tool_endpoint(server_id: str, tool_name: str, body: dict[str, Any]):
-    """Invoke a specific MCP tool."""
-    from local_ai_platform.repositories.tools_repo import list_mcp_servers
-    servers = list_mcp_servers()
-    server = next((s for s in servers if s["id"] == server_id), None)
-    if not server:
-        raise HTTPException(404, f"MCP server '{server_id}' not found")
-    from local_ai_platform.tools.mcp_tools import invoke_mcp_tool
-    result = await invoke_mcp_tool(server, tool_name, body.get("arguments", body))
-    if "error" in result:
-        raise HTTPException(500, result["error"])
-    return result
-
-
-@app.get("/mcp/servers")
-async def list_mcp_servers_endpoint():
-    """List all configured MCP servers."""
-    from local_ai_platform.repositories.tools_repo import list_mcp_servers as _list, list_mcp_discovered_tools
-    servers = _list()
-    for s in servers:
-        s["discovered_tools"] = list_mcp_discovered_tools(s["id"])
-    return {"items": servers}
-
-
-@app.put("/mcp/servers/{server_id}")
-async def update_mcp_server(server_id: str, body: dict[str, Any]):
-    """Update an MCP server configuration."""
-    return upsert_mcp_server(
-        server_id=server_id,
-        name=body.get("name", ""),
-        transport=body.get("transport", "stdio"),
-        endpoint=body.get("endpoint") or "",
-        command=body.get("command") or "",
-        args=body.get("args"),
-        env=body.get("env"),
-    )
-
-
-@app.delete("/mcp/servers/{server_id}")
-async def delete_mcp_server_endpoint(server_id: str):
-    """Delete an MCP server and its discovered tools."""
-    from local_ai_platform.repositories.tools_repo import delete_mcp_discovered_tools
-    delete_mcp_discovered_tools(server_id)
-    delete_mcp_server(server_id)
-    return {"status": "deleted"}
-
-
+# [IMPROVE-1] /tools/*, /mcp/* moved to api/routers/tools.py.
 # [IMPROVE-1] /threads/* moved to api/routers/observability.py.
 
 
