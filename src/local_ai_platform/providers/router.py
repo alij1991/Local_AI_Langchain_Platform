@@ -246,6 +246,37 @@ class ProviderRouter:
                 logger.warning("Failed to list models from %s: %s", name, exc)
         return all_models
 
+    def list_models(self, provider_name: str) -> list[ModelInfo]:
+        """Return one provider's ``list_models()``, swallowing failures.
+
+        [IMPROVE-58] Single-provider counterpart to ``list_all_models``.
+        Lets callers like ``PartnerEngine._get_best_model`` avoid
+        hand-rolling an Ollama ``/api/tags`` HTTP probe — the call is
+        delegated to the registered provider, which already handles
+        the offline-manifest fallback (``OllamaProvider``) or HF-cache
+        scan (``HuggingFaceProvider``) that a raw HTTP call wouldn't.
+
+        Returns ``[]`` for unknown provider names so iterating callers
+        don't need a defensive ``get_provider`` check first. Provider
+        exceptions are logged + swallowed for the same reason — the
+        caller's contract is "give me the names you can give me;
+        absence is the failure mode."
+
+        Note: this intentionally does NOT consult the
+        ``is_available`` cache. Each provider already gates internally
+        (probes the daemon, caches misses, falls back to local
+        manifests) — adding another layer here would double-cache and
+        cause stale results when a daemon comes up between probes.
+        """
+        provider = self._providers.get(provider_name)
+        if provider is None:
+            return []
+        try:
+            return provider.list_models()
+        except Exception as exc:
+            logger.warning("list_models(%s) failed: %s", provider_name, exc)
+            return []
+
     def get_model_info(self, model: str) -> ModelInfo | None:
         provider, model_name = self._resolve(model)
         return provider.get_model_info(model_name)

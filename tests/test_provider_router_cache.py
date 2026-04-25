@@ -197,3 +197,158 @@ def test_per_provider_ttls_are_independent(router, fake_time):
     router.is_available("b")
     assert fake_a.probe_count == 2  # re-probed after expiry
     assert fake_b.probe_count == 1  # still cached
+
+
+# ── [IMPROVE-58] router.list_models(provider_name) shortcut ─────────
+
+
+class _ListingProvider(BaseProvider):
+    """Like ``_FakeProvider`` but with a controllable ``list_models``.
+
+    The cache tests above only exercise ``is_available``; the
+    ``[IMPROVE-58]`` shortcut goes through ``list_models`` instead
+    and intentionally bypasses the availability cache (each provider
+    gates internally — see ``ProviderRouter.list_models`` docstring).
+    """
+
+    def __init__(
+        self,
+        models: list | None = None,
+        raise_on_list: Exception | None = None,
+    ):
+        from local_ai_platform.providers.base import ModelCapabilities, ModelInfo
+
+        self._models = models if models is not None else []
+        self._raise = raise_on_list
+        self.list_calls = 0
+        self.provider_name = "fake"
+        self._ModelInfo = ModelInfo
+        self._ModelCapabilities = ModelCapabilities
+
+    def is_available(self) -> bool:
+        return True
+
+    def list_models(self):
+        self.list_calls += 1
+        if self._raise is not None:
+            raise self._raise
+        return self._models
+
+    def chat(self, model, messages, settings=None, tools=None):
+        raise NotImplementedError
+
+    def stream(self, model, messages, settings=None):
+        raise NotImplementedError
+
+    async def achat(self, model, messages, settings=None, tools=None):
+        raise NotImplementedError
+
+    async def astream(self, model, messages, settings=None):
+        if False:
+            yield ""
+
+    def get_model_info(self, model):
+        return None
+
+
+def _make_model_info(name: str):
+    """Tiny ``ModelInfo`` factory — only ``name`` matters for the
+    shortcut tests, the rest of the dataclass takes documented
+    defaults that exercise the ``required-fields`` constructor path.
+    """
+    from local_ai_platform.providers.base import ModelCapabilities, ModelInfo
+
+    return ModelInfo(
+        name=name,
+        provider="fake",
+        size_bytes=None,
+        family="test",
+        capabilities=ModelCapabilities(
+            supports_chat=True,
+            supports_tools=False,
+            supports_vision=False,
+            supports_streaming=True,
+            supports_embeddings=False,
+            parameter_size="?",
+            quantization="?",
+        ),
+        metadata={},
+    )
+
+
+def test_list_models_returns_provider_results(router):
+    """The shortcut returns whatever the provider's ``list_models``
+    returns — pin the pass-through so a refactor that wraps results
+    in a different shape can't slip through silently.
+    """
+    fake = _ListingProvider(models=[
+        _make_model_info("qwen3:8b"),
+        _make_model_info("gemma4:e4b"),
+    ])
+    router.register("ollama", fake)
+
+    out = router.list_models("ollama")
+    assert [m.name for m in out] == ["qwen3:8b", "gemma4:e4b"]
+    assert fake.list_calls == 1
+
+
+def test_list_models_swallows_provider_errors(router, caplog):
+    """A flapping provider must not crash the caller. The partner
+    engine relies on ``[]`` being returned on failure so its
+    fall-through to ``config.default_model`` fires deterministically.
+    """
+    import logging
+
+    caplog.set_level(logging.WARNING, logger="local_ai_platform.providers.router")
+
+    fake = _ListingProvider(raise_on_list=RuntimeError("daemon hiccup"))
+    router.register("ollama", fake)
+
+    out = router.list_models("ollama")
+    assert out == []
+    # Warning logged so an operator can grep for it.
+    assert any(
+        "list_models(ollama) failed" in r.getMessage()
+        for r in caplog.records
+    ), [r.getMessage() for r in caplog.records]
+
+
+def test_list_models_unknown_provider_returns_empty(router):
+    """Unknown provider names return ``[]`` rather than raising —
+    same defensive shape as ``is_available``. Lets callers iterate
+    a known list without ``get_provider`` checks first.
+    """
+    assert router.list_models("does-not-exist") == []
+
+
+def test_list_models_does_not_consult_availability_cache(router, fake_time):
+    """Documented contract: ``list_models`` skips the availability
+    cache because each provider already gates internally
+    (``OllamaProvider`` falls back to local manifest scans, etc).
+    Adding another cache layer would double-cache — this test pins
+    that the cache is not touched.
+
+    Verified via ``probe_count`` not advancing on the
+    ``_FakeProvider`` even though we made ``list_models`` calls
+    that *would* probe under the old ``list_all_models`` path.
+    """
+    # Composite fake with both ``is_available`` (counted) and
+    # ``list_models`` (also counted).
+    class _Both(_ListingProvider):
+        def __init__(self):
+            super().__init__(models=[_make_model_info("x")])
+            self.probe_count = 0
+
+        def is_available(self) -> bool:
+            self.probe_count += 1
+            return True
+
+    both = _Both()
+    router.register("ollama", both)
+
+    router.list_models("ollama")
+    router.list_models("ollama")
+    router.list_models("ollama")
+
+    assert both.list_calls == 3       # provider was called every time
+    assert both.probe_count == 0      # availability cache untouched

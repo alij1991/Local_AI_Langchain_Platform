@@ -210,6 +210,12 @@ def _init_mem0():
     # here was "http://localhost:11434"; AppSettings uses the equivalent
     # "http://127.0.0.1:11434" (matching the rest of the codebase).
     # Ollama resolves both to the same local daemon.
+    #
+    # [IMPROVE-58] satisfies the partner-LLM-routing consistency goal
+    # via this same surface: the engine, the router, and Mem0 all
+    # reach Ollama through ``AppSettings.ollama_base_url`` rather than
+    # re-reading raw env vars. No plumbing through ``config`` needed
+    # because AppSettings is the single source of truth.
     _settings = get_settings()
     ollama_url = _settings.ollama_base_url
     llm_model = _settings.partner_llm_model

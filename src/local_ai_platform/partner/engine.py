@@ -75,6 +75,15 @@ class PartnerEngine:
 
         Priority: Qwen3-8B (best conversation) > Gemma4 E4B (128K ctx, multimodal)
         > Qwen3-4B (strong at 4B) > Gemma4 E2B (tiny, fast) > fallbacks.
+
+        [IMPROVE-58] Was a direct ``httpx.get({ollama_base_url}/api/tags)``
+        probe; routes through ``ProviderRouter.list_models("ollama")``
+        instead. We inherit ``OllamaProvider``'s offline-manifest scan
+        (so picking a partner model still works when the daemon is
+        down but models are on disk), and we stop duplicating the
+        Ollama-specific transport + JSON shape inside the partner
+        engine. The ``config.ollama_base_url`` is reached through the
+        provider that owns it — same source of truth, one fewer hop.
         """
         if self._partner_model:
             return self._partner_model
@@ -91,20 +100,18 @@ class PartnerEngine:
         ]
 
         try:
-            url = f"{self.config.ollama_base_url}/api/tags"
-            # 2s timeout — partner-model autodetection runs on init,
-            # we don't want a wedged daemon to slow down boot.
-            resp = get_sync_client().get(url, timeout=2)
-            resp.raise_for_status()
-            data = resp.json()
-            available = {m["name"] for m in data.get("models", [])}
-
+            # ``router.list_models`` swallows transport / JSON failures
+            # and returns ``[]`` on any error, so the bare iteration
+            # below is safe — no need for an inner try.
+            available = {m.name for m in self.router.list_models("ollama")}
             for model in preferred:
                 if model in available:
                     self._partner_model = f"ollama:{model}"
                     logger.info("Partner model: %s (auto-detected)", model)
                     return self._partner_model
         except Exception:
+            # Defensive: a misbehaving custom router could still raise
+            # past the swallow above. Don't let partner boot fail.
             pass
 
         # Fallback to config default
