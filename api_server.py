@@ -52,8 +52,8 @@ from local_ai_platform.repositories.tools_repo import (
     upsert_mcp_server, list_mcp_servers, delete_mcp_server,
 )
 from local_ai_platform.repositories.models import upsert_model_entry, list_model_entries
-from local_ai_platform.repositories.systems import list_systems, get_system, upsert_system, delete_system
-from local_ai_platform.systems_validator import SystemValidationError, check_no_cycles
+# [IMPROVE-1] systems repo + systems_validator imports moved to
+# api/routers/systems.py with the /systems/* handlers.
 from local_ai_platform.tracing import load_trace_config, TraceConfig, TraceRecorder, TraceStore, LocalTraceCallbackHandler
 from local_ai_platform.observability import emit, track_event
 
@@ -301,12 +301,14 @@ from local_ai_platform.api.routers import observability as _observability_router
 from local_ai_platform.api.routers import chat as _chat_router  # noqa: E402
 from local_ai_platform.api.routers import tools as _tools_router  # noqa: E402
 from local_ai_platform.api.routers import agents as _agents_router  # noqa: E402
+from local_ai_platform.api.routers import systems as _systems_router  # noqa: E402
 
 app.include_router(_system_router.router)
 app.include_router(_observability_router.router)
 app.include_router(_chat_router.router)
 app.include_router(_tools_router.router)
 app.include_router(_agents_router.router)
+app.include_router(_systems_router.router)
 
 
 # ── Request logging middleware ───────────────────────────────────
@@ -2688,261 +2690,8 @@ from local_ai_platform.api.routers.agents import (  # noqa: E402
 # [IMPROVE-1] /threads/* moved to api/routers/observability.py.
 
 
-# ── System Templates (pre-built agent configs) ───────────────────
-
-@app.get("/systems/templates")
-async def get_system_templates():
-    """Return pre-built system templates for one-click agent deployment."""
-    from local_ai_platform.system_templates import list_templates
-    return {"templates": list_templates()}
-
-
-@app.post("/systems/deploy/{template_id}")
-async def deploy_system_template(
-    template_id: str,
-    body: dict[str, Any] | None = None,
-    orchestrator: AgentOrchestrator = Depends(get_orchestrator),
-):
-    """Deploy a system template as a new agent."""
-    if body is None:
-        body = {}
-
-    from local_ai_platform.system_templates import get_template
-    template = get_template(template_id)
-    if not template:
-        raise HTTPException(404, f"Template '{template_id}' not found")
-
-    # Allow overriding the model and name
-    agent_name = body.get("name", template.id)
-    model_name = body.get("model_name", template.recommended_models[0] if template.recommended_models else "gemma3:4b")
-    provider = body.get("provider", "ollama")
-
-    # Create the agent
-    orchestrator.add_agent(
-        name=agent_name,
-        model_name=model_name,
-        system_prompt=template.system_prompt,
-        provider=provider,
-        settings=template.default_settings,
-        role="general",
-    )
-    if template.tool_ids:
-        orchestrator.set_agent_tools(agent_name, template.tool_ids)
-
-    # Persist to DB
-    save_agent(agent_name, {
-        "name": agent_name,
-        "model_name": model_name,
-        "system_prompt": template.system_prompt,
-        "provider": provider,
-        "settings": template.default_settings,
-        "role": "general",
-        "tool_ids": template.tool_ids,
-        "template_id": template.id,
-    })
-
-    return {
-        "status": "deployed",
-        "agent": agent_name,
-        "template": template.id,
-        "tools": template.tool_ids,
-    }
-
-
-@app.get("/systems/recommend")
-async def recommend_systems(
-    router: ProviderRouter | None = Depends(get_router_or_none),
-):
-    """Recommend system templates based on available models."""
-    from local_ai_platform.system_templates import SYSTEM_TEMPLATES
-
-    # Get available Ollama models (graceful — render catalog even if
-    # the router isn't up yet, e.g. Ollama daemon is down).
-    available_models: list[str] = []
-    try:
-        if router:
-            models_resp = router.list_models("ollama")
-            available_models = [m.model_id for m in models_resp]
-    except Exception:
-        pass
-
-    recommendations = []
-    for t in SYSTEM_TEMPLATES:
-        matching_models = [m for m in t.recommended_models if any(m.split(":")[0] in am for am in available_models)]
-        recommendations.append({
-            "id": t.id,
-            "name": t.name,
-            "description": t.description,
-            "icon": t.icon,
-            "category": t.category,
-            "has_matching_model": len(matching_models) > 0,
-            "matching_models": matching_models,
-            "recommended_models": t.recommended_models,
-        })
-
-    return {"recommendations": recommendations, "available_models": available_models}
-
-
-# ── Systems (custom graph-based systems, kept for backward compat) ─
-
-def _validate_system_or_400(name: str, definition: dict) -> None:
-    """Reject cycle-containing system definitions at save time.
-
-    [IMPROVE-37] — runs Kahn's topological sort via
-    systems_validator.check_no_cycles. Emits a system.validate event
-    (ok or error) so the weekly /observability/summary review can
-    count rejected saves alongside other subsystem errors. On cycle,
-    raises HTTPException 400 with a structured body the Flutter client
-    can render directly.
-    """
-    try:
-        check_no_cycles(definition)
-        emit(
-            "system",
-            "validate",
-            status="ok",
-            context={
-                "system_name": name,
-                "node_count": len(definition.get("nodes") or []),
-                "edge_count": len(definition.get("edges") or []),
-            },
-        )
-    except SystemValidationError as exc:
-        emit(
-            "system",
-            "validate",
-            status="error",
-            error_code="CycleDetected",
-            error_message=str(exc),
-            context={"system_name": name, "cyclic_nodes": exc.cyclic_nodes},
-        )
-        raise HTTPException(
-            400,
-            {
-                "error": "cycle_detected",
-                "message": str(exc),
-                "cyclic_nodes": exc.cyclic_nodes,
-            },
-        )
-
-
-@app.get("/systems")
-async def get_systems():
-    """Return custom systems in the format Flutter expects: {items: [...]}."""
-    return {"items": list_systems()}
-
-
-@app.post("/systems")
-async def create_system(body: dict[str, Any]):
-    name = body.get("name", "")
-    definition = body.get("definition", body)
-    if not name:
-        raise HTTPException(400, "name is required")
-    _validate_system_or_400(name, definition)
-    return upsert_system(name, definition)
-
-
-@app.put("/systems/{name}")
-async def save_system(name: str, body: dict[str, Any]):
-    definition = body.get("definition", body)
-    _validate_system_or_400(name, definition)
-    return upsert_system(name, definition)
-
-
-@app.get("/systems/{name}")
-async def get_single_system(name: str):
-    system = get_system(name)
-    if not system:
-        raise HTTPException(404, f"System '{name}' not found")
-    return system
-
-
-@app.post("/systems/{name}/chat")
-async def chat_with_system(
-    name: str,
-    request: Request,
-    orchestrator: AgentOrchestrator = Depends(get_orchestrator),
-):
-    """Execute a system's agent graph with a user message."""
-    # Handle both JSON and multipart form data
-    content_type = request.headers.get("content-type", "")
-    if "multipart" in content_type:
-        form = await request.form()
-        message = form.get("message", "")
-        conv_id = form.get("conversation_id")
-    else:
-        body = await request.json()
-        message = body.get("message", "")
-        conv_id = body.get("conversation_id")
-
-    if not message:
-        raise HTTPException(400, "message is required")
-
-    system = get_system(name)
-    if not system:
-        raise HTTPException(404, f"System '{name}' not found")
-
-    definition = system.get("definition_json", system.get("definition", {}))
-    if isinstance(definition, str):
-        definition = json.loads(definition)
-
-    try:
-        result = await orchestrator.execute_system_graph(definition, message, conv_id)
-        return result
-    except Exception as exc:
-        raise HTTPException(500, f"System execution failed: {exc}")
-
-
-@app.post("/systems/{name}/clone")
-async def clone_system(name: str, body: dict[str, Any] = None):
-    """Clone a system with a new name."""
-    system = get_system(name)
-    if not system:
-        raise HTTPException(404, f"System '{name}' not found")
-    new_name = (body or {}).get("new_name", f"{name}_copy")
-    definition = system.get("definition_json", system.get("definition", {}))
-    if isinstance(definition, str):
-        definition = json.loads(definition)
-    # Also validate on clone — a legacy cyclic row in DB should not
-    # propagate into a new row via clone. The source row stays
-    # untouched; only the cloned copy is blocked.
-    _validate_system_or_400(new_name, definition)
-    return upsert_system(new_name, definition)
-
-
-@app.get("/systems/{name}/export")
-async def export_system(name: str):
-    """Export a system as a JSON download."""
-    system = get_system(name)
-    if not system:
-        raise HTTPException(404, f"System '{name}' not found")
-    definition = system.get("definition_json", system.get("definition", {}))
-    if isinstance(definition, str):
-        definition = json.loads(definition)
-    export = {"name": name, "definition": definition, "exported_at": system.get("updated_at")}
-    from fastapi.responses import Response
-    return Response(
-        content=json.dumps(export, indent=2),
-        media_type="application/json",
-        headers={"Content-Disposition": f'attachment; filename="{name}.json"'},
-    )
-
-
-@app.post("/systems/import")
-async def import_system(body: dict[str, Any]):
-    """Import a system from exported JSON."""
-    name = body.get("name", "")
-    definition = body.get("definition", {})
-    if not name:
-        raise HTTPException(400, "name is required in import data")
-    _validate_system_or_400(name, definition)
-    return upsert_system(name, definition)
-
-
-@app.delete("/systems/{name}")
-async def remove_system(name: str):
-    delete_system(name)
-    return {"status": "deleted"}
+# [IMPROVE-1] /systems/* (templates + custom graph systems) moved to
+# api/routers/systems.py.
 
 
 # ── AI Partner ────────────────────────────────────────────────────
