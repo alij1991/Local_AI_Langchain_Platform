@@ -66,6 +66,7 @@ from __future__ import annotations
 
 import asyncio
 import gc
+import itertools
 import json
 import logging
 import re
@@ -73,9 +74,9 @@ import threading
 import time
 from pathlib import Path
 from typing import Any
-from urllib.parse import quote_plus, urlencode
 
 from fastapi import APIRouter, Depends, HTTPException, Query
+from huggingface_hub import HfApi
 from pydantic import BaseModel
 
 from local_ai_platform.api.deps import (
@@ -121,6 +122,109 @@ class ModelLoadRequest(BaseModel):
     @property
     def resolved_name(self) -> str:
         return self.model_name or self.model_id or ""
+
+
+# ── HfApi.ModelInfo → legacy JSON-shaped dict ─────────────────────
+#
+# [IMPROVE-11] The two HF browse endpoints used to fetch raw JSON via
+# ``urlencode(...)`` against ``https://huggingface.co/api/models`` and
+# parse the response field-by-field. After the migration to
+# ``HfApi.list_models(...)`` they receive ``ModelInfo`` dataclasses
+# instead. The downstream cluster of helpers (``_sum_safetensors_params``,
+# ``_sum_siblings_bytes``, ``_extract_gguf_variants``, etc.) was written
+# against the original JSON dict shape, so this adapter rebuilds that
+# shape from a ``ModelInfo`` rather than rewriting ~200 lines of
+# parsing logic. Keep it local to this module — it is intentionally
+# narrow (only the fields the helpers read).
+
+
+def _hf_model_info_to_legacy_dict(mi: Any) -> dict[str, Any]:
+    """Re-emit a ``ModelInfo`` as the dict the legacy parser expects.
+
+    ``HfApi.list_models(expand=[...])`` populates these attributes:
+      * ``mi.id``                — repo id (e.g. ``"meta-llama/Llama-3-8B"``)
+      * ``mi.tags``              — ``list[str]``
+      * ``mi.pipeline_tag``      — ``str | None``
+      * ``mi.downloads``         — ``int | None``
+      * ``mi.likes``             — ``int | None``
+      * ``mi.last_modified``     — ``datetime | None``
+      * ``mi.created_at``        — ``datetime | None``
+      * ``mi.gated``             — ``bool | str | None`` (HF returns
+                                   the literal ``"auto"`` / ``"manual"``
+                                   string for gated repos, ``False`` otherwise)
+      * ``mi.config``            — raw config dict (already a dict)
+      * ``mi.safetensors``       — ``SafeTensorsInfo`` with ``.total``
+                                   and ``.parameters``
+      * ``mi.siblings``          — ``list[RepoSibling]`` with ``.rfilename``
+                                   / ``.size`` / ``.lfs``
+
+    The legacy parser reads ``model.get("safetensors", {}).get("total")``
+    and iterates ``model.get("siblings", [])`` expecting items with a
+    ``"size"`` key — so we serialize back to that shape verbatim.
+    """
+    safetensors_dict: dict[str, Any] | None = None
+    sf = getattr(mi, "safetensors", None)
+    if sf is not None:
+        # ``SafeTensorsInfo`` exposes ``.total`` and ``.parameters``;
+        # mirror the JSON keys the legacy parser hits.
+        safetensors_dict = {
+            "total": getattr(sf, "total", None),
+            "parameters": getattr(sf, "parameters", None),
+        }
+
+    siblings_list: list[dict[str, Any]] | None = None
+    sibs = getattr(mi, "siblings", None)
+    if sibs is not None:
+        siblings_list = []
+        for s in sibs:
+            entry: dict[str, Any] = {
+                "rfilename": getattr(s, "rfilename", ""),
+                "size": getattr(s, "size", None),
+            }
+            lfs = getattr(s, "lfs", None)
+            if lfs is not None:
+                # ``_sum_siblings_bytes`` falls back to ``lfs.size``
+                # when the top-level ``size`` is missing — preserve.
+                entry["lfs"] = {
+                    "size": getattr(lfs, "size", None),
+                    "sha256": getattr(lfs, "sha256", None),
+                }
+            siblings_list.append(entry)
+
+    last_modified = getattr(mi, "last_modified", None)
+    created_at = getattr(mi, "created_at", None)
+
+    return {
+        "id": getattr(mi, "id", ""),
+        "tags": list(getattr(mi, "tags", None) or []),
+        "pipeline_tag": getattr(mi, "pipeline_tag", None),
+        "downloads": getattr(mi, "downloads", None),
+        "likes": getattr(mi, "likes", None),
+        "lastModified": last_modified.isoformat() if last_modified else "",
+        "createdAt": created_at.isoformat() if created_at else "",
+        "gated": getattr(mi, "gated", False),
+        "config": getattr(mi, "config", None),
+        "safetensors": safetensors_dict,
+        "siblings": siblings_list,
+    }
+
+
+# Field set passed to ``HfApi.list_models(expand=[...])`` for the
+# discover/library endpoints. Mirrors the old hand-rolled
+# ``expand[]=...`` query-string entries one-for-one so the catalog
+# items returned to Flutter keep every field they had pre-migration.
+_HF_DISCOVER_EXPAND: list[str] = [
+    "safetensors",
+    "siblings",
+    "tags",
+    "pipeline_tag",
+    "likes",
+    "downloads",
+    "lastModified",
+    "createdAt",
+    "gated",
+    "config",
+]
 
 
 # ── ModelInfo → catalog dict ─────────────────────────────────────
@@ -1618,43 +1722,41 @@ async def discover_hf_models(
     """
     items: list[dict[str, Any]] = []
     try:
-        # Use HuggingFace REST API with expand[] to get all needed fields
-        # Note: expand[] replaces default fields, so we must list everything
-        params_list: list[tuple[str, str]] = [
-            ("sort", sort),
-            ("limit", str(min(limit, 100))),
-            ("expand[]", "safetensors"),
-            ("expand[]", "siblings"),          # ← actual file sizes for accurate totals
-            ("expand[]", "tags"),
-            ("expand[]", "pipeline_tag"),
-            ("expand[]", "likes"),
-            ("expand[]", "downloads"),
-            ("expand[]", "lastModified"),
-            ("expand[]", "createdAt"),
-            ("expand[]", "gated"),
-            ("expand[]", "config"),
-        ]
-        if offset > 0:
-            params_list.append(("skip", str(offset)))
-        if q:
-            params_list.append(("search", q))
-        if task:
-            params_list.append(("pipeline_tag", task))
-        if author:
-            params_list.append(("author", author))
-
-        # [IMPROVE-7] urlencode kept here because params_list contains
-        # repeated ``expand[]`` keys (a list-of-tuples shape) that
-        # httpx's ``params=`` accepts but the dict-based callers don't —
-        # leaving the URL intact keeps the wire format byte-for-byte
-        # identical to the urllib path. [IMPROVE-11] is slated to
-        # replace this whole block with ``huggingface_hub.list_models``.
-        api_url = f"https://huggingface.co/api/models?{urlencode(params_list, quote_via=quote_plus)}"
-        resp = get_sync_client().get(
-            api_url, headers={"Accept": "application/json"}, timeout=15,
+        # [IMPROVE-11] Was a hand-rolled
+        # ``urlencode([("expand[]", ...), ...])`` against
+        # ``https://huggingface.co/api/models``; replaced with
+        # ``HfApi.list_models`` so we inherit the library's typed
+        # ``ModelInfo`` results, retry/backoff, and ``HF_TOKEN``
+        # forwarding (relevant for gated repo discovery).
+        #
+        # ``list_models`` has no native ``skip``/``offset`` parameter —
+        # we apply pagination client-side via ``itertools.islice`` after
+        # bumping the fetch ceiling to ``offset + limit`` (capped at 100,
+        # matching the prior URL's hard limit). Fetching the full
+        # ``offset + limit`` window mirrors how the old ``skip=`` query
+        # param worked: HF's API skipped server-side, but the page-1
+        # bandwidth cost is unchanged.
+        page_limit = min(offset + limit, 100)
+        api = HfApi()
+        result_iter = api.list_models(
+            search=q or None,
+            pipeline_tag=task or None,
+            author=author or None,
+            sort=sort,
+            limit=page_limit,
+            expand=_HF_DISCOVER_EXPAND,
         )
-        resp.raise_for_status()
-        data = resp.json()
+        # Slice off the first ``offset`` items (matches old ``skip=``).
+        # ``islice`` does not materialize the whole iterator — important
+        # because ``list_models`` may be a generator backed by paged
+        # HTTP requests under the hood.
+        if offset > 0:
+            result_iter = itertools.islice(result_iter, offset, None)
+        # Cap the per-call result count regardless of what the server
+        # returned — HF sometimes overshoots the requested ``limit``
+        # by a handful when filters interact.
+        result_iter = itertools.islice(result_iter, limit)
+        data = [_hf_model_info_to_legacy_dict(mi) for mi in result_iter]
 
         for model in data:
             model_id = model.get("id", "")
@@ -1857,18 +1959,32 @@ async def get_vllm_library(
     """Return popular vLLM-compatible models from HuggingFace."""
     items: list[dict[str, Any]] = []
     try:
+        # [IMPROVE-11] Was a hand-built
+        # ``https://huggingface.co/api/models?...&expand[]=...`` URL;
+        # replaced with ``HfApi.list_models``. ``"instruct"`` stays as
+        # the default search-token (matches the prior ``query`` default)
+        # so the catalog seeds with chat-friendly models when the user
+        # hasn't typed anything.
         query = search or "instruct"
-        api_url = (
-            f"https://huggingface.co/api/models?search={query}"
-            f"&pipeline_tag=text-generation&sort=downloads&limit=30"
-            f"&expand[]=safetensors&expand[]=siblings&expand[]=tags"
-            f"&expand[]=pipeline_tag&expand[]=likes&expand[]=lastModified"
+        api = HfApi()
+        # Narrower expand set than the discover endpoint — vLLM only
+        # cares about size + capability tags, so ``createdAt`` /
+        # ``gated`` / ``config`` are intentionally omitted.
+        result_iter = api.list_models(
+            search=query,
+            pipeline_tag="text-generation",
+            sort="downloads",
+            limit=30,
+            expand=[
+                "safetensors",
+                "siblings",
+                "tags",
+                "pipeline_tag",
+                "likes",
+                "lastModified",
+            ],
         )
-        resp = get_sync_client().get(
-            api_url, headers={"Accept": "application/json"}, timeout=10,
-        )
-        resp.raise_for_status()
-        data = resp.json()
+        data = [_hf_model_info_to_legacy_dict(mi) for mi in result_iter]
 
         # Check if vLLM is running and which models it serves
         vllm_serving: set[str] = set()

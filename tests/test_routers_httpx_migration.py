@@ -1,10 +1,18 @@
-"""Tests for the [IMPROVE-7] Commit 3/6 httpx migration.
+"""Tests for the [IMPROVE-7] Commit 3/6 + [IMPROVE-11] HF migrations.
 
-Locks in the wire-level behavior of the urllib → httpx swap inside
-``api/routers/models.py`` and ``api/routers/images.py``. Each test
-injects a ``MockTransport``-backed sync client via
-``http_client.set_test_clients`` so the production code path runs
-end-to-end with a deterministic transport in place of the network.
+Locks in the wire-level behavior of:
+
+* The urllib → httpx swap inside ``api/routers/models.py`` and
+  ``api/routers/images.py`` ([IMPROVE-7] Commit 3/6) — each httpx
+  test injects a ``MockTransport``-backed sync client via
+  ``http_client.set_test_clients`` so the production code path
+  runs end-to-end with a deterministic transport in place of the
+  network.
+* The hand-rolled ``huggingface.co/api/models?expand[]=...`` URL
+  → ``HfApi.list_models(...)`` migration ([IMPROVE-11]) — the
+  HF discover and vLLM library endpoints no longer hit httpx
+  directly, so those tests patch ``routers.models.HfApi`` instead
+  of using ``MockTransport``.
 
 Sites covered:
 
@@ -13,12 +21,14 @@ Sites covered:
 * ``GET  /models/ollama/library`` — Ollama trending fetch (was
   ``urllib_req.urlopen``) + the search-scrape branch (was a hand-rolled
   ``urllib_req.quote`` URL, now ``params={"q": search}``).
-* ``GET  /models/hf/discover`` — HuggingFace API call. Behavior under
-  [IMPROVE-11] will replace this with ``huggingface_hub.list_models``;
-  this commit only swaps the transport so that refactor lands
-  cleanly on top.
-* ``GET  /models/vllm/library`` — second HuggingFace fetch on a
-  different code path; ensures we caught both call sites.
+* ``GET  /models/hf/discover`` — was hand-built ``urlencode`` URL +
+  raw httpx GET; now ``HfApi.list_models(expand=[...])``. Tests pin
+  the kwargs (search/pipeline_tag/sort/limit/expand), the offset
+  slicing behavior, and the graceful-degrade contract on
+  ``HfHubHTTPError``.
+* ``GET  /models/vllm/library`` — same migration as discover, narrower
+  expand set; tests pin the hardcoded ``pipeline_tag="text-generation"``
+  + ``sort="downloads"`` + ``limit=30`` invariants.
 * ``POST /images/enhance-prompt`` legacy ``/api/chat`` fallback —
   exercised when the router-mediated primary call doesn't yield JSON.
 
@@ -26,15 +36,19 @@ References (2025–2026):
 * httpx MockTransport — https://www.python-httpx.org/advanced/transports/#mock-transports
 * httpx request methods — https://www.python-httpx.org/api/#client
 * Ollama API reference — https://github.com/ollama/ollama/blob/main/docs/api.md
+* huggingface_hub HfApi.list_models — https://huggingface.co/docs/huggingface_hub/main/en/package_reference/hf_api#huggingface_hub.HfApi.list_models
+* HF Hub API expand params — https://huggingface.co/docs/hub/api#get-apimodels
 """
 from __future__ import annotations
 
 import asyncio
 import json
+from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
 
 import httpx
 import pytest
+from huggingface_hub.errors import HfHubHTTPError
 
 from local_ai_platform.http_client import (
     reset_clients,
@@ -166,91 +180,207 @@ def test_ollama_library_search_scrape_uses_params_querystring():
     assert any("ollama.com/search" in u and "q=qwen" in u for u in seen_urls), seen_urls
 
 
-# ── /models/hf/discover ─────────────────────────────────────────────
+# ── /models/hf/discover  ([IMPROVE-11]: HfApi.list_models) ──────────
 
 
-def test_discover_hf_models_calls_hf_api_via_httpx():
-    """HF discover hits huggingface.co/api/models with a long
-    expand[]-shaped query string that uses ``urlencode`` directly.
-    The migration kept the URL crafting intact (per [IMPROVE-11]
-    the whole block is slated for ``huggingface_hub.list_models``).
+def _stub_model_info(**kwargs):
+    """Build a duck-typed ``ModelInfo`` substitute for tests.
+
+    The router's ``_hf_model_info_to_legacy_dict`` adapter only reads
+    a small set of attributes via ``getattr(...)`` — using a
+    ``SimpleNamespace`` instead of constructing a real ``ModelInfo``
+    keeps these tests independent of huggingface_hub's internal
+    dataclass fields, which have shifted across releases.
+
+    Defaults are chosen so the legacy parser produces a plausible
+    catalog item; override per test as needed.
+    """
+    defaults: dict = {
+        "id": "test-org/test-model",
+        "tags": [],
+        "pipeline_tag": "text-generation",
+        "downloads": 100,
+        "likes": 5,
+        "last_modified": None,
+        "created_at": None,
+        "gated": False,
+        "config": None,
+        "safetensors": None,
+        "siblings": None,
+    }
+    defaults.update(kwargs)
+    return SimpleNamespace(**defaults)
+
+
+def test_discover_hf_models_uses_list_models_with_expand_fields(monkeypatch):
+    """[IMPROVE-11] swapped the hand-rolled
+    ``urlencode([("expand[]", ...), ...])`` URL for
+    ``HfApi.list_models(...)``. Pin every kwarg the route sets:
+
+    * ``search`` / ``pipeline_tag`` / ``author`` mapped from the
+      query parameters,
+    * ``sort`` forwarded as-is,
+    * ``limit`` capped at 100 (matches the prior URL limit clamp),
+    * ``expand`` covers all 10 fields the legacy parser reads.
+
+    A regression here would silently drop a field from the response
+    (e.g. ``siblings`` → no real download size) and degrade the
+    catalog item quality without breaking any contract loud enough
+    for Flutter to notice.
     """
     captured: dict = {}
 
-    def handler(request: httpx.Request) -> httpx.Response:
-        captured["url"] = str(request.url)
-        captured["accept"] = request.headers.get("accept")
-        return httpx.Response(200, json=[
-            {
-                "id": "test-org/test-model",
-                "tags": ["transformers"],
-                "pipeline_tag": "text-generation",
-                "downloads": 100,
-                "likes": 5,
-            },
-        ])
+    class _FakeApi:
+        def list_models(self, **kwargs):
+            captured["kwargs"] = kwargs
+            return iter([_stub_model_info(id="test-org/test-model", tags=["transformers"])])
 
-    set_test_clients(sync=httpx.Client(transport=httpx.MockTransport(handler)))
+    from local_ai_platform.api.routers import models as models_router
+    monkeypatch.setattr(models_router, "HfApi", lambda: _FakeApi())
 
-    from local_ai_platform.api.routers.models import discover_hf_models
+    result = asyncio.run(models_router.discover_hf_models(
+        q="llama", task="text-generation", author="test-org",
+    ))
 
-    result = asyncio.run(discover_hf_models(q="llama", task="text-generation"))
-
-    # URL crafting preserved byte-for-byte from the urllib path.
-    assert captured["url"].startswith("https://huggingface.co/api/models?")
-    assert "expand%5B%5D=safetensors" in captured["url"]
-    assert "search=llama" in captured["url"]
-    assert "pipeline_tag=text-generation" in captured["url"]
-    # Accept header preserved.
-    assert captured["accept"] == "application/json"
-    # And the response surfaced through the parser.
+    kw = captured["kwargs"]
+    assert kw["search"] == "llama"
+    assert kw["pipeline_tag"] == "text-generation"
+    assert kw["author"] == "test-org"
+    assert kw["sort"] == "downloads"  # default
+    # limit defaults to 40; offset=0 → page_limit = min(0+40, 100) = 40.
+    assert kw["limit"] == 40
+    # All 10 expand fields preserved from the pre-migration URL.
+    assert set(kw["expand"]) == {
+        "safetensors", "siblings", "tags", "pipeline_tag",
+        "likes", "downloads", "lastModified", "createdAt",
+        "gated", "config",
+    }
+    # Item surfaced through the legacy parser via the adapter.
     items = result.get("items", [])
     assert any(item.get("name") == "test-org/test-model" for item in items)
 
 
-def test_discover_hf_models_returns_empty_on_http_error():
-    """HF outage must not 500 the endpoint — the route swallows
-    exceptions and returns ``{"items": [], ...}`` so Flutter's model
-    browser falls back to its empty-state UI.
-    """
-    def handler(request: httpx.Request) -> httpx.Response:
-        raise httpx.ConnectError("HF down")
+def test_discover_hf_models_offset_slices_iterator(monkeypatch):
+    """``HfApi.list_models`` does not accept a ``skip``/``offset``
+    kwarg — the route applies pagination client-side via
+    ``itertools.islice``. Pin both halves of the contract:
 
-    set_test_clients(sync=httpx.Client(transport=httpx.MockTransport(handler)))
-
-    from local_ai_platform.api.routers.models import discover_hf_models
-    result = asyncio.run(discover_hf_models(q="anything"))
-    assert result == {"items": [], "offset": 0, "limit": 40, "has_more": False}
-
-
-# ── /models/vllm/library ────────────────────────────────────────────
-
-
-def test_vllm_library_calls_hf_api_via_httpx():
-    """Second HF call site, separate handler — ensures the migration
-    didn't miss the vLLM library path. The query shape here is
-    f-string-built (not urlencode), so we verify the literal URL
-    survives through to the transport.
+    1. ``page_limit`` (the ``limit`` we pass to the library) is
+       ``offset + limit`` capped at 100, so the iterator produced
+       by HF has enough items for us to slice.
+    2. After slicing, exactly ``limit`` items reach the response and
+       the first ``offset`` are dropped.
     """
     captured: dict = {}
 
-    def handler(request: httpx.Request) -> httpx.Response:
-        captured["url"] = str(request.url)
-        return httpx.Response(200, json=[
-            {"id": "meta-llama/Llama-3-8b-Instruct", "tags": [], "pipeline_tag": "text-generation"},
-        ])
+    class _FakeApi:
+        def list_models(self, **kwargs):
+            captured["kwargs"] = kwargs
+            # Yield 25 stub models so we can verify slicing.
+            return iter([
+                _stub_model_info(id=f"org/model-{i}") for i in range(25)
+            ])
 
-    set_test_clients(sync=httpx.Client(transport=httpx.MockTransport(handler)))
+    from local_ai_platform.api.routers import models as models_router
+    monkeypatch.setattr(models_router, "HfApi", lambda: _FakeApi())
 
-    from local_ai_platform.api.routers.models import get_vllm_library
+    result = asyncio.run(models_router.discover_hf_models(
+        q="x", limit=5, offset=10,
+    ))
 
-    result = asyncio.run(get_vllm_library(search="instruct", router=None))
+    # page_limit = min(offset+limit, 100) = min(15, 100) = 15.
+    assert captured["kwargs"]["limit"] == 15
+    items = result["items"]
+    # Exactly ``limit`` items returned.
+    assert len(items) == 5
+    # First model is at offset 10 (model-10), not model-0.
+    assert items[0]["name"] == "org/model-10"
+    assert items[-1]["name"] == "org/model-14"
+    # Pagination metadata reflects what was requested.
+    assert result["offset"] == 10
+    assert result["limit"] == 5
 
-    assert "huggingface.co/api/models" in captured["url"]
-    assert "search=instruct" in captured["url"]
-    assert "pipeline_tag=text-generation" in captured["url"]
+
+def test_discover_hf_models_returns_empty_on_hf_hub_error(monkeypatch):
+    """HF outage must not 500 the endpoint — the route swallows
+    exceptions and returns ``{"items": [], ...}`` so Flutter's model
+    browser falls back to its empty-state UI. Pre-migration this was
+    triggered by ``httpx.ConnectError``; post-migration it's
+    ``HfHubHTTPError`` (raised by the library on 5xx and connection
+    failures). The graceful-degrade contract is identical.
+    """
+    class _FakeApi:
+        def list_models(self, **kwargs):
+            raise HfHubHTTPError("HF down", response=None)
+
+    from local_ai_platform.api.routers import models as models_router
+    monkeypatch.setattr(models_router, "HfApi", lambda: _FakeApi())
+
+    result = asyncio.run(models_router.discover_hf_models(q="anything"))
+    assert result == {"items": [], "offset": 0, "limit": 40, "has_more": False}
+
+
+# ── /models/vllm/library  ([IMPROVE-11]: HfApi.list_models) ─────────
+
+
+def test_vllm_library_uses_list_models_with_text_generation_filter(monkeypatch):
+    """The vLLM library path always hardcodes
+    ``pipeline_tag="text-generation"``, ``sort="downloads"``, and
+    ``limit=30`` — those are the catalog's product invariants.
+    A regression that loosened any of them (e.g. dropped
+    ``pipeline_tag``) would flood the page with non-LLM models.
+    """
+    captured: dict = {}
+
+    class _FakeApi:
+        def list_models(self, **kwargs):
+            captured["kwargs"] = kwargs
+            return iter([
+                _stub_model_info(
+                    id="meta-llama/Llama-3-8b-Instruct",
+                    tags=[],
+                    pipeline_tag="text-generation",
+                ),
+            ])
+
+    from local_ai_platform.api.routers import models as models_router
+    monkeypatch.setattr(models_router, "HfApi", lambda: _FakeApi())
+
+    result = asyncio.run(models_router.get_vllm_library(
+        search="instruct", router=None,
+    ))
+
+    kw = captured["kwargs"]
+    assert kw["search"] == "instruct"
+    assert kw["pipeline_tag"] == "text-generation"
+    assert kw["sort"] == "downloads"
+    assert kw["limit"] == 30
+    # Narrower expand set than discover — createdAt/gated/config
+    # intentionally absent because the vLLM card doesn't show them.
+    assert set(kw["expand"]) == {
+        "safetensors", "siblings", "tags",
+        "pipeline_tag", "likes", "lastModified",
+    }
     items = result.get("items", [])
     assert any(it.get("name") == "meta-llama/Llama-3-8b-Instruct" for it in items)
+
+
+def test_vllm_library_returns_empty_on_hf_hub_error(monkeypatch):
+    """Mirrors the discover-endpoint contract: HF failure → empty
+    list, no 500. Flutter's vLLM browser handles ``items=[]``
+    gracefully but would render an error banner on a non-200.
+    """
+    class _FakeApi:
+        def list_models(self, **kwargs):
+            raise HfHubHTTPError("HF down", response=None)
+
+    from local_ai_platform.api.routers import models as models_router
+    monkeypatch.setattr(models_router, "HfApi", lambda: _FakeApi())
+
+    result = asyncio.run(models_router.get_vllm_library(
+        search="anything", router=None,
+    ))
+    assert result == {"items": []}
 
 
 # ── /images/enhance-prompt fallback ─────────────────────────────────
