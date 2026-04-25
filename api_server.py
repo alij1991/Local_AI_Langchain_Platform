@@ -37,6 +37,11 @@ from local_ai_platform.repositories.agents_repo import list_agents_db
 # api/routers/systems.py with the /systems/* handlers.
 from local_ai_platform.tracing import load_trace_config, TraceStore
 from local_ai_platform.observability import emit
+# [IMPROVE-4] OTel TracerProvider is a process-singleton (the SDK only
+# accepts ``set_tracer_provider`` once per process). Bootstrap lives in
+# the lifespan rather than here so test fixtures can swap providers via
+# ``otel._reset_for_tests`` without an uvicorn restart.
+from local_ai_platform.otel import init_otel, shutdown_otel
 
 logger = logging.getLogger("api_server")
 logger.setLevel(logging.INFO)
@@ -145,6 +150,16 @@ async def lifespan(app: FastAPI):
     t0 = time.monotonic()
     logger.info("Starting up Local AI Platform…")
     init_db()
+    # [IMPROVE-4] Bootstrap OTel before any other subsystem so the
+    # observability emit() / track_event() paths always see a live
+    # TracerProvider. Default mode is no-op (spans created and
+    # discarded — zero overhead) — set OTEL_EXPORTER=console|otlp to
+    # activate. State lives inside the otel module rather than on
+    # ``app.state`` because the SDK's global TracerProvider is itself
+    # the process-singleton; an extra app.state binding would just be
+    # a stale alias if anyone called set_tracer_provider directly.
+    otel_provider = init_otel("local-ai-platform")
+    app.state.otel_tracer_provider = otel_provider
 
     # Build singletons. Order: router → orchestrator (depends on router)
     # → controllers → trace store → image service (heaviest, last).
@@ -262,7 +277,15 @@ async def lifespan(app: FastAPI):
         await aclose_clients()
     except Exception as exc:
         logger.debug("http_client.aclose_clients failed: %s", exc)
+    # [IMPROVE-4] Tear down OTel after the emit("lifespan.stop") below
+    # so the stop event still goes through any wired exporter — but
+    # before any subsequent process-level cleanup, so the BatchSpan
+    # daemon thread doesn't outlive the event loop.
     emit("app", "lifespan.stop")
+    try:
+        shutdown_otel()
+    except Exception as exc:
+        logger.debug("otel.shutdown_otel failed: %s", exc)
 
 
 app = FastAPI(title="Local AI Platform", version="2.0.0", lifespan=lifespan)

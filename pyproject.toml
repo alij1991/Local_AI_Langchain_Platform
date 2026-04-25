@@ -60,6 +60,18 @@ dependencies = [
   # ── System Monitoring ──
   "psutil>=5.9.0",
   "py-cpuinfo>=9.0.0",
+  # ── Observability ── [IMPROVE-4] OTel GenAI semantic conventions.
+  # Already pulled in transitively via chromadb (in the [partner]
+  # extra) but declared explicitly so non-partner installs still get
+  # the dual-emit path. The semantic-conventions package ships the
+  # ``gen_ai_*`` constants under
+  # ``opentelemetry.semconv._incubating.attributes.gen_ai_attributes``
+  # — the spec is still incubating in 2026, gated by the
+  # ``OTEL_SEMCONV_STABILITY_OPT_IN=gen_ai_latest_experimental`` flag
+  # that ``otel.init_otel()`` sets on our behalf.
+  "opentelemetry-api>=1.40.0",
+  "opentelemetry-sdk>=1.40.0",
+  "opentelemetry-semantic-conventions>=0.61b0",
 ]
 
 [project.optional-dependencies]
