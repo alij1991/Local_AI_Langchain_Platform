@@ -71,7 +71,6 @@ import logging
 import re
 import threading
 import time
-import urllib.request
 from pathlib import Path
 from typing import Any
 from urllib.parse import quote_plus, urlencode
@@ -100,6 +99,7 @@ from local_ai_platform.api.helpers import (
 )
 from local_ai_platform.config import AppConfig, get_settings
 from local_ai_platform.formatting import format_bytes_human
+from local_ai_platform.http_client import get_sync_client
 from local_ai_platform.huggingface import HuggingFaceController
 from local_ai_platform.images.service import ImageGenerationService
 from local_ai_platform.observability import emit
@@ -753,13 +753,17 @@ async def delete_ollama_model(
 ):
     """Delete an Ollama model locally."""
     try:
-        req = urllib.request.Request(
+        # Ollama's /api/delete is a DELETE with a JSON body — httpx
+        # ``request("DELETE", ..., json=...)`` is the explicit form
+        # since the convenience ``client.delete()`` doesn't accept
+        # a body kwarg.
+        resp = get_sync_client().request(
+            "DELETE",
             f"{config.ollama_base_url}/api/delete",
-            data=json.dumps({"name": model_id}).encode(),
-            headers={"Content-Type": "application/json"},
-            method="DELETE",
+            json={"name": model_id},
+            timeout=10,
         )
-        urllib.request.urlopen(req, timeout=10)
+        resp.raise_for_status()
         return {"status": "deleted", "model": model_id}
     except Exception as e:
         raise HTTPException(500, f"Failed to delete model: {e}")
@@ -966,13 +970,13 @@ async def get_ollama_library(
 
     # Source 2: Remote /api/tags (trending)
     try:
-        import urllib.request as urllib_req
-        req = urllib_req.Request(
+        resp = get_sync_client().get(
             "https://ollama.com/api/tags",
             headers={"Accept": "application/json"},
+            timeout=8,
         )
-        with urllib_req.urlopen(req, timeout=8) as resp:
-            data = json.loads(resp.read().decode("utf-8"))
+        resp.raise_for_status()
+        data = resp.json()
         for model in data.get("models", []):
             name = model.get("name", "")
             if not name:
@@ -993,11 +997,15 @@ async def get_ollama_library(
     # Source 3: Scrape ollama.com/search for broader results (when user searches)
     if search:
         try:
-            import urllib.request as urllib_req
-            search_url = f"https://ollama.com/search?q={urllib_req.quote(search)}"
-            req2 = urllib_req.Request(search_url)
-            with urllib_req.urlopen(req2, timeout=8) as resp2:
-                html = resp2.read().decode("utf-8", errors="replace")
+            # ``params=`` lets httpx URL-encode the query without us
+            # importing urllib.parse.quote separately.
+            resp2 = get_sync_client().get(
+                "https://ollama.com/search",
+                params={"q": search},
+                timeout=8,
+            )
+            resp2.raise_for_status()
+            html = resp2.text
             scraped = set(re.findall(r'/library/([a-z0-9][-a-z0-9.]*)', html))
             for base in scraped:
                 _add_model(base, from_remote=True)
@@ -1635,10 +1643,18 @@ async def discover_hf_models(
         if author:
             params_list.append(("author", author))
 
+        # [IMPROVE-7] urlencode kept here because params_list contains
+        # repeated ``expand[]`` keys (a list-of-tuples shape) that
+        # httpx's ``params=`` accepts but the dict-based callers don't —
+        # leaving the URL intact keeps the wire format byte-for-byte
+        # identical to the urllib path. [IMPROVE-11] is slated to
+        # replace this whole block with ``huggingface_hub.list_models``.
         api_url = f"https://huggingface.co/api/models?{urlencode(params_list, quote_via=quote_plus)}"
-        req = urllib.request.Request(api_url, headers={"Accept": "application/json"})
-        with urllib.request.urlopen(req, timeout=15) as resp:
-            data = json.loads(resp.read().decode("utf-8"))
+        resp = get_sync_client().get(
+            api_url, headers={"Accept": "application/json"}, timeout=15,
+        )
+        resp.raise_for_status()
+        data = resp.json()
 
         for model in data:
             model_id = model.get("id", "")
@@ -1848,9 +1864,11 @@ async def get_vllm_library(
             f"&expand[]=safetensors&expand[]=siblings&expand[]=tags"
             f"&expand[]=pipeline_tag&expand[]=likes&expand[]=lastModified"
         )
-        req = urllib.request.Request(api_url, headers={"Accept": "application/json"})
-        with urllib.request.urlopen(req, timeout=10) as resp:
-            data = json.loads(resp.read().decode("utf-8"))
+        resp = get_sync_client().get(
+            api_url, headers={"Accept": "application/json"}, timeout=10,
+        )
+        resp.raise_for_status()
+        data = resp.json()
 
         # Check if vLLM is running and which models it serves
         vllm_serving: set[str] = set()

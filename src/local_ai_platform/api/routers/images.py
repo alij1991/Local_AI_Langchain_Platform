@@ -39,7 +39,8 @@ inlined here rather than shared.
 the router-mediated primary call (via ``_ollama_generate_via_router``)
 is wrapped in ``track_event`` so ``/observability/summary`` captures
 ``image.enhance_prompt`` latency + error rate. The legacy ``/api/chat``
-fallback still uses urllib because it depends on the dedicated
+fallback still hits Ollama directly (now via the shared httpx
+client — [IMPROVE-7]) because it depends on the dedicated
 ``thinking`` field that ``router.achat`` collapses into ``<think>...</think>``
 tags. ``_extract_json_from_llm`` lives here (single consumer) rather
 than getting promoted to api/helpers.py.
@@ -64,6 +65,7 @@ import uuid
 from pathlib import Path
 from typing import Any
 
+import httpx
 from fastapi import APIRouter, Depends, HTTPException
 from fastapi.responses import FileResponse
 
@@ -79,6 +81,7 @@ from local_ai_platform.api.routers.chat import (
     _pick_small_ollama_model,
 )
 from local_ai_platform.config import AppConfig
+from local_ai_platform.http_client import get_sync_client
 from local_ai_platform.images.service import ImageGenerationService
 from local_ai_platform.observability import track_event
 from local_ai_platform.providers import ProviderRouter
@@ -641,24 +644,29 @@ Output ONLY this JSON format, nothing else:
         # through the dedicated `thinking` field, which router.achat
         # collapses into the inline <think>...</think> tag we just stripped.
         try:
-            import urllib.request
-            import urllib.error
             logger.info("enhance-prompt: router call didn't yield JSON, trying /api/chat fallback")
-            chat_body = json.dumps({
-                "model": ollama_model,
-                "messages": [
-                    {"role": "user", "content": generate_prompt},
-                ],
-                "stream": False,
-                "options": {"temperature": 0.7, "num_predict": 256},
-            }).encode()
-            chat_req = urllib.request.Request(
+            # [IMPROVE-7] Migrated from urllib.request to the shared httpx
+            # client. The fallback exists because thinking models surface
+            # the prompt only through Ollama's dedicated ``thinking``
+            # field, which router.achat collapses into the inline
+            # <think>...</think> tag we just stripped. Localhost target
+            # kept verbatim — global OLLAMA_BASE_URL plumbing is part of
+            # a larger refactor [IMPROVE-14] that intentionally left
+            # this fallback alone.
+            chat_resp = get_sync_client().post(
                 "http://localhost:11434/api/chat",
-                data=chat_body,
-                headers={"Content-Type": "application/json"},
+                json={
+                    "model": ollama_model,
+                    "messages": [
+                        {"role": "user", "content": generate_prompt},
+                    ],
+                    "stream": False,
+                    "options": {"temperature": 0.7, "num_predict": 256},
+                },
+                timeout=timeout_sec,
             )
-            with urllib.request.urlopen(chat_req, timeout=timeout_sec) as resp2:
-                data2 = json.loads(resp2.read().decode())
+            chat_resp.raise_for_status()
+            data2 = chat_resp.json()
             msg = data2.get("message", {})
             chat_content = (msg.get("content", "") or "").strip()
             chat_content = _re.sub(r'<think>.*?</think>', '', chat_content, flags=_re.DOTALL).strip()
@@ -757,7 +765,9 @@ Output ONLY this JSON format, nothing else:
             }
         except HTTPException:
             raise
-        except urllib.error.URLError as exc:
+        except (httpx.ConnectError, httpx.ConnectTimeout) as exc:
+            # ``ConnectError`` covers DNS / refused / unreachable —
+            # the urllib equivalent was URLError with the same intent.
             raise HTTPException(503, f"Cannot connect to Ollama at localhost:11434. Is it running? Start with: ollama serve  (Error: {exc})")
         except Exception as exc:
             raise HTTPException(500, f"Prompt enhancement failed: {exc}")
