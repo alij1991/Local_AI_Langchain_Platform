@@ -253,6 +253,15 @@ async def lifespan(app: FastAPI):
     )
     yield
     logger.info("Shutting down Local AI Platform")
+    # [IMPROVE-7] Close the shared httpx clients so any in-flight
+    # async requests get torn down cleanly before the event loop
+    # closes — avoids "Event loop is closed" warnings that pollute
+    # test output and Windows uvicorn shutdowns.
+    try:
+        from local_ai_platform.http_client import aclose_clients
+        await aclose_clients()
+    except Exception as exc:
+        logger.debug("http_client.aclose_clients failed: %s", exc)
     emit("app", "lifespan.stop")
 
 
