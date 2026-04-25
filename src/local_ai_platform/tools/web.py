@@ -7,6 +7,7 @@ from langchain_core.tools import StructuredTool
 from pydantic import BaseModel, Field
 
 from ..config import get_settings
+from ..http_client import get_sync_client
 
 
 class WebSearchInput(BaseModel):
@@ -62,22 +63,25 @@ def _strip_html(html: str) -> str:
 
 
 def fetch_webpage(url: str, max_chars: int = 5000) -> str:
-    """Fetch a webpage and extract its text content."""
+    """Fetch a webpage and extract its text content.
+
+    [IMPROVE-7] Uses the shared httpx sync client. The legacy
+    ``ImportError`` fallback to ``urllib.request`` was dead code:
+    httpx is a hard runtime dependency since Commit 1/6, so the
+    fallback can never trigger. Removing it shrinks the surface
+    and lets a missing httpx fail loudly instead of silently
+    degrading to a less-capable transport.
+    """
     try:
-        import httpx
-        resp = httpx.get(url, timeout=15, follow_redirects=True, headers={"User-Agent": "Mozilla/5.0"})
+        # 15s timeout — fetch_webpage is a user-facing tool, not a
+        # background scrape, so we don't want a slow site to pin the
+        # whole agent turn. ``follow_redirects`` is on by default
+        # via the shared client config.
+        resp = get_sync_client().get(
+            url, headers={"User-Agent": "Mozilla/5.0"}, timeout=15,
+        )
         resp.raise_for_status()
         text = _strip_html(resp.text)
-        if len(text) > max_chars:
-            return text[:max_chars] + f"\n\n... (truncated, {len(text)} total chars)"
-        return text
-    except ImportError:
-        # Fall back to urllib
-        from urllib.request import urlopen, Request
-        req = Request(url, headers={"User-Agent": "Mozilla/5.0"})
-        with urlopen(req, timeout=15) as resp:  # noqa: S310
-            html = resp.read().decode("utf-8", errors="replace")
-        text = _strip_html(html)
         if len(text) > max_chars:
             return text[:max_chars] + f"\n\n... (truncated, {len(text)} total chars)"
         return text

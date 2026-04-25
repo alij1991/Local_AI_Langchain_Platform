@@ -1,13 +1,11 @@
 """MCP (Model Context Protocol) tool discovery and invocation."""
 from __future__ import annotations
 
-import json
-from urllib import request as urllib_request
-
 from langchain_core.tools import StructuredTool
 from pydantic import BaseModel, Field
 
 from ..config import get_settings
+from ..http_client import get_sync_client
 
 
 class MCPQueryInput(BaseModel):
@@ -31,11 +29,13 @@ def mcp_query(prompt: str) -> str:
         "method": method,
         "params": {"input": prompt},
     }
-    body = json.dumps(payload).encode("utf-8")
-    req = urllib_request.Request(endpoint, data=body, headers={"Content-Type": "application/json"}, method="POST")
     try:
-        with urllib_request.urlopen(req, timeout=20) as resp:  # noqa: S310
-            return resp.read().decode("utf-8")
+        # 20s timeout matches the original urllib budget — long enough
+        # for stdio MCP servers spawning a worker, short enough that
+        # a wedged endpoint can't pin the whole agent turn.
+        resp = get_sync_client().post(endpoint, json=payload, timeout=20)
+        resp.raise_for_status()
+        return resp.text
     except Exception as exc:
         return f"MCP request failed: {exc}"
 

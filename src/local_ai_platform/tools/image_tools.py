@@ -8,13 +8,12 @@ from __future__ import annotations
 
 import json
 from typing import Any
-from urllib import request as urllib_request
 
 from langchain_core.tools import StructuredTool
 from pydantic import BaseModel, Field
 
 from ..config import get_settings
-
+from ..http_client import get_sync_client
 
 # ── Direct service reference (set by api_server.py at startup) ────
 
@@ -41,10 +40,13 @@ class EditImageInput(BaseModel):
 
 
 def _post_json(url: str, payload: dict) -> str:
-    body = json.dumps(payload).encode("utf-8")
-    req = urllib_request.Request(url, data=body, headers={"Content-Type": "application/json"}, method="POST")
-    with urllib_request.urlopen(req, timeout=60) as resp:  # noqa: S310
-        return resp.read().decode("utf-8")
+    # 60s timeout — image generation calls can take a while; the
+    # shared client's 60s read default is sufficient but we pass it
+    # explicitly so a future bump to the global doesn't change tool
+    # behaviour silently.
+    resp = get_sync_client().post(url, json=payload, timeout=60)
+    resp.raise_for_status()
+    return resp.text
 
 
 def generate_image(session_id: str, model_id: str, prompt: str) -> str:
