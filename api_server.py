@@ -296,6 +296,9 @@ from local_ai_platform.api.routers import editor as _editor_router  # noqa: E402
 from local_ai_platform.api.routers import models as _models_router  # noqa: E402
 from local_ai_platform.api.routers import images as _images_router  # noqa: E402
 from local_ai_platform.api.routers import partner as _partner_router  # noqa: E402
+# [IMPROVE-70] Generic /settings CRUD surface — coexists with the
+# narrower /settings/hf-token cluster in the system router.
+from local_ai_platform.api.routers import settings as _settings_router  # noqa: E402
 
 app.include_router(_system_router.router)
 app.include_router(_observability_router.router)
@@ -307,6 +310,7 @@ app.include_router(_editor_router.router)
 app.include_router(_models_router.router)
 app.include_router(_images_router.router)
 app.include_router(_partner_router.router)
+app.include_router(_settings_router.router)
 
 # [IMPROVE-1] Re-exports for backward compatibility with tests + the
 # legacy ``api_server.X`` import path:
