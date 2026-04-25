@@ -46,7 +46,11 @@ dependencies = [
   # ── Document / Data ──
   "pypdf>=5.0.0",
   "aiosqlite>=0.20.0",
-  "aiohttp>=3.9.0",
+  # [IMPROVE-7] aiohttp dropped — only consumer was the async chat
+  # path on OpenAICompatibleProvider, now served by the shared
+  # ``local_ai_platform.http_client`` (httpx). It may still be
+  # pulled in transitively (langchain-community, duckduckgo-search)
+  # but there are no direct imports anywhere in this codebase.
   "tiktoken>=0.7.0",
   # ── Search ──
   "tavily-python>=0.5.0",
