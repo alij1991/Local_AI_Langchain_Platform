@@ -26,6 +26,7 @@ from .user_profile import (
     UserProfile, load_user_profile, save_user_profile,
 )
 from . import memory
+from ..http_client import get_sync_client
 from ..observability import emit, track_event
 
 logger = logging.getLogger(__name__)
@@ -90,10 +91,12 @@ class PartnerEngine:
         ]
 
         try:
-            import urllib.request, json as _json
             url = f"{self.config.ollama_base_url}/api/tags"
-            resp = urllib.request.urlopen(url, timeout=2)
-            data = _json.loads(resp.read())
+            # 2s timeout — partner-model autodetection runs on init,
+            # we don't want a wedged daemon to slow down boot.
+            resp = get_sync_client().get(url, timeout=2)
+            resp.raise_for_status()
+            data = resp.json()
             available = {m["name"] for m in data.get("models", [])}
 
             for model in preferred:
@@ -756,14 +759,18 @@ class PartnerEngine:
           - Chatterbox vs Kokoro TTS comparison (Slashdot, 2026)
           - Real-time voice agent benchmarks (Inworld, 2026)
         """
-        import urllib.request
         for path in self._CHATTERBOX_INFO_PATHS:
             try:
                 url = base_url.rstrip("/") + path
-                with urllib.request.urlopen(
+                # ``decode(errors='replace')`` semantics preserved via
+                # ``resp.text`` — httpx defers decoding to charset_normalizer
+                # which uses the same fallback policy. Empty / probed-not-
+                # implemented paths fall through to the next candidate.
+                resp = get_sync_client().get(
                     url, timeout=self._CHATTERBOX_PROBE_TIMEOUT_SEC,
-                ) as resp:
-                    body = resp.read().decode("utf-8", errors="replace")
+                )
+                resp.raise_for_status()
+                body = resp.text
             except Exception:
                 continue
             haystack = body.lower()
@@ -827,8 +834,10 @@ class PartnerEngine:
         # Chatterbox build get a log hint to upgrade and a flag in the
         # voice status that the UI can surface when switching modes.
         try:
-            import urllib.request as _ur
-            _ur.urlopen("http://127.0.0.1:8282/health", timeout=1)
+            # 1s budget — voice init blocks the partner panel; a missing
+            # sidecar must fail fast so the Kokoro path can take over.
+            _resp = get_sync_client().get("http://127.0.0.1:8282/health", timeout=1)
+            _resp.raise_for_status()
             self._tts_emotional = "http://127.0.0.1:8282"
             self._chatterbox_variant = self._detect_chatterbox_variant(
                 self._tts_emotional
@@ -1060,14 +1069,14 @@ class PartnerEngine:
         # Sync gender to Chatterbox server if available
         if self._tts_emotional:
             try:
-                import urllib.request, json as _json
-                req = urllib.request.Request(
+                # Best-effort sync — older Chatterbox builds don't ship
+                # /gender; we swallow on any failure so the local
+                # ``self._voice_gender`` update still takes effect.
+                get_sync_client().post(
                     f"{self._tts_emotional}/gender",
-                    data=_json.dumps({"gender": gender}).encode(),
-                    headers={"Content-Type": "application/json"},
-                    method="POST",
+                    json={"gender": gender},
+                    timeout=3,
                 )
-                urllib.request.urlopen(req, timeout=3)
             except Exception:
                 pass  # Chatterbox server might not support gender yet
         logger.info("Voice gender set to: %s", gender)
@@ -1212,9 +1221,6 @@ class PartnerEngine:
     def _synthesize_chatterbox(self, text: str, emotion: str) -> bytes | None:
         """Synthesize with Chatterbox via external server on port 8282."""
         try:
-            import urllib.request
-            import json as _json
-
             text = self._preprocess_text_for_tts(text, emotion)
             if not text:
                 return None
@@ -1222,19 +1228,22 @@ class PartnerEngine:
             exaggeration = self._EMOTION_EXAGGERATION.get(emotion, 0.65)
 
             server_url = self._tts_emotional
-            payload = _json.dumps({
-                "text": text,
-                "exaggeration": exaggeration,
-                "gender": self._voice_gender,
-            }).encode("utf-8")
-            req = urllib.request.Request(
+            # 60s read timeout — full-paragraph emotional synthesis on
+            # consumer GPUs runs ~6x realtime per Resemble.ai's 2026
+            # Turbo benchmarks; a 60s window covers ~6 minutes of audio.
+            resp = get_sync_client().post(
                 f"{server_url}/synthesize",
-                data=payload,
-                headers={"Content-Type": "application/json"},
-                method="POST",
+                json={
+                    "text": text,
+                    "exaggeration": exaggeration,
+                    "gender": self._voice_gender,
+                },
+                timeout=60,
             )
-            with urllib.request.urlopen(req, timeout=60) as resp:
-                return resp.read()
+            resp.raise_for_status()
+            # ``resp.content`` returns the raw response body as bytes —
+            # the audio buffer stays opaque, just like ``urlopen.read()``.
+            return resp.content
 
         except Exception as e:
             logger.warning("Chatterbox failed: %s — falling back to Kokoro", e)
@@ -1251,9 +1260,6 @@ class PartnerEngine:
         """
         if self._tts_emotional is not None and self._tts_mode == "chatterbox":
             try:
-                import urllib.request
-                import json as _json
-
                 sentence = self._preprocess_text_for_tts(sentence, emotion)
                 if not sentence or len(sentence) < 5:
                     return None
@@ -1261,19 +1267,21 @@ class PartnerEngine:
                 exaggeration = self._EMOTION_EXAGGERATION.get(emotion, 0.65)
 
                 server_url = self._tts_emotional
-                payload = _json.dumps({
-                    "text": sentence,
-                    "exaggeration": exaggeration,
-                    "gender": self._voice_gender,
-                }).encode("utf-8")
-                req = urllib.request.Request(
+                # 30s read timeout — per-sentence streaming is the hot
+                # path; a stalled sidecar must surface as an error so
+                # the Kokoro fallback below can cover the rest of the
+                # reply without the user noticing a gap.
+                resp = get_sync_client().post(
                     f"{server_url}/synthesize_sentence",
-                    data=payload,
-                    headers={"Content-Type": "application/json"},
-                    method="POST",
+                    json={
+                        "text": sentence,
+                        "exaggeration": exaggeration,
+                        "gender": self._voice_gender,
+                    },
+                    timeout=30,
                 )
-                with urllib.request.urlopen(req, timeout=30) as resp:
-                    return resp.read()
+                resp.raise_for_status()
+                return resp.content
             except Exception as e:
                 logger.debug("Chatterbox sentence synthesis failed: %s", e)
 

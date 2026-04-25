@@ -15,17 +15,40 @@ probes /info | /model | /version after /health, and exposes the
 detected variant through get_voice_status() + set_tts_mode() so the
 Flutter voice picker can surface the tradeoff.
 
+[IMPROVE-7] Commit 4/6 migrated the urllib.request.urlopen probes
+to ``http_client.get_sync_client()``. The original test setup
+monkeypatched ``urllib.request.urlopen`` directly; this rewrite
+injects an ``httpx.MockTransport`` via ``set_test_clients`` so the
+production code path runs end-to-end with a deterministic transport
+in place of the real network.
+
 Strategy: build a bare PartnerEngine (bypass __init__ to skip Ollama
-probes + profile I/O), monkey-patch urllib.request.urlopen with a
-factory that returns test-controlled responses per path. This lets
-us assert on both the detection result AND the probe ordering.
+probes + profile I/O), feed it a per-path MockTransport handler that
+either returns the body or raises ``httpx.ConnectError`` to simulate
+"server said no to this endpoint". This lets us assert on both the
+detection result AND the probe ordering.
+
+References (2025–2026):
+* httpx MockTransport — https://www.python-httpx.org/advanced/transports/#mock-transports
+* Resemble.ai Chatterbox-Turbo benchmarks (2026)
+* Slashdot — Chatterbox vs Kokoro TTS comparison (2026)
 """
 from __future__ import annotations
 
-import io
-from unittest.mock import MagicMock
-
+import httpx
 import pytest
+
+from local_ai_platform.http_client import (
+    reset_clients,
+    set_test_clients,
+)
+
+
+@pytest.fixture(autouse=True)
+def _isolated_singletons():
+    reset_clients()
+    yield
+    reset_clients()
 
 
 def _make_engine():
@@ -40,55 +63,40 @@ def _make_engine():
     return engine
 
 
-class _FakeResponse:
-    """Context-manager stand-in for urllib.request.urlopen's return."""
-
-    def __init__(self, body: bytes):
-        self._body = body
-
-    def read(self):
-        return self._body
-
-    def __enter__(self):
-        return self
-
-    def __exit__(self, *exc):
-        return False
-
-
-def _install_urlopen(monkeypatch, responses: dict[str, bytes | Exception]):
-    """Patch urllib.request.urlopen with a path-keyed responder.
+def _install_transport(responses: dict[str, bytes | Exception]):
+    """Install an ``httpx.MockTransport``-backed sync client.
 
     responses: dict mapping path suffix ('/info', '/model', '/version') to
-    either the bytes body to return, or an Exception instance to raise.
-    Any path not in the dict raises ConnectionRefusedError so the test
-    gets a clean "server said no to this endpoint" signal.
+    either the bytes body to return, or an Exception to raise. Any path
+    not in the dict raises ``httpx.ConnectError`` so the test gets a
+    clean "server said no to this endpoint" signal — equivalent to
+    the urllib.request ``ConnectionRefusedError`` the original tests
+    relied on.
     """
-    import urllib.request
-
     call_log: list[str] = []
 
-    def _fake_urlopen(url, *args, **kwargs):
-        # url is passed positionally; extract the path suffix.
-        url_str = str(url)
-        path = "/" + url_str.rstrip("/").rsplit("/", 1)[-1]
-        call_log.append(path)
-        if path not in responses:
-            raise ConnectionRefusedError(f"no stub for {path}")
-        val = responses[path]
+    def handler(request: httpx.Request) -> httpx.Response:
+        path = request.url.path
+        # Take the last segment, normalised to a leading slash, so the
+        # responder mapping stays as it was for the urllib version.
+        suffix = "/" + path.rstrip("/").rsplit("/", 1)[-1]
+        call_log.append(suffix)
+        if suffix not in responses:
+            raise httpx.ConnectError(f"no stub for {suffix}")
+        val = responses[suffix]
         if isinstance(val, Exception):
             raise val
-        return _FakeResponse(val)
+        return httpx.Response(200, content=val)
 
-    monkeypatch.setattr(urllib.request, "urlopen", _fake_urlopen)
+    set_test_clients(sync=httpx.Client(transport=httpx.MockTransport(handler)))
     return call_log
 
 
 # ── Variant detection ────────────────────────────────────────────────
 
 
-def test_detects_turbo_from_info_endpoint_json(monkeypatch):
-    log = _install_urlopen(monkeypatch, {
+def test_detects_turbo_from_info_endpoint_json():
+    log = _install_transport({
         "/info": b'{"model": "chatterbox-turbo", "version": "1.2"}',
     })
     variant = _make_engine()._detect_chatterbox_variant("http://127.0.0.1:8282")
@@ -97,10 +105,10 @@ def test_detects_turbo_from_info_endpoint_json(monkeypatch):
     assert log == ["/info"]
 
 
-def test_detects_turbo_from_plain_text_response(monkeypatch):
+def test_detects_turbo_from_plain_text_response():
     # Some Chatterbox builds serve a plain-text banner instead of JSON;
     # the detector must still catch the 'turbo' substring either way.
-    _install_urlopen(monkeypatch, {
+    _install_transport({
         "/info": b"Chatterbox-Turbo server v2.0 ready",
     })
     assert _make_engine()._detect_chatterbox_variant(
@@ -108,8 +116,8 @@ def test_detects_turbo_from_plain_text_response(monkeypatch):
     ) == "turbo"
 
 
-def test_case_insensitive_turbo_match(monkeypatch):
-    _install_urlopen(monkeypatch, {
+def test_case_insensitive_turbo_match():
+    _install_transport({
         "/info": b'{"model": "Chatterbox TURBO build 42"}',
     })
     assert _make_engine()._detect_chatterbox_variant(
@@ -117,9 +125,11 @@ def test_case_insensitive_turbo_match(monkeypatch):
     ) == "turbo"
 
 
-def test_falls_through_to_model_endpoint_when_info_missing(monkeypatch):
-    log = _install_urlopen(monkeypatch, {
-        "/info": FileNotFoundError("404 no /info"),  # probe fails
+def test_falls_through_to_model_endpoint_when_info_missing():
+    log = _install_transport({
+        # 404 emulated as a connect error — the engine treats any
+        # transport exception as "skip this path and try the next".
+        "/info": httpx.HTTPError("404 no /info"),
         "/model": b'{"name": "chatterbox-turbo-350m"}',
     })
     assert _make_engine()._detect_chatterbox_variant(
@@ -129,10 +139,10 @@ def test_falls_through_to_model_endpoint_when_info_missing(monkeypatch):
     assert log == ["/info", "/model"]
 
 
-def test_falls_through_to_version_endpoint(monkeypatch):
-    log = _install_urlopen(monkeypatch, {
-        "/info": ConnectionRefusedError("nope"),
-        "/model": ConnectionRefusedError("nope"),
+def test_falls_through_to_version_endpoint():
+    log = _install_transport({
+        "/info": httpx.ConnectError("nope"),
+        "/model": httpx.ConnectError("nope"),
         "/version": b"1.4.0-turbo",
     })
     assert _make_engine()._detect_chatterbox_variant(
@@ -141,10 +151,10 @@ def test_falls_through_to_version_endpoint(monkeypatch):
     assert log == ["/info", "/model", "/version"]
 
 
-def test_detects_legacy_when_no_turbo_marker(monkeypatch):
+def test_detects_legacy_when_no_turbo_marker():
     # Body has content but doesn't include 'turbo' — treat as legacy so
     # the user still gets the "upgrade available" hint in the log.
-    _install_urlopen(monkeypatch, {
+    _install_transport({
         "/info": b'{"model": "chatterbox", "version": "0.9"}',
     })
     assert _make_engine()._detect_chatterbox_variant(
@@ -152,8 +162,8 @@ def test_detects_legacy_when_no_turbo_marker(monkeypatch):
     ) == "legacy"
 
 
-def test_returns_none_when_all_probes_fail(monkeypatch):
-    log = _install_urlopen(monkeypatch, {})  # no stubs → every path refuses
+def test_returns_none_when_all_probes_fail():
+    log = _install_transport({})  # no stubs → every path refuses
     assert _make_engine()._detect_chatterbox_variant(
         "http://127.0.0.1:8282"
     ) is None
@@ -161,10 +171,10 @@ def test_returns_none_when_all_probes_fail(monkeypatch):
     assert log == ["/info", "/model", "/version"]
 
 
-def test_empty_body_is_treated_as_no_data_and_skipped(monkeypatch):
+def test_empty_body_is_treated_as_no_data_and_skipped():
     # A server responding 200 with an empty body is indistinguishable
     # from one that doesn't implement the endpoint — keep looking.
-    log = _install_urlopen(monkeypatch, {
+    log = _install_transport({
         "/info": b"",
         "/model": b"chatterbox-turbo",
     })
@@ -174,8 +184,8 @@ def test_empty_body_is_treated_as_no_data_and_skipped(monkeypatch):
     assert log == ["/info", "/model"]
 
 
-def test_strips_trailing_slash_from_base_url(monkeypatch):
-    log = _install_urlopen(monkeypatch, {
+def test_strips_trailing_slash_from_base_url():
+    log = _install_transport({
         "/info": b"chatterbox-turbo",
     })
     # Base URL with trailing slash must not produce '//info'.
@@ -183,10 +193,12 @@ def test_strips_trailing_slash_from_base_url(monkeypatch):
     assert log == ["/info"]
 
 
-def test_non_ascii_body_does_not_crash(monkeypatch):
-    # Some servers respond with UTF-8 that has invalid bytes; the
-    # decoder uses errors='replace' to keep the detector robust.
-    _install_urlopen(monkeypatch, {
+def test_non_ascii_body_does_not_crash():
+    # Some servers respond with UTF-8 that has invalid bytes; httpx's
+    # ``resp.text`` uses charset_normalizer which substitutes for
+    # undecodable bytes — same fallback policy as urllib's
+    # ``.decode(errors='replace')`` — and the detector keeps working.
+    _install_transport({
         "/info": b"Chatterbox-Turbo \xff\xfe corrupted but still OK",
     })
     assert _make_engine()._detect_chatterbox_variant(
