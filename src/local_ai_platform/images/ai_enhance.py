@@ -13,13 +13,38 @@ import time as _time_module
 from pathlib import Path
 from typing import Any
 
+import httpx
 import numpy as np
 from PIL import Image
 
 from ..config import get_settings
+from ..http_client import get_sync_client
 from ..observability import emit
 
 logger = logging.getLogger(__name__)
+
+
+# [IMPROVE-7] urlretrieve replacement. The four model-pull sites in
+# this file (GFPGAN, CodeFormer, RealESRGAN, Depth Anything) used
+# ``urllib.request.urlretrieve(url, path)`` to write a remote blob to
+# disk. The httpx equivalent streams the body in chunks via
+# ``client.stream("GET", url)`` + ``iter_bytes`` — keeps RSS bounded
+# by the chunk size instead of the file size, which matters for
+# multi-hundred-MB weights on 8GB-VRAM systems where any extra heap
+# pressure trips OOM during a parallel inference. The
+# ``Timeout(connect=10, read=300)`` override is necessary because
+# the shared client's 60s read default trips on real-world GitHub
+# Releases / HF CDN downloads on cold caches.
+def _stream_download_to_file(url: str, path: Path) -> None:
+    """Stream ``url`` into ``path`` via the shared httpx sync client."""
+    with get_sync_client().stream(
+        "GET", url,
+        timeout=httpx.Timeout(connect=10.0, read=300.0, write=60.0, pool=5.0),
+    ) as resp:
+        resp.raise_for_status()
+        with open(path, "wb") as fh:
+            for chunk in resp.iter_bytes():
+                fh.write(chunk)
 
 # Thread locks for safe concurrent access to lazy-loaded model singletons
 _rembg_lock = threading.Lock()
@@ -140,8 +165,7 @@ def _download_gfpgan_model() -> Path:
     url = "https://github.com/TencentARC/GFPGAN/releases/download/v1.3.0/GFPGANv1.4.pth"
     logger.info("Downloading GFPGAN model from %s", url)
 
-    import urllib.request
-    urllib.request.urlretrieve(url, str(model_path))
+    _stream_download_to_file(url, model_path)
     logger.info("GFPGAN model saved to %s (%.1f MB)", model_path, model_path.stat().st_size / 1e6)
     return model_path
 
@@ -207,12 +231,11 @@ def _download_codeformer_model() -> Path:
     url = "https://github.com/sczhou/CodeFormer/releases/download/v0.1.0/codeformer.pth"
     logger.info("Downloading CodeFormer model from %s", url)
 
-    import urllib.request
     # Download with retry
     for attempt in range(3):
         try:
             tmp_path = model_path.with_suffix(".tmp")
-            urllib.request.urlretrieve(url, str(tmp_path))
+            _stream_download_to_file(url, tmp_path)
             tmp_path.rename(model_path)
             logger.info("CodeFormer model saved to %s (%.1f MB)", model_path, model_path.stat().st_size / 1e6)
             return model_path
@@ -398,8 +421,7 @@ def _upscale_realesrgan(image: Image.Image, scale: int = 4, anime: bool = False)
                 if anime:
                     url = f"https://github.com/xinntao/Real-ESRGAN/releases/download/v0.2.2.4/{model_name}.pth"
                 logger.info("Downloading RealESRGAN model from %s", url)
-                import urllib.request
-                urllib.request.urlretrieve(url, str(model_path))
+                _stream_download_to_file(url, model_path)
                 logger.info("RealESRGAN model saved: %s (%.1f MB)", model_name, model_path.stat().st_size / 1e6)
 
             device = "cuda" if torch.cuda.is_available() else "cpu"
@@ -542,11 +564,14 @@ def _evict_ollama_from_gpu() -> None:
     Sending keep_alive=0 to Ollama evicts the model without terminating Ollama.
     The model reloads automatically on the next chat request.
     """
-    import urllib.request, json as _json, gc
+    import gc
     try:
         # Get the currently loaded model name from Ollama
-        resp = urllib.request.urlopen("http://localhost:11434/api/ps", timeout=3)
-        ps_data = _json.loads(resp.read())
+        ps_resp = get_sync_client().get(
+            "http://localhost:11434/api/ps", timeout=3,
+        )
+        ps_resp.raise_for_status()
+        ps_data = ps_resp.json()
         models_in_vram = ps_data.get("models", [])
         if not models_in_vram:
             logger.info("[KONTEXT] Ollama: no models in VRAM")
@@ -556,14 +581,16 @@ def _evict_ollama_from_gpu() -> None:
                 if not model_name:
                     continue
                 logger.info("[KONTEXT] Evicting Ollama model '%s' from VRAM...", model_name)
-                payload = _json.dumps({"model": model_name, "keep_alive": 0}).encode()
-                req = urllib.request.Request(
+                # Sending keep_alive=0 evicts the model without
+                # terminating Ollama; the daemon reloads on the next
+                # chat. 10s timeout because eviction can stall on
+                # large models flushing CUDA buffers.
+                evict_resp = get_sync_client().post(
                     "http://localhost:11434/api/generate",
-                    data=payload,
-                    headers={"Content-Type": "application/json"},
-                    method="POST",
+                    json={"model": model_name, "keep_alive": 0},
+                    timeout=10,
                 )
-                urllib.request.urlopen(req, timeout=10)
+                evict_resp.raise_for_status()
                 logger.info("[KONTEXT] Ollama model '%s' evicted from VRAM", model_name)
             gc.collect()
     except Exception as e:
@@ -3324,11 +3351,12 @@ def enhance_edit_prompt(
     # Direct Ollama fallback
     if enhanced is None:
         try:
-            import json
-            import urllib.request
             try:
-                resp = urllib.request.urlopen("http://localhost:11434/api/tags", timeout=5)
-                tags = json.loads(resp.read().decode())
+                tags_resp = get_sync_client().get(
+                    "http://localhost:11434/api/tags", timeout=5,
+                )
+                tags_resp.raise_for_status()
+                tags = tags_resp.json()
                 models_list = [m["name"] for m in tags.get("models", [])]
                 preferred = [
                     "qwen3:4b", "qwen3:1.7b", "qwen2.5:3b",
@@ -3346,19 +3374,18 @@ def enhance_edit_prompt(
                     ("/no_think\n" if "qwen" in ollama_model.lower() else "")
                     + llm_prompt
                 )
-                req_body = json.dumps({
-                    "model": ollama_model,
-                    "prompt": prompt_with_nothink,
-                    "stream": False,
-                    "options": {"temperature": 0.4, "num_predict": 250},
-                }).encode()
-                req = urllib.request.Request(
+                gen_resp = get_sync_client().post(
                     "http://localhost:11434/api/generate",
-                    data=req_body,
-                    headers={"Content-Type": "application/json"},
+                    json={
+                        "model": ollama_model,
+                        "prompt": prompt_with_nothink,
+                        "stream": False,
+                        "options": {"temperature": 0.4, "num_predict": 250},
+                    },
+                    timeout=60,
                 )
-                with urllib.request.urlopen(req, timeout=60) as resp:
-                    data = json.loads(resp.read().decode())
+                gen_resp.raise_for_status()
+                data = gen_resp.json()
                 candidate = (data.get("response", "") or "").strip()
                 candidate = re.sub(r'<think>.*?</think>', '', candidate, flags=re.DOTALL).strip()
                 candidate = candidate.replace('/no_think', '').strip()
@@ -3473,10 +3500,9 @@ def _get_depth_map(arr: np.ndarray, h_orig: int, w_orig: int) -> np.ndarray | No
             # Download from HuggingFace
             url = "https://huggingface.co/onnx-community/depth-anything-v2-small/resolve/main/onnx/model.onnx"
             logger.info("Downloading Depth Anything v2 Small ONNX from %s", url)
-            import urllib.request
             tmp = model_path.with_suffix(".tmp")
             try:
-                urllib.request.urlretrieve(url, str(tmp))
+                _stream_download_to_file(url, tmp)
                 tmp.rename(model_path)
                 logger.info("Depth Anything v2 saved: %.1f MB", model_path.stat().st_size / 1e6)
             except Exception as e:

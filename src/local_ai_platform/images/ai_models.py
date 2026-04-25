@@ -15,12 +15,14 @@ import logging
 import os
 import threading
 import time
-import urllib.request
 from pathlib import Path
 from typing import Any
 
+import httpx
 import numpy as np
 from PIL import Image
+
+from local_ai_platform.http_client import get_sync_client
 
 logger = logging.getLogger(__name__)
 
@@ -74,7 +76,23 @@ def _download_model(name: str, url: str, filename: str, retries: int = 3) -> Pat
     for attempt in range(1, retries + 1):
         try:
             logger.info("Downloading %s (attempt %d/%d) from %s", name, attempt, retries, url)
-            urllib.request.urlretrieve(url, str(tmp_path))
+            # ``client.stream`` defers body decoding to ``iter_bytes``;
+            # the connection is held open until the generator exits, so
+            # we never hold the whole file in memory — important since
+            # some entries in MODEL_REGISTRY (e.g. LaMa, ~208MB) would
+            # otherwise spike RSS by their full size.
+            #
+            # Per-call ``Timeout(connect=10, read=300)`` overrides the
+            # shared client's 60s read default — model files are slow
+            # enough that the global default trips on real networks.
+            with get_sync_client().stream(
+                "GET", url,
+                timeout=httpx.Timeout(connect=10.0, read=300.0, write=60.0, pool=5.0),
+            ) as resp:
+                resp.raise_for_status()
+                with open(tmp_path, "wb") as fh:
+                    for chunk in resp.iter_bytes():
+                        fh.write(chunk)
             tmp_path.rename(model_path)
             logger.info("Model saved: %s (%.1f MB)", filename, model_path.stat().st_size / 1e6)
             return model_path
