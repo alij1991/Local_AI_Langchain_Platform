@@ -36,7 +36,7 @@ import time
 import uuid
 from typing import Any
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 
@@ -72,6 +72,37 @@ from local_ai_platform.tracing import (
 logger = logging.getLogger("api_server")
 
 router = APIRouter()
+
+
+# ── [IMPROVE-17] Stream cancel-detection seam ────────────────────
+
+
+async def _is_client_gone(request: Request) -> bool:
+    """[IMPROVE-17] Cancel-detection seam for ``/chat/stream``.
+
+    Wraps Starlette's ``request.is_disconnected()`` with an
+    exception-swallowing guard — the SSE inner loop must never
+    crash because the disconnect probe failed; if the probe is
+    flaky (rare ASGI receive-channel error), keep streaming and
+    rely on the natural completion path.
+
+    Pre-IMPROVE-17 ``/chat/stream`` had no disconnect check at all
+    — Starlette buffers the SSE generator into a discarded sink
+    after the client closes the connection, so the orchestrator
+    ran to completion and persisted a full assistant message the
+    user never asked for. The poll inside the inner loop is the
+    standard pattern from "How We Used SSE to Stream LLM Responses
+    at Scale" (Akabani, Medium); per-frame cost is microseconds
+    against an asyncio receive channel.
+
+    Tests monkeypatch this helper to simulate disconnect
+    deterministically (tests/test_chat_stream_cancellation.py)
+    instead of poking Starlette's receive channel directly.
+    """
+    try:
+        return await request.is_disconnected()
+    except Exception:
+        return False
 
 
 # ── Request models ───────────────────────────────────────────────
@@ -654,10 +685,22 @@ async def agent_chat(
 @router.post("/chat/stream")
 async def agent_chat_stream(
     req: ChatRequest,
+    request: Request,
     orchestrator: AgentOrchestrator = Depends(get_orchestrator),
     trace_store: TraceStore = Depends(get_trace_store),
 ):
-    """SSE streaming agent chat. Flutter expects events: start, token, end, error."""
+    """SSE streaming agent chat. Flutter expects events: start, token, end, error.
+
+    [IMPROVE-17] Client disconnect mid-stream halts generation —
+    ``stream_gen`` polls ``_is_client_gone(request)`` after each
+    token event and raises ``asyncio.CancelledError`` when the
+    Starlette receive channel reports a disconnect. The existing
+    ``except BaseException`` block then finalizes the trace as
+    cancelled and (per the open-question default in
+    docs/features/10-improvements.md:455) does NOT persist a
+    partial assistant message. Pre-IMPROVE-17 the route ran to
+    completion regardless of the client closing the tab.
+    """
     agent_name = req.resolved_agent
     if agent_name not in orchestrator.definitions:
         raise HTTPException(404, f"Agent '{agent_name}' not found")
@@ -754,6 +797,19 @@ async def agent_chat_stream(
                                     first_token_time = time.monotonic()
                                 full_response += text
                                 yield f"event: token\ndata: {json.dumps({'text': text})}\n\n"
+                                # [IMPROVE-17] Probe between tokens.
+                                # CancelledError here is the deliberate
+                                # signal to halt; LangGraph's
+                                # ``astream_events`` honors cooperative
+                                # cancellation, so the orchestrator
+                                # stops at the next await point. The
+                                # existing ``except BaseException``
+                                # block below finalizes the trace as
+                                # cancelled and re-raises (PEP 342).
+                                if await _is_client_gone(request):
+                                    raise asyncio.CancelledError(
+                                        "client_disconnected"
+                                    )
 
                         elif etype == "tool_call":
                             yield f"event: tool_call\ndata: {json.dumps({'name': event.get('name', ''), 'args': event.get('args', ''), 'call_id': event.get('call_id', '')})}\n\n"
@@ -843,10 +899,41 @@ async def agent_chat_stream(
                     ev.mark_error(exc)
                     yield f"event: error\ndata: {json.dumps({'error': str(exc)})}\n\n"
                 except BaseException as exc:
-                    # Client disconnect (GeneratorExit) or process signal.
-                    # Swallowing GeneratorExit is invalid per PEP 342 — re-raise.
+                    # Client disconnect (GeneratorExit / [IMPROVE-17]
+                    # CancelledError("client_disconnected")) or process
+                    # signal. Swallowing GeneratorExit is invalid per
+                    # PEP 342 — re-raise.
+                    #
+                    # [IMPROVE-17] When the cancel originated from our
+                    # deliberate ``raise CancelledError("client_
+                    # disconnected")`` the args[0] string is the
+                    # informative attribution; otherwise fall back to
+                    # the exception's class name (matches the
+                    # pre-IMPROVE-17 wording for GeneratorExit /
+                    # KeyboardInterrupt etc).
+                    cancel_reason = type(exc).__name__
                     try:
-                        recorder.finalize(success=False, error=f"cancelled: {type(exc).__name__}")
+                        if isinstance(exc, asyncio.CancelledError) and exc.args:
+                            cancel_reason = str(exc.args[0]) or cancel_reason
+                    except Exception:
+                        pass
+                    # [IMPROVE-17] Pre-IMPROVE-17 this branch only
+                    # finalized the recorder and never wrote the
+                    # trace to disk — so cancelled streams were
+                    # invisible on /runs. The bug was masked because
+                    # the only real-world trigger before this commit
+                    # was Starlette's GeneratorExit, rare enough that
+                    # the missing save went unnoticed. With deliberate
+                    # client-disconnect cancellation now firing
+                    # routinely, persist the trace too — operators
+                    # need to see "this run was cancelled at second 3"
+                    # not "this run silently vanished".
+                    try:
+                        cancel_trace = recorder.finalize(
+                            success=False, error=f"cancelled: {cancel_reason}"
+                        )
+                        if trace_store:
+                            trace_store.save(cancel_trace)
                     except Exception:
                         pass
                     # [IMPROVE-16] Same recount on the cancelled
@@ -863,7 +950,7 @@ async def agent_chat_stream(
                     except Exception:
                         partial_tokens = 0
                     ev.perf = {"tokens": partial_tokens}
-                    ev.mark_cancelled(type(exc).__name__)
+                    ev.mark_cancelled(cancel_reason)
                     raise
         finally:
             # Restore original model if overridden
