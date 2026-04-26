@@ -41,6 +41,7 @@ References (2025–2026):
 from __future__ import annotations
 
 import asyncio
+import contextvars
 import logging
 from pathlib import Path
 from typing import Any
@@ -56,6 +57,7 @@ from local_ai_platform.api.deps import (
 from local_ai_platform.config import AppConfig
 from local_ai_platform.observability import track_event
 from local_ai_platform.providers import ProviderRouter
+from local_ai_platform.tracing import trace_run
 
 logger = logging.getLogger(__name__)
 
@@ -195,34 +197,73 @@ async def editor_apply_edit(
     if not operation:
         raise HTTPException(400, "operation is required")
 
-    # [IMPROVE-4] Commit 4/4: request-level image_edit span. The
+    # [IMPROVE-4] Commit 4/4: request-level image_edit OTel span. The
     # per-op emits inside images/editor.py keep being plain app_events
     # rows — see _OTEL_OPERATION_MAP comments. The edit op (e.g.
     # "remove_bg", "upscale", "instruct_pix2pix") is a custom
     # ``editor.operation`` attribute, NOT gen_ai.tool.name — tool
     # spans are reserved for LLM-tool calls, while editor ops are
     # the "what" of an image_edit operation.
-    with track_event("editor", "edit", context={
-        "session_id": session_id,
-        "operation": operation,
-        "param_count": len(params or {}),
-    }) as ev:
-        try:
-            result = await asyncio.get_event_loop().run_in_executor(
-                None, editor.apply_edit, session_id, operation, params
-            )
-            ev.set_otel_attributes({
-                # Custom: which editor op was applied (e.g. "remove_bg",
-                # "upscale", "instruct_pix2pix"). Useful for filtering
-                # latency by op type.
-                "editor.operation": operation,
-                "gen_ai.system": "diffusers",
-            })
-            return result
-        except ValueError as e:
-            raise HTTPException(400, str(e))
-        except RuntimeError as e:
-            raise HTTPException(422, str(e))
+    #
+    # [IMPROVE-68] Commit 3/5: wrap the request in a TraceRecorder via
+    # ``trace_run`` so the per-op emits inside editor.apply_edit
+    # (``emit("editor", "op", ...)`` at editor.py:293/303/345) flow
+    # into the trace JSON automatically. ``conversation_id=session_id``
+    # ties every edit to its editor session, so /runs?subsystem=editor
+    # groups by session naturally.
+    #
+    # CRITICAL: this route is ``async def``. The editor work runs via
+    # ``loop.run_in_executor``, which does NOT inherit the calling
+    # task's contextvars by default — that's the documented behavior of
+    # threadpool executors and the load-bearing difference from the
+    # image route (which is sync ``def`` and gets context propagation
+    # for free via anyio's run_in_threadpool wrapper).
+    #
+    # ``contextvars.copy_context().run`` snapshots the current context
+    # (including the ``_active_recorder`` set by trace_run on the line
+    # above) and runs ``editor.apply_edit`` with that snapshot active
+    # in the worker thread. Without it, every emit() inside apply_edit
+    # would see ``recorder=None`` and the trace JSON would only show
+    # the bracketing editor.edit start/end emits with zero per-op
+    # detail.
+    #
+    # ``model_id=None``: editor classical CV ops (rotate, crop,
+    # remove_bg) have no AI model; instruct ops (cosxl, kontext) have
+    # one but it varies per call. The custom ``editor.operation`` OTel
+    # attribute below is the better discriminator.
+    with trace_run(
+        subsystem="editor",
+        agent_name="image_editor",
+        model_provider="diffusers",
+        model_id=None,
+        conversation_id=session_id,
+    ):
+        with track_event("editor", "edit", context={
+            "session_id": session_id,
+            "operation": operation,
+            "param_count": len(params or {}),
+        }) as ev:
+            try:
+                # Snapshot the current context (with _active_recorder set)
+                # and pass ctx.run as the executor target so the worker
+                # thread runs editor.apply_edit with that context active.
+                ctx = contextvars.copy_context()
+                result = await asyncio.get_event_loop().run_in_executor(
+                    None, ctx.run, editor.apply_edit,
+                    session_id, operation, params,
+                )
+                ev.set_otel_attributes({
+                    # Custom: which editor op was applied (e.g. "remove_bg",
+                    # "upscale", "instruct_pix2pix"). Useful for filtering
+                    # latency by op type.
+                    "editor.operation": operation,
+                    "gen_ai.system": "diffusers",
+                })
+                return result
+            except ValueError as e:
+                raise HTTPException(400, str(e))
+            except RuntimeError as e:
+                raise HTTPException(422, str(e))
 
 
 @router.post("/editor/{session_id}/undo")
