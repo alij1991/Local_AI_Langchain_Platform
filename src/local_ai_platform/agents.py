@@ -1005,6 +1005,7 @@ Guidelines:
         system_definition: dict,
         user_input: str,
         conversation_id: str | None = None,
+        run_id: str | None = None,
     ) -> dict[str, Any]:
         """Execute a system graph designed in the visual graph editor.
 
@@ -1013,6 +1014,13 @@ Guidelines:
         - "on_keyword_match": follow if output contains a keyword (from edge notes)
         - "on_tool_result": follow if a tool was called (checks for tool markers)
         - "manual_next": always follow (same as always, user controls via graph)
+
+        ``run_id`` is optional — when callers don't pass one, a fresh
+        ``uuid4`` is minted as before. [IMPROVE-68] Commit 5/5 wraps
+        this method in a ``trace_run`` block at the route layer and
+        passes the same ``run_id`` to both, so the trace JSON file
+        on disk and the run_id in the response payload match — that's
+        what lets operators jump from /runs to the response and back.
 
         Returns timing data and tool call info in trace.
         """
@@ -1048,7 +1056,11 @@ Guidelines:
                 current_nodes = [nodes[0]["id"]]
 
         # Execute graph with routing
-        run_id = str(uuid.uuid4())
+        # [IMPROVE-68] Reuse caller-supplied run_id when given (the
+        # /systems/{name}/chat route mints one and passes it to BOTH
+        # ``trace_run`` and this executor so the on-disk trace JSON
+        # matches the response payload's run_id).
+        run_id = run_id or str(uuid.uuid4())
         system_name = system_definition.get("name") or system_definition.get("id") or "unnamed"
         total_start = _time.monotonic()
         node_outputs: list[dict[str, Any]] = []

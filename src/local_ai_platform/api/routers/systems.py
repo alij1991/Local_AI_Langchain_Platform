@@ -39,6 +39,7 @@ References (2025–2026):
 from __future__ import annotations
 
 import json
+import uuid
 from typing import Any
 
 from fastapi import APIRouter, Depends, HTTPException, Request
@@ -51,6 +52,7 @@ from local_ai_platform.api.deps import (
 )
 from local_ai_platform.observability import emit
 from local_ai_platform.providers import ProviderRouter
+from local_ai_platform.tracing import trace_run
 from local_ai_platform.repositories.agents_repo import save_agent
 from local_ai_platform.repositories.systems import (
     delete_system,
@@ -266,11 +268,47 @@ async def chat_with_system(
     if isinstance(definition, str):
         definition = json.loads(definition)
 
-    try:
-        result = await orchestrator.execute_system_graph(definition, message, conv_id)
-        return result
-    except Exception as exc:
-        raise HTTPException(500, f"System execution failed: {exc}")
+    # [IMPROVE-68] Commit 5/5: wrap the system DAG run in trace_run.
+    # The executor already emits ``system/run.start``,
+    # ``system/node_start``, ``system/node_end``, ``system/run_done``
+    # at agents.py:1063/1110/1118/1131/1167 — those flow into the
+    # trace JSON via the ``_active_recorder`` ContextVar set here,
+    # so the Runs page (/runs?subsystem=system) gets the per-node
+    # timeline of every DAG run with zero edits to the executor's
+    # body.
+    #
+    # ``run_id`` is minted here and passed to BOTH ``trace_run``
+    # (for the trace JSON filename) AND ``execute_system_graph``
+    # (for the response payload's ``run_id`` field) so the two
+    # match — operators can jump from /runs to the response and
+    # back without correlating different UUIDs.
+    #
+    # ``model_provider="multi"`` and ``model_id="dag"`` because a
+    # system DAG spans multiple agents that may use different
+    # providers / models per node. The /runs row identifies the
+    # operation as a system run; per-node provider + model land
+    # on the events list (each node's emit context carries
+    # ``agent`` and the agent's chat emits below carry the model).
+    #
+    # The executor is ``async def`` and runs in the same event-loop
+    # task as this route — no copy_context dance needed (no
+    # threadpool crossing for the executor's emit() sites).
+    run_id = str(uuid.uuid4())
+    with trace_run(
+        subsystem="system",
+        agent_name=name,
+        model_provider="multi",
+        model_id="dag",
+        conversation_id=conv_id,
+        run_id=run_id,
+    ):
+        try:
+            result = await orchestrator.execute_system_graph(
+                definition, message, conv_id, run_id=run_id,
+            )
+            return result
+        except Exception as exc:
+            raise HTTPException(500, f"System execution failed: {exc}")
 
 
 @router.post("/systems/{name}/clone")
