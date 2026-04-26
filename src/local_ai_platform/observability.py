@@ -50,6 +50,13 @@ _OTEL_OPERATION_MAP: dict[tuple[str, str], str] = {
     # gen_ai.request.model + the run_id in the context dict.
     ("chat", "send"): "chat",
     ("chat", "enhance_prompt"): "chat",
+    # [IMPROVE-4] Commit 3/4: tool dispatch via AgentOrchestrator's
+    # _instrument_tool wrapper. Internal action stays "invoke" (the
+    # name app_events / dashboards already use); the OTel operation
+    # name is the spec-compliant "execute_tool". Tool spans nest under
+    # the parent chat span automatically via OTel context propagation
+    # (start_as_current_span pushes onto the current context).
+    ("tool", "invoke"): "execute_tool",
 }
 
 
@@ -242,6 +249,28 @@ class _EventCtx:
                 conv_id = self.context.get("conversation_id")
                 if conv_id:
                     self._span.set_attribute(_gen_ai.GEN_AI_CONVERSATION_ID, str(conv_id))
+                # [IMPROVE-4] Commit 3/4: agent attribution. The chat
+                # router stores the resolved agent name in context;
+                # mirror it onto the span so an operator can filter by
+                # "this agent" across the trace tree (chat span + every
+                # tool span beneath it). Tool spans inherit the agent
+                # via context propagation, but only if the parent has
+                # the attribute — so we set it here, not in the tool
+                # wrapper.
+                agent = self.context.get("agent")
+                if agent:
+                    self._span.set_attribute(_gen_ai.GEN_AI_AGENT_NAME, str(agent))
+                # Tool subsystem auto-attributes — the wrapper passes
+                # tool/dangerous in context; mirror them onto gen_ai.*
+                # so downstream OTel consumers don't have to know our
+                # internal context-key names.
+                tool = self.context.get("tool")
+                if tool:
+                    self._span.set_attribute(_gen_ai.GEN_AI_TOOL_NAME, str(tool))
+                    # Spec valid values: "function", "extension", "datastore".
+                    # "function" matches the OpenAI tool-call shape, which is
+                    # what LangChain's StructuredTool emits.
+                    self._span.set_attribute(_gen_ai.GEN_AI_TOOL_TYPE, "function")
             except Exception as exc:
                 # OTel bootstrap failure must never break the underlying
                 # operation. Log + carry on with span=None — every

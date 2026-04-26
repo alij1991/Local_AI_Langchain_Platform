@@ -329,46 +329,37 @@ class AgentOrchestrator:
             except Exception:
                 return -1
 
+        # [IMPROVE-4] Commit 3/4: switched from manual emit() to
+        # track_event so each tool invocation gets a gen_ai.execute_tool
+        # span in addition to the app_events row. ``tool`` and
+        # ``dangerous`` ride in the context dict — observability.__enter__
+        # mirrors ``tool`` onto gen_ai.tool.name + gen_ai.tool.type
+        # automatically, so this wrapper doesn't need to know the
+        # gen_ai key names. Tool spans nest under the active chat span
+        # via OTel context propagation (start_as_current_span pushes
+        # onto the current context, async or sync).
         if original_func is not None and not inspect.iscoroutinefunction(original_func):
             def wrapped_func(*args, **kwargs):
-                t0 = time.monotonic()
                 ctx = {"tool": tool_name, "dangerous": is_dangerous,
                        "arg_size": _arg_size(args, kwargs)}
-                try:
+                with track_event("tool", "invoke", context=ctx) as ev:
                     result = original_func(*args, **kwargs)
-                    emit("tool", "invoke", status="ok",
-                         duration_ms=int((time.monotonic() - t0) * 1000),
-                         context=ctx,
-                         perf={"result_size": len(str(result)) if result is not None else 0})
+                    ev.perf = {
+                        "result_size": len(str(result)) if result is not None else 0,
+                    }
                     return result
-                except Exception as exc:
-                    emit("tool", "invoke", status="error",
-                         duration_ms=int((time.monotonic() - t0) * 1000),
-                         error_code=type(exc).__name__,
-                         error_message=str(exc),
-                         context=ctx)
-                    raise
             tool.func = wrapped_func
 
         if original_coroutine is not None:
             async def wrapped_coro(*args, **kwargs):
-                t0 = time.monotonic()
                 ctx = {"tool": tool_name, "dangerous": is_dangerous,
                        "arg_size": _arg_size(args, kwargs)}
-                try:
+                with track_event("tool", "invoke", context=ctx) as ev:
                     result = await original_coroutine(*args, **kwargs)
-                    emit("tool", "invoke", status="ok",
-                         duration_ms=int((time.monotonic() - t0) * 1000),
-                         context=ctx,
-                         perf={"result_size": len(str(result)) if result is not None else 0})
+                    ev.perf = {
+                        "result_size": len(str(result)) if result is not None else 0,
+                    }
                     return result
-                except Exception as exc:
-                    emit("tool", "invoke", status="error",
-                         duration_ms=int((time.monotonic() - t0) * 1000),
-                         error_code=type(exc).__name__,
-                         error_message=str(exc),
-                         context=ctx)
-                    raise
             tool.coroutine = wrapped_coro
 
         return tool
