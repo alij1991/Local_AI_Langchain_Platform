@@ -37,6 +37,7 @@ from local_ai_platform.api.deps import (
 from local_ai_platform.api.helpers import _cached, _set_cache
 from local_ai_platform.config import AppConfig
 from local_ai_platform.providers import ProviderRouter
+from local_ai_platform.token_counting import count_tokens
 
 router = APIRouter()
 
@@ -143,19 +144,26 @@ async def quick_benchmark(
     # Stream and measure
     t_start = time.monotonic()
     first_token_time = None
-    token_count = 0
     full_text = ""
 
     try:
         async for chunk in router.astream(model, messages, settings):
             if first_token_time is None:
                 first_token_time = time.monotonic()
-            token_count += max(1, len(chunk.split()))
             full_text += chunk
     except Exception as exc:
         return {"error": str(exc)}
 
     t_end = time.monotonic()
+
+    # [IMPROVE-13] Tokenizer-accurate count of the full streamed
+    # response. Pre-IMPROVE-13 this was ``token_count += max(1,
+    # len(chunk.split()))`` per chunk — undercounted English by ~25%
+    # and made cross-provider tok/s comparisons misleading. The
+    # helper prefers the provider's cached tokenizer (HF / LlamaCpp
+    # already loaded one for this stream), tiktoken cl100k_base
+    # next, split as a last resort.
+    token_count = count_tokens(provider, model, full_text, router=router)
 
     # Measure peak memory after
     ram_after = 0
@@ -181,7 +189,11 @@ async def quick_benchmark(
     return {
         "model": model,
         "provider": provider,
-        "prompt_length": len(prompt.split()),
+        # [IMPROVE-13] prompt_length now reports tokenizer-accurate
+        # input length so it's directly comparable to output_tokens
+        # (previously: word-split for input, word-split for output —
+        # consistent but both wrong; now both honest).
+        "prompt_length": count_tokens(provider, model, prompt, router=router),
         "output_tokens": token_count,
         "ttft_sec": round(ttft, 3),
         "decode_tokens_per_sec": round(decode_tps, 1),

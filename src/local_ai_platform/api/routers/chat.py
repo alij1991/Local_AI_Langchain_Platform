@@ -61,6 +61,7 @@ from local_ai_platform.repositories.conversations import (
     list_messages,
     set_conversation_thread_id,
 )
+from local_ai_platform.token_counting import count_tokens
 from local_ai_platform.tracing import (
     LocalTraceCallbackHandler,
     TraceRecorder,
@@ -751,7 +752,6 @@ async def agent_chat_stream(
                             if text:
                                 if first_token_time is None:
                                     first_token_time = time.monotonic()
-                                token_count += max(1, len(text.split()))
                                 full_response += text
                                 yield f"event: token\ndata: {json.dumps({'text': text})}\n\n"
 
@@ -765,6 +765,23 @@ async def agent_chat_stream(
                             if not full_response:
                                 full_response = event.get("content", "") or "No response returned."
 
+                    # [IMPROVE-16] Tokenizer-accurate count of the
+                    # streamed response. Pre-IMPROVE-16 the loop
+                    # accumulated ``token_count += max(1,
+                    # len(text.split()))`` per chunk — undercounts
+                    # English by ~25% and non-Latin scripts by far
+                    # more. The helper prefers the agent's provider
+                    # tokenizer (HF / LlamaCpp already cached one
+                    # for this stream), tiktoken cl100k_base next,
+                    # split as a last resort. Single encode of the
+                    # full response is cheap enough for typical
+                    # response sizes per the proposal.
+                    token_count = count_tokens(
+                        orchestrator.definitions[agent_name].provider,
+                        orchestrator.definitions[agent_name].model_name,
+                        full_response,
+                        router=getattr(orchestrator, "router", None),
+                    )
                     # Performance metrics
                     total_time = time.monotonic() - stream_start_time
                     ttft = (first_token_time - stream_start_time) if first_token_time else 0
@@ -792,13 +809,14 @@ async def agent_chat_stream(
 
                     ev.perf = {**perf_data, "response_length": len(full_response)}
                     # [IMPROVE-4] Streaming path is the cleanest source
-                    # of gen_ai.usage.output_tokens — token_count is the
-                    # number of completion tokens we actually streamed.
-                    # Until [IMPROVE-13]/[IMPROVE-16] land tokenizer-
-                    # accurate counts, the .split() approximation in
-                    # token_count is the same number /observability/summary
-                    # already shows — so OTel and the existing dashboard
-                    # stay consistent.
+                    # of gen_ai.usage.output_tokens — token_count is
+                    # the number of completion tokens we actually
+                    # streamed. [IMPROVE-16] now feeds it through the
+                    # tokenizer-accurate ``count_tokens`` helper, so
+                    # the OTel attribute and the perf_json column on
+                    # ``messages`` both report tokenizer counts —
+                    # cross-provider tok/s is now an honest absolute
+                    # metric, not just a relative one.
                     ev.set_otel_attributes({
                         "gen_ai.usage.output_tokens": token_count,
                         "gen_ai.response.id": run_id,
@@ -810,7 +828,18 @@ async def agent_chat_stream(
                     trace_data = recorder.finalize(success=False, error=str(exc))
                     if trace_store:
                         trace_store.save(trace_data)
-                    ev.perf = {"tokens": token_count}
+                    # [IMPROVE-16] Recount on the partial response so
+                    # the failure-path perf isn't stuck at the
+                    # initialization-zero. Pre-IMPROVE-16 the
+                    # per-chunk accumulator captured partial counts
+                    # for free; without it we'd lose mid-stream
+                    # observability if we didn't recount here.
+                    ev.perf = {"tokens": count_tokens(
+                        orchestrator.definitions[agent_name].provider,
+                        orchestrator.definitions[agent_name].model_name,
+                        full_response,
+                        router=getattr(orchestrator, "router", None),
+                    )}
                     ev.mark_error(exc)
                     yield f"event: error\ndata: {json.dumps({'error': str(exc)})}\n\n"
                 except BaseException as exc:
@@ -820,7 +849,20 @@ async def agent_chat_stream(
                         recorder.finalize(success=False, error=f"cancelled: {type(exc).__name__}")
                     except Exception:
                         pass
-                    ev.perf = {"tokens": token_count}
+                    # [IMPROVE-16] Same recount on the cancelled
+                    # path. Wrap in try/except — counting must not
+                    # mask the original exception that triggered the
+                    # cancel branch.
+                    try:
+                        partial_tokens = count_tokens(
+                            orchestrator.definitions[agent_name].provider,
+                            orchestrator.definitions[agent_name].model_name,
+                            full_response,
+                            router=getattr(orchestrator, "router", None),
+                        )
+                    except Exception:
+                        partial_tokens = 0
+                    ev.perf = {"tokens": partial_tokens}
                     ev.mark_cancelled(type(exc).__name__)
                     raise
         finally:

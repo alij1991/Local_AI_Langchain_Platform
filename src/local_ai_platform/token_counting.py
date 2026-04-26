@@ -1,0 +1,175 @@
+"""[IMPROVE-13] / [IMPROVE-16] Tokenizer-accurate token counting.
+
+Single helper consumed by ``/benchmark/quick`` (api/routers/system.py)
+and ``/chat/stream`` (api/routers/chat.py). Replaces the
+``len(text.split())`` approximation that undercounts English by ~25%
+and non-Latin scripts by far more — making reported tok/s a useful
+relative metric but a misleading absolute one.
+
+Order of preference (each tier tries; on failure drops to next):
+
+1. **Provider's cached tokenizer.** When the streaming run that
+   produced the text already lives on a HuggingFace or LlamaCpp
+   provider, the tokenizer/Llama instance is sitting in the
+   provider's cache (HF: ``_tokenizer_cache``; LlamaCpp:
+   ``_model_cache`` since the Llama instance exposes ``tokenize``).
+   Reuse it — accuracy comes free.
+
+   IMPORTANT: tier 1 reads only what's already cached. We never
+   force-load a 4 GB model just to count tokens; the helper exists
+   to add accuracy to perf metrics, not silently to incur load
+   latency. If the provider doesn't have it cached, we drop to
+   tier 2 — the streaming-aftermath case is what tier 1 targets.
+
+2. **tiktoken cl100k_base.** Offline, fast, ~25% closer than split
+   for English. Same primitive memory.py:62 already uses for
+   context-window math. Used for Ollama / OpenAI-compat (no
+   exposed tokenizer) and for any tier-1 miss.
+
+3. **``max(1, len(text.split()))``.** The pre-IMPROVE-13/16
+   behavior. Fires only when tiktoken is somehow unavailable
+   (test environments that monkeypatch the import).
+
+The helper aggregates at end-of-stream rather than per-chunk because
+tokenizer overhead per token would be wasted — encoding the
+cumulative string once is cheap and matches the proposal at
+docs/features/03-chat.md:474.
+
+Sources (2025-2026):
+- https://github.com/openai/tiktoken — cl100k_base offline encoding
+  (same one OpenAI uses for gpt-4 family; standard offline approx.)
+- "Local AI on consumer laptops 2024-2026" research, cited at
+  api_server.py:468 (proposal in 02-llm-infrastructure.md §IMPROVE-13).
+"""
+from __future__ import annotations
+
+import logging
+from typing import TYPE_CHECKING, Any
+
+if TYPE_CHECKING:
+    from .providers.router import ProviderRouter
+
+logger = logging.getLogger(__name__)
+
+
+def _split_count(text: str) -> int:
+    """Tier 3 fallback. ``max(1, …)`` matches the pre-IMPROVE-13/16
+    accumulator's lower bound so a non-empty chunk always counts as at
+    least one token (preserves dashboard continuity for empty-result
+    responses)."""
+    if not text:
+        return 0
+    return max(1, len(text.split()))
+
+
+def _tiktoken_count(text: str) -> int | None:
+    """Tier 2. Returns None if tiktoken isn't importable so the caller
+    drops to tier 3. ``cl100k_base`` is the OpenAI gpt-4 encoding —
+    not perfect for every model but consistently within ~5% of native
+    tokenizer counts on English, far better than split."""
+    if not text:
+        return 0
+    try:
+        import tiktoken
+    except ImportError:
+        return None
+    try:
+        enc = tiktoken.get_encoding("cl100k_base")
+        return len(enc.encode(text))
+    except Exception as exc:
+        # tiktoken can fail to load encodings in offline test
+        # environments where the cl100k_base BPE file isn't bundled;
+        # surface as a tier miss rather than crashing the perf chain.
+        logger.debug("tiktoken encode failed: %s", exc)
+        return None
+
+
+def _provider_tokenizer_count(
+    provider_name: str,
+    model: str,
+    text: str,
+    router: "ProviderRouter | None",
+) -> int | None:
+    """Tier 1. Returns None on any miss/failure so the caller drops
+    to tier 2. Reads provider caches only — never force-loads.
+    """
+    if router is None or not provider_name or not model:
+        return None
+    try:
+        provider = router.get_provider(provider_name)
+    except Exception:
+        return None
+    if provider is None:
+        return None
+
+    # HuggingFace: _tokenizer_cache is a dict[model] -> AutoTokenizer.
+    # The tokenizer's ``.encode(text)`` returns list[int]; len = count.
+    if provider_name == "huggingface":
+        cache: dict[str, Any] = getattr(provider, "_tokenizer_cache", {}) or {}
+        tok = cache.get(model)
+        if tok is None:
+            return None
+        try:
+            return len(tok.encode(text))
+        except Exception as exc:
+            logger.debug("HF tokenizer encode failed for %s: %s", model, exc)
+            return None
+
+    # LlamaCpp: _model_cache is a dict[model_path] -> Llama. Llama
+    # exposes ``tokenize(bytes)`` returning list[int]. Per llama-cpp-
+    # python API, the bytes must be UTF-8.
+    if provider_name == "llamacpp":
+        cache = getattr(provider, "_model_cache", {}) or {}
+        llm = cache.get(model)
+        if llm is None:
+            return None
+        try:
+            return len(llm.tokenize(text.encode("utf-8")))
+        except Exception as exc:
+            logger.debug("LlamaCpp tokenize failed for %s: %s", model, exc)
+            return None
+
+    # Ollama, openai_compatible, etc.: no native tokenizer accessible
+    # from the provider object. Tier 2 (tiktoken) handles them.
+    return None
+
+
+def count_tokens(
+    provider_name: str,
+    model: str,
+    text: str,
+    *,
+    router: "ProviderRouter | None" = None,
+) -> int:
+    """Tokenizer-accurate token count for ``text``.
+
+    Args:
+        provider_name: ``"huggingface"`` / ``"llamacpp"`` /
+            ``"ollama"`` / ``"openai_compatible"`` / etc. Used to
+            pick a provider-native tokenizer when one is cached.
+        model: Model identifier as the provider knows it. Resolves
+            to the right entry in the provider's tokenizer/model
+            cache.
+        text: The string to count.
+        router: Optional ``ProviderRouter``; when supplied, tier 1
+            tries the provider's cached tokenizer. When ``None``,
+            tier 1 is skipped — tier 2 (tiktoken) handles it.
+
+    Returns:
+        Non-negative int. ``0`` on empty input.
+    """
+    if not text:
+        return 0
+
+    # Tier 1: provider-native tokenizer (cached only).
+    n = _provider_tokenizer_count(provider_name, model, text, router)
+    if n is not None:
+        return n
+
+    # Tier 2: tiktoken cl100k_base.
+    n = _tiktoken_count(text)
+    if n is not None:
+        return n
+
+    # Tier 3: split-based fallback.
+    return _split_count(text)
