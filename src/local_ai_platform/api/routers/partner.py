@@ -69,6 +69,7 @@ from local_ai_platform.api.deps import (
 )
 from local_ai_platform.images.service import ImageGenerationService
 from local_ai_platform.observability import track_event
+from local_ai_platform.tracing import trace_run
 
 logger = logging.getLogger(__name__)
 
@@ -173,8 +174,32 @@ async def partner_chat_sync(
     model = body.get("model")
     if not message:
         raise HTTPException(400, "message is required")
-    reply = partner.chat(message, model)
-    return {"reply": reply}
+
+    # [IMPROVE-68] Commit 4/5: wrap the sync partner chat in trace_run
+    # so the engine's stage emits (chat.start / chat / emotion_detect /
+    # fact_extract at engine.py:294/356/419/492/639) flow into the
+    # trace JSON. ``conversation_id`` is intentionally None — partner
+    # chats are persona-scoped, not conversation-scoped (the persona
+    # has its own memory store).
+    #
+    # ``partner.chat`` is a sync method called directly from this
+    # ``async def`` handler — i.e. it runs in the event loop, not a
+    # threadpool worker — so the ContextVar set by trace_run is
+    # visible to the engine's emit() calls without a copy_context
+    # dance. (This is also the historical "blocks the loop" bug for
+    # long Ollama generates, but that's a separate concern from
+    # observability.)
+    with trace_run(
+        subsystem="partner",
+        agent_name=partner.profile.name,
+        # Partner routes through ProviderRouter; "ollama" is the
+        # default backend. Per-call provider varies based on the
+        # actual model used and is recorded on the engine's emits.
+        model_provider="ollama",
+        model_id=model,
+    ):
+        reply = partner.chat(message, model)
+        return {"reply": reply}
 
 
 @router.post("/partner/chat/stream")
@@ -198,7 +223,27 @@ async def partner_chat_stream(
                    "model": model, "streaming": True,
                    "thinking_pause": enable_pause,
                    "message_length": len(message)}
-        try:
+        # [IMPROVE-68] Commit 4/5: trace_run lives INSIDE the generator,
+        # not outside it. Starlette consumes ``stream_gen()`` lazily
+        # AFTER the route function returns — the recorder needs to be
+        # active for the duration of the SSE iterator's actual run, not
+        # just the route's setup. Placing the ``with trace_run`` here
+        # is what keeps ``_active_recorder`` set while events stream
+        # and what makes the engine's per-event emits inside
+        # ``partner.astream_chat`` (chat.start / chat / emotion_detect /
+        # fact_extract) flow into the trace JSON.
+        #
+        # ContextVars survive yield/resume across an async generator —
+        # asyncio's task context machinery preserves the active context
+        # when the generator pauses on yield and restores it on resume.
+        # No copy_context dance is needed for this path because the
+        # generator runs in the same event loop task as the request.
+        with trace_run(
+            subsystem="partner",
+            agent_name=partner.profile.name,
+            model_provider="ollama",
+            model_id=model,
+        ):
             with track_event("partner", "chat", context=obs_ctx) as ev:
                 try:
                     async for event in partner.astream_chat(
@@ -224,14 +269,33 @@ async def partner_chat_stream(
                                 "emotion_detected": event.get("emotion_detected", False),
                             }
                 except Exception as exc:
-                    ev.mark_error(exc)
+                    # Yield the error event to the client THEN re-raise
+                    # so trace_run + track_event both record the
+                    # failure. Pre-IMPROVE-68 this branch ate the
+                    # exception (mark_error + yield, no re-raise),
+                    # which left the trace dict at success=True even
+                    # for failed streams. Re-raising lets trace_run
+                    # save success=False so /runs?subsystem=partner
+                    # shows the failed run in red. Starlette closes
+                    # the connection cleanly after a re-raised
+                    # exception in an async generator — the bytes we
+                    # already yielded reach the client; the close
+                    # handshake just stops here.
                     yield f"event: error\ndata: {json.dumps({'error': str(exc)})}\n\n"
+                    raise
                 except BaseException as exc:
-                    # Client disconnect (GeneratorExit), task cancel, etc.
+                    # Client disconnect (GeneratorExit), task cancel
+                    # (asyncio.CancelledError, which is BaseException
+                    # in Python 3.8+), KeyboardInterrupt. mark_cancelled
+                    # records the cancelled status in app_events via
+                    # track_event; trace_run's except-Exception clause
+                    # deliberately does NOT catch these (matching
+                    # chat.py's semantics from Commit 1/5), so the
+                    # trace JSON is not saved for cancelled streams —
+                    # that's by design for now; widen if /runs gains
+                    # cancellation visualization later.
                     ev.mark_cancelled(type(exc).__name__)
                     raise
-        finally:
-            pass
 
     return StreamingResponse(stream_gen(), media_type="text/event-stream")
 
