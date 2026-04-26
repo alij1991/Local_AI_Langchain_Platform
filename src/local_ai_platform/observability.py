@@ -25,6 +25,38 @@ from local_ai_platform.db import get_conn
 logger = logging.getLogger(__name__)
 
 
+# ── [IMPROVE-4] Subsystem → gen_ai.operation.name mapping ────────────
+#
+# Returns the OTel ``gen_ai.operation.name`` value for a given (subsystem,
+# action) pair, or ``None`` if this event isn't a gen_ai operation and
+# should NOT produce an OTel span (e.g. provider availability probes,
+# image-pipeline-load events, lifespan markers — these still get an
+# ``app_events`` row via emit(), they just don't pollute the OTel trace
+# graph with non-LLM operations).
+#
+# Spec valid values for ``gen_ai.operation.name`` include: ``chat``,
+# ``text_completion``, ``embeddings``, ``generate_content``,
+# ``execute_tool``, ``create_agent``, ``invoke_agent``,
+# ``image_generation``, ``image_edit``. Custom values are allowed but
+# discouraged unless they're stable across releases.
+#
+# Commits 3/4 (tools + agents) and 4/4 (image gen / edit) extend this
+# mapping. Keeping it in one place means a refactor that splits
+# observability into a package only has to update one constant.
+_OTEL_OPERATION_MAP: dict[tuple[str, str], str] = {
+    # /chat/send (non-streaming + streaming) and /chat/enhance-prompt
+    # both go through track_event("chat", ...). Per the spec they're
+    # all chat completions — same operation name, distinguished by
+    # gen_ai.request.model + the run_id in the context dict.
+    ("chat", "send"): "chat",
+    ("chat", "enhance_prompt"): "chat",
+}
+
+
+def _gen_ai_operation_for(subsystem: str, action: str) -> str | None:
+    return _OTEL_OPERATION_MAP.get((subsystem, action))
+
+
 def _now() -> str:
     return datetime.now(timezone.utc).isoformat()
 
@@ -89,6 +121,13 @@ class _EventCtx:
         self._override_status: str | None = None
         self._override_error_code: str | None = None
         self._override_error_message: str | None = None
+        # [IMPROVE-4] OTel span state. ``_span`` is None for subsystems
+        # that aren't mapped to a gen_ai.operation.name (see
+        # _OTEL_OPERATION_MAP) — set_otel_attributes / add_otel_event
+        # then become safe no-ops, so the caller doesn't need a guard.
+        self._span: Any | None = None
+        self._span_cm: Any | None = None
+        self._otel_operation: str | None = None
 
     def mark_error(self, exc: BaseException, error_code: str | None = None) -> None:
         """Record an error outcome without re-raising through the with block.
@@ -105,23 +144,188 @@ class _EventCtx:
         self._override_status = "cancelled"
         self._override_error_code = reason
 
+    def set_otel_attributes(self, attrs: dict[str, Any]) -> None:
+        """[IMPROVE-4] Attach ``gen_ai.*`` attributes to the active span.
+
+        Safe to call when the (subsystem, action) pair has no OTel
+        operation mapping — attrs are silently dropped, so callers don't
+        need a guard. Designed for post-hoc enrichment: token usage,
+        finish reasons, response IDs are all known after the operation
+        completes, not at __enter__.
+
+        Values that are ``None`` are skipped (OTel rejects ``None``
+        attributes outright, so the convenience helper handles it).
+        """
+        if self._span is None:
+            return
+        for key, value in attrs.items():
+            if value is None:
+                continue
+            try:
+                self._span.set_attribute(key, value)
+            except Exception as exc:
+                # Defensive — set_attribute can raise on invalid types
+                # (e.g. dict). Don't let an OTel SDK gripe break the
+                # underlying business logic. Log at DEBUG so test runs
+                # don't get noisy.
+                logger.debug("set_attribute(%s) failed: %s", key, exc)
+
+    def add_otel_event(self, name: str, attributes: dict[str, Any] | None = None) -> None:
+        """[IMPROVE-4] Record a span event (e.g. tool call boundary,
+        first-token timestamp). Safe no-op when no span is active.
+        """
+        if self._span is None:
+            return
+        try:
+            self._span.add_event(name, attributes=attributes or {})
+        except Exception as exc:
+            logger.debug("add_event(%s) failed: %s", name, exc)
+
     def __enter__(self):
         self._t0 = time.monotonic()
         emit(self.subsystem, f"{self.action}.start", status="start",
              context=self.context)
+
+        # [IMPROVE-4] Open a gen_ai span for mapped subsystems. The span
+        # context is held via the ExitStack-equivalent pattern: we
+        # __enter__ the start_as_current_span context manager here and
+        # __exit__ it in our own __exit__. That way child operations
+        # (tool calls, image steps) opened during the with-block nest
+        # under this span automatically — start_as_current_span pushes
+        # the span onto the OTel context stack on __enter__ and pops
+        # it on __exit__.
+        self._otel_operation = _gen_ai_operation_for(self.subsystem, self.action)
+        if self._otel_operation is not None:
+            try:
+                # Lazy import — observability.py is imported by lots of
+                # modules at startup; deferring the OTel SDK import to
+                # the first track_event call shaves a few ms off cold
+                # boot for processes that never touch chat (e.g. a CLI
+                # script that just queries /system/info).
+                from .otel import get_tracer
+                from opentelemetry.semconv._incubating.attributes import (
+                    gen_ai_attributes as _gen_ai,
+                )
+
+                tracer = get_tracer()
+                # Span name: spec recommends "{operation} {model}" but
+                # model isn't always known at __enter__ (enhance_prompt
+                # resolves it inside the with-block). Set a placeholder
+                # name now and update at __exit__ if a model attribute
+                # has been attached via set_otel_attributes.
+                #
+                # ``record_exception=False, set_status_on_exception=False``
+                # — the SDK helper would otherwise auto-record on __exit__
+                # AND we'd call record_exception ourselves below, doubling
+                # up the span events. We want explicit control over
+                # cancellation classification, so opt out and own it.
+                self._span_cm = tracer.start_as_current_span(
+                    self._otel_operation,
+                    record_exception=False,
+                    set_status_on_exception=False,
+                )
+                self._span = self._span_cm.__enter__()
+                self._span.set_attribute(_gen_ai.GEN_AI_OPERATION_NAME, self._otel_operation)
+
+                # Pull the standard attributes out of the context dict
+                # if they're there. Callers can still override via
+                # set_otel_attributes — set_attribute is last-write-wins.
+                provider = self.context.get("provider")
+                if provider:
+                    self._span.set_attribute(_gen_ai.GEN_AI_SYSTEM, str(provider))
+                model = (
+                    self.context.get("model")
+                    or self.context.get("model_hint")
+                )
+                if model and model != "auto":
+                    self._span.set_attribute(_gen_ai.GEN_AI_REQUEST_MODEL, str(model))
+                conv_id = self.context.get("conversation_id")
+                if conv_id:
+                    self._span.set_attribute(_gen_ai.GEN_AI_CONVERSATION_ID, str(conv_id))
+            except Exception as exc:
+                # OTel bootstrap failure must never break the underlying
+                # operation. Log + carry on with span=None — every
+                # set_otel_attributes call from here on is a no-op.
+                logger.debug("OTel span open failed for %s/%s: %s",
+                             self.subsystem, self.action, exc)
+                self._span = None
+                self._span_cm = None
+
         return self
 
     def __exit__(self, exc_type, exc, tb):
         duration_ms = int((time.monotonic() - self._t0) * 1000)
+
+        # [IMPROVE-4] Wrap up the gen_ai span before the emit() call so
+        # the span's end_time is as close as possible to the actual
+        # operation end (the emit() write to SQLite adds a few ms). The
+        # span's status mirrors the emit() status: ok/cancelled/error
+        # → UNSET/ERROR. Per the spec, cancellation is also ERROR but
+        # with a "cancelled" message — UNSET is reserved for "we don't
+        # know" which doesn't apply to a completed operation.
+        is_cancellation = False
         if exc is not None:
-            # BaseException that isn't a regular Exception (GeneratorExit,
-            # KeyboardInterrupt, SystemExit, asyncio.CancelledError since 3.8)
-            # is almost always cancellation, not a real error. Classify
-            # automatically so callers don't need mark_cancelled boilerplate.
             is_cancellation = (
                 self._override_status == "cancelled"
                 or (isinstance(exc, BaseException) and not isinstance(exc, Exception))
             )
+
+        if self._span is not None:
+            try:
+                from opentelemetry.trace import Status, StatusCode
+
+                # Spec recommends span name = "{operation} {model}".
+                # Update if the model has been attached via set_otel_attributes
+                # since __enter__ (e.g. enhance_prompt resolves "auto" inside
+                # the with-block; set_otel_attributes pins the resolved name).
+                model_attr = self._span.attributes.get("gen_ai.request.model") \
+                    if hasattr(self._span, "attributes") else None
+                if model_attr and self._otel_operation:
+                    try:
+                        self._span.update_name(f"{self._otel_operation} {model_attr}")
+                    except Exception:
+                        pass  # SDK can refuse update_name post-end; non-fatal.
+
+                if exc is not None:
+                    if is_cancellation:
+                        # Description prefixed "cancelled" so dashboards
+                        # can grep the visible signal even when the
+                        # specific reason (GeneratorExit, KeyboardInterrupt,
+                        # caller-supplied code) varies.
+                        reason = (
+                            self._override_error_code or exc_type.__name__
+                        )
+                        self._span.set_status(
+                            Status(StatusCode.ERROR, f"cancelled: {reason}")
+                        )
+                    else:
+                        self._span.record_exception(exc)
+                        self._span.set_status(
+                            Status(StatusCode.ERROR, str(exc)[:500])
+                        )
+                elif self._override_status == "error":
+                    self._span.set_status(
+                        Status(StatusCode.ERROR,
+                               self._override_error_message or "error")
+                    )
+                elif self._override_status == "cancelled":
+                    reason = self._override_error_code or "cancelled"
+                    self._span.set_status(
+                        Status(StatusCode.ERROR, f"cancelled: {reason}")
+                    )
+                # Default UNSET ≡ OK for SDK consumers (Datadog, Tempo, etc).
+            finally:
+                # Always close the span CM so the OTel context stack
+                # unwinds cleanly. ``__exit__`` swallows nothing — the
+                # caller's exception still propagates.
+                try:
+                    self._span_cm.__exit__(exc_type, exc, tb)
+                except Exception as exc2:
+                    logger.debug("OTel span close failed: %s", exc2)
+                self._span = None
+                self._span_cm = None
+
+        if exc is not None:
             if is_cancellation:
                 emit(self.subsystem, self.action, status="cancelled",
                      duration_ms=duration_ms,

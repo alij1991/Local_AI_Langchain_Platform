@@ -345,6 +345,14 @@ User's original request:
         content = content.strip().strip("`").strip('"').strip("'").strip()
 
         ev.perf = {"resolved_model": ollama_model, "output_length": len(content)}
+        # [IMPROVE-4] enhance_prompt resolves "auto" model_hint to a
+        # concrete model name inside the with-block; pin it onto the
+        # gen_ai span so downstream observability tools can group
+        # enhance-prompt latency by actual underlying model.
+        ev.set_otel_attributes({
+            "gen_ai.request.model": ollama_model,
+            "gen_ai.system": "ollama",
+        })
         return {
             "prompt": content,
             "original_prompt": user_prompt,
@@ -610,6 +618,19 @@ async def agent_chat(
 
             ev.perf["response_length"] = len(response) if response else 0
 
+            # [IMPROVE-4] Attach the run_id as gen_ai.response.id and
+            # mirror agent identity. Token counts on the non-streaming
+            # path are best pulled from the recorder's events but the
+            # callback shape varies per provider — leaving a richer
+            # token-usage extraction to the [IMPROVE-13] / [IMPROVE-16]
+            # tokenizer-accurate work later in Wave 3. For now, the
+            # response_length proxy mirrors what /observability already
+            # surfaces.
+            ev.set_otel_attributes({
+                "gen_ai.response.id": run_id,
+                "gen_ai.agent.name": agent_name,
+            })
+
             return {
                 "assistant_reply": response,
                 "response": response,
@@ -770,6 +791,19 @@ async def agent_chat_stream(
                                  token_count, tokens_per_sec, ttft, total_time)
 
                     ev.perf = {**perf_data, "response_length": len(full_response)}
+                    # [IMPROVE-4] Streaming path is the cleanest source
+                    # of gen_ai.usage.output_tokens — token_count is the
+                    # number of completion tokens we actually streamed.
+                    # Until [IMPROVE-13]/[IMPROVE-16] land tokenizer-
+                    # accurate counts, the .split() approximation in
+                    # token_count is the same number /observability/summary
+                    # already shows — so OTel and the existing dashboard
+                    # stay consistent.
+                    ev.set_otel_attributes({
+                        "gen_ai.usage.output_tokens": token_count,
+                        "gen_ai.response.id": run_id,
+                        "gen_ai.agent.name": agent_name,
+                    })
                     yield f"event: end\ndata: {json.dumps({'conversation_id': conv_id, 'run_id': run_id, 'thread_id': thread_id, 'perf': perf_data})}\n\n"
 
                 except Exception as exc:
