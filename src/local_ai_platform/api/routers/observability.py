@@ -214,14 +214,27 @@ async def delete_thread_endpoint(thread_id: str):
 async def get_runs(
     limit: int = 20,
     agent: str | None = None,
+    subsystem: str | None = None,
     trace_store: TraceStore | None = Depends(get_trace_store_or_none),
 ):
-    """Return runs/traces for the Runs page."""
+    """Return runs/traces for the Runs page.
+
+    [IMPROVE-68] ``subsystem`` filter (one of ``chat`` | ``image`` |
+    ``editor`` | ``partner`` | ``system``) lets the Runs page slice the
+    unified timeline. Pre-IMPROVE-68 traces on disk lack the field; a
+    lookup returning ``None`` is treated as ``"chat"`` so historical
+    chat runs still appear under ``?subsystem=chat``.
+    """
     if not trace_store:
         return {"items": []}
     traces = trace_store.list(limit=limit)
     if agent:
         traces = [t for t in traces if t.get("agent_name") == agent]
+    if subsystem:
+        traces = [
+            t for t in traces
+            if (t.get("subsystem") or "chat") == subsystem
+        ]
     return {"items": traces}
 
 
@@ -247,6 +260,9 @@ async def get_run_view(
 
     return {
         "summary": {
+            # [IMPROVE-68] subsystem surfaced so the Runs detail UI can
+            # render an icon / route to a subsystem-specific view.
+            "subsystem": trace.get("subsystem") or "chat",
             "agent_name": trace.get("agent_name"),
             "model_provider": trace.get("model_provider"),
             "model_id": trace.get("model_id"),

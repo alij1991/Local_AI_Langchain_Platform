@@ -117,6 +117,36 @@ def emit(subsystem: str, action: str, status: str = "ok",
     except Exception as exc:
         logger.debug("observability emit failed: %s", exc)
 
+    # [IMPROVE-68] Auto-propagate to the active TraceRecorder if any.
+    # Stage emits inside subsystem services (image/load,
+    # image/postprocess, editor.<op>, partner.turn, system.<node>)
+    # appear in the trace JSON without those services importing
+    # TraceRecorder — the recorder is set on the ContextVar by
+    # ``trace_run`` in the surrounding route handler.
+    #
+    # No-op when no recorder is active (chat today, plus any caller
+    # not yet on trace_run): the get_active_recorder() lookup is a
+    # ContextVar read, ~tens of nanoseconds. Lazy-imported so the
+    # observability module stays free of a tracing.py import cycle.
+    try:
+        from .tracing import get_active_recorder
+        recorder = get_active_recorder()
+        if recorder is not None:
+            recorder.subsystem_event(
+                subsystem, action,
+                status=status,
+                duration_ms=duration_ms,
+                context=context,
+                perf=perf,
+                error_code=error_code,
+                error_message=error_message,
+            )
+    except Exception as exc:
+        # Recorder propagation failure must NEVER break the SQLite
+        # write path — that's the primary observability surface. Log
+        # at DEBUG so test runs stay quiet.
+        logger.debug("trace recorder propagation failed: %s", exc)
+
 
 class _EventCtx:
     """Context captured for one tracked operation.
