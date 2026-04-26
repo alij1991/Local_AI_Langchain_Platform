@@ -54,6 +54,10 @@ from local_ai_platform.observability import emit
 from local_ai_platform.providers import ProviderRouter
 from local_ai_platform.tracing import trace_run
 from local_ai_platform.repositories.agents_repo import save_agent
+from local_ai_platform.repositories.conversations import (
+    add_message,
+    get_conversation,
+)
 from local_ai_platform.repositories.systems import (
     delete_system,
     get_system,
@@ -268,6 +272,24 @@ async def chat_with_system(
     if isinstance(definition, str):
         definition = json.loads(definition)
 
+    # [IMPROVE-38] When the caller supplies a real conversation_id,
+    # persist the user message + a synthetic assistant message after
+    # the run. ``db_conv_id`` is the validated handle used for DB
+    # writes; ``conv_id`` (the caller's opaque value) is what the
+    # trace records — they're decoupled because:
+    # - A caller can tag a trace with any conversation_id (used as
+    #   correlation key on /runs filters) without requiring a real
+    #   ``conversations`` row to exist.
+    # - Auto-creating a conversation row on every system run would
+    #   double the user's /conversations list (one per DAG fire);
+    #   pre-IMPROVE-38 system runs were "fire and forget" by design.
+    # So: write only when the row already exists; silently skip
+    # otherwise (including when conv_id is None or unknown). Mirrors
+    # routers/chat.py:570's pre-call user write.
+    db_conv_id = conv_id if (conv_id and get_conversation(conv_id)) else None
+    if db_conv_id:
+        add_message(db_conv_id, "user", message)
+
     # [IMPROVE-68] Commit 5/5: wrap the system DAG run in trace_run.
     # The executor already emits ``system/run.start``,
     # ``system/node_start``, ``system/node_end``, ``system/run_done``
@@ -306,8 +328,46 @@ async def chat_with_system(
             result = await orchestrator.execute_system_graph(
                 definition, message, conv_id, run_id=run_id,
             )
+            # [IMPROVE-38] Persist a synthetic assistant message
+            # carrying the run summary. The structured ``attachments``
+            # entry lets the conversation thread render the per-node
+            # breakdown inline (one row per system run, not one per
+            # node — keeps /conversations preview text sane while the
+            # full DAG trace lives in the trace JSON on disk linked
+            # via run_id). ``perf`` matches the chat path's shape so
+            # the same Flutter card renderer can pick up the timing
+            # block without a system-specific branch.
+            if db_conv_id:
+                add_message(
+                    db_conv_id, "assistant",
+                    result.get("final_text", ""),
+                    agent=name, model="dag",
+                    attachments=[{
+                        "type": "system_run",
+                        "node_outputs": result.get("node_outputs", []),
+                        "run_id": run_id,
+                    }],
+                    run_id=run_id,
+                    perf={
+                        "total_duration_ms": result.get("total_duration_ms"),
+                        "nodes_executed": result.get("nodes_executed"),
+                    },
+                )
             return result
         except Exception as exc:
+            # [IMPROVE-38] On executor failure persist an error
+            # assistant message before re-raising. Mirrors
+            # routers/chat.py:609 where /chat/agent writes a failure
+            # row so the conversation thread doesn't dangle at the
+            # user's prompt with no visible response. The HTTPException
+            # still bubbles → trace_run records success=False, /runs
+            # shows the run in red.
+            if db_conv_id:
+                add_message(
+                    db_conv_id, "assistant",
+                    f"System execution failed: {exc}",
+                    agent=name, model="dag", run_id=run_id,
+                )
             raise HTTPException(500, f"System execution failed: {exc}")
 
 
