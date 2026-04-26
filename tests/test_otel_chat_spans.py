@@ -133,13 +133,17 @@ def test_unmapped_subsystem_emits_no_span(memory_exporter):
     assert memory_exporter.get_finished_spans() == ()
 
 
-def test_image_subsystem_unmapped_until_commit_4(memory_exporter):
-    """Sanity check for the wave plan: ``image`` is reserved for
-    Commit 4/4. Until then, image events emit their app_events row
-    but no OTel span. Pin that so a careless extension to the map
-    in this commit fails this test.
+def test_image_per_stage_emits_emit_no_span(memory_exporter):
+    """Regression guard updated for Commit 4/4: ``image/generate`` is
+    NOW mapped (request-level), but the per-stage internal markers
+    (load / plan / infer / postprocess) stay as plain app_events
+    rows — turning each stage into its own gen_ai span would
+    conflict with the spec ("one image_generation operation =
+    one span"). Stage-level OTel sub-spans are part of [IMPROVE-68].
     """
-    with track_event("image", "generate", context={"model": "flux1-schnell"}):
+    with track_event("image", "load", context={"model_id": "flux1-schnell"}):
+        pass
+    with track_event("image", "postprocess", context={}):
         pass
 
     assert memory_exporter.get_finished_spans() == ()

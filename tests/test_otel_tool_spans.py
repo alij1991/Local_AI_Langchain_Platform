@@ -298,13 +298,15 @@ def test_provider_availability_probe_still_unmapped(memory_exporter):
     assert memory_exporter.get_finished_spans() == ()
 
 
-def test_image_subsystem_still_unmapped_until_commit_4(memory_exporter):
-    """Regression guard mirroring the chat-span tests — image is
-    reserved for Commit 4/4. Adding "image" to the map prematurely
-    would change the test result; keeping this here forces the wave
-    plan to be honored.
+def test_image_per_stage_markers_stay_unmapped_after_commit_4(memory_exporter):
+    """Regression guard updated for Commit 4/4: ``image/generate`` is
+    NOW mapped at the request level, but per-stage emits (load /
+    plan / infer / postprocess) deliberately stay unmapped — the
+    spec says one image_generation operation = one span, so stage-
+    level sub-spans are out of scope until [IMPROVE-68] introduces
+    nested stage children.
     """
-    with track_event("image", "generate", context={"model": "flux1-schnell"}):
+    with track_event("image", "load", context={"model": "flux1-schnell"}):
         pass
 
     assert memory_exporter.get_finished_spans() == ()

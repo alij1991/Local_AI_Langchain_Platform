@@ -54,6 +54,7 @@ from local_ai_platform.api.deps import (
     get_router,
 )
 from local_ai_platform.config import AppConfig
+from local_ai_platform.observability import track_event
 from local_ai_platform.providers import ProviderRouter
 
 logger = logging.getLogger(__name__)
@@ -194,14 +195,34 @@ async def editor_apply_edit(
     if not operation:
         raise HTTPException(400, "operation is required")
 
-    try:
-        return await asyncio.get_event_loop().run_in_executor(
-            None, editor.apply_edit, session_id, operation, params
-        )
-    except ValueError as e:
-        raise HTTPException(400, str(e))
-    except RuntimeError as e:
-        raise HTTPException(422, str(e))
+    # [IMPROVE-4] Commit 4/4: request-level image_edit span. The
+    # per-op emits inside images/editor.py keep being plain app_events
+    # rows — see _OTEL_OPERATION_MAP comments. The edit op (e.g.
+    # "remove_bg", "upscale", "instruct_pix2pix") is a custom
+    # ``editor.operation`` attribute, NOT gen_ai.tool.name — tool
+    # spans are reserved for LLM-tool calls, while editor ops are
+    # the "what" of an image_edit operation.
+    with track_event("editor", "edit", context={
+        "session_id": session_id,
+        "operation": operation,
+        "param_count": len(params or {}),
+    }) as ev:
+        try:
+            result = await asyncio.get_event_loop().run_in_executor(
+                None, editor.apply_edit, session_id, operation, params
+            )
+            ev.set_otel_attributes({
+                # Custom: which editor op was applied (e.g. "remove_bg",
+                # "upscale", "instruct_pix2pix"). Useful for filtering
+                # latency by op type.
+                "editor.operation": operation,
+                "gen_ai.system": "diffusers",
+            })
+            return result
+        except ValueError as e:
+            raise HTTPException(400, str(e))
+        except RuntimeError as e:
+            raise HTTPException(422, str(e))
 
 
 @router.post("/editor/{session_id}/undo")

@@ -57,7 +57,29 @@ _OTEL_OPERATION_MAP: dict[tuple[str, str], str] = {
     # the parent chat span automatically via OTel context propagation
     # (start_as_current_span pushes onto the current context).
     ("tool", "invoke"): "execute_tool",
+    # [IMPROVE-4] Commit 4/4: image generation + image edit + image
+    # prompt enhancement.
+    #
+    # ``image/enhance_prompt`` is the chat completion that rewrites
+    # the user's prompt for the image model (same shape as
+    # ``chat/enhance_prompt`` — both are chat ops, not image ops).
+    # ``image/generate`` and ``editor/edit`` are the high-level
+    # request boundaries. Per-stage emits (load / plan / infer /
+    # postprocess) inside ``images/service.py`` stay as plain
+    # app_events rows; turning each stage into its own gen_ai span
+    # would conflict with the spec ("one image_generation operation
+    # = one span"). Stage-level OTel sub-spans are part of
+    # [IMPROVE-68] (unify all subsystems under TraceStore) which
+    # follows in the wave.
+    ("image", "enhance_prompt"): "chat",
+    ("image", "generate"): "image_generation",
+    ("editor", "edit"): "image_edit",
 }
+
+
+# Operations that produce image output — used by __enter__ to auto-set
+# gen_ai.output.type="image" per spec valid values (text|json|image|speech).
+_IMAGE_OUTPUT_OPERATIONS: frozenset[str] = frozenset({"image_generation", "image_edit"})
 
 
 def _gen_ai_operation_for(subsystem: str, action: str) -> str | None:
@@ -240,9 +262,13 @@ class _EventCtx:
                 provider = self.context.get("provider")
                 if provider:
                     self._span.set_attribute(_gen_ai.GEN_AI_SYSTEM, str(provider))
+                # [IMPROVE-4] Commit 4/4: image gen uses ``model_id``
+                # in its context dict where chat uses ``model`` — accept
+                # both so the auto-attach works for all three subsystems.
                 model = (
                     self.context.get("model")
                     or self.context.get("model_hint")
+                    or self.context.get("model_id")
                 )
                 if model and model != "auto":
                     self._span.set_attribute(_gen_ai.GEN_AI_REQUEST_MODEL, str(model))
@@ -271,6 +297,12 @@ class _EventCtx:
                     # "function" matches the OpenAI tool-call shape, which is
                     # what LangChain's StructuredTool emits.
                     self._span.set_attribute(_gen_ai.GEN_AI_TOOL_TYPE, "function")
+                # [IMPROVE-4] Commit 4/4: image-producing operations get
+                # gen_ai.output.type="image" automatically (spec valid
+                # values: text|json|image|speech). Saves every image
+                # call site from setting it explicitly.
+                if self._otel_operation in _IMAGE_OUTPUT_OPERATIONS:
+                    self._span.set_attribute(_gen_ai.GEN_AI_OUTPUT_TYPE, "image")
             except Exception as exc:
                 # OTel bootstrap failure must never break the underlying
                 # operation. Log + carry on with span=None — every

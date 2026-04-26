@@ -809,36 +809,71 @@ def generate_image(
         mask_file.write_bytes(mask_bytes)
         mask_image_path = str(mask_file)
 
+    # [IMPROVE-4] Commit 4/4: request-level image_generation span.
+    # The multi-stage emits inside image_service.generate() (load /
+    # plan / infer / postprocess) keep being plain app_events rows
+    # — the spec says "one image_generation operation = one span",
+    # so stage-level OTel sub-spans are out of scope for this commit.
+    # [IMPROVE-68] (next item in the wave) is the right place to
+    # nest stage spans under this request span.
+    #
     # This is a sync def, so FastAPI runs it in a threadpool worker
     # automatically, keeping the event loop free for progress/cancel requests.
-    result = image_service.generate(
-        model_id=model_id,
-        prompt=prompt,
-        negative_prompt=body.get("negative_prompt"),
-        seed=body.get("seed"),
-        steps=int(body.get("steps", 20)),
-        guidance_scale=float(body.get("guidance_scale", 7.0)),
-        width=int(body.get("width", 1024)),
-        height=int(body.get("height", 1024)),
-        init_image_path=body.get("init_image_path"),
-        mask_image_path=mask_image_path,
-        strength=float(body.get("strength", 0.65)),
-        params_json=body.get("params_json"),
-        timeout_sec=body.get("timeout_sec"),
-        controlnet_type=body.get("controlnet_type"),
-        control_image_path=body.get("control_image_path"),
-        controlnet_model_id=body.get("controlnet_model_id"),
-        controlnet_conditioning_scale=float(body.get("controlnet_conditioning_scale", 1.0)),
-        device_preference=body.get("device_preference"),
-        scheduler=body.get("scheduler"),
-        loras=body.get("loras"),
-        # Batch 1 features
-        num_images=int(body.get("num_images", 1)),
-        clip_skip=int(body.get("clip_skip", 0)),
-        hires_fix=bool(body.get("hires_fix", False)),
-        hires_denoise=float(body.get("hires_denoise", 0.55)),
-        prompt_weighting=bool(body.get("prompt_weighting", True)),
-    )
+    with track_event("image", "generate", context={
+        "model_id": model_id,
+        "prompt_length": len(prompt),
+        "steps": int(body.get("steps", 20)),
+        "width": int(body.get("width", 1024)),
+        "height": int(body.get("height", 1024)),
+        "num_images": int(body.get("num_images", 1)),
+        "scheduler": body.get("scheduler"),
+        "controlnet_type": body.get("controlnet_type"),
+    }) as ev:
+        result = image_service.generate(
+            model_id=model_id,
+            prompt=prompt,
+            negative_prompt=body.get("negative_prompt"),
+            seed=body.get("seed"),
+            steps=int(body.get("steps", 20)),
+            guidance_scale=float(body.get("guidance_scale", 7.0)),
+            width=int(body.get("width", 1024)),
+            height=int(body.get("height", 1024)),
+            init_image_path=body.get("init_image_path"),
+            mask_image_path=mask_image_path,
+            strength=float(body.get("strength", 0.65)),
+            params_json=body.get("params_json"),
+            timeout_sec=body.get("timeout_sec"),
+            controlnet_type=body.get("controlnet_type"),
+            control_image_path=body.get("control_image_path"),
+            controlnet_model_id=body.get("controlnet_model_id"),
+            controlnet_conditioning_scale=float(body.get("controlnet_conditioning_scale", 1.0)),
+            device_preference=body.get("device_preference"),
+            scheduler=body.get("scheduler"),
+            loras=body.get("loras"),
+            # Batch 1 features
+            num_images=int(body.get("num_images", 1)),
+            clip_skip=int(body.get("clip_skip", 0)),
+            hires_fix=bool(body.get("hires_fix", False)),
+            hires_denoise=float(body.get("hires_denoise", 0.55)),
+            prompt_weighting=bool(body.get("prompt_weighting", True)),
+        )
+        # Attach OTel attrs + perf before the span closes. File IO +
+        # response shaping below run after the span ends — they're a
+        # rounding error vs the generation itself, so keeping the
+        # span narrow keeps the timing honest.
+        _results_for_metrics = result if isinstance(result, list) else [result]
+        ev.perf = {
+            "images_requested": len(_results_for_metrics),
+            "images_succeeded": sum(1 for r in _results_for_metrics if r.ok),
+        }
+        ev.set_otel_attributes({
+            # Custom but useful: which diffusers backend produced the image.
+            # The spec doesn't define one for local diffusion stacks, so we
+            # use the constant "diffusers" — operators filter by gen_ai.system
+            # to separate image-gen work from chat work.
+            "gen_ai.system": "diffusers",
+            "gen_ai.usage.output_images": len(_results_for_metrics),
+        })
 
     # Handle batch results (list) or single result
     results_list: list = result if isinstance(result, list) else [result]
