@@ -85,6 +85,7 @@ from local_ai_platform.http_client import get_sync_client
 from local_ai_platform.images.service import ImageGenerationService
 from local_ai_platform.observability import track_event
 from local_ai_platform.providers import ProviderRouter
+from local_ai_platform.tracing import trace_run
 
 logger = logging.getLogger(__name__)
 
@@ -809,142 +810,172 @@ def generate_image(
         mask_file.write_bytes(mask_bytes)
         mask_image_path = str(mask_file)
 
-    # [IMPROVE-4] Commit 4/4: request-level image_generation span.
+    # [IMPROVE-4] Commit 4/4: request-level image_generation OTel span.
     # The multi-stage emits inside image_service.generate() (load /
-    # plan / infer / postprocess) keep being plain app_events rows
-    # — the spec says "one image_generation operation = one span",
-    # so stage-level OTel sub-spans are out of scope for this commit.
-    # [IMPROVE-68] (next item in the wave) is the right place to
-    # nest stage spans under this request span.
+    # plan / infer / postprocess) keep being plain app_events rows on
+    # the OTel side — the spec says "one image_generation operation =
+    # one span", so stage-level OTel sub-spans are out of scope.
     #
-    # This is a sync def, so FastAPI runs it in a threadpool worker
-    # automatically, keeping the event loop free for progress/cancel requests.
-    with track_event("image", "generate", context={
-        "model_id": model_id,
-        "prompt_length": len(prompt),
-        "steps": int(body.get("steps", 20)),
-        "width": int(body.get("width", 1024)),
-        "height": int(body.get("height", 1024)),
-        "num_images": int(body.get("num_images", 1)),
-        "scheduler": body.get("scheduler"),
-        "controlnet_type": body.get("controlnet_type"),
-    }) as ev:
-        result = image_service.generate(
-            model_id=model_id,
-            prompt=prompt,
-            negative_prompt=body.get("negative_prompt"),
-            seed=body.get("seed"),
-            steps=int(body.get("steps", 20)),
-            guidance_scale=float(body.get("guidance_scale", 7.0)),
-            width=int(body.get("width", 1024)),
-            height=int(body.get("height", 1024)),
-            init_image_path=body.get("init_image_path"),
-            mask_image_path=mask_image_path,
-            strength=float(body.get("strength", 0.65)),
-            params_json=body.get("params_json"),
-            timeout_sec=body.get("timeout_sec"),
-            controlnet_type=body.get("controlnet_type"),
-            control_image_path=body.get("control_image_path"),
-            controlnet_model_id=body.get("controlnet_model_id"),
-            controlnet_conditioning_scale=float(body.get("controlnet_conditioning_scale", 1.0)),
-            device_preference=body.get("device_preference"),
-            scheduler=body.get("scheduler"),
-            loras=body.get("loras"),
-            # Batch 1 features
-            num_images=int(body.get("num_images", 1)),
-            clip_skip=int(body.get("clip_skip", 0)),
-            hires_fix=bool(body.get("hires_fix", False)),
-            hires_denoise=float(body.get("hires_denoise", 0.55)),
-            prompt_weighting=bool(body.get("prompt_weighting", True)),
-        )
-        # Attach OTel attrs + perf before the span closes. File IO +
-        # response shaping below run after the span ends — they're a
-        # rounding error vs the generation itself, so keeping the
-        # span narrow keeps the timing honest.
-        _results_for_metrics = result if isinstance(result, list) else [result]
-        ev.perf = {
-            "images_requested": len(_results_for_metrics),
-            "images_succeeded": sum(1 for r in _results_for_metrics if r.ok),
-        }
-        ev.set_otel_attributes({
-            # Custom but useful: which diffusers backend produced the image.
-            # The spec doesn't define one for local diffusion stacks, so we
-            # use the constant "diffusers" — operators filter by gen_ai.system
-            # to separate image-gen work from chat work.
-            "gen_ai.system": "diffusers",
-            "gen_ai.usage.output_images": len(_results_for_metrics),
-        })
-
-    # Handle batch results (list) or single result
-    results_list: list = result if isinstance(result, list) else [result]
-
-    session_id = body.get("session_id")
-    saved_images: list[dict[str, Any]] = []
-
-    for single_result in results_list:
-        if not single_result.ok:
-            # If any image in the batch fails, return error with partial results
-            if saved_images:
-                return {"status": "partial", "images": saved_images, "error": {
-                    "code": single_result.error_code,
-                    "message": single_result.error_message,
-                }}
-            raise HTTPException(500, {
-                "error": {
-                    "code": single_result.error_code,
-                    "message": single_result.error_message,
-                    "metadata": single_result.metadata,
-                }
+    # [IMPROVE-68] Commit 2/5: wrap the request in a TraceRecorder via
+    # ``trace_run``. The same stage emits flow into the trace JSON
+    # automatically — Commit 1/5 wired ``observability.emit()`` to
+    # consult the ``_active_recorder`` ContextVar; trace_run sets it.
+    # The Runs page (/runs?subsystem=image) gets a per-stage timeline
+    # for free, with no edits to images/service.py.
+    #
+    # Nesting order — trace_run OUTSIDE track_event:
+    # - The closing ``image.generate`` emit fired by track_event.__exit__
+    #   falls inside the recorder's lifetime so the bracketing parent
+    #   stage event lands on the trace JSON alongside the load / plan /
+    #   infer / postprocess sub-stages.
+    # - File IO + response shaping (image bytes → disk, repo writes,
+    #   step-preview copy) all run inside the trace_run scope so the
+    #   trace's overall ``duration_ms`` reflects the full request, not
+    #   just the inference window the OTel span (intentionally) bounds.
+    #
+    # This route is ``def`` (sync), so FastAPI dispatches it via
+    # anyio's ``run_in_threadpool``, which copies contextvars into the
+    # worker thread. Inside that thread, ``_active_recorder.set(...)``
+    # is visible to every emit() called by service.py — no extra
+    # copy_context dance needed for this endpoint. Async route handlers
+    # that delegate to ``loop.run_in_executor`` (editor in Commit 3/5,
+    # partner in Commit 4/5) will need explicit propagation.
+    with trace_run(
+        subsystem="image",
+        agent_name="image_generator",
+        model_provider="diffusers",
+        model_id=model_id,
+    ):
+        with track_event("image", "generate", context={
+            "model_id": model_id,
+            "prompt_length": len(prompt),
+            "steps": int(body.get("steps", 20)),
+            "width": int(body.get("width", 1024)),
+            "height": int(body.get("height", 1024)),
+            "num_images": int(body.get("num_images", 1)),
+            "scheduler": body.get("scheduler"),
+            "controlnet_type": body.get("controlnet_type"),
+        }) as ev:
+            result = image_service.generate(
+                model_id=model_id,
+                prompt=prompt,
+                negative_prompt=body.get("negative_prompt"),
+                seed=body.get("seed"),
+                steps=int(body.get("steps", 20)),
+                guidance_scale=float(body.get("guidance_scale", 7.0)),
+                width=int(body.get("width", 1024)),
+                height=int(body.get("height", 1024)),
+                init_image_path=body.get("init_image_path"),
+                mask_image_path=mask_image_path,
+                strength=float(body.get("strength", 0.65)),
+                params_json=body.get("params_json"),
+                timeout_sec=body.get("timeout_sec"),
+                controlnet_type=body.get("controlnet_type"),
+                control_image_path=body.get("control_image_path"),
+                controlnet_model_id=body.get("controlnet_model_id"),
+                controlnet_conditioning_scale=float(body.get("controlnet_conditioning_scale", 1.0)),
+                device_preference=body.get("device_preference"),
+                scheduler=body.get("scheduler"),
+                loras=body.get("loras"),
+                # Batch 1 features
+                num_images=int(body.get("num_images", 1)),
+                clip_skip=int(body.get("clip_skip", 0)),
+                hires_fix=bool(body.get("hires_fix", False)),
+                hires_denoise=float(body.get("hires_denoise", 0.55)),
+                prompt_weighting=bool(body.get("prompt_weighting", True)),
+            )
+            # Attach OTel attrs + perf before the span closes. File IO +
+            # response shaping below run after the span ends — they're a
+            # rounding error vs the generation itself, so keeping the
+            # span narrow keeps the timing honest.
+            _results_for_metrics = result if isinstance(result, list) else [result]
+            ev.perf = {
+                "images_requested": len(_results_for_metrics),
+                "images_succeeded": sum(1 for r in _results_for_metrics if r.ok),
+            }
+            ev.set_otel_attributes({
+                # Custom but useful: which diffusers backend produced the image.
+                # The spec doesn't define one for local diffusion stacks, so we
+                # use the constant "diffusers" — operators filter by gen_ai.system
+                # to separate image-gen work from chat work.
+                "gen_ai.system": "diffusers",
+                "gen_ai.usage.output_images": len(_results_for_metrics),
             })
 
-        seed_used = (single_result.metadata or {}).get("seed")
-        image_id_saved: str | None = None
+        # Handle batch results (list) or single result. Indented one
+        # level deeper than the pre-IMPROVE-68 code so the file IO +
+        # response shaping run inside ``trace_run`` — the trace's
+        # ``duration_ms`` then reflects the full request including
+        # disk writes, which is what the Runs page should surface.
+        results_list: list = result if isinstance(result, list) else [result]
 
-        if session_id and single_result.image_bytes:
-            try:
-                from local_ai_platform.repositories.images_repo import add_image, image_output_path
-                image_id_saved = str(uuid.uuid4())
-                out_path = image_output_path(session_id, image_id_saved)
-                out_path.parent.mkdir(parents=True, exist_ok=True)
-                out_path.write_bytes(single_result.image_bytes)
-                save_params = dict(body.get("params_json") or {})
-                save_params["seed_used"] = seed_used
-                if body.get("scheduler"):
-                    save_params["scheduler"] = body["scheduler"]
-                gen_log = (single_result.metadata or {}).get("generation_log")
-                if gen_log:
-                    save_params["generation_log"] = gen_log
-                add_image(
-                    session_id=session_id,
-                    model_id=model_id,
-                    prompt=prompt,
-                    file_path=str(out_path),
-                    negative_prompt=body.get("negative_prompt"),
-                    params=save_params,
-                )
-                # Copy step preview images to session folder if they were generated
-                step_previews_dir = (single_result.metadata or {}).get("step_previews_dir")
-                if step_previews_dir and Path(step_previews_dir).is_dir():
-                    steps_dest = out_path.parent / f"{image_id_saved}_steps"
-                    steps_dest.mkdir(parents=True, exist_ok=True)
-                    import shutil
-                    for preview in sorted(Path(step_previews_dir).glob("step_*.png")):
-                        shutil.copy2(str(preview), str(steps_dest / preview.name))
-                    shutil.rmtree(step_previews_dir, ignore_errors=True)
-                    logger.info("Saved %d step previews to %s", len(list(steps_dest.glob("*.png"))), steps_dest)
-            except Exception as exc:
-                logger.warning("Failed to save generated image: %s", exc)
+        session_id = body.get("session_id")
+        saved_images: list[dict[str, Any]] = []
 
-        saved_images.append({
-            "image_id": image_id_saved,
-            "seed_used": seed_used,
-            "metadata": single_result.metadata,
-        })
+        for single_result in results_list:
+            if not single_result.ok:
+                # If any image in the batch fails, return error with partial results
+                if saved_images:
+                    return {"status": "partial", "images": saved_images, "error": {
+                        "code": single_result.error_code,
+                        "message": single_result.error_message,
+                    }}
+                raise HTTPException(500, {
+                    "error": {
+                        "code": single_result.error_code,
+                        "message": single_result.error_message,
+                        "metadata": single_result.metadata,
+                    }
+                })
 
-    # Backward-compatible response: single image returns flat, batch returns list
-    if len(saved_images) == 1:
-        return {"status": "ok", "metadata": saved_images[0]["metadata"], "seed_used": saved_images[0]["seed_used"]}
-    return {"status": "ok", "images": saved_images, "seed_used": saved_images[0]["seed_used"] if saved_images else None}
+            seed_used = (single_result.metadata or {}).get("seed")
+            image_id_saved: str | None = None
+
+            if session_id and single_result.image_bytes:
+                try:
+                    from local_ai_platform.repositories.images_repo import add_image, image_output_path
+                    image_id_saved = str(uuid.uuid4())
+                    out_path = image_output_path(session_id, image_id_saved)
+                    out_path.parent.mkdir(parents=True, exist_ok=True)
+                    out_path.write_bytes(single_result.image_bytes)
+                    save_params = dict(body.get("params_json") or {})
+                    save_params["seed_used"] = seed_used
+                    if body.get("scheduler"):
+                        save_params["scheduler"] = body["scheduler"]
+                    gen_log = (single_result.metadata or {}).get("generation_log")
+                    if gen_log:
+                        save_params["generation_log"] = gen_log
+                    add_image(
+                        session_id=session_id,
+                        model_id=model_id,
+                        prompt=prompt,
+                        file_path=str(out_path),
+                        negative_prompt=body.get("negative_prompt"),
+                        params=save_params,
+                    )
+                    # Copy step preview images to session folder if they were generated
+                    step_previews_dir = (single_result.metadata or {}).get("step_previews_dir")
+                    if step_previews_dir and Path(step_previews_dir).is_dir():
+                        steps_dest = out_path.parent / f"{image_id_saved}_steps"
+                        steps_dest.mkdir(parents=True, exist_ok=True)
+                        import shutil
+                        for preview in sorted(Path(step_previews_dir).glob("step_*.png")):
+                            shutil.copy2(str(preview), str(steps_dest / preview.name))
+                        shutil.rmtree(step_previews_dir, ignore_errors=True)
+                        logger.info("Saved %d step previews to %s", len(list(steps_dest.glob("*.png"))), steps_dest)
+                except Exception as exc:
+                    logger.warning("Failed to save generated image: %s", exc)
+
+            saved_images.append({
+                "image_id": image_id_saved,
+                "seed_used": seed_used,
+                "metadata": single_result.metadata,
+            })
+
+        # Backward-compatible response: single image returns flat, batch returns list
+        if len(saved_images) == 1:
+            return {"status": "ok", "metadata": saved_images[0]["metadata"], "seed_used": saved_images[0]["seed_used"]}
+        return {"status": "ok", "images": saved_images, "seed_used": saved_images[0]["seed_used"] if saved_images else None}
 
 
 @router.post("/images/edit")
