@@ -6,6 +6,7 @@ import logging
 import os
 import random
 import sys
+import threading
 import time
 import traceback
 import tempfile
@@ -1258,13 +1259,141 @@ def _detect_model_hints(model_path: str | Path) -> dict[str, Any]:
 
 
 
-def _write_stage_marker(stage_file: str | None, stage: str) -> None:
-    if not stage_file:
-        return
-    try:
-        Path(stage_file).write_text(stage, encoding="utf-8")
-    except Exception:
-        pass
+def _write_stage_marker(
+    stage_file: str | None,
+    stage: str,
+    queue: Any = None,
+) -> None:
+    """[IMPROVE-42] Stage marker emit — file write + optional queue push.
+
+    Pre-IMPROVE-42 the only sink was ``stage_file`` (a tempfile path
+    written by the worker subprocess and re-read by the parent each
+    poll). The file path stays as a fallback so the existing
+    ``GET /images/generate/progress`` polling contract continues to
+    work even when a queue isn't attached (e.g. legacy callers, or
+    drain-thread failure modes).
+
+    When ``queue`` is provided (an ``mp.Queue`` from
+    ``mp.get_context("spawn").Queue(...)``), also push a
+    ``{"stage": stage, "ts": time.time()}`` payload — the parent's
+    drain thread reads from the queue and updates a thread-safe
+    snapshot dict that ``get_generation_progress()`` prefers over the
+    file (per the proposal at docs/features/06-image-generation.md:599).
+
+    Drop-on-full semantics: if the queue is saturated (the parent's
+    drain thread fell behind), ``put_nowait`` raises ``queue.Full``
+    which we swallow. Only the most recent event matters for progress
+    polling, so dropping older events is the correct choice — never
+    block the inference loop on a backed-up consumer.
+
+    Sources (2025-2026):
+    - docs/features/06-image-generation.md §IMPROVE-42 (line 599)
+    - Standard ``multiprocessing.Queue`` non-blocking pattern
+    """
+    if stage_file:
+        try:
+            Path(stage_file).write_text(stage, encoding="utf-8")
+        except Exception:
+            pass
+    if queue is not None:
+        try:
+            queue.put_nowait({"stage": stage, "ts": time.time()})
+        except Exception:
+            # queue.Full or pickling error; drop silently.
+            pass
+
+
+class _ProgressChannel:
+    """[IMPROVE-42] Cross-process progress event channel.
+
+    Wraps an ``mp.Queue`` (worker → parent) plus a thread-safe
+    snapshot dict updated by a daemon drain thread. Replaces the
+    file-only stage marker as the primary progress surface; the file
+    remains as a fallback in ``get_generation_progress()``.
+
+    Lifecycle:
+        - ``start()``: spawns the daemon drain thread.
+        - ``stop()``: signals the drain thread to exit and joins it
+          with a short timeout. Idempotent.
+        - ``latest()``: returns a thread-safe shallow copy of the
+          most recent event, or ``{}`` when nothing has been observed
+          yet.
+
+    Concurrency:
+        ``_latest`` is guarded by ``threading.Lock``. The drain thread
+        is the sole writer; ``latest()`` is the sole reader at the
+        FastAPI handler level. The lock is short-held — only around
+        the dict copy/replace.
+
+    Why a thread instead of an asyncio task? The FastAPI handler runs
+    in an asyncio event loop, but the drain consumer should keep
+    running even when no handler is awaiting it (the worker emits
+    events whether or not a poll is in flight). A daemon thread is
+    the simplest fit and matches the existing
+    ``ImageGenerationService`` pattern of background workers
+    (cancel_generation runs ``proc.terminate()`` from the loop too).
+
+    Sources (2025-2026):
+    - docs/features/06-image-generation.md §IMPROVE-42 (line 599)
+    - https://docs.python.org/3/library/multiprocessing.html#multiprocessing.Queue
+    """
+
+    def __init__(self, ctx: Any, *, maxsize: int = 64) -> None:
+        # ctx is an ``mp.context`` (spawn). The queue must be created
+        # from the SAME context the worker process uses so the handle
+        # is picklable across spawn — using ``mp.Queue()`` directly
+        # would create a queue from the default context which differs
+        # on Windows from the explicit spawn context the workers use.
+        self.queue: Any = ctx.Queue(maxsize=maxsize)
+        self._latest: dict[str, Any] = {}
+        self._lock = threading.Lock()
+        self._stop_event = threading.Event()
+        self._thread: threading.Thread | None = None
+
+    def start(self) -> None:
+        if self._thread is not None and self._thread.is_alive():
+            return
+        self._stop_event.clear()
+        self._thread = threading.Thread(
+            target=self._drain, name="image-progress-drain", daemon=True,
+        )
+        self._thread.start()
+
+    def stop(self) -> None:
+        self._stop_event.set()
+        # Push a sentinel so the queue.get blocks unblock — without
+        # this the drain loop would only exit after the next worker
+        # event lands, which may be never if generate() finished.
+        try:
+            self.queue.put_nowait({"__sentinel__": True})
+        except Exception:
+            pass
+        thread = self._thread
+        if thread is not None and thread.is_alive():
+            thread.join(timeout=2.0)
+        self._thread = None
+
+    def latest(self) -> dict[str, Any]:
+        with self._lock:
+            return dict(self._latest)
+
+    def _drain(self) -> None:
+        # Block on ``queue.get(timeout=...)`` rather than busy-poll —
+        # CPU-friendly and gives us a clean exit window on stop.
+        while not self._stop_event.is_set():
+            try:
+                event = self.queue.get(timeout=0.25)
+            except Exception:
+                # queue.Empty (timeout) or any IPC hiccup — re-check
+                # the stop flag and loop.
+                continue
+            if not isinstance(event, dict):
+                continue
+            if event.get("__sentinel__"):
+                # Pushed by stop() to unblock the get; do not store.
+                break
+            with self._lock:
+                self._latest = event
 
 # ── ControlNet constants ──────────────────────────────────────────
 
@@ -1469,7 +1598,11 @@ def _openvino_worker(payload: dict[str, Any], out_q: Any) -> None:
     """Subprocess worker for OpenVINO inference (Intel-optimized CPU)."""
     started = time.time()
     stage_file = str(payload.get("stage_file") or "") or None
-    _write_stage_marker(stage_file, "bootstrap")
+    # [IMPROVE-42] Optional progress queue (mp.Queue from spawn ctx).
+    # Workers push events here so the parent's drain thread can update
+    # the snapshot dict that backs ``GET /images/generate/progress``.
+    progress_queue = payload.get("progress_queue")
+    _write_stage_marker(stage_file, "bootstrap", progress_queue)
 
     def _log(msg: str) -> None:
         elapsed = round(time.time() - started, 1)
@@ -1483,7 +1616,7 @@ def _openvino_worker(payload: dict[str, Any], out_q: Any) -> None:
         local_only = bool(payload.get("local_files_only", True))
         total_steps = int(payload["steps"])
 
-        _write_stage_marker(stage_file, "pipeline_load")
+        _write_stage_marker(stage_file, "pipeline_load", progress_queue)
 
         # Select correct OV pipeline class based on model family
         if model_family == "sdxl":
@@ -1510,7 +1643,7 @@ def _openvino_worker(payload: dict[str, Any], out_q: Any) -> None:
         actual_seed = int(seed) if seed is not None else np.random.randint(1, 2**31 - 1)
         np.random.seed(actual_seed)
 
-        _write_stage_marker(stage_file, f"inference:0/{total_steps}")
+        _write_stage_marker(stage_file, f"inference:0/{total_steps}", progress_queue)
 
         # ── Shared instrumentation (OpenVINO worker) ──
         # OpenVINO components don't expose torch parameters the same way
@@ -1534,7 +1667,7 @@ def _openvino_worker(payload: dict[str, Any], out_q: Any) -> None:
 
         def _ov_step_callback(pipe_obj: Any, step: int, timestep: Any, callback_kwargs: dict[str, Any]) -> dict[str, Any]:
             clamped = min(step + 1, total_steps)
-            _write_stage_marker(stage_file, f"inference:{clamped}/{total_steps}")
+            _write_stage_marker(stage_file, f"inference:{clamped}/{total_steps}", progress_queue)
             _log(_si.observe(step, timestep, callback_kwargs))
             return callback_kwargs
 
@@ -1552,7 +1685,7 @@ def _openvino_worker(payload: dict[str, Any], out_q: Any) -> None:
         _ov_inf_elapsed = time.time() - _ov_inf_start
         log_post_inference_summary(_si.warmup_sec, _si.steady_times, _ov_inf_elapsed, _log)
 
-        _write_stage_marker(stage_file, "saving")
+        _write_stage_marker(stage_file, "saving", progress_queue)
         _ov_image = result.images[0]
         try:
             _, _coh = analyze_output_coherence(_ov_image)
@@ -1650,7 +1783,9 @@ def _controlnet_worker(payload: dict[str, Any], out_q: Any) -> None:
     started = time.time()
     stage = "bootstrap"
     stage_file = payload.get("stage_file")
-    _write_stage_marker(stage_file, stage)
+    # [IMPROVE-42] Optional progress queue — see _openvino_worker.
+    progress_queue = payload.get("progress_queue")
+    _write_stage_marker(stage_file, stage, progress_queue)
 
     def _log(msg: str) -> None:
         print(f"[ControlNet] {msg}", flush=True)
@@ -1667,7 +1802,7 @@ def _controlnet_worker(payload: dict[str, Any], out_q: Any) -> None:
 
         # 1. Load and preprocess control image
         stage = "preprocess"
-        _write_stage_marker(stage_file, stage)
+        _write_stage_marker(stage_file, stage, progress_queue)
         source_img = Image.open(payload["control_image_path"]).convert("RGB")
         source_img = source_img.resize((int(payload["width"]), int(payload["height"])))
         control_image = _preprocess_control_image(cn_type, source_img, _log)
@@ -1675,7 +1810,7 @@ def _controlnet_worker(payload: dict[str, Any], out_q: Any) -> None:
 
         # 2. Load ControlNet model
         stage = "load_controlnet"
-        _write_stage_marker(stage_file, stage)
+        _write_stage_marker(stage_file, stage, progress_queue)
         cn_dtype = torch.float16 if device == "cuda" else torch.float32
 
         if is_sdxl:
@@ -1694,7 +1829,7 @@ def _controlnet_worker(payload: dict[str, Any], out_q: Any) -> None:
 
         # 3. Build pipeline
         stage = "load_pipeline"
-        _write_stage_marker(stage_file, stage)
+        _write_stage_marker(stage_file, stage, progress_queue)
         load_kwargs: dict[str, Any] = {
             "controlnet": controlnet,
             "torch_dtype": cn_dtype,
@@ -1820,7 +1955,7 @@ def _controlnet_worker(payload: dict[str, Any], out_q: Any) -> None:
         # 4. Generate
         stage = "inference"
         total_steps = int(payload["steps"])
-        _write_stage_marker(stage_file, f"inference:0/{total_steps}")
+        _write_stage_marker(stage_file, f"inference:0/{total_steps}", progress_queue)
         generator = torch.Generator(device=device if device == "cuda" else "cpu")
         seed = payload.get("seed")
         actual_seed = int(seed) if seed is not None else random.randint(1, 2**31 - 1)
@@ -1838,7 +1973,7 @@ def _controlnet_worker(payload: dict[str, Any], out_q: Any) -> None:
 
         def _step_cb(pipe_obj: Any, step: int, timestep: Any, cb_kwargs: dict[str, Any]) -> dict[str, Any]:
             clamped = min(step + 1, total_steps)
-            _write_stage_marker(stage_file, f"inference:{clamped}/{total_steps}")
+            _write_stage_marker(stage_file, f"inference:{clamped}/{total_steps}", progress_queue)
             _log(_si.observe(step, timestep, cb_kwargs))
             return cb_kwargs
 
@@ -1911,7 +2046,9 @@ def _diffusers_worker(payload: dict[str, Any], out_q: Any) -> None:
     started = time.time()
     stage = "bootstrap"
     stage_file = str(payload.get("stage_file") or "") or None
-    _write_stage_marker(stage_file, stage)
+    # [IMPROVE-42] Optional progress queue — see _openvino_worker.
+    progress_queue = payload.get("progress_queue")
+    _write_stage_marker(stage_file, stage, progress_queue)
 
     # Generation log — tracks every stage with timing for post-analysis
     _gen_log: list[dict[str, Any]] = []
@@ -2121,7 +2258,7 @@ def _diffusers_worker(payload: dict[str, Any], out_q: Any) -> None:
                 _use_quantization = False
 
         stage = "pipeline_load"
-        _write_stage_marker(stage_file, stage)
+        _write_stage_marker(stage_file, stage, progress_queue)
         _log(f"Loading pipeline: mode={mode}, local_files_only={local_files_only}")
         if mode == "inpaint":
             pipe = AutoPipelineForInpainting.from_pretrained(model_id_or_path, **load_kwargs)
@@ -2363,10 +2500,10 @@ def _diffusers_worker(payload: dict[str, Any], out_q: Any) -> None:
                 _is_hypersd = "Hyper-SD" in lora_repo
                 _lora_label = "Hyper-SD" if _is_hypersd else "Lightning"
                 _log(f"Downloading {_lora_label} LoRA from {lora_repo}/{lora_file}")
-                _write_stage_marker(stage_file, "hypersd_lora_download" if _is_hypersd else "lightning_lora_download")
+                _write_stage_marker(stage_file, "hypersd_lora_download" if _is_hypersd else "lightning_lora_download", progress_queue)
                 lora_path = _hf_dl(lora_repo, lora_file)
                 _log(f"Applying {_lora_label} LoRA weights + fusing")
-                _write_stage_marker(stage_file, "hypersd_lora_apply" if _is_hypersd else "lightning_lora_apply")
+                _write_stage_marker(stage_file, "hypersd_lora_apply" if _is_hypersd else "lightning_lora_apply", progress_queue)
                 pipe.load_lora_weights(lora_path)
                 pipe.fuse_lora()
                 # Hyper-SD/Lightning require Euler scheduler with trailing timestep spacing
@@ -2675,7 +2812,7 @@ def _diffusers_worker(payload: dict[str, Any], out_q: Any) -> None:
 
         stage = "inference"
         total_steps = int(payload["steps"])
-        _write_stage_marker(stage_file, f"inference:0/{total_steps}")
+        _write_stage_marker(stage_file, f"inference:0/{total_steps}", progress_queue)
 
         # Step preview: optionally decode latents at each step to save
         # intermediate images for model comparison and debugging.
@@ -2693,7 +2830,7 @@ def _diffusers_worker(payload: dict[str, Any], out_q: Any) -> None:
 
         def _step_callback(pipe_obj: Any, step: int, timestep: Any, callback_kwargs: dict[str, Any]) -> dict[str, Any]:
             clamped = min(step + 1, total_steps)
-            _write_stage_marker(stage_file, f"inference:{clamped}/{total_steps}")
+            _write_stage_marker(stage_file, f"inference:{clamped}/{total_steps}", progress_queue)
 
             # Per-step elapsed (not cumulative)
             _now = time.time()
@@ -2989,7 +3126,7 @@ def _diffusers_worker(payload: dict[str, Any], out_q: Any) -> None:
             except Exception:
                 pass
 
-        _write_stage_marker(stage_file, "saving")
+        _write_stage_marker(stage_file, "saving", progress_queue)
         image = result.images[0]
 
         # ── Output coherence check (subprocess worker) ──
@@ -3122,6 +3259,12 @@ class ImageGenerationService:
         self._models_cache: dict[str, Any] = {"ts": 0.0, "items": []}
         # Progress tracking for the current generation job
         self._current_stage_file: str | None = None
+        # [IMPROVE-42] Pub/sub progress channel — primary surface for
+        # ``get_generation_progress``. ``_current_stage_file`` stays as
+        # a fallback for cases where the channel can't be built or its
+        # drain thread fails. Lifecycle mirrors stage_file: created at
+        # generate() entry, stopped + cleared on completion or cancel.
+        self._current_progress_channel: _ProgressChannel | None = None
         self._current_job_started: float = 0.0
         self._current_job_model: str = ""
         self._current_worker_proc: Any = None  # multiprocessing.Process
@@ -3604,13 +3747,37 @@ class ImageGenerationService:
         return opts
 
     def get_generation_progress(self) -> dict[str, Any]:
-        """Read current generation progress from the stage file."""
-        if not self._current_stage_file:
+        """Read current generation progress.
+
+        [IMPROVE-42] Primary source: the progress channel's snapshot
+        dict (workers push events into ``mp.Queue``; the parent's
+        drain thread updates the snapshot). Falls back to reading
+        ``_current_stage_file`` when the channel hasn't observed any
+        event yet (race window between worker spawn and the first
+        emit) or isn't initialized at all.
+
+        Pre-IMPROVE-42 the only path was the file read — kept as a
+        defense-in-depth fallback so a drain-thread bug can't silence
+        progress polling entirely.
+        """
+        # No active job at all.
+        if not self._current_stage_file and self._current_progress_channel is None:
             return {"active": False}
-        try:
-            raw = Path(self._current_stage_file).read_text(encoding="utf-8").strip()
-        except Exception:
-            raw = ""
+        raw = ""
+        # Prefer the channel snapshot.
+        channel = self._current_progress_channel
+        if channel is not None:
+            latest = channel.latest()
+            stage_value = latest.get("stage")
+            if isinstance(stage_value, str) and stage_value:
+                raw = stage_value
+        # Fall back to the file when the channel hasn't observed any
+        # event yet (worker spawn race) or isn't attached.
+        if not raw and self._current_stage_file:
+            try:
+                raw = Path(self._current_stage_file).read_text(encoding="utf-8").strip()
+            except Exception:
+                raw = ""
         elapsed = round(time.time() - self._current_job_started, 1) if self._current_job_started else 0.0
         # Parse stage like "inference:5/20" or "pipeline_load"
         stage = raw
@@ -3675,6 +3842,15 @@ class ImageGenerationService:
                 Path(self._current_stage_file).unlink(missing_ok=True)
             except Exception:
                 pass
+        # [IMPROVE-42] Stop the drain thread + close the queue.
+        # Idempotent — safe even if the channel was never started for
+        # this run (e.g. cancel arrived before generate() set it up).
+        if self._current_progress_channel is not None:
+            try:
+                self._current_progress_channel.stop()
+            except Exception:
+                pass
+            self._current_progress_channel = None
         self._current_stage_file = None
         self._current_job_started = 0.0
         self._current_worker_proc = None
@@ -4060,6 +4236,10 @@ class ImageGenerationService:
 
         ctx = mp.get_context("spawn")
         q: Any = ctx.Queue(maxsize=1)
+        # [IMPROVE-42] Build a progress channel from the same spawn ctx
+        # so the queue handle is picklable across the spawn boundary.
+        progress_channel = _ProgressChannel(ctx)
+        progress_channel.start()
         payload = {
             "base_model": resolved_model,
             "model_id": model_id,  # Original HF model ID for fallback download
@@ -4080,8 +4260,10 @@ class ImageGenerationService:
             "use_model_cpu_offload": use_cpu_offload,
             "is_sdxl": is_sdxl,
             "stage_file": stage_file_path,
+            "progress_queue": progress_channel.queue,
         }
         self._current_stage_file = stage_file_path
+        self._current_progress_channel = progress_channel
         self._current_job_started = time.time()
         self._current_job_model = model_id
         proc = ctx.Process(target=_controlnet_worker, args=(payload, q), daemon=True)
@@ -4112,6 +4294,12 @@ class ImageGenerationService:
         logger.info("[IMG-CN] Worker finished: exitcode=%s", proc.exitcode)
 
         self._current_stage_file = None
+        # [IMPROVE-42] Stop the drain thread; channel is per-run.
+        try:
+            progress_channel.stop()
+        except Exception:
+            pass
+        self._current_progress_channel = None
         self._current_job_started = 0.0
         try:
             Path(stage_file_path).unlink(missing_ok=True)
@@ -4188,7 +4376,11 @@ class ImageGenerationService:
         stage_file = tempfile.NamedTemporaryFile(prefix="img_ov_stage_", suffix=".txt", delete=False)
         stage_file_path = stage_file.name
         stage_file.close()
+        # [IMPROVE-42] Progress channel — see _generate_controlnet.
+        progress_channel = _ProgressChannel(ctx)
+        progress_channel.start()
         self._current_stage_file = stage_file_path
+        self._current_progress_channel = progress_channel
         self._current_job_started = time.time()
         self._current_job_model = model_id
 
@@ -4204,6 +4396,7 @@ class ImageGenerationService:
             "height": height,
             "local_files_only": model_source == "local" or not self.config.hf_image_allow_auto_download,
             "stage_file": stage_file_path,
+            "progress_queue": progress_channel.queue,
             "use_tiny_vae": bool(execution_plan.get("use_tiny_vae")),
             "tiny_vae_model": execution_plan.get("tiny_vae_model"),
         }
@@ -4214,6 +4407,11 @@ class ImageGenerationService:
         proc.join(timeout=timeout_s)
 
         self._current_stage_file = None
+        try:
+            progress_channel.stop()
+        except Exception:
+            pass
+        self._current_progress_channel = None
         self._current_job_started = 0.0
         self._current_worker_proc = None
         if proc.is_alive():
@@ -6160,8 +6358,12 @@ class ImageGenerationService:
         step_previews_dir: str | None = None
         if (execution_plan or {}).get("enable_step_previews"):
             step_previews_dir = tempfile.mkdtemp(prefix="img_steps_")
+        # [IMPROVE-42] Progress channel — see _generate_controlnet.
+        progress_channel = _ProgressChannel(ctx)
+        progress_channel.start()
         # Expose for progress polling
         self._current_stage_file = stage_file_path
+        self._current_progress_channel = progress_channel
         self._current_step_previews_dir = step_previews_dir
         self._current_job_started = time.time()
         self._current_job_model = model_id_or_path
@@ -6193,6 +6395,7 @@ class ImageGenerationService:
             "runtime_strategy": execution_plan.get("device_plan") or ("cuda_fp16" if device.startswith("cuda") else "cpu_only"),
             "execution_plan": execution_plan,
             "stage_file": stage_file_path,
+            "progress_queue": progress_channel.queue,
             "step_previews_dir": step_previews_dir,
             # Optimization flags from adaptive backend scoring
             "use_tiny_vae": bool(execution_plan.get("use_tiny_vae")),
@@ -6276,6 +6479,13 @@ class ImageGenerationService:
         if data is None:
             # No result from queue — process likely crashed or timed out
             self._current_stage_file = None
+            # [IMPROVE-42] Stop the drain thread on the timeout/crash
+            # branch — without this it'd leak past the run.
+            try:
+                progress_channel.stop()
+            except Exception:
+                pass
+            self._current_progress_channel = None
             self._current_job_started = 0.0
             if proc.exitcode is None or proc.exitcode != 0:
                 return ImageRuntimeResult(
@@ -6293,6 +6503,12 @@ class ImageGenerationService:
                 )
             return ImageRuntimeResult(ok=False, error_code="generation_failed", error_message="Image worker returned no result")
         self._current_stage_file = None
+        # [IMPROVE-42] Stop the drain thread on the success branch.
+        try:
+            progress_channel.stop()
+        except Exception:
+            pass
+        self._current_progress_channel = None
         self._current_job_started = 0.0
         self._current_worker_proc = None
         try:
@@ -6382,7 +6598,15 @@ class ImageGenerationService:
             self._current_stage_file = stage_file_path
             self._current_job_started = time.time()
             self._current_job_model = model_id_or_path
-            _write_stage_marker(stage_file_path, "pipeline_load")
+            # [IMPROVE-42] In-process path also gets a progress channel
+            # so ``get_generation_progress`` can read from a uniform
+            # surface regardless of subprocess vs in-process. Built from
+            # the spawn context for parity with the worker paths.
+            _progress_channel = _ProgressChannel(mp.get_context("spawn"))
+            _progress_channel.start()
+            self._current_progress_channel = _progress_channel
+            _progress_queue_local = _progress_channel.queue
+            _write_stage_marker(stage_file_path, "pipeline_load", _progress_queue_local)
 
             # ── RAM / Disk safety gate ──
             # Wait for RAM/disk to drop below threshold before heavy loading.
@@ -6431,7 +6655,7 @@ class ImageGenerationService:
             if _two_stage:
                 try:
                     import gc as _gc
-                    _write_stage_marker(stage_file_path, "prompt_encoding")
+                    _write_stage_marker(stage_file_path, "prompt_encoding", _progress_queue_local)
                     _enc_dtype = getattr(torch, str(ep.get("torch_dtype") or "bfloat16"), torch.bfloat16)
 
                     if _ip_family == "flux":
@@ -6738,7 +6962,7 @@ class ImageGenerationService:
                 except Exception as e:
                     logger.info("[IMG] Hybrid VAE failed: %s", e)
 
-            _write_stage_marker(stage_file_path, f"inference:0/{total_steps}")
+            _write_stage_marker(stage_file_path, f"inference:0/{total_steps}", _progress_queue_local)
             logger.info("[IMG] Starting inference: %d steps, guidance=%.1f, size=%dx%d, seed=%d",
                         total_steps, guidance_scale, width, height, actual_seed)
 
@@ -6774,7 +6998,7 @@ class ImageGenerationService:
 
             def _step_cb(pipe_obj: Any, step: int, timestep: Any, cb_kwargs: dict[str, Any]) -> dict[str, Any]:
                 clamped = min(step + 1, total_steps)
-                _write_stage_marker(stage_file_path, f"inference:{clamped}/{total_steps}")
+                _write_stage_marker(stage_file_path, f"inference:{clamped}/{total_steps}", _progress_queue_local)
 
                 # Per-step elapsed (not cumulative) ──
                 _now = time.time()
@@ -6927,7 +7151,7 @@ class ImageGenerationService:
             except Exception as _tim_err:
                 logger.warning("[IMG] Timing summary failed: %s", _tim_err)
 
-            _write_stage_marker(stage_file_path, "saving")
+            _write_stage_marker(stage_file_path, "saving", _progress_queue_local)
             image = result.images[0]
 
             # ── Output coherence check (CosXL-style) ──
@@ -6950,6 +7174,13 @@ class ImageGenerationService:
             if has_nan or (pixel_range <= 2 and unique_count < 4):
                 dtype_used = str(execution_plan.get("torch_dtype") or "unknown")
                 self._current_stage_file = None
+                # [IMPROVE-42] Stop the channel on the NaN-output early
+                # return — same teardown as the success/error branches.
+                try:
+                    _progress_channel.stop()
+                except Exception:
+                    pass
+                self._current_progress_channel = None
                 self._current_job_started = 0.0
                 return ImageRuntimeResult(
                     ok=False,
@@ -6967,6 +7198,12 @@ class ImageGenerationService:
             logger.info("[IMG] Image saved (%d bytes, total=%.1fs)", len(buf.getvalue()), total_elapsed)
 
             self._current_stage_file = None
+            # [IMPROVE-42] Stop the channel on success.
+            try:
+                _progress_channel.stop()
+            except Exception:
+                pass
+            self._current_progress_channel = None
             self._current_job_started = 0.0
             try:
                 Path(stage_file_path).unlink(missing_ok=True)
@@ -7027,6 +7264,14 @@ class ImageGenerationService:
             )
         except RuntimeError as exc:
             self._current_stage_file = None
+            # [IMPROVE-42] Channel teardown on error. Wrap to handle
+            # the case where ``_progress_channel`` wasn't yet assigned
+            # because the exception fired before that line.
+            try:
+                _progress_channel.stop()
+            except (NameError, UnboundLocalError, Exception):
+                pass
+            self._current_progress_channel = None
             self._current_job_started = 0.0
             # Clean up temp files leaked by error path
             try:
@@ -7053,6 +7298,13 @@ class ImageGenerationService:
             return ImageRuntimeResult(ok=False, error_code="provider_unavailable", error_message=str(exc), metadata={"device_used": device})
         except Exception as exc:  # noqa: BLE001
             self._current_stage_file = None
+            # [IMPROVE-42] Channel teardown — defensive (channel may
+            # not have been built yet).
+            try:
+                _progress_channel.stop()
+            except (NameError, UnboundLocalError, Exception):
+                pass
+            self._current_progress_channel = None
             self._current_job_started = 0.0
             # Clean up temp files leaked by error path
             try:
