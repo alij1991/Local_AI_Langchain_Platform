@@ -1152,12 +1152,29 @@ async def generate_image_stream(
                         # gen_task should be near-complete; loop and
                         # check.
                         continue
-                    stage_payload = {
-                        "stage": ev.get("stage"),
-                        "ts": ev.get("ts"),
-                        "run_id": run_id,
-                    }
-                    yield f"event: stage\ndata: {json.dumps(stage_payload)}\n\n"
+                    # [IMPROVE-45] Distinguish event types via the
+                    # ``__type__`` tag the drain threads stamp on each
+                    # fan-out copy. Stage events carry stage strings;
+                    # step_preview events carry inline base64 PNGs
+                    # (capped at 256x256 by the worker-side encoder
+                    # so SSE frames stay small).
+                    ev_type = ev.get("__type__", "stage")
+                    if ev_type == "step_preview":
+                        preview_payload = {
+                            "step": ev.get("step"),
+                            "total": ev.get("total"),
+                            "image_base64": ev.get("image_base64"),
+                            "ts": ev.get("ts"),
+                            "run_id": run_id,
+                        }
+                        yield f"event: step_preview\ndata: {json.dumps(preview_payload)}\n\n"
+                    else:
+                        stage_payload = {
+                            "stage": ev.get("stage"),
+                            "ts": ev.get("ts"),
+                            "run_id": run_id,
+                        }
+                        yield f"event: stage\ndata: {json.dumps(stage_payload)}\n\n"
                 else:
                     # Timeout (no event yet) or gen_task completed —
                     # cancel the pending sub_get to keep the queue clean.

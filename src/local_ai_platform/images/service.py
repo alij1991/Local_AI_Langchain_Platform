@@ -1259,6 +1259,48 @@ def _detect_model_hints(model_path: str | Path) -> dict[str, Any]:
 
 
 
+def _encode_preview_for_event(
+    image_bytes: bytes, *, max_side: int = 256,
+) -> str | None:
+    """[IMPROVE-45] Resize a PNG to ``max_side`` and base64-encode it.
+
+    Step preview PNGs at full resolution are ~200KB+ at 1024×1024 —
+    way too large to ship as inline SSE frames. The proposal at
+    docs/features/06-image-generation.md:660 caps at 256×256, which
+    keeps each ``step_preview`` frame in the 10-30KB range (well
+    under any reasonable HTTP/SSE buffer) and is plenty of detail
+    for a thumbnail strip.
+
+    Resize uses LANCZOS (high quality, slow but acceptable per-step
+    on the CPU side — this runs in the worker subprocess between
+    diffusion steps, where CPU is mostly idle anyway). Returns the
+    encoded base64 string, or ``None`` on any error so the caller
+    can decide whether to drop the preview or surface a warning.
+    Never raises.
+
+    Sources (2025-2026):
+    - docs/features/06-image-generation.md §IMPROVE-45 (line 656)
+    - https://medium.com/@daniakabani/how-we-used-sse-to-stream-llm-responses-at-scale-fa0d30a6773f
+    """
+    try:
+        import base64 as _b64
+        from PIL import Image as _PILImage
+        with _PILImage.open(io.BytesIO(image_bytes)) as img:
+            img.load()
+            # Convert mode to RGB so the re-encode is deterministic
+            # (avoids palette/RGBA edge cases on certain models).
+            if img.mode not in ("RGB", "RGBA"):
+                img = img.convert("RGB")
+            # Resize keeping aspect ratio so the longest side is
+            # ``max_side``. ``thumbnail`` mutates in place.
+            img.thumbnail((max_side, max_side), _PILImage.Resampling.LANCZOS)
+            buf = io.BytesIO()
+            img.save(buf, format="PNG")
+            return _b64.b64encode(buf.getvalue()).decode("ascii")
+    except Exception:
+        return None
+
+
 def _write_stage_marker(
     stage_file: str | None,
     stage: str,
@@ -1345,10 +1387,23 @@ class _ProgressChannel:
         # would create a queue from the default context which differs
         # on Windows from the explicit spawn context the workers use.
         self.queue: Any = ctx.Queue(maxsize=maxsize)
+        # [IMPROVE-45] Second queue carrying step preview bytes. Cap
+        # is small (8) because each entry is ~10-30KB after the
+        # ``_encode_preview_for_event`` resize+base64 — letting more
+        # than a few accumulate would just bloat memory if a slow
+        # consumer (Flutter UI on a phone hotspot) fell behind. The
+        # drain thread drops on full so the worker can never block.
+        self.preview_queue: Any = ctx.Queue(maxsize=8)
         self._latest: dict[str, Any] = {}
         self._lock = threading.Lock()
         self._stop_event = threading.Event()
         self._thread: threading.Thread | None = None
+        # [IMPROVE-45] Second drain thread for the preview queue.
+        # Two threads instead of one with split timeouts keeps stage
+        # latency low (every poll cycle would otherwise pay the
+        # preview-queue timeout) and isolates the preview path —
+        # if preview decoding stalls, stage events keep flowing.
+        self._preview_thread: threading.Thread | None = None
         # [IMPROVE-43] asyncio subscribers: the streaming endpoint
         # subscribes to receive every drained event in real time.
         # Each subscriber is a (loop, asyncio.Queue) pair — the drain
@@ -1367,6 +1422,14 @@ class _ProgressChannel:
             target=self._drain, name="image-progress-drain", daemon=True,
         )
         self._thread.start()
+        # [IMPROVE-45] Start the preview drain thread alongside the
+        # stage drain. Two threads keep the paths independent — a
+        # slow preview encode can't delay stage events.
+        self._preview_thread = threading.Thread(
+            target=self._drain_previews,
+            name="image-preview-drain", daemon=True,
+        )
+        self._preview_thread.start()
 
     def stop(self) -> None:
         self._stop_event.set()
@@ -1377,10 +1440,19 @@ class _ProgressChannel:
             self.queue.put_nowait({"__sentinel__": True})
         except Exception:
             pass
+        # [IMPROVE-45] Same unblock for the preview queue.
+        try:
+            self.preview_queue.put_nowait({"__sentinel__": True})
+        except Exception:
+            pass
         thread = self._thread
         if thread is not None and thread.is_alive():
             thread.join(timeout=2.0)
         self._thread = None
+        preview_thread = self._preview_thread
+        if preview_thread is not None and preview_thread.is_alive():
+            preview_thread.join(timeout=2.0)
+        self._preview_thread = None
         # [IMPROVE-43] Notify subscribers that the channel is closing.
         # Each SSE generator uses this sentinel to exit cleanly when
         # the worker-side stream ends (success or error).
@@ -1449,13 +1521,46 @@ class _ProgressChannel:
                 # call_soon_threadsafe to avoid holding the lock
                 # across a cross-thread call.
                 subs = list(self._subscribers)
+            # [IMPROVE-45] Tag the fan-out copy so subscribers can
+            # distinguish stage events from preview events. The
+            # snapshot dict (``_latest``) stays untagged — that's the
+            # polling path, which only ever cared about stage events.
+            tagged = {"__type__": "stage", **event}
             for loop, sub_q in subs:
                 try:
-                    loop.call_soon_threadsafe(sub_q.put_nowait, dict(event))
+                    loop.call_soon_threadsafe(sub_q.put_nowait, dict(tagged))
                 except Exception:
                     # Subscriber's loop may have closed (handler
                     # exited mid-stream) — drop silently. The
                     # subscriber will be removed via unsubscribe().
+                    pass
+
+    def _drain_previews(self) -> None:
+        """[IMPROVE-45] Mirror of ``_drain`` for the preview queue.
+
+        Reads preview events (``{"step": int, "total": int,
+        "image_base64": str}``) and fans them out to subscribers
+        tagged ``__type__=step_preview``. Does NOT update ``_latest``
+        — preview events aren't part of the polling-endpoint
+        contract (which knows only about stage strings). The streaming
+        endpoint is the only consumer.
+        """
+        while not self._stop_event.is_set():
+            try:
+                event = self.preview_queue.get(timeout=0.25)
+            except Exception:
+                continue
+            if not isinstance(event, dict):
+                continue
+            if event.get("__sentinel__"):
+                break
+            with self._lock:
+                subs = list(self._subscribers)
+            tagged = {"__type__": "step_preview", **event}
+            for loop, sub_q in subs:
+                try:
+                    loop.call_soon_threadsafe(sub_q.put_nowait, dict(tagged))
+                except Exception:
                     pass
 
 # ── ControlNet constants ──────────────────────────────────────────
@@ -2925,8 +3030,14 @@ def _diffusers_worker(payload: dict[str, Any], out_q: Any) -> None:
                 f"step_dt={_step_dt:.2f}s{_vram_str}{_lat_str}"
             )
 
-            # Decode latents to a preview image if step previews are enabled
-            if _step_previews_dir and "latents" in callback_kwargs:
+            # Decode latents to a preview image if step previews are enabled.
+            # [IMPROVE-45] If a preview_queue is attached on the
+            # payload, also push the encoded thumbnail onto it so
+            # the streaming endpoint can emit a step_preview SSE
+            # frame. The disk-write path stays so polling clients
+            # (and persistence) keep working.
+            _preview_queue = payload.get("preview_queue")
+            if (_step_previews_dir or _preview_queue is not None) and "latents" in callback_kwargs:
                 try:
                     latents = callback_kwargs["latents"]
                     with torch.no_grad():
@@ -2938,9 +3049,30 @@ def _diffusers_worker(payload: dict[str, Any], out_q: Any) -> None:
                         decoded = (decoded[0] * 255).round().astype("uint8")
                     Image_prev, _ = _require_pillow()
                     preview = Image_prev.fromarray(decoded)
-                    preview_path = Path(_step_previews_dir) / f"step_{clamped:03d}.png"
-                    preview.save(str(preview_path), format="PNG")
-                    _log(f"Step {clamped} preview saved: {preview_path}")
+                    # Encode to PNG bytes once, reuse for both sinks
+                    # (disk write at full res; SSE event at 256 cap).
+                    _png_buf = io.BytesIO()
+                    preview.save(_png_buf, format="PNG")
+                    _png_bytes = _png_buf.getvalue()
+                    if _step_previews_dir:
+                        preview_path = Path(_step_previews_dir) / f"step_{clamped:03d}.png"
+                        Path(preview_path).write_bytes(_png_bytes)
+                        _log(f"Step {clamped} preview saved: {preview_path}")
+                    if _preview_queue is not None:
+                        _b64_str = _encode_preview_for_event(_png_bytes)
+                        if _b64_str is not None:
+                            try:
+                                _preview_queue.put_nowait({
+                                    "step": clamped,
+                                    "total": total_steps,
+                                    "image_base64": _b64_str,
+                                    "ts": time.time(),
+                                })
+                            except Exception:
+                                # queue.Full — drop oldest is the
+                                # caller's responsibility; we never
+                                # block the inference loop.
+                                pass
                 except Exception as e:
                     _log(f"Step {clamped} preview failed: {e}")
 
@@ -6507,6 +6639,10 @@ class ImageGenerationService:
             "execution_plan": execution_plan,
             "stage_file": stage_file_path,
             "progress_queue": progress_channel.queue,
+            # [IMPROVE-45] Diffusers worker pushes step preview
+            # bytes here. Other workers (openvino, controlnet) don't
+            # support step previews, so they don't get this slot.
+            "preview_queue": progress_channel.preview_queue,
             "step_previews_dir": step_previews_dir,
             # Optimization flags from adaptive backend scoring
             "use_tiny_vae": bool(execution_plan.get("use_tiny_vae")),
@@ -7150,7 +7286,16 @@ class ImageGenerationService:
                     _step_dt, _elapsed_total, _vram_str, _lat_str,
                 )
 
-                if _step_previews_dir and "latents" in cb_kwargs:
+                # [IMPROVE-45] Push to preview queue alongside disk
+                # write so the streaming endpoint can emit a
+                # step_preview SSE frame. The in-process path's
+                # preview queue is the same channel queue as the
+                # subprocess path — pre-attached by the SSE handler.
+                _preview_queue_local = (
+                    self._current_progress_channel.preview_queue
+                    if self._current_progress_channel is not None else None
+                )
+                if (_step_previews_dir or _preview_queue_local is not None) and "latents" in cb_kwargs:
                     try:
                         latents = cb_kwargs["latents"]
                         with torch.no_grad():
@@ -7161,9 +7306,25 @@ class ImageGenerationService:
                             decoded = (decoded[0] * 255).round().astype("uint8")
                         Image_mod, _ = _require_pillow()
                         preview = Image_mod.fromarray(decoded)
-                        preview_path = Path(_step_previews_dir) / f"step_{clamped:03d}.png"
-                        preview.save(str(preview_path), format="PNG")
-                        logger.info("[IMG] Step %d preview saved", clamped)
+                        _png_buf = io.BytesIO()
+                        preview.save(_png_buf, format="PNG")
+                        _png_bytes = _png_buf.getvalue()
+                        if _step_previews_dir:
+                            preview_path = Path(_step_previews_dir) / f"step_{clamped:03d}.png"
+                            Path(preview_path).write_bytes(_png_bytes)
+                            logger.info("[IMG] Step %d preview saved", clamped)
+                        if _preview_queue_local is not None:
+                            _b64_str = _encode_preview_for_event(_png_bytes)
+                            if _b64_str is not None:
+                                try:
+                                    _preview_queue_local.put_nowait({
+                                        "step": clamped,
+                                        "total": total_steps,
+                                        "image_base64": _b64_str,
+                                        "ts": time.time(),
+                                    })
+                                except Exception:
+                                    pass
                     except Exception as e:
                         logger.warning("[IMG] Step %d preview failed: %s", clamped, e)
 
