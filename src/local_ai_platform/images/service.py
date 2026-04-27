@@ -1349,6 +1349,15 @@ class _ProgressChannel:
         self._lock = threading.Lock()
         self._stop_event = threading.Event()
         self._thread: threading.Thread | None = None
+        # [IMPROVE-43] asyncio subscribers: the streaming endpoint
+        # subscribes to receive every drained event in real time.
+        # Each subscriber is a (loop, asyncio.Queue) pair — the drain
+        # thread uses ``loop.call_soon_threadsafe`` to enqueue events
+        # cross-thread (drain runs on a daemon thread; the queue is
+        # consumed on the FastAPI event loop). Pre-IMPROVE-43 there
+        # was only the snapshot path; subscribers add a fan-out for
+        # SSE without changing the snapshot semantics.
+        self._subscribers: list[tuple[Any, Any]] = []
 
     def start(self) -> None:
         if self._thread is not None and self._thread.is_alive():
@@ -1372,10 +1381,51 @@ class _ProgressChannel:
         if thread is not None and thread.is_alive():
             thread.join(timeout=2.0)
         self._thread = None
+        # [IMPROVE-43] Notify subscribers that the channel is closing.
+        # Each SSE generator uses this sentinel to exit cleanly when
+        # the worker-side stream ends (success or error).
+        with self._lock:
+            subs = list(self._subscribers)
+            self._subscribers.clear()
+        for loop, sub_q in subs:
+            try:
+                loop.call_soon_threadsafe(sub_q.put_nowait, {"__channel_closed__": True})
+            except Exception:
+                # Loop may already be closed if the SSE generator
+                # exited first — drop silently.
+                pass
 
     def latest(self) -> dict[str, Any]:
         with self._lock:
             return dict(self._latest)
+
+    def subscribe(self, loop: Any) -> Any:
+        """[IMPROVE-43] Register an asyncio.Queue subscriber.
+
+        ``loop`` is the asyncio event loop the consumer will call
+        ``await sub.get()`` from — required because the drain runs on
+        a daemon thread, and ``asyncio.Queue.put_nowait`` must be
+        invoked via ``loop.call_soon_threadsafe`` from any other
+        thread (per asyncio docs / PEP 3156).
+
+        Returns the freshly-created queue. Caller is responsible for
+        ``unsubscribe()`` when done — typically in a ``finally`` block
+        so a disconnect/error doesn't leak the subscriber across runs.
+        """
+        import asyncio as _asyncio
+        sub_q: Any = _asyncio.Queue()
+        with self._lock:
+            self._subscribers.append((loop, sub_q))
+        return sub_q
+
+    def unsubscribe(self, sub_q: Any) -> None:
+        """Remove a subscriber. Idempotent — safe to call from a
+        ``finally`` block even if the channel was already stopped
+        (which clears the list)."""
+        with self._lock:
+            self._subscribers = [
+                (loop, q) for (loop, q) in self._subscribers if q is not sub_q
+            ]
 
     def _drain(self) -> None:
         # Block on ``queue.get(timeout=...)`` rather than busy-poll —
@@ -1394,6 +1444,19 @@ class _ProgressChannel:
                 break
             with self._lock:
                 self._latest = event
+                # [IMPROVE-43] Fan out to asyncio subscribers. Snapshot
+                # the list under the lock; release the lock before
+                # call_soon_threadsafe to avoid holding the lock
+                # across a cross-thread call.
+                subs = list(self._subscribers)
+            for loop, sub_q in subs:
+                try:
+                    loop.call_soon_threadsafe(sub_q.put_nowait, dict(event))
+                except Exception:
+                    # Subscriber's loop may have closed (handler
+                    # exited mid-stream) — drop silently. The
+                    # subscriber will be removed via unsubscribe().
+                    pass
 
 # ── ControlNet constants ──────────────────────────────────────────
 
@@ -3822,6 +3885,39 @@ class ImageGenerationService:
             "model": self._current_job_model,
         }
 
+    def pre_attach_progress_channel(self) -> "_ProgressChannel":
+        """[IMPROVE-43] Pre-build a progress channel for the streaming
+        endpoint to subscribe to BEFORE ``generate()`` runs.
+
+        Pre-IMPROVE-43 every generate path built its own channel
+        inside ``_run_diffusers_isolated`` / ``_run_diffusers`` etc.
+        That works for the polling endpoint (which reads the
+        snapshot) but not for SSE — by the time the handler could
+        subscribe, the worker's first emits would already be lost.
+
+        Solution: the SSE handler calls this BEFORE generate(), gets
+        a channel, subscribes, then runs generate() in an executor.
+        The generate paths use ``self._current_progress_channel`` if
+        set (this method's effect), build a fresh one otherwise
+        (backward compat for ``POST /images/generate``).
+
+        Idempotent: if a channel is already attached, returns it
+        unchanged. The streaming handler is responsible for stopping
+        the channel and clearing the slot in its ``finally`` block —
+        same lifecycle as the in-method paths, just managed at the
+        route layer.
+
+        Sources (2025-2026):
+        - docs/features/06-image-generation.md §IMPROVE-43 (line 615)
+        """
+        if self._current_progress_channel is not None:
+            return self._current_progress_channel
+        ctx = mp.get_context("spawn")
+        channel = _ProgressChannel(ctx)
+        channel.start()
+        self._current_progress_channel = channel
+        return channel
+
     def cancel_generation(self) -> bool:
         """Kill the current worker process if one is running."""
         proc = self._current_worker_proc
@@ -4238,8 +4334,14 @@ class ImageGenerationService:
         q: Any = ctx.Queue(maxsize=1)
         # [IMPROVE-42] Build a progress channel from the same spawn ctx
         # so the queue handle is picklable across the spawn boundary.
-        progress_channel = _ProgressChannel(ctx)
-        progress_channel.start()
+        # [IMPROVE-43] If a channel was pre-attached by the streaming
+        # endpoint via ``pre_attach_progress_channel()``, reuse it so
+        # subscribers (the SSE handler) receive every emit. Otherwise
+        # build a fresh one — preserves the polling-endpoint contract.
+        _pre_attached = self._current_progress_channel is not None
+        progress_channel = self._current_progress_channel or _ProgressChannel(ctx)
+        if not _pre_attached:
+            progress_channel.start()
         payload = {
             "base_model": resolved_model,
             "model_id": model_id,  # Original HF model ID for fallback download
@@ -4294,12 +4396,15 @@ class ImageGenerationService:
         logger.info("[IMG-CN] Worker finished: exitcode=%s", proc.exitcode)
 
         self._current_stage_file = None
-        # [IMPROVE-42] Stop the drain thread; channel is per-run.
-        try:
-            progress_channel.stop()
-        except Exception:
-            pass
-        self._current_progress_channel = None
+        # [IMPROVE-42 / IMPROVE-43] Stop the drain thread when WE built
+        # the channel. If it was pre-attached by the streaming endpoint
+        # the handler owns the lifecycle and stops it in its finally.
+        if not _pre_attached:
+            try:
+                progress_channel.stop()
+            except Exception:
+                pass
+            self._current_progress_channel = None
         self._current_job_started = 0.0
         try:
             Path(stage_file_path).unlink(missing_ok=True)
@@ -4376,9 +4481,11 @@ class ImageGenerationService:
         stage_file = tempfile.NamedTemporaryFile(prefix="img_ov_stage_", suffix=".txt", delete=False)
         stage_file_path = stage_file.name
         stage_file.close()
-        # [IMPROVE-42] Progress channel — see _generate_controlnet.
-        progress_channel = _ProgressChannel(ctx)
-        progress_channel.start()
+        # [IMPROVE-42 / IMPROVE-43] Reuse pre-attached channel if any.
+        _pre_attached = self._current_progress_channel is not None
+        progress_channel = self._current_progress_channel or _ProgressChannel(ctx)
+        if not _pre_attached:
+            progress_channel.start()
         self._current_stage_file = stage_file_path
         self._current_progress_channel = progress_channel
         self._current_job_started = time.time()
@@ -4407,11 +4514,13 @@ class ImageGenerationService:
         proc.join(timeout=timeout_s)
 
         self._current_stage_file = None
-        try:
-            progress_channel.stop()
-        except Exception:
-            pass
-        self._current_progress_channel = None
+        # [IMPROVE-43] Pre-attached channel: route owns lifecycle.
+        if not _pre_attached:
+            try:
+                progress_channel.stop()
+            except Exception:
+                pass
+            self._current_progress_channel = None
         self._current_job_started = 0.0
         self._current_worker_proc = None
         if proc.is_alive():
@@ -6358,9 +6467,11 @@ class ImageGenerationService:
         step_previews_dir: str | None = None
         if (execution_plan or {}).get("enable_step_previews"):
             step_previews_dir = tempfile.mkdtemp(prefix="img_steps_")
-        # [IMPROVE-42] Progress channel — see _generate_controlnet.
-        progress_channel = _ProgressChannel(ctx)
-        progress_channel.start()
+        # [IMPROVE-42 / IMPROVE-43] Reuse pre-attached channel if any.
+        _pre_attached = self._current_progress_channel is not None
+        progress_channel = self._current_progress_channel or _ProgressChannel(ctx)
+        if not _pre_attached:
+            progress_channel.start()
         # Expose for progress polling
         self._current_stage_file = stage_file_path
         self._current_progress_channel = progress_channel
@@ -6479,13 +6590,15 @@ class ImageGenerationService:
         if data is None:
             # No result from queue — process likely crashed or timed out
             self._current_stage_file = None
-            # [IMPROVE-42] Stop the drain thread on the timeout/crash
-            # branch — without this it'd leak past the run.
-            try:
-                progress_channel.stop()
-            except Exception:
-                pass
-            self._current_progress_channel = None
+            # [IMPROVE-42 / IMPROVE-43] Stop the drain thread on the
+            # timeout/crash branch when WE built the channel; route
+            # owns lifecycle when pre-attached.
+            if not _pre_attached:
+                try:
+                    progress_channel.stop()
+                except Exception:
+                    pass
+                self._current_progress_channel = None
             self._current_job_started = 0.0
             if proc.exitcode is None or proc.exitcode != 0:
                 return ImageRuntimeResult(
@@ -6503,12 +6616,13 @@ class ImageGenerationService:
                 )
             return ImageRuntimeResult(ok=False, error_code="generation_failed", error_message="Image worker returned no result")
         self._current_stage_file = None
-        # [IMPROVE-42] Stop the drain thread on the success branch.
-        try:
-            progress_channel.stop()
-        except Exception:
-            pass
-        self._current_progress_channel = None
+        # [IMPROVE-43] Pre-attached: route owns lifecycle.
+        if not _pre_attached:
+            try:
+                progress_channel.stop()
+            except Exception:
+                pass
+            self._current_progress_channel = None
         self._current_job_started = 0.0
         self._current_worker_proc = None
         try:
@@ -6602,8 +6716,12 @@ class ImageGenerationService:
             # so ``get_generation_progress`` can read from a uniform
             # surface regardless of subprocess vs in-process. Built from
             # the spawn context for parity with the worker paths.
-            _progress_channel = _ProgressChannel(mp.get_context("spawn"))
-            _progress_channel.start()
+            # [IMPROVE-43] Reuse the streaming endpoint's pre-attached
+            # channel when present; otherwise build a fresh one.
+            _pre_attached = self._current_progress_channel is not None
+            _progress_channel = self._current_progress_channel or _ProgressChannel(mp.get_context("spawn"))
+            if not _pre_attached:
+                _progress_channel.start()
             self._current_progress_channel = _progress_channel
             _progress_queue_local = _progress_channel.queue
             _write_stage_marker(stage_file_path, "pipeline_load", _progress_queue_local)
@@ -7174,13 +7292,15 @@ class ImageGenerationService:
             if has_nan or (pixel_range <= 2 and unique_count < 4):
                 dtype_used = str(execution_plan.get("torch_dtype") or "unknown")
                 self._current_stage_file = None
-                # [IMPROVE-42] Stop the channel on the NaN-output early
-                # return — same teardown as the success/error branches.
-                try:
-                    _progress_channel.stop()
-                except Exception:
-                    pass
-                self._current_progress_channel = None
+                # [IMPROVE-42 / IMPROVE-43] Stop the channel on the
+                # NaN-output early return when WE built it; route
+                # owns lifecycle when pre-attached.
+                if not _pre_attached:
+                    try:
+                        _progress_channel.stop()
+                    except Exception:
+                        pass
+                    self._current_progress_channel = None
                 self._current_job_started = 0.0
                 return ImageRuntimeResult(
                     ok=False,
@@ -7198,12 +7318,13 @@ class ImageGenerationService:
             logger.info("[IMG] Image saved (%d bytes, total=%.1fs)", len(buf.getvalue()), total_elapsed)
 
             self._current_stage_file = None
-            # [IMPROVE-42] Stop the channel on success.
-            try:
-                _progress_channel.stop()
-            except Exception:
-                pass
-            self._current_progress_channel = None
+            # [IMPROVE-43] Pre-attached: route owns lifecycle.
+            if not _pre_attached:
+                try:
+                    _progress_channel.stop()
+                except Exception:
+                    pass
+                self._current_progress_channel = None
             self._current_job_started = 0.0
             try:
                 Path(stage_file_path).unlink(missing_ok=True)
@@ -7264,14 +7385,17 @@ class ImageGenerationService:
             )
         except RuntimeError as exc:
             self._current_stage_file = None
-            # [IMPROVE-42] Channel teardown on error. Wrap to handle
-            # the case where ``_progress_channel`` wasn't yet assigned
-            # because the exception fired before that line.
+            # [IMPROVE-42 / IMPROVE-43] Channel teardown on error,
+            # only when WE built the channel (route owns lifecycle
+            # when pre-attached). Wrap to handle the case where
+            # ``_progress_channel``/``_pre_attached`` weren't yet
+            # assigned (exception before that line).
             try:
-                _progress_channel.stop()
+                if not _pre_attached:
+                    _progress_channel.stop()
+                    self._current_progress_channel = None
             except (NameError, UnboundLocalError, Exception):
                 pass
-            self._current_progress_channel = None
             self._current_job_started = 0.0
             # Clean up temp files leaked by error path
             try:
@@ -7298,13 +7422,14 @@ class ImageGenerationService:
             return ImageRuntimeResult(ok=False, error_code="provider_unavailable", error_message=str(exc), metadata={"device_used": device})
         except Exception as exc:  # noqa: BLE001
             self._current_stage_file = None
-            # [IMPROVE-42] Channel teardown — defensive (channel may
-            # not have been built yet).
+            # [IMPROVE-42 / IMPROVE-43] Channel teardown — defensive
+            # (channel/pre_attached may not have been built yet).
             try:
-                _progress_channel.stop()
+                if not _pre_attached:
+                    _progress_channel.stop()
+                    self._current_progress_channel = None
             except (NameError, UnboundLocalError, Exception):
                 pass
-            self._current_progress_channel = None
             self._current_job_started = 0.0
             # Clean up temp files leaked by error path
             try:

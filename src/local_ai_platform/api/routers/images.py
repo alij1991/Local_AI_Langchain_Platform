@@ -4,7 +4,7 @@
 count: 25 ``/images/*`` endpoints, plus the single-router helper
 ``_extract_json_from_llm`` (used only by ``/images/enhance-prompt``).
 
-Endpoints (25):
+Endpoints (26):
   GET    /images/sessions                            — list sessions
   POST   /images/sessions                            — create session
   GET    /images/sessions/{session_id}               — fetch one
@@ -25,6 +25,7 @@ Endpoints (25):
   POST   /images/enhance-prompt                      — LLM-assisted SD prompt
   POST   /images/generate/cancel                     — kill active worker
   POST   /images/generate                            — txt2img / img2img / inpaint
+  POST   /images/generate/stream                     — SSE with stage-typed events
   POST   /images/edit                                — instruction-driven edit
   POST   /images/upscale                             — RealESRGAN / LANCZOS
   POST   /images/preprocess                          — ControlNet preview
@@ -57,17 +58,19 @@ References (2025–2026):
 """
 from __future__ import annotations
 
+import asyncio
 import base64
 import json
 import logging
 import re as _re
 import uuid
+from functools import partial
 from pathlib import Path
 from typing import Any
 
 import httpx
-from fastapi import APIRouter, Depends, HTTPException
-from fastapi.responses import FileResponse
+from fastapi import APIRouter, Depends, HTTPException, Request
+from fastapi.responses import FileResponse, StreamingResponse
 
 from local_ai_platform.api.deps import (
     get_app_config,
@@ -90,6 +93,30 @@ from local_ai_platform.tracing import trace_run
 logger = logging.getLogger(__name__)
 
 router = APIRouter()
+
+
+# ── [IMPROVE-43] Stream cancel-detection seam ────────────────────
+
+
+async def _is_client_gone(request: Request) -> bool:
+    """[IMPROVE-43] Cancel-detection seam for ``/images/generate/stream``.
+
+    Mirrors ``chat_router._is_client_gone`` (IMPROVE-17) and
+    ``systems_router._is_client_gone`` (IMPROVE-32) — wraps Starlette's
+    ``request.is_disconnected()`` with an exception-swallowing guard
+    so a flaky receive channel can't crash the SSE inner loop. Tests
+    monkeypatch this symbol on the images router module to simulate
+    disconnect deterministically without poking the ASGI receive
+    channel directly.
+
+    The seam is per-router rather than shared so the monkeypatch
+    target stays local — tests for ``/images/generate/stream``
+    shouldn't accidentally affect other SSE endpoints.
+    """
+    try:
+        return await request.is_disconnected()
+    except Exception:
+        return False
 
 
 # ── Sessions ──────────────────────────────────────────────────────
@@ -976,6 +1003,258 @@ def generate_image(
         if len(saved_images) == 1:
             return {"status": "ok", "metadata": saved_images[0]["metadata"], "seed_used": saved_images[0]["seed_used"]}
         return {"status": "ok", "images": saved_images, "seed_used": saved_images[0]["seed_used"] if saved_images else None}
+
+
+@router.post("/images/generate/stream")
+async def generate_image_stream(
+    body: dict[str, Any],
+    request: Request,
+    image_service: ImageGenerationService = Depends(get_image_service),
+):
+    """[IMPROVE-43] SSE streaming variant of POST /images/generate.
+
+    Yields typed events as the worker emits stage transitions:
+    ``start``, ``stage``, ``done``, ``error``. Pre-IMPROVE-43 the only
+    progress surface was ``GET /images/generate/progress`` polling at
+    500ms — for a 30-step run on FLUX that's at most 60 progress reads
+    over the full generation, with quantization to whatever step
+    boundary the polling caught. Streaming gives the client every
+    transition the worker actually emitted, in real time.
+
+    Builds on the IMPROVE-42 channel:
+    - Pre-attaches a fresh channel via
+      ``image_service.pre_attach_progress_channel()`` BEFORE generate()
+      runs, so the subscriber sees the worker's first emit.
+    - Subscribes to the channel for asyncio fan-out — the drain
+      thread enqueues every event into the subscriber via
+      ``loop.call_soon_threadsafe`` (drain runs on a daemon thread).
+    - Runs ``image_service.generate(...)`` in an executor; awaits both
+      the subscriber queue and the executor task concurrently, yielding
+      stage frames as they arrive.
+
+    Cancel detection: ``_is_client_gone(request)`` polled after each
+    yielded frame. On disconnect, calls
+    ``image_service.cancel_generation()`` to terminate the worker.
+
+    Step previews stay deferred to IMPROVE-45 — that needs a second
+    multiprocessing queue for preview bytes, distinct enough to
+    deserve its own commit per the proposal.
+
+    Sources (2025-2026):
+    - docs/features/06-image-generation.md §IMPROVE-43 (line 615)
+    - https://proagenticworkflows.ai/best-practices-streaming-llm-responses-front-end-stack
+    - https://oneuptime.com/blog/post/2026-01-27-sse-vs-websockets/view
+    """
+    model_id = body.get("model_id", "")
+    prompt = body.get("prompt", "")
+    if not model_id or not prompt:
+        raise HTTPException(400, "model_id and prompt are required")
+
+    run_id = str(uuid.uuid4())
+    loop = asyncio.get_running_loop()
+
+    # Decode mask_image_base64 if provided (mirrors POST /images/generate).
+    mask_image_path = body.get("mask_image_path")
+    if not mask_image_path and body.get("mask_image_base64"):
+        try:
+            mask_bytes = base64.b64decode(body["mask_image_base64"])
+            mask_tmp = Path("data/images/masks")
+            mask_tmp.mkdir(parents=True, exist_ok=True)
+            mask_file = mask_tmp / f"{uuid.uuid4()}.png"
+            mask_file.write_bytes(mask_bytes)
+            mask_image_path = str(mask_file)
+        except Exception as exc:
+            raise HTTPException(400, f"Invalid mask_image_base64: {exc}")
+
+    async def stream_gen():
+        # ``start`` carries the same fields the SSE consumer needs to
+        # bootstrap UI state — run_id for cancel correlation, model_id
+        # for header rendering, prompt summary for deduplication.
+        start_payload = {
+            "run_id": run_id,
+            "model_id": model_id,
+            "prompt_summary": (prompt[:120] + "…") if len(prompt) > 120 else prompt,
+            "steps": int(body.get("steps", 20)),
+            "width": int(body.get("width", 1024)),
+            "height": int(body.get("height", 1024)),
+        }
+        yield f"event: start\ndata: {json.dumps(start_payload)}\n\n"
+
+        # Pre-attach the progress channel before generate() runs so
+        # the subscriber sees the worker's first emit. The handler
+        # owns the channel's lifecycle — the generate path detects
+        # the pre-attached channel and skips its own start/stop.
+        channel = image_service.pre_attach_progress_channel()
+        sub = channel.subscribe(loop)
+
+        gen_task: asyncio.Task | None = None
+        result: Any = None
+        gen_error: BaseException | None = None
+        try:
+            # Run generate() in an executor — it's sync and the
+            # subprocess wait inside would otherwise block the loop.
+            gen_call = partial(
+                image_service.generate,
+                model_id=model_id,
+                prompt=prompt,
+                negative_prompt=body.get("negative_prompt"),
+                seed=body.get("seed"),
+                steps=int(body.get("steps", 20)),
+                guidance_scale=float(body.get("guidance_scale", 7.0)),
+                width=int(body.get("width", 1024)),
+                height=int(body.get("height", 1024)),
+                init_image_path=body.get("init_image_path"),
+                mask_image_path=mask_image_path,
+                strength=float(body.get("strength", 0.65)),
+                params_json=body.get("params_json"),
+                timeout_sec=body.get("timeout_sec"),
+                controlnet_type=body.get("controlnet_type"),
+                control_image_path=body.get("control_image_path"),
+                controlnet_model_id=body.get("controlnet_model_id"),
+                controlnet_conditioning_scale=float(body.get("controlnet_conditioning_scale", 1.0)),
+                device_preference=body.get("device_preference"),
+                scheduler=body.get("scheduler"),
+                loras=body.get("loras"),
+                num_images=int(body.get("num_images", 1)),
+                clip_skip=int(body.get("clip_skip", 0)),
+                hires_fix=bool(body.get("hires_fix", False)),
+                hires_denoise=float(body.get("hires_denoise", 0.55)),
+                prompt_weighting=bool(body.get("prompt_weighting", True)),
+            )
+            # ``run_in_executor`` returns an asyncio.Future, not a
+            # coroutine — use ``ensure_future`` (works on both) rather
+            # than ``create_task`` which requires a coroutine.
+            gen_task = asyncio.ensure_future(loop.run_in_executor(None, gen_call))
+
+            # Concurrent loop: forward stage events as they arrive
+            # until generate() completes (or errors out).
+            while not gen_task.done():
+                # Disconnect probe before each iteration — reuses the
+                # IMPROVE-17 / IMPROVE-32 cancel pattern.
+                if await _is_client_gone(request):
+                    try:
+                        image_service.cancel_generation()
+                    except Exception:
+                        pass
+                    raise asyncio.CancelledError("client_disconnected")
+
+                sub_get = asyncio.create_task(sub.get())
+                done, _pending = await asyncio.wait(
+                    {gen_task, sub_get},
+                    return_when=asyncio.FIRST_COMPLETED,
+                    timeout=0.5,
+                )
+
+                if sub_get in done:
+                    ev = sub_get.result()
+                    if ev.get("__channel_closed__"):
+                        # Channel signaled shutdown (drain stop). The
+                        # gen_task should be near-complete; loop and
+                        # check.
+                        continue
+                    stage_payload = {
+                        "stage": ev.get("stage"),
+                        "ts": ev.get("ts"),
+                        "run_id": run_id,
+                    }
+                    yield f"event: stage\ndata: {json.dumps(stage_payload)}\n\n"
+                else:
+                    # Timeout (no event yet) or gen_task completed —
+                    # cancel the pending sub_get to keep the queue clean.
+                    sub_get.cancel()
+
+            # gen_task completed — pull the result.
+            result = gen_task.result()
+        except asyncio.CancelledError:
+            # Client disconnect path — re-raise so the outer finally
+            # tears down the channel; the StreamingResponse layer
+            # absorbs the unwind.
+            if gen_task is not None and not gen_task.done():
+                gen_task.cancel()
+            raise
+        except Exception as exc:
+            gen_error = exc
+        finally:
+            try:
+                channel.unsubscribe(sub)
+            except Exception:
+                pass
+            try:
+                channel.stop()
+            except Exception:
+                pass
+            # Clear the slot we set via pre_attach. Same teardown
+            # the in-method paths perform when they own the channel.
+            try:
+                image_service._current_progress_channel = None
+            except Exception:
+                pass
+
+        # Outside the finally so yields aren't suppressed by it.
+        if gen_error is not None:
+            yield f"event: error\ndata: {json.dumps({'error': str(gen_error), 'run_id': run_id})}\n\n"
+            return
+
+        # Normalize batch vs single-image result.
+        results_list = result if isinstance(result, list) else [result]
+        first = results_list[0] if results_list else None
+        if first is None or not getattr(first, "ok", False):
+            err_code = getattr(first, "error_code", "generation_failed") if first else "generation_failed"
+            err_msg = getattr(first, "error_message", "Image worker returned no result") if first else "Image worker returned no result"
+            yield f"event: error\ndata: {json.dumps({'code': err_code, 'message': err_msg, 'run_id': run_id})}\n\n"
+            return
+
+        # Persist the produced image(s) under the requested session,
+        # mirroring the non-streaming endpoint's flow. We persist only
+        # when a session_id is provided — same backward-compat rule.
+        session_id = body.get("session_id")
+        saved_images: list[dict[str, Any]] = []
+        if session_id:
+            try:
+                from local_ai_platform.repositories.images_repo import add_image, image_output_path
+                for single_result in results_list:
+                    if not single_result.ok or not single_result.image_bytes:
+                        continue
+                    image_id_saved = str(uuid.uuid4())
+                    out_path = image_output_path(session_id, image_id_saved)
+                    out_path.parent.mkdir(parents=True, exist_ok=True)
+                    out_path.write_bytes(single_result.image_bytes)
+                    save_params = dict(body.get("params_json") or {})
+                    seed_used = (single_result.metadata or {}).get("seed")
+                    save_params["seed_used"] = seed_used
+                    if body.get("scheduler"):
+                        save_params["scheduler"] = body["scheduler"]
+                    add_image(
+                        session_id=session_id,
+                        model_id=model_id,
+                        prompt=prompt,
+                        file_path=str(out_path),
+                        negative_prompt=body.get("negative_prompt"),
+                        params=save_params,
+                    )
+                    saved_images.append({
+                        "image_id": image_id_saved,
+                        "image_url": f"/images/files/{session_id}/{Path(out_path).name}",
+                        "seed_used": seed_used,
+                        "metadata": single_result.metadata,
+                    })
+            except Exception as exc:
+                logger.warning("[IMG-STREAM] persistence failed for run %s: %s", run_id, exc)
+
+        # ``done`` mirrors the sync endpoint's response shape so the
+        # SSE consumer can render the final image with the same data
+        # contract.
+        done_payload: dict[str, Any] = {
+            "run_id": run_id,
+            "seed_used": (first.metadata or {}).get("seed"),
+            "metadata": first.metadata,
+        }
+        if saved_images:
+            done_payload["images"] = saved_images
+            done_payload["image_url"] = saved_images[0]["image_url"]
+        yield f"event: done\ndata: {json.dumps(done_payload)}\n\n"
+
+    return StreamingResponse(stream_gen(), media_type="text/event-stream")
 
 
 @router.post("/images/edit")
