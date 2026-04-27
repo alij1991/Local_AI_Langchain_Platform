@@ -5,7 +5,7 @@
 router only (POST/PUT/clone/import — every write path must run Kahn's
 topological sort to reject cycles up front).
 
-Endpoints (12):
+Endpoints (13):
   GET    /systems/templates              list pre-built templates
   POST   /systems/deploy/{template_id}   one-click deploy a template as agent
   GET    /systems/recommend              templates filtered by available models
@@ -14,6 +14,7 @@ Endpoints (12):
   PUT    /systems/{name}                 update system (cycle-checked)
   GET    /systems/{name}                 fetch one
   POST   /systems/{name}/chat            execute the system graph
+  POST   /systems/{name}/chat/stream     execute as SSE with node-scoped events
   POST   /systems/{name}/clone           duplicate (cycle-checked)
   GET    /systems/{name}/export          download as JSON
   POST   /systems/import                 import from JSON (cycle-checked)
@@ -38,12 +39,13 @@ References (2025–2026):
 """
 from __future__ import annotations
 
+import asyncio
 import json
 import uuid
 from typing import Any
 
 from fastapi import APIRouter, Depends, HTTPException, Request
-from fastapi.responses import Response
+from fastapi.responses import Response, StreamingResponse
 
 from local_ai_platform.agents import AgentOrchestrator
 from local_ai_platform.api.deps import (
@@ -52,7 +54,13 @@ from local_ai_platform.api.deps import (
 )
 from local_ai_platform.observability import emit
 from local_ai_platform.providers import ProviderRouter
-from local_ai_platform.tracing import trace_run
+from local_ai_platform.tracing import (
+    TraceRecorder,
+    TraceStore,
+    _active_recorder,
+    load_trace_config,
+    trace_run,
+)
 from local_ai_platform.repositories.agents_repo import save_agent
 from local_ai_platform.repositories.conversations import (
     add_message,
@@ -70,6 +78,29 @@ from local_ai_platform.systems_validator import (
 )
 
 router = APIRouter()
+
+
+# ── [IMPROVE-32] Stream cancel-detection seam ────────────────────
+
+
+async def _is_client_gone(request: Request) -> bool:
+    """[IMPROVE-32] Cancel-detection seam for ``/systems/{name}/chat/stream``.
+
+    Mirrors ``chat_router._is_client_gone`` (IMPROVE-17) — wraps
+    Starlette's ``request.is_disconnected()`` with an
+    exception-swallowing guard so a flaky receive channel can't crash
+    the SSE inner loop. Tests monkeypatch this symbol on the systems
+    router module to simulate disconnect deterministically without
+    poking the ASGI receive channel directly.
+
+    The seam is per-router rather than shared with chat to keep the
+    monkeypatch target local — tests for ``/systems/.../stream``
+    shouldn't accidentally affect ``/chat/stream`` and vice versa.
+    """
+    try:
+        return await request.is_disconnected()
+    except Exception:
+        return False
 
 
 # ── System Templates (pre-built agent configs) ───────────────────
@@ -369,6 +400,225 @@ async def chat_with_system(
                     agent=name, model="dag", run_id=run_id,
                 )
             raise HTTPException(500, f"System execution failed: {exc}")
+
+
+@router.post("/systems/{name}/chat/stream")
+async def chat_with_system_stream(
+    name: str,
+    request: Request,
+    orchestrator: AgentOrchestrator = Depends(get_orchestrator),
+):
+    """[IMPROVE-32] SSE streaming variant of /systems/{name}/chat.
+
+    Yields the typed events emitted by ``astream_system_graph``:
+    ``node_start``, ``token`` (with ``node`` field), ``tool_call``,
+    ``tool_result``, ``node_end``, and a final ``done`` event with
+    the same payload shape as the non-streaming endpoint's return
+    dict — the Flutter consumer can treat this stream as the
+    streaming equivalent of POST /systems/{name}/chat.
+
+    Pre-IMPROVE-32 the only way to run a system was the synchronous
+    /systems/{name}/chat endpoint, which buffered every node's output
+    until the whole DAG completed — for a 3-node DAG with 5s nodes,
+    the user waited 15s with zero feedback. With this endpoint,
+    tokens stream as each node generates them, interleaved with
+    node-boundary events the UI can use to render per-node progress.
+
+    Carries the same persistence / tracing / cancellation pins as
+    /chat/stream and the sync /systems/{name}/chat:
+    - [IMPROVE-38] ``db_conv_id`` decoupling: persistence runs against
+      a validated handle; trace records the caller's opaque conv_id.
+    - [IMPROVE-68] Wrapped in ``trace_run(subsystem="system", ...)``
+      so the executor's ``emit("system", ...)`` calls populate the
+      trace JSON identically to the sync path.
+    - [IMPROVE-17 echo] ``_is_client_gone(request)`` polled after each
+      token frame; on disconnect raises CancelledError; the
+      ``except BaseException`` branch finalizes the trace as
+      cancelled and (per the IMPROVE-17 default) does NOT persist a
+      partial assistant message.
+    - On done, persists a synthetic assistant message with the
+      ``system_run`` attachment shape — same row schema as the sync
+      path so /conversations renders one row per run regardless of
+      transport.
+
+    Sources (2025-2026):
+    - https://docs.langchain.com/oss/python/langgraph/streaming
+    - docs/features/05-systems.md §IMPROVE-32 (line 382)
+    """
+    # Body parsing mirrors /systems/{name}/chat — accept both JSON
+    # and multipart so existing clients can flip the URL without
+    # changing payload shape.
+    content_type = request.headers.get("content-type", "")
+    if "multipart" in content_type:
+        form = await request.form()
+        message = form.get("message", "")
+        conv_id = form.get("conversation_id")
+    else:
+        body = await request.json()
+        message = body.get("message", "")
+        conv_id = body.get("conversation_id")
+
+    if not message:
+        raise HTTPException(400, "message is required")
+
+    system = get_system(name)
+    if not system:
+        raise HTTPException(404, f"System '{name}' not found")
+
+    definition = system.get("definition_json", system.get("definition", {}))
+    if isinstance(definition, str):
+        definition = json.loads(definition)
+
+    # [IMPROVE-38] Same conv-id decoupling as /systems/{name}/chat.
+    db_conv_id = conv_id if (conv_id and get_conversation(conv_id)) else None
+    if db_conv_id:
+        add_message(db_conv_id, "user", message)
+
+    run_id = str(uuid.uuid4())
+
+    # [IMPROVE-32] Manual TraceRecorder + TraceStore (mirrors chat.py's
+    # /chat/stream pattern, NOT the trace_run context manager used by
+    # the sync /systems/{name}/chat). Two reasons:
+    # 1. ``trace_run`` only catches ``Exception``, so a deliberate
+    #    ``CancelledError("client_disconnected")`` raised between
+    #    tokens (BaseException) bypasses its save branch and the run
+    #    silently disappears from /runs.
+    # 2. We want to yield an SSE ``error`` frame on exceptions so the
+    #    client can render the failure — but re-raising from inside a
+    #    StreamingResponse generator can drop the yielded chunk before
+    #    flush. Manual control lets us save+yield without re-raise.
+    cfg = load_trace_config()
+    recorder = TraceRecorder(
+        cfg, run_id, conv_id, name, "multi", "dag",
+        subsystem="system",
+    )
+    trace_store_local = TraceStore(cfg)
+
+    async def stream_gen():
+        # Emit start frame so the client can capture conv_id + run_id
+        # before any node tokens arrive (same shape as /chat/stream's
+        # start event for consumer parity).
+        yield f"event: start\ndata: {json.dumps({'conversation_id': conv_id, 'run_id': run_id, 'system': name})}\n\n"
+
+        final_payload: dict[str, Any] | None = None
+        # [IMPROVE-68] Set the active recorder ContextVar so
+        # ``observability.emit()`` calls inside ``astream_system_graph``
+        # mirror onto the trace JSON automatically — same effect
+        # ``trace_run`` provides, but with manual finalize control.
+        token = _active_recorder.set(recorder)
+        try:
+            try:
+                async for ev in orchestrator.astream_system_graph(
+                    definition, message, conv_id, run_id=run_id,
+                ):
+                    etype = ev.get("type", "")
+                    if etype == "node_start":
+                        yield (
+                            f"event: node_start\ndata: "
+                            f"{json.dumps({'node': ev.get('node'), 'agent': ev.get('agent'), 'role': ev.get('role')})}\n\n"
+                        )
+                    elif etype == "token":
+                        yield (
+                            f"event: token\ndata: "
+                            f"{json.dumps({'node': ev.get('node'), 'text': ev.get('text', '')})}\n\n"
+                        )
+                        # [IMPROVE-32 / IMPROVE-17 echo] Probe between
+                        # tokens. CancelledError propagates out of the
+                        # async for and is caught below.
+                        if await _is_client_gone(request):
+                            raise asyncio.CancelledError("client_disconnected")
+                    elif etype == "tool_call":
+                        yield (
+                            f"event: tool_call\ndata: "
+                            f"{json.dumps({'node': ev.get('node'), 'name': ev.get('name', ''), 'args': ev.get('args', ''), 'call_id': ev.get('call_id', '')})}\n\n"
+                        )
+                    elif etype == "tool_result":
+                        yield (
+                            f"event: tool_result\ndata: "
+                            f"{json.dumps({'node': ev.get('node'), 'name': ev.get('name', ''), 'content': ev.get('content', ''), 'call_id': ev.get('call_id', '')})}\n\n"
+                        )
+                    elif etype == "node_end":
+                        yield (
+                            f"event: node_end\ndata: "
+                            f"{json.dumps({'node': ev.get('node'), 'agent': ev.get('agent'), 'role': ev.get('role'), 'text': ev.get('text', ''), 'status': ev.get('status'), 'duration_ms': ev.get('duration_ms')})}\n\n"
+                        )
+                    elif etype == "done":
+                        final_payload = {
+                            "final_text": ev.get("final_text", ""),
+                            "node_outputs": ev.get("node_outputs", []),
+                            "total_duration_ms": ev.get("total_duration_ms"),
+                            "nodes_executed": ev.get("nodes_executed"),
+                            "run_id": run_id,
+                            "conversation_id": conv_id,
+                        }
+
+                # [IMPROVE-38] Persist synthetic assistant message
+                # carrying the run summary — same shape as the
+                # non-streaming endpoint so /conversations renders
+                # streamed runs and sync runs identically.
+                if final_payload and db_conv_id:
+                    add_message(
+                        db_conv_id, "assistant",
+                        final_payload.get("final_text", ""),
+                        agent=name, model="dag",
+                        attachments=[{
+                            "type": "system_run",
+                            "node_outputs": final_payload.get("node_outputs", []),
+                            "run_id": run_id,
+                        }],
+                        run_id=run_id,
+                        perf={
+                            "total_duration_ms": final_payload.get("total_duration_ms"),
+                            "nodes_executed": final_payload.get("nodes_executed"),
+                        },
+                    )
+
+                if final_payload is not None:
+                    yield f"event: done\ndata: {json.dumps(final_payload)}\n\n"
+                    try:
+                        trace_store_local.save(recorder.finalize(success=True))
+                    except Exception:
+                        pass
+            except Exception as exc:
+                # Executor or downstream failure mid-stream. Yield an
+                # SSE error frame so the client renders something, and
+                # finalize the trace as failed. No partial assistant
+                # message persisted (mirrors /chat/stream's drop
+                # default — the user message stays so the conversation
+                # isn't dangling at no-response).
+                yield f"event: error\ndata: {json.dumps({'error': str(exc), 'run_id': run_id})}\n\n"
+                try:
+                    trace_store_local.save(recorder.finalize(
+                        success=False, error=str(exc),
+                    ))
+                except Exception:
+                    pass
+            except BaseException as exc:
+                # [IMPROVE-17 echo] Client-disconnect (CancelledError)
+                # or process signal (GeneratorExit, KeyboardInterrupt).
+                # CancelledError("client_disconnected") is BaseException
+                # in Python 3.8+ — won't be caught by ``except
+                # Exception`` above. Save the trace as cancelled and
+                # re-raise per PEP 342 (swallowing GeneratorExit is
+                # invalid).
+                cancel_reason = type(exc).__name__
+                try:
+                    if isinstance(exc, asyncio.CancelledError) and exc.args:
+                        cancel_reason = str(exc.args[0]) or cancel_reason
+                except Exception:
+                    pass
+                try:
+                    trace_store_local.save(recorder.finalize(
+                        success=False,
+                        error=f"cancelled: {cancel_reason}",
+                    ))
+                except Exception:
+                    pass
+                raise
+        finally:
+            _active_recorder.reset(token)
+
+    return StreamingResponse(stream_gen(), media_type="text/event-stream")
 
 
 @router.post("/systems/{name}/clone")

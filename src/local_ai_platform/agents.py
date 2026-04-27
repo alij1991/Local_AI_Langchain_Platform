@@ -1196,6 +1196,289 @@ Guidelines:
             "nodes_executed": len(node_outputs),
         }
 
+    async def astream_system_graph(
+        self,
+        system_definition: dict,
+        user_input: str,
+        conversation_id: str | None = None,
+        run_id: str | None = None,
+    ) -> AsyncGenerator[dict[str, Any], None]:
+        """[IMPROVE-32] Streaming variant of ``execute_system_graph``.
+
+        Walks the same DAG with the same edge-routing semantics as the
+        sync executor (lines 1003-1197) — `visited` + `max_steps` cycle
+        guard, agent-name-not-found = ``status="skipped"``, accumulated
+        context concatenation, edge rules ``always`` / ``manual_next`` /
+        ``on_keyword_match`` / ``on_tool_result`` — but yields typed
+        events as nodes progress instead of returning the full result
+        at the end.
+
+        Per node it calls ``astream_chat_with_agent(agent, prompt)`` and
+        re-yields each token / tool_call / tool_result tagged with the
+        owning ``node`` id, so the SSE consumer can reconstruct
+        per-node sub-streams. Final event is ``{"type": "done", ...}``
+        carrying the same payload shape as the sync executor's return
+        dict — that's what ``/systems/{name}/chat/stream``'s end-frame
+        renders.
+
+        The same ``emit("system", ...)`` calls as the sync path stay
+        intact so the active TraceRecorder ContextVar (set by
+        ``trace_run`` at the route layer per IMPROVE-68) records the
+        per-node timeline identically — operators on /runs see the
+        same events whether the system was invoked sync or streamed.
+
+        Sources (2025-2026):
+        - https://docs.langchain.com/oss/python/langgraph/streaming
+        - https://docs.langchain.com/oss/python/langgraph/workflows-agents
+        - docs/features/05-systems.md §IMPROVE-32 (line 382)
+        """
+        import time as _time
+
+        nodes = system_definition.get("nodes", [])
+        edges = system_definition.get("edges", [])
+        start_node_id = system_definition.get("start_node_id") or system_definition.get("startNodeId")
+
+        if not nodes:
+            yield {
+                "type": "done",
+                "final_text": "System has no agent nodes.",
+                "node_outputs": [],
+                "total_duration_ms": 0,
+                "nodes_executed": 0,
+                "run_id": run_id or str(uuid.uuid4()),
+                "conversation_id": conversation_id,
+            }
+            return
+
+        # Build graph structures (mirrors execute_system_graph:1037-1048)
+        node_map = {n["id"]: n for n in nodes}
+        edge_map: dict[str, list[tuple[str, str, str]]] = {n["id"]: [] for n in nodes}
+        in_degree: dict[str, int] = {n["id"]: 0 for n in nodes}
+        for e in edges:
+            src, tgt = e.get("source"), e.get("target")
+            rule = e.get("rule", {}) if isinstance(e.get("rule"), dict) else {}
+            rule_type = rule.get("type", e.get("ruleType", "always"))
+            rule_notes = rule.get("notes", e.get("notes", ""))
+            if src in edge_map and tgt in node_map:
+                edge_map[src].append((tgt, rule_type, rule_notes))
+                in_degree[tgt] = in_degree.get(tgt, 0) + 1
+
+        # Find start node (mirrors execute_system_graph:1051-1056)
+        if start_node_id and start_node_id in node_map:
+            current_nodes = [start_node_id]
+        else:
+            current_nodes = [nid for nid, deg in in_degree.items() if deg == 0]
+            if not current_nodes:
+                current_nodes = [nodes[0]["id"]]
+
+        run_id = run_id or str(uuid.uuid4())
+        system_name = system_definition.get("name") or system_definition.get("id") or "unnamed"
+        total_start = _time.monotonic()
+        node_outputs: list[dict[str, Any]] = []
+        accumulated_context = ""
+        visited: set[str] = set()
+        max_steps = len(nodes) * 2
+
+        emit("system", "run.start", status="start",
+             context={
+                 "run_id": run_id,
+                 "system_name": system_name,
+                 "conversation_id": conversation_id,
+                 "node_count": len(nodes),
+                 "edge_count": len(edges),
+                 "streaming": True,
+             })
+
+        step = 0
+        while current_nodes and step < max_steps:
+            step += 1
+            next_nodes: list[str] = []
+
+            for nid in current_nodes:
+                if nid in visited:
+                    continue
+                visited.add(nid)
+
+                node_def = node_map.get(nid)
+                if not node_def:
+                    continue
+
+                agent_name = node_def.get("agent", "")
+                role = (node_def.get("config") or {}).get("role", node_def.get("role", ""))
+
+                # Agent-name-not-found path mirrors the sync executor:
+                # record status="skipped" and continue. Stream consumers
+                # see a node_start + node_end pair so the UI can render
+                # the skip explicitly rather than dropping the node
+                # silently.
+                if not agent_name or agent_name not in self.definitions:
+                    yield {
+                        "type": "node_start",
+                        "node": nid, "agent": agent_name, "role": role,
+                    }
+                    skipped_text = f"(agent '{agent_name}' not found)"
+                    node_outputs.append({
+                        "node": nid, "agent": agent_name, "role": role,
+                        "text": skipped_text, "status": "skipped",
+                        "duration_ms": 0,
+                    })
+                    emit("system", "node_end", status="skipped",
+                         duration_ms=0,
+                         context={"run_id": run_id, "system_name": system_name,
+                                  "node_id": nid, "agent": agent_name, "role": role,
+                                  "reason": "agent_not_found"})
+                    yield {
+                        "type": "node_end",
+                        "node": nid, "agent": agent_name, "role": role,
+                        "text": skipped_text, "status": "skipped",
+                        "duration_ms": 0,
+                    }
+                    continue
+
+                if accumulated_context:
+                    prompt = f"{user_input}\n\nContext from prior agents:\n{accumulated_context}"
+                else:
+                    prompt = user_input
+
+                node_start = _time.monotonic()
+                emit("system", "node_start", status="start",
+                     context={"run_id": run_id, "system_name": system_name,
+                              "node_id": nid, "agent": agent_name, "role": role,
+                              "step": step})
+                yield {
+                    "type": "node_start",
+                    "node": nid, "agent": agent_name, "role": role,
+                }
+
+                # Stream this node via astream_chat_with_agent. Tag each
+                # inner event with the owning node id so consumers can
+                # reconstruct per-node sub-streams. The agent's own
+                # ``done`` event is consumed here (not re-yielded) — the
+                # system-level ``done`` only fires after the whole DAG
+                # walk completes.
+                output = ""
+                node_status = "ok"
+                try:
+                    async for event in self.astream_chat_with_agent(
+                        agent_name, prompt,
+                    ):
+                        etype = event.get("type", "")
+                        if etype == "token":
+                            text = event.get("text", "")
+                            if text:
+                                output += text
+                                yield {
+                                    "type": "token",
+                                    "node": nid,
+                                    "text": text,
+                                }
+                        elif etype == "tool_call":
+                            yield {
+                                "type": "tool_call",
+                                "node": nid,
+                                "name": event.get("name", ""),
+                                "args": event.get("args", ""),
+                                "call_id": event.get("call_id", ""),
+                            }
+                        elif etype == "tool_result":
+                            yield {
+                                "type": "tool_result",
+                                "node": nid,
+                                "name": event.get("name", ""),
+                                "content": event.get("content", ""),
+                                "call_id": event.get("call_id", ""),
+                            }
+                        elif etype == "done":
+                            # Prefer the inner stream's ``content`` when
+                            # we collected nothing via tokens (path A
+                            # of astream_chat_with_agent yields tokens
+                            # naturally; path B may emit a synthetic
+                            # "No response returned." token. Either way,
+                            # ``content`` is the canonical full text).
+                            if not output:
+                                output = event.get("content", "") or ""
+                    duration_ms = int((_time.monotonic() - node_start) * 1000)
+                    node_outputs.append({
+                        "node": nid, "agent": agent_name, "role": role,
+                        "text": output, "status": "ok",
+                        "duration_ms": duration_ms,
+                    })
+                    emit("system", "node_end", status="ok",
+                         duration_ms=duration_ms,
+                         context={"run_id": run_id, "system_name": system_name,
+                                  "node_id": nid, "agent": agent_name, "role": role},
+                         perf={"output_length": len(output) if output else 0})
+                    accumulated_context += f"\n[{agent_name} ({role})]: {output}\n"
+                except Exception as exc:
+                    duration_ms = int((_time.monotonic() - node_start) * 1000)
+                    node_status = "error"
+                    output = str(exc)
+                    node_outputs.append({
+                        "node": nid, "agent": agent_name, "role": role,
+                        "text": output, "status": "error",
+                        "duration_ms": duration_ms,
+                    })
+                    emit("system", "node_end", status="error",
+                         duration_ms=duration_ms,
+                         error_code=type(exc).__name__,
+                         error_message=str(exc),
+                         context={"run_id": run_id, "system_name": system_name,
+                                  "node_id": nid, "agent": agent_name, "role": role})
+
+                yield {
+                    "type": "node_end",
+                    "node": nid, "agent": agent_name, "role": role,
+                    "text": output, "status": node_status,
+                    "duration_ms": duration_ms,
+                }
+
+                # Edge routing — same rules as execute_system_graph:1152-1171.
+                for target, rule_type, rule_notes in edge_map.get(nid, []):
+                    if target in visited:
+                        continue
+                    should_follow = False
+                    if rule_type in ("always", "manual_next"):
+                        should_follow = True
+                    elif rule_type == "on_keyword_match":
+                        keywords = [k.strip().lower() for k in rule_notes.split(",") if k.strip()]
+                        output_lower = output.lower()
+                        should_follow = any(kw in output_lower for kw in keywords) if keywords else True
+                    elif rule_type == "on_tool_result":
+                        should_follow = any(marker in output for marker in ["Tool", "tool", "Result:", "```"])
+                    else:
+                        should_follow = True
+
+                    if should_follow and target not in next_nodes:
+                        next_nodes.append(target)
+
+            current_nodes = next_nodes
+
+        total_ms = int((_time.monotonic() - total_start) * 1000)
+        final_text = node_outputs[-1]["text"] if node_outputs else "No output produced."
+
+        errors = sum(1 for n in node_outputs if n.get("status") == "error")
+        emit("system", "run_done", status="error" if errors else "ok",
+             duration_ms=total_ms,
+             context={"run_id": run_id, "system_name": system_name,
+                      "conversation_id": conversation_id,
+                      "streaming": True},
+             perf={
+                 "nodes_executed": len(node_outputs),
+                 "error_count": errors,
+                 "final_text_length": len(final_text) if final_text else 0,
+                 "steps": step,
+             })
+
+        yield {
+            "type": "done",
+            "final_text": final_text,
+            "node_outputs": node_outputs,
+            "conversation_id": conversation_id,
+            "run_id": run_id,
+            "total_duration_ms": total_ms,
+            "nodes_executed": len(node_outputs),
+        }
+
     # ── Helpers ────────────────────────────────────────────────────
 
     @staticmethod
