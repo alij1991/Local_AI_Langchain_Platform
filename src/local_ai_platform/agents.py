@@ -63,6 +63,107 @@ class WorkflowState(TypedDict):
     outputs: dict[str, str]
 
 
+# ── [IMPROVE-33] Bounded inter-node context for system DAG runs ──
+#
+# Pre-IMPROVE-33 ``execute_system_graph`` (and its streaming twin)
+# accumulated every prior node's output into a single string that
+# was prepended to the next node's prompt. With 5 nodes producing
+# 2k tokens each, node 5 saw ~10k tokens of context BEFORE the
+# user input — enough to bust the context window of any small
+# local model.
+#
+# Doc rationale at docs/features/05-systems.md:403-415: replace the
+# unbounded string-concat with a token-budgeted, structured
+# context builder. Newest outputs win; older ones get elided when
+# the budget runs out.
+#
+# This is a simpler primitive than IMPROVE-15's full
+# ``ContextCompactor`` (which does LLM-based summarization +
+# key-fact extraction). For DAG runs the typical depth is ~5-10
+# nodes, so a recency-based truncation already buys enough
+# headroom. LLM-summarized inter-node context is a follow-up.
+
+# Default budget targets a comfortable upper bound for most local
+# 3-7B models (gemma3:4b ~4k context after system prompt and tools;
+# qwen2.5:7b 32k but we don't want to spend it all on backref). Per
+# system override via ``definition.context_budget_tokens``.
+_INTER_NODE_CONTEXT_BUDGET_TOKENS = 4000
+
+# Tokens-per-character heuristic for English. Avoids pulling
+# tiktoken into the hot path of every node call — the actual model
+# tokenizer would give a more precise count, but this is a budget
+# guard, not a billing meter, so a 4-char rule of thumb is fine.
+# Pinned by ``test_estimate_tokens_uses_4chars_per_token``.
+_INTER_NODE_CHARS_PER_TOKEN = 4
+
+
+def _estimate_tokens(text: str) -> int:
+    """Rough token-count estimate without a real tokenizer.
+
+    Returns ``max(1, len(text) // 4)`` so any non-empty string
+    contributes at least one token to the budget — prevents an
+    empty-string entry from "free-riding" the budget.
+    """
+    if not text:
+        return 0
+    return max(1, len(text) // _INTER_NODE_CHARS_PER_TOKEN)
+
+
+def _build_inter_node_context(
+    node_outputs: list[dict[str, Any]],
+    budget_tokens: int = _INTER_NODE_CONTEXT_BUDGET_TOKENS,
+) -> str:
+    """[IMPROVE-33] Build a token-budgeted prior-context block.
+
+    Walks ``node_outputs`` newest-first, packing each ``status:
+    "ok"`` entry's text into the result until the token budget is
+    exhausted. Older entries that don't fit are summarized as a
+    single ``[... N earlier output(s) elided ...]`` marker so the
+    downstream agent knows context was truncated.
+
+    Skipped/error entries are dropped — propagating "(agent X not
+    found)" or an exception traceback into a downstream prompt
+    only confuses the next agent.
+
+    Returns an empty string when there are no usable entries —
+    callers can then skip the "Context from prior agents:" prefix
+    entirely (matches the legacy "if accumulated_context" branch).
+    """
+    usable = [r for r in node_outputs if r.get("status") == "ok"]
+    if not usable:
+        return ""
+
+    # Walk newest-first; the most recent context is always preserved.
+    chunks_newest_first: list[str] = []
+    used_tokens = 0
+    elided_count = 0
+
+    for idx in range(len(usable) - 1, -1, -1):
+        rec = usable[idx]
+        agent = rec.get("agent", "?")
+        role = rec.get("role", "")
+        text = rec.get("text") or ""
+        chunk = f"\n[{agent} ({role})]: {text}\n"
+        chunk_tokens = _estimate_tokens(chunk)
+
+        if used_tokens + chunk_tokens > budget_tokens:
+            # This record + everything older gets elided.
+            elided_count = idx + 1
+            break
+
+        chunks_newest_first.append(chunk)
+        used_tokens += chunk_tokens
+
+    chunks = list(reversed(chunks_newest_first))
+    if elided_count > 0:
+        prefix = (
+            f"\n[... {elided_count} earlier output(s) elided to fit "
+            f"context budget ...]\n"
+        )
+        chunks.insert(0, prefix)
+    return "".join(chunks)
+
+
 # ── Agent orchestrator ────────────────────────────────────────────
 
 class AgentOrchestrator:
@@ -1408,7 +1509,14 @@ Guidelines:
         system_name = system_definition.get("name") or system_definition.get("id") or "unnamed"
         total_start = _time.monotonic()
         node_outputs: list[dict[str, Any]] = []
-        accumulated_context = ""
+        # [IMPROVE-33] Per-system budget override; defaults to
+        # ``_INTER_NODE_CONTEXT_BUDGET_TOKENS``. Letting users dial
+        # this up for big-context models (or down for cheap models)
+        # without redeploying.
+        context_budget = int(
+            system_definition.get("context_budget_tokens",
+                                  _INTER_NODE_CONTEXT_BUDGET_TOKENS),
+        )
         visited: set[str] = set()
         max_steps = len(nodes) * 2  # prevent infinite loops
 
@@ -1451,9 +1559,14 @@ Guidelines:
                                   "reason": "agent_not_found"})
                     continue
 
-                # Build prompt
-                if accumulated_context:
-                    prompt = f"{user_input}\n\nContext from prior agents:\n{accumulated_context}"
+                # [IMPROVE-33] Build prompt with token-budgeted prior
+                # context — newest outputs win, older ones get elided
+                # with a marker so the agent knows truncation happened.
+                ctx_block = _build_inter_node_context(
+                    node_outputs, budget_tokens=context_budget,
+                )
+                if ctx_block:
+                    prompt = f"{user_input}\n\nContext from prior agents:\n{ctx_block}"
                 else:
                     prompt = user_input
 
@@ -1476,7 +1589,6 @@ Guidelines:
                          context={"run_id": run_id, "system_name": system_name,
                                   "node_id": nid, "agent": agent_name, "role": role},
                          perf={"output_length": len(output) if output else 0})
-                    accumulated_context += f"\n[{agent_name} ({role})]: {output}\n"
                 except Exception as exc:
                     duration_ms = int((_time.monotonic() - node_start) * 1000)
                     node_outputs.append({
@@ -1619,7 +1731,11 @@ Guidelines:
         system_name = system_definition.get("name") or system_definition.get("id") or "unnamed"
         total_start = _time.monotonic()
         node_outputs: list[dict[str, Any]] = []
-        accumulated_context = ""
+        # [IMPROVE-33] same budget contract as the sync executor.
+        context_budget = int(
+            system_definition.get("context_budget_tokens",
+                                  _INTER_NODE_CONTEXT_BUDGET_TOKENS),
+        )
         visited: set[str] = set()
         max_steps = len(nodes) * 2
 
@@ -1679,8 +1795,12 @@ Guidelines:
                     }
                     continue
 
-                if accumulated_context:
-                    prompt = f"{user_input}\n\nContext from prior agents:\n{accumulated_context}"
+                # [IMPROVE-33] same budgeted context builder as sync.
+                ctx_block = _build_inter_node_context(
+                    node_outputs, budget_tokens=context_budget,
+                )
+                if ctx_block:
+                    prompt = f"{user_input}\n\nContext from prior agents:\n{ctx_block}"
                 else:
                     prompt = user_input
 
@@ -1752,7 +1872,9 @@ Guidelines:
                          context={"run_id": run_id, "system_name": system_name,
                                   "node_id": nid, "agent": agent_name, "role": role},
                          perf={"output_length": len(output) if output else 0})
-                    accumulated_context += f"\n[{agent_name} ({role})]: {output}\n"
+                    # [IMPROVE-33] context block is rebuilt per-node
+                    # from node_outputs so we no longer maintain a
+                    # parallel accumulator string here.
                 except Exception as exc:
                     duration_ms = int((_time.monotonic() - node_start) * 1000)
                     node_status = "error"
