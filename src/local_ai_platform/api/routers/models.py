@@ -2094,6 +2094,15 @@ def _hf_download_worker(
         "gguf_filename": gguf_filename,
         "status": "downloading",
         "progress": 0.0,
+        # [IMPROVE-8] Per-byte progress fields. The bound tqdm class
+        # (snapshot_download tqdm_class=) writes into these. Exposed
+        # via tasks.py:_hf_to_task so /models/tasks surfaces real-time
+        # bytes-downloaded for the UI rather than the binary 0.0/1.0
+        # progress field. Starts at 0; ``current_file`` empty until
+        # the first per-file tqdm fires.
+        "bytes_downloaded": 0,
+        "bytes_total": 0,
+        "current_file": "",
         "error": None,
         "thread": threading.current_thread().name,
         # [IMPROVE-9] ``started_at`` is read by the unified
@@ -2103,6 +2112,12 @@ def _hf_download_worker(
         # process boundaries and needs absolute meaning.
         "started_at": time.time(),
     }
+    # [IMPROVE-8] Build the per-byte tqdm class once per worker call.
+    # Closure captures the row dict by reference so subsequent writes
+    # land on the same object the registry reads.
+    from local_ai_platform.api.hf_progress import make_hf_progress_tqdm
+
+    _bound_tqdm = make_hf_progress_tqdm(downloads_state[download_key])
     _hf_t0 = time.monotonic()
     emit("model", "download.start", status="start",
          context={"provider": "huggingface", "model_id": model_id,
@@ -2122,6 +2137,7 @@ def _hf_download_worker(
                 repo_id=model_id,
                 token=token or None,
                 resume_download=True,
+                tqdm_class=_bound_tqdm,
                 allow_patterns=[
                     gguf_filename,             # the specific GGUF variant
                     "*.json",                  # configs, model_index, scheduler
@@ -2239,6 +2255,7 @@ def _hf_download_worker(
                 repo_id=model_id,
                 token=token or None,
                 resume_download=True,
+                tqdm_class=_bound_tqdm,
                 allow_patterns=[
                     "*.json",
                     "*.txt",
@@ -2288,15 +2305,30 @@ async def get_hf_downloads(
     limit: int = 20,
     downloads_state: dict[str, dict[str, Any]] = Depends(get_hf_downloads_state),
 ):
-    """Return active/recent HF download jobs."""
+    """Return active/recent HF download jobs.
+
+    [IMPROVE-8] Surfaces ``bytes_downloaded`` / ``bytes_total`` /
+    ``current_file`` when the per-byte tqdm has populated them.
+    Legacy callers reading only ``progress`` keep working unchanged.
+    """
     items = []
     for mid, info in list(downloads_state.items()):
-        items.append({
+        item: dict[str, Any] = {
             "model_id": info["model_id"],
             "status": info["status"],
             "progress": info.get("progress", 0.0),
             "error": info.get("error"),
-        })
+        }
+        # [IMPROVE-8] Additive — only present once the per-byte
+        # tracker has fired at least once. Snapshot-only path; GGUF
+        # single-file fetches via hf_hub_download stay binary.
+        if info.get("bytes_downloaded"):
+            item["bytes_downloaded"] = int(info["bytes_downloaded"])
+        if info.get("bytes_total"):
+            item["bytes_total"] = int(info["bytes_total"])
+        if info.get("current_file"):
+            item["current_file"] = info["current_file"]
+        items.append(item)
     return {"items": items[:limit]}
 
 

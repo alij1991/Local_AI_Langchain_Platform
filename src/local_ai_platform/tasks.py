@@ -312,6 +312,24 @@ class TaskRegistry:
         extra: dict[str, Any] = {}
         if gguf_filename:
             extra["gguf_filename"] = gguf_filename
+
+        # [IMPROVE-8] Surface per-byte fields when the snapshot worker
+        # has populated them. Defensive types — legacy in-flight rows
+        # written before IMPROVE-8 don't have the keys, and
+        # ``_hf_hub_download`` (GGUF case) doesn't accept a tqdm
+        # class so its rows still report only ``progress``. Treat
+        # missing fields as "not available" rather than zero so the
+        # UI can fall back to the binary indicator instead of showing
+        # "0 / 0 bytes".
+        bytes_downloaded = raw.get("bytes_downloaded")
+        bytes_total = raw.get("bytes_total")
+        if isinstance(bytes_downloaded, (int, float)) and bytes_downloaded > 0:
+            extra["bytes_downloaded"] = int(bytes_downloaded)
+        if isinstance(bytes_total, (int, float)) and bytes_total > 0:
+            extra["bytes_total"] = int(bytes_total)
+        current_file = raw.get("current_file")
+        if isinstance(current_file, str) and current_file:
+            extra["current_file"] = current_file
         return BackgroundTask(
             task_id=f"hf:{key}",
             kind=TaskKind.HF_DOWNLOAD.value,
