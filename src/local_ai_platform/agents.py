@@ -1665,6 +1665,17 @@ Guidelines:
         # docs/features/05-systems.md:444-455.
         parallel_waves = bool(system_definition.get("parallel_waves", False))
 
+        # [IMPROVE-36 telemetry] Per-run counters surfaced in the
+        # run_done perf dict so the weekly review can answer "how
+        # often does parallel mode actually engage" and "what's the
+        # fan-out". Increments happen INSIDE the parallel pre-pass
+        # below — both run only when the wave is safe to parallelize
+        # AND has more than one runnable node, matching the user's
+        # intuition for "did the speedup fire here".
+        parallel_waves_used = 0
+        concurrent_nodes_total = 0
+        parallel_waves_skipped = 0  # safety-fallback counter
+
         step = 0
         while current_nodes and step < max_steps:
             step += 1
@@ -1726,20 +1737,61 @@ Guidelines:
                                 (_time.monotonic() - _t0) * 1000,
                             ), _exc
 
+                    _wave_t0 = _time.monotonic()
                     results = await asyncio.gather(
                         *[_preload(n) for n in runnable_for_parallel],
                     )
+                    _wave_ms = int((_time.monotonic() - _wave_t0) * 1000)
                     for _nid, _out, _dur, _exc in results:
                         preloaded_outputs[_nid] = (_out, _dur, _exc)
                     logger.info(
                         "[IMPROVE-36] parallel wave: %d nodes ran "
                         "concurrently", len(runnable_for_parallel),
                     )
+                    # [IMPROVE-36 telemetry] Counter-bump + per-wave
+                    # event so /observability/summary can answer
+                    # "how often does this engage and at what
+                    # fan-out". Errors during the wave still fire the
+                    # event — it tracks the parallel decision, not
+                    # whether the agents themselves succeeded.
+                    parallel_waves_used += 1
+                    concurrent_nodes_total += len(runnable_for_parallel)
+                    _wave_errors = sum(
+                        1 for _, _, _, exc in results if exc is not None
+                    )
+                    emit(
+                        "system", "wave_parallel", status="ok",
+                        duration_ms=_wave_ms,
+                        context={
+                            "run_id": run_id,
+                            "system_name": system_name,
+                            "step": step,
+                            "node_count": len(runnable_for_parallel),
+                            "agents": wave_agents,
+                            "errors": _wave_errors,
+                        },
+                        perf={"node_count": len(runnable_for_parallel)},
+                    )
                 else:
                     logger.info(
                         "[IMPROVE-36] parallel_waves on but wave has "
                         "duplicate agents (%s); falling back to "
                         "sequential", wave_agents,
+                    )
+                    # [IMPROVE-36 telemetry] Track safety-fallbacks
+                    # too so a user wondering "why didn't parallel
+                    # engage" can grep for this in run logs.
+                    parallel_waves_skipped += 1
+                    emit(
+                        "system", "wave_parallel_fallback", status="ok",
+                        context={
+                            "run_id": run_id,
+                            "system_name": system_name,
+                            "step": step,
+                            "node_count": len(runnable_for_parallel),
+                            "agents": wave_agents,
+                            "reason": "duplicate_agents",
+                        },
                     )
 
             for nid in current_nodes:
@@ -1878,6 +1930,12 @@ Guidelines:
                  "error_count": errors,
                  "final_text_length": len(final_text) if final_text else 0,
                  "steps": step,
+                 # [IMPROVE-36 telemetry] Per-run aggregates of the
+                 # parallel-wave decision. Useful for the weekly review
+                 # but cheap to surface — three int fields.
+                 "parallel_waves_used": parallel_waves_used,
+                 "concurrent_nodes_total": concurrent_nodes_total,
+                 "parallel_waves_skipped": parallel_waves_skipped,
              })
 
         return {

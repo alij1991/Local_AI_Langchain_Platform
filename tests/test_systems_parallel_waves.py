@@ -347,3 +347,151 @@ def test_parallel_wave_node_error_is_recorded():
     assert by_node["b_n"]["status"] == "ok"
     assert by_node["c_n"]["status"] == "error"
     assert "synthetic gamma failure" in by_node["c_n"]["text"]
+
+
+# ── [IMPROVE-36 telemetry] Counter and event surfacing ────────────
+
+
+def _capture_emits():
+    """Collect ``emit(...)`` calls into a list. Returns (list, patcher);
+    caller passes patcher to ``monkeypatch.setattr``."""
+    captured: list[tuple[str, str, dict, dict | None]] = []
+    from local_ai_platform import agents as _agents_mod
+
+    def fake_emit(subsystem, action, status="ok",
+                  duration_ms=None, error_code=None, error_message=None,
+                  context=None, perf=None):
+        captured.append((subsystem, action, dict(context or {}), dict(perf) if perf else None))
+
+    return captured, _agents_mod, fake_emit
+
+
+def test_telemetry_parallel_wave_emits_event(monkeypatch):
+    """A parallel-engaged wave fires a ``system.wave_parallel`` event
+    with node_count + agent list."""
+    orch = _make_orch()
+    orch.chat_with_agent = lambda a, p, **kw: f"out:{a}"
+
+    captured, agents_mod, fake_emit = _capture_emits()
+    monkeypatch.setattr(agents_mod, "emit", fake_emit)
+
+    definition = {
+        "nodes": [
+            {"id": "start_n", "agent": "alpha"},
+            {"id": "b_n", "agent": "beta"},
+            {"id": "c_n", "agent": "gamma"},
+        ],
+        "edges": [
+            {"source": "start_n", "target": "b_n", "rule": {"type": "always"}},
+            {"source": "start_n", "target": "c_n", "rule": {"type": "always"}},
+        ],
+        "start_node_id": "start_n",
+        "parallel_waves": True,
+    }
+    asyncio.run(orch.execute_system_graph(definition, "Test"))
+    parallel_events = [c for c in captured if c[1] == "wave_parallel"]
+    assert len(parallel_events) == 1
+    ctx = parallel_events[0][2]
+    assert ctx["node_count"] == 2
+    assert set(ctx["agents"]) == {"beta", "gamma"}
+    assert ctx["errors"] == 0
+
+
+def test_telemetry_run_done_perf_includes_counters(monkeypatch):
+    """The ``run_done`` perf dict carries ``parallel_waves_used``,
+    ``concurrent_nodes_total``, ``parallel_waves_skipped`` so the
+    weekly review can answer "how often does parallel mode engage"
+    without scraping per-wave events."""
+    orch = _make_orch()
+    orch.chat_with_agent = lambda a, p, **kw: f"out:{a}"
+
+    captured, agents_mod, fake_emit = _capture_emits()
+    monkeypatch.setattr(agents_mod, "emit", fake_emit)
+
+    definition = {
+        "nodes": [
+            {"id": "start_n", "agent": "alpha"},
+            {"id": "b_n", "agent": "beta"},
+            {"id": "c_n", "agent": "gamma"},
+        ],
+        "edges": [
+            {"source": "start_n", "target": "b_n", "rule": {"type": "always"}},
+            {"source": "start_n", "target": "c_n", "rule": {"type": "always"}},
+        ],
+        "start_node_id": "start_n",
+        "parallel_waves": True,
+    }
+    asyncio.run(orch.execute_system_graph(definition, "Test"))
+    run_done = [c for c in captured if c[1] == "run_done"]
+    assert len(run_done) == 1
+    perf = run_done[0][3]
+    assert perf is not None
+    assert perf["parallel_waves_used"] == 1
+    assert perf["concurrent_nodes_total"] == 2
+    assert perf["parallel_waves_skipped"] == 0
+
+
+def test_telemetry_sequential_run_reports_zero_parallel(monkeypatch):
+    """A run with parallel_waves OFF reports zeros — the perf fields
+    are always present so dashboards don't have to special-case."""
+    orch = _make_orch()
+    orch.chat_with_agent = lambda a, p, **kw: f"out:{a}"
+
+    captured, agents_mod, fake_emit = _capture_emits()
+    monkeypatch.setattr(agents_mod, "emit", fake_emit)
+
+    definition = {
+        "nodes": [
+            {"id": "n1", "agent": "alpha"},
+            {"id": "n2", "agent": "beta"},
+        ],
+        "edges": [
+            {"source": "n1", "target": "n2", "rule": {"type": "always"}},
+        ],
+        "start_node_id": "n1",
+    }
+    asyncio.run(orch.execute_system_graph(definition, "Test"))
+    run_done = [c for c in captured if c[1] == "run_done"]
+    perf = run_done[0][3]
+    assert perf["parallel_waves_used"] == 0
+    assert perf["concurrent_nodes_total"] == 0
+    assert perf["parallel_waves_skipped"] == 0
+    parallel_events = [c for c in captured if c[1] == "wave_parallel"]
+    assert parallel_events == []
+
+
+def test_telemetry_duplicate_agent_fallback_emits_event(monkeypatch):
+    """Safety-fallback (duplicate agents in the wave) fires a
+    ``wave_parallel_fallback`` event AND increments
+    ``parallel_waves_skipped`` — the user can grep for this when
+    asking "why didn't parallel engage"."""
+    orch = _make_orch()
+    orch.chat_with_agent = lambda a, p, **kw: f"out:{a}"
+
+    captured, agents_mod, fake_emit = _capture_emits()
+    monkeypatch.setattr(agents_mod, "emit", fake_emit)
+
+    # Two nodes share the same agent — triggers safety fallback.
+    definition = {
+        "nodes": [
+            {"id": "start_n", "agent": "alpha"},
+            {"id": "b_n", "agent": "beta"},
+            {"id": "c_n", "agent": "beta"},  # duplicate
+        ],
+        "edges": [
+            {"source": "start_n", "target": "b_n", "rule": {"type": "always"}},
+            {"source": "start_n", "target": "c_n", "rule": {"type": "always"}},
+        ],
+        "start_node_id": "start_n",
+        "parallel_waves": True,
+    }
+    asyncio.run(orch.execute_system_graph(definition, "Test"))
+    fallbacks = [c for c in captured if c[1] == "wave_parallel_fallback"]
+    assert len(fallbacks) == 1
+    assert fallbacks[0][2]["reason"] == "duplicate_agents"
+    run_done = [c for c in captured if c[1] == "run_done"]
+    perf = run_done[0][3]
+    assert perf["parallel_waves_used"] == 0
+    assert perf["parallel_waves_skipped"] == 1
+    # No actual parallel wave fired.
+    assert [c for c in captured if c[1] == "wave_parallel"] == []
