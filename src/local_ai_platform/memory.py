@@ -1,8 +1,11 @@
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import json
 import logging
+import threading
+from datetime import datetime, timezone
 from typing import Any
 
 from langchain_core.messages import AIMessage, BaseMessage, HumanMessage, SystemMessage
@@ -143,10 +146,23 @@ class SmartMemory:
         system_prompt: str,
         history: list[ChatMessage],
         user_input: str,
+        *,
+        conv_id: str | None = None,
+        agent_name: str | None = None,
+        compactor: Any = None,  # ContextCompactor — late-bound to avoid forward ref
     ) -> list[ChatMessage]:
         """Build a token-budgeted message list.
 
         Returns [system, ...history..., user] that fits within the token budget.
+
+        [IMPROVE-15] When ``compactor`` + ``conv_id`` + ``agent_name`` are
+        supplied AND the persisted summary / facts exist, builds the
+        compacted form: system + summary block + facts block + anchor +
+        user. Falls through to the existing budget-tier chain (full /
+        truncate / extractive) when no summary has been generated yet
+        (early in the conversation, or before the background job has
+        run). The new branch is purely additive — callers that don't
+        pass the compactor see identical pre-IMPROVE-15 behavior.
         """
         system_msg = ChatMessage(role="system", content=system_prompt)
         user_msg = ChatMessage(role="user", content=user_input)
@@ -156,6 +172,34 @@ class SmartMemory:
 
         if remaining <= 0:
             return [system_msg, user_msg]
+
+        # [IMPROVE-15] Compacted-context branch. Engages only when:
+        #   * caller supplied a compactor + conv_id + agent_name, AND
+        #   * the persisted summary and/or facts exist (the read returns
+        #     useful content), AND
+        #   * the history is long enough that compaction is meaningful
+        #     (otherwise the "full history fits" tier is cheaper).
+        if compactor is not None and conv_id and agent_name and len(history) > compactor.anchor_count + 5:
+            try:
+                summary_text, facts, anchor = compactor.get_compacted_context(
+                    conv_id, agent_name, history,
+                )
+            except Exception as exc:
+                # Defensive: a misbehaving compactor must not block the
+                # chat path. Fall through to the legacy budget tiers.
+                logger.debug(
+                    "[IMPROVE-15] compactor.get_compacted_context raised "
+                    "(%s) — falling back to legacy tiers", exc,
+                )
+                summary_text, facts, anchor = None, {}, history
+            if summary_text or facts:
+                return self._build_compacted_message_list(
+                    system_msg=system_msg,
+                    summary_text=summary_text,
+                    facts=facts,
+                    anchor=anchor,
+                    user_msg=user_msg,
+                )
 
         # Check if full history fits
         history_tokens = self.counter.count_messages(history)
@@ -178,6 +222,40 @@ class SmartMemory:
                 content=f"Summary of earlier conversation:\n{summary}",
             ))
         result.extend(recent)
+        result.append(user_msg)
+        return result
+
+    @staticmethod
+    def _build_compacted_message_list(
+        *,
+        system_msg: ChatMessage,
+        summary_text: str | None,
+        facts: dict[str, str],
+        anchor: list[ChatMessage],
+        user_msg: ChatMessage,
+    ) -> list[ChatMessage]:
+        """[IMPROVE-15] Assemble the compacted message list:
+            [system, summary?, facts?, *anchor, user]
+
+        Both ``summary_text`` and ``facts`` are optional — when one is
+        absent the corresponding system message is omitted entirely
+        (rather than emitted as an empty placeholder, which would
+        confuse the LLM).
+        """
+        result: list[ChatMessage] = [system_msg]
+        if summary_text:
+            result.append(ChatMessage(
+                role="system",
+                content=f"Summary of earlier conversation:\n{summary_text}",
+            ))
+        if facts:
+            # Stable ordering for reproducibility in tests + caches.
+            fact_lines = [f"- {k}: {v}" for k, v in sorted(facts.items())]
+            result.append(ChatMessage(
+                role="system",
+                content="Known facts about this conversation:\n" + "\n".join(fact_lines),
+            ))
+        result.extend(anchor)
         result.append(user_msg)
         return result
 
@@ -277,6 +355,521 @@ class SmartMemory:
         from .providers.base import GenerationSettings
         response = await provider_chat_fn(model, summary_prompt, GenerationSettings(max_tokens=300))
         return response.content
+
+
+# ── [IMPROVE-15] Hybrid context compression ──────────────────────
+
+
+_FACTS_NAMESPACE_PREFIX = "facts"
+
+
+# Module-level in-flight set for background summarization tasks.
+# A second concurrent ``summarize_in_background`` call for the same
+# ``conv_id`` short-circuits — the first task will persist the result
+# the second would have produced anyway. Lock guards mutation; reads
+# under contention are best-effort (False-positive duplicate runs are
+# harmless, just wasted work).
+_SUMMARIZE_IN_FLIGHT: set[str] = set()
+_SUMMARIZE_IN_FLIGHT_LOCK = threading.Lock()
+
+
+# Prompts. Kept short so a 1B-class summarizer (gemma3:1b) handles
+# them comfortably and the per-call latency stays low. Output shape
+# is what we parse downstream — pin via tests.
+_SUMMARIZER_PROMPT = """\
+You are a conversation summarizer. Read the conversation below and \
+produce a concise 2-3 sentence summary capturing key topics, decisions, \
+and context useful for continuing the conversation. Focus on facts and \
+intent. Skip greetings and pleasantries. Output ONLY the summary text.
+
+Conversation:
+{conversation_text}
+
+Summary:"""
+
+
+_FACT_EXTRACTOR_PROMPT = """\
+Extract durable facts from the conversation below. Output ONLY a JSON \
+object mapping snake_case keys to short string values. Include names, \
+dates, projects, preferences, and decisions. Skip greetings, opinions, \
+and ephemeral exchanges. Output {{}} when no durable facts are present.
+
+Example output:
+{{"user_name": "Ali", "project_deadline": "2026-04-30", "preferred_language": "Python"}}
+
+Conversation:
+{conversation_text}
+
+JSON:"""
+
+
+def _format_messages_for_prompt(messages: list[ChatMessage]) -> str:
+    """Render a list of ChatMessages as plain text for the summarizer/
+    extractor prompts. Truncates each message to a 500-char preview so
+    a single huge user message can't blow the LLM context budget.
+    """
+    lines: list[str] = []
+    for m in messages:
+        role = "User" if m.role == "user" else (
+            "Assistant" if m.role == "assistant" else m.role.capitalize()
+        )
+        text = m.content
+        if len(text) > 500:
+            text = text[:500] + "…"
+        lines.append(f"{role}: {text}")
+    return "\n".join(lines)
+
+
+def _now() -> str:
+    return datetime.now(timezone.utc).isoformat()
+
+
+class ContextCompactor:
+    """[IMPROVE-15] Hybrid context compression: anchor + summary + facts.
+
+    Pre-IMPROVE-15 ``SmartMemory.prepare_messages`` was effectively a
+    head-trim — when budget was exceeded it dropped the oldest
+    messages. Long conversations lost early context entirely; the
+    user's name, project deadlines, decisions made 30 turns ago all
+    vanished without trace.
+
+    This class implements the standard 2025-2026 hybrid pattern:
+
+      * **Anchor**: keep system prompt + last N messages verbatim.
+      * **Summarize**: middle messages compressed into a 2-3 sentence
+        running summary, persisted to ``conversation_summaries``.
+      * **Key facts**: durable KV facts extracted via the LLM and
+        stored in the existing ``memory_store`` table under namespace
+        ``facts:{agent_name}:{conv_id}``. Re-injected on every turn
+        regardless of summary state.
+
+    Q21=B (background job): summarization runs out-of-band via
+    ``asyncio.create_task`` from the chat router AFTER the response
+    is returned. ``get_compacted_context`` reads the persisted
+    summary, never blocks on LLM calls. When no summary exists yet
+    (early in a conversation, or before the background job has run),
+    callers fall back to ``SmartMemory``'s existing extractive
+    truncation tier.
+
+    Thread-safety: the in-flight dedup set is protected by a module-
+    level ``threading.Lock``. Multiple concurrent chat turns trigger
+    at most one summarization per conv_id at a time.
+
+    Sources (2025-2026):
+      * mem0.ai — LLM Chat History Summarization (Oct 2025):
+        https://mem0.ai/blog/llm-chat-history-summarization-guide-2025
+      * Zylos Research — AI Agent Context Compression (Feb 2026):
+        https://zylos.ai/research/2026-02-28-ai-agent-context-compression-strategies
+      * Redis — Context Window Overflow in 2026:
+        https://redis.io/blog/context-window-overflow/
+    """
+
+    def __init__(
+        self,
+        *,
+        anchor_count: int = 10,
+        summary_threshold: int = 20,
+        summary_max_tokens: int = 300,
+        summarizer_model: str = "ollama:gemma3:1b",
+        router: Any = None,  # ProviderRouter — late-bound to avoid circular import
+    ) -> None:
+        # The "anchor": last N messages kept verbatim. 10 is the
+        # 2025-2026 enterprise default — small enough that even a
+        # 4k-context model has room, large enough to preserve
+        # immediate-turn coherence (clarifications, follow-ups).
+        self.anchor_count = anchor_count
+        # Re-summarize after this many NEW messages since the last
+        # summary's ``summarized_through_message_id``. Plus the anchor
+        # below the threshold gives a rolling-window effect.
+        self.summary_threshold = summary_threshold
+        self.summary_max_tokens = summary_max_tokens
+        self.summarizer_model = summarizer_model
+        self.router = router
+
+    # ── Trigger decision ──────────────────────────────────────────
+
+    def should_summarize(
+        self, conv_id: str, current_message_count: int,
+    ) -> bool:
+        """Decide whether to fire a background summarization task.
+
+        True iff:
+          * ``current_message_count > anchor_count + 5`` (have enough
+            messages older than the anchor to be worth summarizing),
+            AND
+          * Either no summary exists, OR the existing summary is
+            stale by ``>= summary_threshold`` messages.
+
+        Cheap — a single PK lookup on ``conversation_summaries``.
+        Called from the trigger path so we don't queue work that
+        would no-op anyway.
+        """
+        # Need enough older history to summarize beyond the anchor.
+        if current_message_count <= self.anchor_count + 5:
+            return False
+        from .repositories.summaries import get_summary
+        try:
+            existing = get_summary(conv_id)
+        except Exception as exc:
+            # DB read failure is NOT a reason to skip summarization;
+            # the background task will hit the same DB and might
+            # succeed when transient connection issues resolve.
+            logger.debug(
+                "[IMPROVE-15] should_summarize: get_summary failed (%s) — "
+                "treating as no existing summary",
+                exc,
+            )
+            existing = None
+        if existing is None:
+            return True
+        # Stale check: how many new messages since last summary?
+        last_count = int(existing.get("summarized_message_count") or 0)
+        new_messages_since = current_message_count - last_count
+        return new_messages_since >= self.summary_threshold
+
+    # ── Background summarization (Q21=B) ──────────────────────────
+
+    async def summarize_in_background(
+        self, conv_id: str, agent_name: str,
+    ) -> bool:
+        """Fire-and-forget background summarization task.
+
+        Idempotent — the in-flight dedup set short-circuits a second
+        concurrent invocation for the same ``conv_id``. Returns True
+        on success, False on any failure (logs + swallows; chat path
+        stays alive).
+
+        Sequence:
+          1. Acquire in-flight slot for ``conv_id``; bail if held.
+          2. Verify the summarizer model is available (cheap call).
+          3. Read the conversation messages.
+          4. Slice older history (everything before the anchor).
+          5. Call the LLM with the summarizer prompt.
+          6. Persist via ``upsert_summary``.
+          7. Best-effort fact extraction (failure here doesn't block
+             summary persistence).
+          8. Release the in-flight slot.
+        """
+        # 1. In-flight dedup. Quick acquire-or-bail; the second call
+        #    returns immediately rather than waiting for the first.
+        with _SUMMARIZE_IN_FLIGHT_LOCK:
+            if conv_id in _SUMMARIZE_IN_FLIGHT:
+                logger.debug(
+                    "[IMPROVE-15] summarize_in_background: conv %s "
+                    "already in flight — skipping duplicate trigger",
+                    conv_id,
+                )
+                return False
+            _SUMMARIZE_IN_FLIGHT.add(conv_id)
+        try:
+            return await self._summarize_impl(conv_id, agent_name)
+        finally:
+            with _SUMMARIZE_IN_FLIGHT_LOCK:
+                _SUMMARIZE_IN_FLIGHT.discard(conv_id)
+
+    async def _summarize_impl(
+        self, conv_id: str, agent_name: str,
+    ) -> bool:
+        # 2. Verify the summarizer model exists. Skip silently when
+        #    not pulled — the user can install gemma3:1b later and
+        #    the next trigger will succeed. Better than crashing the
+        #    background task pool with a missing-model error.
+        if self.router is None:
+            logger.debug(
+                "[IMPROVE-15] summarize_in_background: no router bound — "
+                "skipping",
+            )
+            return False
+        try:
+            info = self.router.get_model_info(self.summarizer_model)
+        except Exception as exc:
+            logger.debug(
+                "[IMPROVE-15] summarize_in_background: get_model_info "
+                "raised (%s) — skipping",
+                exc,
+            )
+            return False
+        if info is None:
+            logger.info(
+                "[IMPROVE-15] Summarizer model %s not available — "
+                "skipping. Pull it via Ollama or set "
+                "ContextCompactor.summarizer_model to an available "
+                "model to enable.",
+                self.summarizer_model,
+            )
+            return False
+
+        # 3-4. Read messages, slice older-than-anchor.
+        from .repositories.conversations import list_messages
+        try:
+            db_messages = list_messages(conv_id, limit=10_000)
+        except Exception as exc:
+            logger.warning(
+                "[IMPROVE-15] summarize_in_background: list_messages "
+                "failed (%s) — aborting", exc,
+            )
+            return False
+        if len(db_messages) <= self.anchor_count + 5:
+            # Race: between trigger-decision and now, the threshold
+            # check no longer holds. Bail cleanly.
+            return False
+        # Older messages = everything except the last anchor_count.
+        # The "5" buffer matches should_summarize's gate.
+        older = db_messages[: -self.anchor_count] if self.anchor_count else db_messages
+        if not older:
+            return False
+        last_message_id = str(older[-1].get("id"))
+        older_count = len(db_messages)  # total (used for staleness check)
+
+        chat_messages = [
+            ChatMessage(
+                role=str(m.get("role") or "user"),
+                content=str(m.get("content") or ""),
+            )
+            for m in older
+        ]
+        conversation_text = _format_messages_for_prompt(chat_messages)
+
+        # 5. Call the LLM via the router (sync-via-thread to keep this
+        #    method async-clean from any caller).
+        from .providers.base import GenerationSettings
+        summary_prompt_messages = [
+            ChatMessage(
+                role="system",
+                content=_SUMMARIZER_PROMPT.format(
+                    conversation_text=conversation_text,
+                ),
+            ),
+            ChatMessage(role="user", content="Generate the summary now."),
+        ]
+        try:
+            response = await asyncio.to_thread(
+                self.router.chat,
+                self.summarizer_model,
+                summary_prompt_messages,
+                GenerationSettings(max_tokens=self.summary_max_tokens),
+            )
+            summary_text = (response.content or "").strip()
+        except Exception as exc:
+            logger.warning(
+                "[IMPROVE-15] summarize_in_background: LLM call failed "
+                "(%s) — aborting summary for conv %s",
+                exc, conv_id,
+            )
+            return False
+
+        if not summary_text:
+            logger.info(
+                "[IMPROVE-15] summarize_in_background: empty summary for "
+                "conv %s — skipping persistence",
+                conv_id,
+            )
+            return False
+
+        # 6. Persist summary.
+        from .repositories.summaries import upsert_summary
+        try:
+            upsert_summary(
+                conversation_id=conv_id,
+                summary_text=summary_text,
+                summarized_through_message_id=last_message_id,
+                summarized_message_count=older_count,
+                summarizer_model=self.summarizer_model,
+            )
+        except Exception as exc:
+            logger.warning(
+                "[IMPROVE-15] summarize_in_background: upsert_summary "
+                "failed (%s) — aborting", exc,
+            )
+            return False
+
+        # 7. Best-effort fact extraction. Failure here is logged but
+        #    doesn't undo the summary persistence — facts and summary
+        #    are independent value adds.
+        try:
+            await self._extract_and_store_facts(
+                conv_id, agent_name, chat_messages,
+            )
+        except Exception as exc:
+            logger.info(
+                "[IMPROVE-15] summarize_in_background: fact extraction "
+                "failed (%s) — summary persisted regardless",
+                exc,
+            )
+
+        logger.info(
+            "[IMPROVE-15] Summarized conv %s through msg %s (%d msgs total)",
+            conv_id, last_message_id, older_count,
+        )
+        return True
+
+    async def _extract_and_store_facts(
+        self, conv_id: str, agent_name: str, chat_messages: list[ChatMessage],
+    ) -> None:
+        """Ask the LLM to extract durable facts as JSON; persist any
+        valid keys into the ``memory_store`` table under namespace
+        ``facts:{agent_name}:{conv_id}``.
+
+        Bad JSON is silently skipped (logged at debug). The summary
+        still persists. Per-fact errors don't abort the loop.
+        """
+        from .providers.base import GenerationSettings
+        if self.router is None:
+            return
+        conversation_text = _format_messages_for_prompt(chat_messages)
+        fact_prompt_messages = [
+            ChatMessage(
+                role="system",
+                content=_FACT_EXTRACTOR_PROMPT.format(
+                    conversation_text=conversation_text,
+                ),
+            ),
+            ChatMessage(role="user", content="Extract facts as JSON now."),
+        ]
+        response = await asyncio.to_thread(
+            self.router.chat,
+            self.summarizer_model,
+            fact_prompt_messages,
+            GenerationSettings(max_tokens=200),
+        )
+        raw = (response.content or "").strip()
+        # The LLM sometimes wraps JSON in ```json ... ``` fences or
+        # adds a leading sentence. Strip both before parsing.
+        if "```" in raw:
+            raw = raw.split("```")[1]
+            if raw.startswith("json"):
+                raw = raw[4:]
+        # Find the first { and the last } — defensive against trailing
+        # commentary the model may emit despite the "ONLY JSON"
+        # instruction.
+        first = raw.find("{")
+        last = raw.rfind("}")
+        if first < 0 or last <= first:
+            logger.debug(
+                "[IMPROVE-15] fact extraction: no JSON in LLM output "
+                "for conv %s — skipping", conv_id,
+            )
+            return
+        try:
+            facts = json.loads(raw[first : last + 1])
+        except json.JSONDecodeError as exc:
+            logger.debug(
+                "[IMPROVE-15] fact extraction: JSON parse failed (%s) — "
+                "skipping for conv %s",
+                exc, conv_id,
+            )
+            return
+        if not isinstance(facts, dict):
+            return
+
+        namespace = f"{_FACTS_NAMESPACE_PREFIX}:{agent_name}:{conv_id}"
+        from .db import get_conn
+        now = _now()
+        conn = get_conn()
+        try:
+            for key, value in facts.items():
+                if not isinstance(key, str) or not key:
+                    continue
+                # Reject empties / placeholders / overly long values.
+                value_str = str(value).strip()
+                if not value_str or len(value_str) > 500:
+                    continue
+                try:
+                    conn.execute(
+                        "INSERT INTO memory_store (namespace, key, value_json, created_at, updated_at) "
+                        "VALUES (?, ?, ?, ?, ?) "
+                        "ON CONFLICT(namespace, key) DO UPDATE SET "
+                        "value_json=excluded.value_json, updated_at=excluded.updated_at",
+                        (
+                            namespace, key,
+                            json.dumps({"value": value_str}),
+                            now, now,
+                        ),
+                    )
+                except Exception as exc:
+                    logger.debug(
+                        "[IMPROVE-15] fact extraction: per-fact write "
+                        "failed (%s) — continuing", exc,
+                    )
+            conn.commit()
+        finally:
+            conn.close()
+
+    # ── Read path (synchronous) ──────────────────────────────────
+
+    def get_compacted_context(
+        self, conv_id: str, agent_name: str, history: list[ChatMessage],
+    ) -> tuple[str | None, dict[str, str], list[ChatMessage]]:
+        """Read persisted summary + facts; return
+        ``(summary_text, facts_dict, anchor_history)``.
+
+        Synchronous — no LLM calls. Called once per chat turn from
+        ``SmartMemory.prepare_messages``. When no summary exists yet
+        the first slot is None and the anchor is the FULL history;
+        ``SmartMemory`` falls through to its extractive truncation
+        tier.
+        """
+        from .repositories.summaries import get_summary
+
+        try:
+            summary_row = get_summary(conv_id)
+        except Exception as exc:
+            logger.debug(
+                "[IMPROVE-15] get_compacted_context: get_summary failed "
+                "(%s) — treating as no summary", exc,
+            )
+            summary_row = None
+        summary_text: str | None = None
+        if summary_row is not None:
+            summary_text = str(summary_row.get("summary_text") or "") or None
+
+        # Anchor = last N messages verbatim. When summary is absent,
+        # we still split (caller decides what to do with each piece).
+        anchor = (
+            list(history[-self.anchor_count:])
+            if self.anchor_count > 0 else []
+        )
+
+        facts = self._read_facts(agent_name, conv_id)
+        return summary_text, facts, anchor
+
+    def _read_facts(
+        self, agent_name: str, conv_id: str,
+    ) -> dict[str, str]:
+        """Read all facts for this (agent, conv). Returns dict mapping
+        ``key`` → ``value`` (string). Empty when no facts persisted.
+
+        Tolerant of malformed value_json — silently drops bad rows.
+        """
+        namespace = f"{_FACTS_NAMESPACE_PREFIX}:{agent_name}:{conv_id}"
+        from .db import get_conn
+        conn = get_conn()
+        try:
+            rows = conn.execute(
+                "SELECT key, value_json FROM memory_store WHERE namespace = ? "
+                "ORDER BY updated_at DESC",
+                (namespace,),
+            ).fetchall()
+        except Exception as exc:
+            logger.debug(
+                "[IMPROVE-15] _read_facts: query failed (%s) — "
+                "returning empty", exc,
+            )
+            return {}
+        finally:
+            conn.close()
+
+        out: dict[str, str] = {}
+        for r in rows:
+            key = r["key"]
+            try:
+                payload = json.loads(r["value_json"])
+                value = payload.get("value") if isinstance(payload, dict) else payload
+            except Exception:
+                continue
+            if isinstance(value, str) and value:
+                out[key] = value
+        return out
 
 
 # ── Vector store memory (optional, for retrieval-augmented memory) ──

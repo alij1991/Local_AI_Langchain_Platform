@@ -106,7 +106,13 @@ def _install_fake_stream(monkeypatch, *, tokens=("alpha", "beta", "gamma", "delt
     event; with cancellation we'll see strictly fewer.
     """
     async def fake_stream(name, user_input, history_override=None,
-                          settings_override=None, thread_id=None):
+                          settings_override=None, thread_id=None,
+                          conv_id=None, **kwargs):
+        # [IMPROVE-15] ``conv_id`` was added to astream_chat_with_agent
+        # so the chat router can pass it through for hybrid context
+        # compression. Tests don't exercise the compactor — accept and
+        # ignore the kwarg. ``**kwargs`` future-proofs against
+        # additional optional kwargs.
         for tok in tokens:
             yield {"type": "token", "text": tok}
         yield {"type": "done", "content": "".join(tokens)}

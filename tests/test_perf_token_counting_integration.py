@@ -64,7 +64,12 @@ def _install_fake_stream(monkeypatch, agent_name="assistant",
     default ``assistant`` is added in lifespan).
     """
     async def fake_stream(name, user_input, history_override=None,
-                          settings_override=None, thread_id=None):
+                          settings_override=None, thread_id=None,
+                          conv_id=None, **kwargs):
+        # [IMPROVE-15] Accept the new ``conv_id`` kwarg the chat
+        # router started passing for hybrid context compression.
+        # Tests don't exercise the compactor; ``**kwargs`` future-
+        # proofs against additional optional kwargs.
         for tok in tokens:
             yield {"type": "token", "text": tok}
         yield {"type": "done", "content": "".join(tokens)}

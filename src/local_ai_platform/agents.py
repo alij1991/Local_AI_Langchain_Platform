@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import base64
 import inspect
 import logging
@@ -23,6 +24,7 @@ from langchain_ollama import ChatOllama
 
 from .config import AppConfig
 from .memory import (
+    ContextCompactor,
     SmartMemory,
     chat_messages_to_langchain,
     db_messages_to_langchain,
@@ -83,6 +85,12 @@ class AgentOrchestrator:
         self._agent_tool_ids: dict[str, list[str]] = {}
         self._models_without_tool_support: set[str] = set()
         self._smart_memories: dict[str, SmartMemory] = {}
+        # [IMPROVE-15] Per-agent ContextCompactor cache. Same lifecycle
+        # as ``_smart_memories`` — built lazily on first access, kept
+        # for the orchestrator's lifetime. The compactor is cheap
+        # state-wise (just config + router ref); the costly bit
+        # (LLM summarization) runs out-of-band via background tasks.
+        self._compactors: dict[str, ContextCompactor] = {}
 
         # LangGraph checkpointer — keeps conversation state per thread_id.
         # Initialized as InMemorySaver; upgraded to SqliteSaver by ainit().
@@ -284,6 +292,83 @@ class AgentOrchestrator:
             )
         return self._smart_memories[agent_name]
 
+    def _get_compactor(self, agent_name: str) -> ContextCompactor:
+        """[IMPROVE-15] Lazy-build a per-agent ``ContextCompactor``.
+
+        The summarizer model is taken from
+        ``config.context_summarizer_model`` if set, else falls back to
+        ``ollama:gemma3:1b`` — the default name registered in the
+        Ollama-side family of small fast models. Users can override
+        via ``.env`` ``CONTEXT_SUMMARIZER_MODEL=...`` once we wire that
+        config field; for v1 it's a hardcoded default + the per-call
+        cached compactor instance carries the choice.
+
+        Built lazily because most agents never see a long-enough
+        conversation to trigger summarization — paying the compactor
+        construction cost only when needed keeps short-conversation
+        chat paths quick.
+        """
+        if agent_name not in self._compactors:
+            summarizer_model = getattr(
+                self.config, "context_summarizer_model", None,
+            ) or "ollama:gemma3:1b"
+            self._compactors[agent_name] = ContextCompactor(
+                summarizer_model=summarizer_model,
+                router=self.router,
+            )
+        return self._compactors[agent_name]
+
+    def maybe_trigger_summarization(
+        self, conv_id: str, agent_name: str, current_message_count: int,
+    ) -> "asyncio.Task[bool] | None":
+        """[IMPROVE-15] Fire-and-forget background summarization when
+        the threshold is crossed. Called by chat router handlers AFTER
+        ``add_message`` so the trigger reflects the post-write count.
+
+        Returns the ``asyncio.Task`` handle (or None when not
+        triggered) so callers can optionally await for tests; in
+        production the task runs in the background while the response
+        flows back to the user.
+
+        Idempotent at two layers:
+          1. ``compactor.should_summarize`` short-circuits if a recent
+             summary covers the current message count.
+          2. ``compactor.summarize_in_background`` short-circuits via
+             the in-flight set if a concurrent task is already
+             running for the same ``conv_id``.
+
+        Best-effort: any failure (no running loop, stale config, LLM
+        unavailable) is swallowed — chat path stays alive.
+        """
+        try:
+            compactor = self._get_compactor(agent_name)
+            if not compactor.should_summarize(conv_id, current_message_count):
+                return None
+            try:
+                # Must be called from a running event loop — chat
+                # routers ARE async, so this is the normal case.
+                # Returns None when no loop is available (sync
+                # caller in a test, lifespan, etc.).
+                loop = asyncio.get_running_loop()
+            except RuntimeError:
+                logger.debug(
+                    "[IMPROVE-15] maybe_trigger_summarization: no running "
+                    "loop — skipping fire-and-forget for conv %s",
+                    conv_id,
+                )
+                return None
+            task = loop.create_task(
+                compactor.summarize_in_background(conv_id, agent_name),
+                name=f"summarize:{conv_id}",
+            )
+            return task
+        except Exception as exc:
+            logger.debug(
+                "[IMPROVE-15] maybe_trigger_summarization failed (%s) — "
+                "swallowing", exc,
+            )
+            return None
+
     # ── Tool management ───────────────────────────────────────────
 
     def add_instruction_tool(self, name: str, instructions: str) -> None:
@@ -424,8 +509,18 @@ class AgentOrchestrator:
         user_input: str,
         history: list[ChatMessage],
         image_paths: list[str] | None = None,
+        *,
+        conv_id: str | None = None,
     ) -> list[ChatMessage]:
-        """Build token-budgeted message list using smart memory."""
+        """Build token-budgeted message list using smart memory.
+
+        [IMPROVE-15] When ``conv_id`` is supplied, the per-agent
+        ``ContextCompactor`` is plumbed through to ``prepare_messages``
+        so persisted summaries + facts can replace older history. The
+        chat router passes ``conv_id``; lower-level callers that don't
+        have one (e.g. internal supervisor delegations) keep the
+        legacy budget-tier behavior unchanged.
+        """
         memory = self._get_smart_memory(definition.name)
         system_prompt = self._inject_date(definition.system_prompt)
 
@@ -438,10 +533,21 @@ class AgentOrchestrator:
                 ]),
             ]
 
+        # [IMPROVE-15] When we have a conv_id, lazily build the
+        # compactor and forward it. SmartMemory.prepare_messages
+        # short-circuits to the compacted-context branch only when
+        # both the compactor AND a persisted summary/facts exist.
+        compactor = (
+            self._get_compactor(definition.name) if conv_id else None
+        )
+
         return memory.prepare_messages(
             system_prompt=system_prompt,
             history=history,
             user_input=user_input,
+            conv_id=conv_id,
+            agent_name=definition.name if conv_id else None,
+            compactor=compactor,
         )
 
     def _chat_via_router(
@@ -451,10 +557,14 @@ class AgentOrchestrator:
         history: list[ChatMessage],
         image_paths: list[str] | None = None,
         settings_override: dict | None = None,
+        *,
+        conv_id: str | None = None,
     ) -> str:
         """Direct chat through the provider router (no tool calling)."""
         model = self._resolve_model_string(definition)
-        messages = self._build_messages(definition, user_input, history, image_paths)
+        messages = self._build_messages(
+            definition, user_input, history, image_paths, conv_id=conv_id,
+        )
         base_settings = dict(definition.settings) if definition.settings else {}
         if settings_override:
             base_settings.update({k: v for k, v in settings_override.items() if v is not None})
@@ -470,19 +580,21 @@ class AgentOrchestrator:
         callbacks: list[Any] | None = None,
         thread_id: str | None = None,
         settings_override: dict | None = None,
+        *,
+        conv_id: str | None = None,
     ) -> str:
         """Chat using a LangGraph ReAct agent with tool-calling loop and checkpointing."""
         try:
             from langgraph.prebuilt import create_react_agent
         except ImportError:
             logger.warning("langgraph.prebuilt not available, falling back to direct chat")
-            return self._chat_via_router(definition, user_input, history)
+            return self._chat_via_router(definition, user_input, history, conv_id=conv_id)
 
         llm = self._build_langchain_llm(definition, settings_override=settings_override)
         tools = self._tools_for_agent(definition.name)
 
         if not tools or definition.model_name in self._models_without_tool_support:
-            return self._chat_via_router(definition, user_input, history)
+            return self._chat_via_router(definition, user_input, history, conv_id=conv_id)
 
         try:
             agent = create_react_agent(
@@ -617,7 +729,15 @@ class AgentOrchestrator:
         use_tools: bool = True,
         settings_override: dict | None = None,
         thread_id: str | None = None,
+        conv_id: str | None = None,
     ) -> str:
+        """[IMPROVE-15] ``conv_id`` enables hybrid context compression
+        for this turn. When None (default), behavior is identical to
+        pre-IMPROVE-15 — compactor stays inert, legacy budget tiers
+        run. When supplied, ``_build_messages`` reads any persisted
+        summary/facts for this conv and substitutes them for older
+        history.
+        """
         definition = self.definitions[agent_name]
 
         # Normalize history to ChatMessage
@@ -629,15 +749,18 @@ class AgentOrchestrator:
         # Route to the right execution path
         if image_paths:
             output = self._chat_via_router(definition, user_input, history,
-                                           image_paths=image_paths, settings_override=settings_override)
+                                           image_paths=image_paths, settings_override=settings_override,
+                                           conv_id=conv_id)
         elif use_tools and self._tools_for_agent(agent_name):
             output = self._chat_with_react_agent(
                 definition, user_input, history, callbacks=callbacks, thread_id=thread_id,
                 settings_override=settings_override,
+                conv_id=conv_id,
             )
         else:
             output = self._chat_via_router(definition, user_input, history,
-                                           settings_override=settings_override)
+                                           settings_override=settings_override,
+                                           conv_id=conv_id)
 
         # Persist history (bounded to prevent unbounded memory growth)
         if persist_history:
@@ -708,6 +831,7 @@ class AgentOrchestrator:
         history_override: list[ChatMessage] | None = None,
         settings_override: dict | None = None,
         thread_id: str | None = None,
+        conv_id: str | None = None,
     ) -> AsyncGenerator[dict[str, Any], None]:
         """Async streaming chat with typed events.
 
@@ -718,6 +842,11 @@ class AgentOrchestrator:
         - {"type": "done", "content": "full response text"}
 
         Falls back to direct streaming (token-only) for models without tool support.
+
+        [IMPROVE-15] When ``conv_id`` is supplied, hybrid context
+        compression engages — older history is replaced by a persisted
+        summary + facts (when present). Backward-compat with pre-
+        IMPROVE-15 callers via the keyword default.
         """
         definition = self.definitions[agent_name]
         history = history_override if history_override is not None else self.chat_histories.get(agent_name, [])
@@ -848,7 +977,9 @@ class AgentOrchestrator:
 
         # ── Path B: Direct streaming via provider router (no tools) ──
         model = self._resolve_model_string(definition)
-        messages = self._build_messages(definition, user_input, history)
+        messages = self._build_messages(
+            definition, user_input, history, conv_id=conv_id,
+        )
         base_settings = dict(definition.settings) if definition.settings else {}
         if settings_override:
             base_settings.update({k: v for k, v in settings_override.items() if v is not None})

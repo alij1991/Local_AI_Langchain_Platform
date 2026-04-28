@@ -951,6 +951,7 @@ async def agent_chat_stream(
                         history_override=chat_history,
                         settings_override=req.settings,
                         thread_id=thread_id,
+                        conv_id=conv_id,
                     ):
                         etype = event.get("type", "")
 
@@ -1020,6 +1021,24 @@ async def agent_chat_stream(
                         run_id=run_id,
                         perf=perf_data,
                     )
+                    # [IMPROVE-15] Fire-and-forget background
+                    # summarization when the message count crosses
+                    # the threshold. Returns immediately (no await
+                    # on the task); the LLM call happens in the
+                    # background while the user reads the response.
+                    # Idempotent — safe even if multiple turns fire
+                    # concurrently for the same conv.
+                    try:
+                        from local_ai_platform.repositories.conversations import list_messages as _list_msgs
+                        _msg_count = len(_list_msgs(conv_id, limit=10_000))
+                        orchestrator.maybe_trigger_summarization(
+                            conv_id, agent_name, _msg_count,
+                        )
+                    except Exception as _sum_exc:
+                        logger.debug(
+                            "[IMPROVE-15] summarization trigger swallowed: %s",
+                            _sum_exc,
+                        )
                     trace_data = recorder.finalize(success=True)
                     if trace_store:
                         trace_store.save(trace_data)
