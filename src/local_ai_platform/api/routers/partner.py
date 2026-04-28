@@ -314,8 +314,91 @@ async def partner_user_profile(partner=Depends(get_partner_engine)):
 
 @router.delete("/partner/user-profile")
 async def partner_reset_user_profile(partner=Depends(get_partner_engine)):
-    """One-click profile reset (ethical requirement from research)."""
+    """One-click profile reset (ethical requirement from research).
+
+    [IMPROVE-67] This single-scope endpoint is kept for backward
+    compat with existing Flutter clients. Prefer the scoped variant
+    ``DELETE /partner/profile/user_profile`` which produces the same
+    result via the unified scope vocabulary.
+    """
     return partner.reset_user_profile()
+
+
+# ── [IMPROVE-67] Scoped reset + export ───────────────────────────
+
+
+@router.get("/partner/export")
+async def partner_export(partner=Depends(get_partner_engine)):
+    """[IMPROVE-67] Bundle all partner state into a ZIP download.
+
+    Returns:
+      * ``profile.json`` — AI persona
+      * ``user_profile.json`` — BigFive + emotional trajectory
+      * ``facts.jsonl`` / ``key_memories.jsonl`` / ``archived.jsonl`` /
+        ``journal.jsonl`` / ``messages.jsonl`` /
+        ``knowledge_graph.jsonl`` — SQLite tables as JSONL
+      * ``README.md`` — schema notes + export timestamp
+
+    Maps to GDPR-style data portability (Article 20): users get
+    their data BEFORE choosing to nuke any scope via
+    ``DELETE /partner/profile/{scope}``. Read-only — the source
+    data is untouched.
+    """
+    from local_ai_platform.partner.export import build_export_bundle
+
+    bundle = build_export_bundle(partner)
+    return Response(
+        content=bundle,
+        media_type="application/zip",
+        headers={
+            "Content-Disposition": 'attachment; filename="partner-export.zip"',
+            "X-Export-Bytes": str(len(bundle)),
+        },
+    )
+
+
+@router.delete("/partner/profile/{scope}")
+async def partner_reset_scope(
+    scope: str,
+    partner=Depends(get_partner_engine),
+):
+    """[IMPROVE-67] Scoped reset of partner state.
+
+    ``scope`` is one of:
+      * ``profile`` — AI persona (``data/partner/profile.json``)
+      * ``user_profile`` — BigFive + emotional trajectory
+        (``data/partner/user_profile.json``)
+      * ``facts`` — partner_core_facts table
+      * ``key_memories`` — partner_key_memories table
+      * ``archived`` — partner_memories_archive table
+      * ``journal`` — partner_journal table
+      * ``messages`` — partner_conversations table
+      * ``knowledge_graph`` — partner_knowledge_graph table
+      * ``all`` — every scope above, with per-scope breakdown in
+        the response
+
+    Returns a summary like::
+
+        {"scope": "facts", "rows_cleared": 42, "files_cleared": 0,
+         "engine_state_refreshed": false}
+
+    Pre-IMPROVE-67 the only reset was ``DELETE /partner/user-profile``
+    which left facts / key memories / knowledge graph intact —
+    a partial reset users typically didn't expect. Per the doc
+    complaint at ``08-partner.md:432``, scoped reset surfaces the
+    full reset semantics users want.
+    """
+    from local_ai_platform.partner.reset import (
+        RESET_SCOPES,
+        reset_scope,
+    )
+
+    if scope not in RESET_SCOPES:
+        raise HTTPException(
+            400,
+            f"Unknown scope: {scope!r}. Valid: {sorted(RESET_SCOPES)}",
+        )
+    return reset_scope(partner, scope)
 
 
 # ── Voice init + VRAM cleanup helper ─────────────────────────────
