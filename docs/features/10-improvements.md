@@ -1,14 +1,16 @@
 # 10 — Improvement Roadmap
 
-> **Goal of this chapter:** a single consolidated view of the **70 improvement ideas** surfaced across chapters 1–9, scored for impact and effort, grouped by theme, and laid out in a phased roadmap. Every idea here is grounded in a 2025–2026 source — the citations are in each chapter; this doc focuses on *what to do when*.
+> **Goal of this chapter:** a single consolidated view of the **70 improvement ideas** surfaced across chapters 1–9 (now **74** post Wave 6 audit), scored for impact and effort, grouped by theme, and laid out in a phased roadmap. Every idea here is grounded in a 2025–2026 source — the citations are in each chapter; this doc focuses on *what to do when*.
+
+> **Revised 2026-04-28** — Wave 5 shipped (12 items: IMPROVE-29/31/33/34/35/36/51/52/53/54/55/56/57/63/67). Wave 6 in progress (8 items, of which 6 land here). Four new IMPROVE-71/72/73/74 candidates surfaced during the post-Wave-5 audit (see §10.6).
 
 ---
 
 ## 10.1 Summary
 
-- **70 improvements** flagged inline as `[IMPROVE-N]` in chapters 1–9.
+- **74 improvements** flagged inline as `[IMPROVE-N]` in chapters 1–9 + the post-Wave-5 audit (NEW: 71/72/73/74).
 - **10 themes** — security, architecture, observability, tracing, UX, memory & context, model & inference, background tasks, voice, and tools/MCP.
-- **6 waves** — from "this afternoon" to "major lift." Wave 1 alone is ~15 quick wins that unblock everything else.
+- **6 waves** shipped or in-flight; **2** standing in deferred queues (Wave 6 partial, Wave 7 future).
 
 All improvements are traceable back to a chapter + a 2025–2026 citation. This chapter is pure planning — *what* + *why this order*; *how* is in each origin chapter.
 
@@ -252,8 +254,14 @@ Sortable if you paste into a spreadsheet. Chapter column links back to the origi
 | 68 | 9 | Unify all subsystems under TraceStore | ⋆⋆⋆⋆ | 🔨🔨🔨 | Observability |
 | 69 | 9 | pydantic-settings migration (= IMPROVE-6) | ⋆⋆⋆⋆ | 🔨🔨 | Architecture |
 | 70 | 9 | Unified /settings CRUD + schema endpoint | ⋆⋆⋆ | 🔨🔨 | Observability |
+| 71 | 10 | ✓ Land 4 xfailed agents tests + boundary audit | ⋆⋆⋆ | 🔨🔨 | Tools |
+| 72 | 10 | ✓ Route-order shadowing lint at startup | ⋆⋆⋆ | 🔨 | Architecture |
+| 73 | 10 | ✓ 10-improvements.md re-rank + Wave 5 retrospective | ⋆⋆⋆ | 🔨 | Architecture |
+| 74 | 10 | Extract image-compose helpers (numpy/PIL) | ⋆⋆ | 🔨 | Architecture |
 
 *Impact for [IMPROVE-59] is ⋆⋆⋆⋆⋆ if the app is ever distributed, ⋆⋆ if it stays local-only.
+
+**Legend:** A ``✓`` prefix marks items that have shipped. See §10.6 for the Wave 5 + Wave 6 retrospective.
 
 ---
 
@@ -349,47 +357,100 @@ Full scope retained per Q2 (Runs page will be used after testing).
 - [IMPROVE-22] Tavily key in keyring/DB
 - [IMPROVE-59] AI disclosure banner + first-session opt-in
 
-### Wave 5 — Quality polish (ongoing)
+### Wave 5 — Quality polish (✓ shipped 2026-04)
 
-**FLUX-related items elevated per Q13** (all FLUX variants used + more planned).
+All Wave 5 items shipped. Tier 1 sweep grew from 875 → 1091 passes
+(no xfails on Wave 5 work specifically). Net +216 tests across 12
+top-level commits.
 
-High priority:
-- **[IMPROVE-39] Structural model family detection** — 3d *(builds on Wave 1's [IMPROVE-47])*
-- **[IMPROVE-40] Declarative `_plan_optimizations`** — 1w
-- **[IMPROVE-44] Graduated OOM retry** — 3d
-- [IMPROVE-41] Persistent worker pool — 1w
-- [IMPROVE-15] Hybrid context compression *(background job per Q21)* — 1-2w
-- [IMPROVE-9] Unified task registry *(small patch per Q22)* — 3d
+High priority (✓ all shipped):
+- ✓ [IMPROVE-39] Structural model family detection
+- ✓ [IMPROVE-40] Declarative `_plan_optimizations`
+- ✓ [IMPROVE-44] Graduated OOM retry
+- ✓ [IMPROVE-41] Persistent worker pool
+- ✓ [IMPROVE-15] Hybrid context compression *(background job per Q21)*
+- ✓ [IMPROVE-9] Unified task registry *(small patch per Q22)*
 
-Standard polish:
-- [IMPROVE-29] Per-call dangerous-tool interrupts — 3d
-- [IMPROVE-31] Pydantic validation at /systems — 2d
-- [IMPROVE-33] Bounded inter-node context *(after [IMPROVE-15])* — 2d
-- [IMPROVE-63] Voice picker with samples — 2d
-- [IMPROVE-52] Partial undo / blend slider — 3d
-- [IMPROVE-53] Archive-on-close — 1d
-- [IMPROVE-54] User-defined editor presets — 3d
-- [IMPROVE-67] Scoped reset + export for partner — 2d
-- [IMPROVE-51] Weights-readiness reporting — 2d
-- [IMPROVE-57] Mask-composite for Kontext — 2d
-- [IMPROVE-56] Diff metrics from /editor/compare — 2d
-- [IMPROVE-55] Edit-prompt enhancer regression tests — 3d
-- [IMPROVE-34] Rename /systems/deploy → /agents/from-template — 1d
-- [IMPROVE-35] LLM-driven edge routing for DAGs — 3d
-- [IMPROVE-36] Parallel wave execution *(per Q20: allow when wave has no shared state)* — 3d
+Standard polish (✓ all shipped):
+- ✓ [IMPROVE-29] Per-call dangerous-tool interrupts
+- ✓ [IMPROVE-31] Pydantic validation at /systems
+- ✓ [IMPROVE-33] Bounded inter-node context
+- ✓ [IMPROVE-63] Voice picker with samples
+- ✓ [IMPROVE-52] Partial undo / blend slider
+- ✓ [IMPROVE-53] Archive-on-close
+- ✓ [IMPROVE-54] User-defined editor presets
+- ✓ [IMPROVE-67] Scoped reset + export for partner
+- ✓ [IMPROVE-51] Weights-readiness reporting
+- ✓ [IMPROVE-57] Mask-composite for Kontext
+- ✓ [IMPROVE-56] Diff metrics from /editor/compare
+- ✓ [IMPROVE-55] Edit-prompt enhancer regression tests
+- ✓ [IMPROVE-34] Rename /systems/deploy → /agents/from-template
+- ✓ [IMPROVE-35] LLM-driven edge routing for DAGs
+- ✓ [IMPROVE-36] Parallel wave execution *(per Q20)*
 
-### Wave 6 — Demoted / future
+### Wave 6 — Validation hardening + new candidates (in progress 2026-04-28)
 
-**MCP items demoted per Q3 (aspirational).**
+Mix of (a) clearing tech debt that survived Wave 5 (xfailed tests,
+fragile route ordering), (b) promoted items where Wave 5 changes
+dropped their effort (per-byte HF progress), (c) Wave 5 spawned
+follow-ups bundled into the "Tranche C" telemetry expansion, and
+(d) new candidates from the post-Wave-5 audit.
 
+| # | Item | Effort | Status |
+|---:|---|---:|---|
+| 1 | [IMPROVE-71] Land 4 xfailed agents tests + boundary audit | 1.5d | ✓ shipped |
+| 2 | [IMPROVE-72] Route-order shadowing lint at startup | ½d | ✓ shipped |
+| 3 | [IMPROVE-8]  Per-byte HF download progress | 1d | ✓ shipped |
+| 4 | Tranche C — Telemetry expansion ([IMPROVE-36/40/44/55/35]) | 1d | ✓ shipped |
+| 5 | [IMPROVE-73] 10-improvements.md re-rank + Wave 5 retro | ½d | ✓ shipped |
+| 6 | [IMPROVE-46] Latent / SDXL upscaler option | 2d | pending |
+| 7 | [IMPROVE-74] Extract image-compose helpers | 1d | pending |
+| 8 | [IMPROVE-61] Memory decay configuration | 1d | pending |
+
+**Tranche C — Telemetry expansion** (1 day, 5 sub-commits) bundles
+five spawned-followup events from Wave 5:
+
+- [IMPROVE-36 telemetry] parallel-wave engagement counters + per-wave events.
+- [IMPROVE-40 telemetry] per-plan optimization-rule emit with suppressed-by map.
+- [IMPROVE-44 telemetry] OOM ladder start / per-stage / done events.
+- [IMPROVE-55 telemetry] enhancer availability surface (router, source, fallback_reason in /editor/enhance-prompt).
+- [IMPROVE-35 telemetry] SSE routing_decision event for llm_router classifier picks.
+
+### Wave 7 — Deferred (queued for next iteration)
+
+**MCP items still demoted per Q3 (aspirational, post-Wave-5 reassessment confirms).**
+
+NEW candidates surfaced by Wave 5 audit (numbered IMPROVE-NEW-* until accepted):
+- [IMPROVE-NEW-2] Unify token-budget primitive (waits for Tranche D)
+- [IMPROVE-NEW-4] Extract executor from agents.py (~2d refactor)
+- [IMPROVE-NEW-5] Voice/optimization/weights → registry files
+- [IMPROVE-NEW-6] LangGraph-style graph-time validation
+- [IMPROVE-NEW-7] HF accelerate offload manager probe
+- [IMPROVE-NEW-8] OpenAI / Anthropic SDK contract refresh
+- [IMPROVE-NEW-10] Per-feature smoke fixtures
+
+Wave 5 spawned follow-ups deferred to Wave 7+ (organized into
+themed tranches):
+- Tranche A — Flutter editor v2 (~3d): recently-closed panel,
+  preset gallery, mask brush UI, blend slider, metrics overlay.
+- Tranche B — Voice persistence (~1d): persist voice_id/gender,
+  pre-rendered samples, per-emotion voice variants.
+- Tranche D — System DAG enrichments (~3d): LLM-summarized
+  inter-node context, per-edge "pass" config, classifier
+  confidence threshold.
+- Tranche E — Editor advanced (~2d): TTL cleanup cron, LPIPS
+  metric, per-step metrics caching, cropped-patch optimization.
+- Tranche F — Real-world evals (~2d): real-LLM enhancer eval
+  suite at tests/eval/edit_prompt_enhancer.py.
+- Tranche G — Persistence + import (~1d): preset sharing/JSON
+  export, preset versioning, POST /partner/import.
+
+Original Wave 6 items (some shipped above, others still queued):
 - [IMPROVE-21] Sandbox MCP servers *(if Q1 stays local)*
 - [IMPROVE-26] Cache MCP client connections
 - [IMPROVE-28] Wire MCP tools into agent registry
-- [IMPROVE-24] Remove/replace instruction tools *(revisit when Q7 answered)*
-- [IMPROVE-8] Per-byte HF download progress
+- [IMPROVE-24] Remove/replace instruction tools *(Q7 still open)*
 - [IMPROVE-27] Shaped input for tools/test
-- [IMPROVE-46] Latent / SDXL upscaler option
-- [IMPROVE-61] Memory decay configuration
 - [IMPROVE-66] Evaluate SimulStreaming for Whisper streaming
 - Deletion candidates — activate when answers firm up:
   - Delete Chatterbox path if Q4 flips to Kokoro-only (currently kept per Q4=c)
@@ -399,28 +460,55 @@ Standard polish:
 
 ---
 
-## 10.6 Where to start today
+## 10.6 Wave 5 + Wave 6 retrospective
 
-See [§10.5 Wave 1](#wave-1--this-week--2-3-days-total-14-items) above for the full 14-item concrete list. If you only have **1-2 hours today**, pick from this shortlist — each is self-contained, safe, and under 1 hour:
+> **Status as of 2026-04-28:** Wave 5 fully shipped (12 commits, +216
+> tests). Wave 6 in progress (5 of 8 commits shipped, +73 tests).
+> Tier 1 baseline grew 875 → 1164 passes. All 4 xfailed agent
+> tests resolved post-IMPROVE-71.
 
-1. **[IMPROVE-30] Fix `CLAUDE_SYSTEMS.md`** — 30 min
-2. **[IMPROVE-23] Strict path containment in file_ops** — 1 hour
-3. **[IMPROVE-37] Kahn cycle detection on /systems save** — 1 hour
-4. **[IMPROVE-14] Route enhance-prompt + generate-image through router** — 2 hours
-5. **[IMPROVE-19] De-dup chat history loading** — 1 hour
+### Wave 5 (✓ shipped)
 
-If you have a **half day**:
+| # | Tag | SHA | What landed | Tests |
+|---|---|---|---|---:|
+| 1 | [IMPROVE-29] | a3cd464 | Per-call dangerous-tool interrupts | +12 |
+| 2 | [IMPROVE-31] | 9570df7 | Pydantic schema validation at /systems boundary | +14 |
+| 3 | [IMPROVE-67] | 41cfbee | Scoped reset + export for partner (9 scopes + ZIP) | +20 |
+| 4 | [IMPROVE-34] | 88ca7dd | Rename /systems/deploy → /agents/from-template (alias kept until 2026-10-28) | +21 |
+| 5 | [IMPROVE-53] | e402a80 | Archive-on-close for editor sessions | +25 |
+| 6 | [IMPROVE-56] | d830049 | Diff metrics on /editor/compare | +18 |
+| 7 | [IMPROVE-57] | d66cac8 | Mask-composite post-processing | +17 |
+| 8 | [IMPROVE-52] | c066042 | Partial undo / blend slider | +17 |
+| 9 | [IMPROVE-51] | 5b96b85 | Weights-readiness reporting | +14 |
+| 10 | [IMPROVE-55] | 1af9cb7 | Edit-prompt enhancer regression tests | +23 |
+| 11 | [IMPROVE-33] | 86e840c | Bounded inter-node context | +17 |
+| 12 | [IMPROVE-63] | e30e579 | Voice picker with samples | +24 |
+| 13 | [IMPROVE-35] | 41f75e8 | LLM-driven edge routing | +14 |
+| 14 | [IMPROVE-36] | e6dd908 | Optional parallel wave execution | +7 |
+| 15 | [IMPROVE-54] | dfd2c53 | User-defined editor presets | +19 |
 
-6. **[IMPROVE-65] Silero VAD in STT stream** — immediate voice partner quality win
-7. **[IMPROVE-25] Calculator `math.*`** — makes one tool qualitatively more useful
-8. **[IMPROVE-47] Safetensors metadata** — critical given you use every FLUX variant
+### Wave 6 (in progress)
 
-If you have a **full day**:
+| # | Tag | What lands | Tests | Status |
+|---|---|---|---:|---|
+| 1 | [IMPROVE-71] | /agents/* boundary validation + audit | +26 | ✓ |
+| 2 | [IMPROVE-72] | Route-order shadowing lint | +15 | ✓ |
+| 3 | [IMPROVE-8]  | Per-byte HF download progress | +12 | ✓ |
+| 4 | Tranche C    | 5 follow-ups (IMPROVE-36/40/44/55/35 telemetry) | +19 | ✓ |
+| 5 | [IMPROVE-73] | This commit: doc re-rank + retrospective | 0 | ✓ |
+| 6 | [IMPROVE-46] | Latent / SDXL upscaler | tba | pending |
+| 7 | [IMPROVE-74] | Extract image-compose helpers | tba | pending |
+| 8 | [IMPROVE-61] | Memory decay configuration | tba | pending |
 
-9. **[IMPROVE-49] Per-call GGUF quant override** — mandatory per Q27; touches three files (backend + editor route + Flutter UI)
-10. **[IMPROVE-18] thread_id column on conversations** — schema change + single Flutter round-trip
+### Where to start today
 
-All ordered to avoid merge conflicts with each other. Run the app after each as basic verification.
+Wave 1-5 is shipped — pick up [IMPROVE-46], [IMPROVE-74], or
+[IMPROVE-61] from Wave 6 above. All three are independent and
+under a day.
+
+For larger items, see Wave 7 in §10.5 — the deferred queue
+covers the remaining IMPROVE-NEW-* candidates surfaced during
+the Wave 5 audit and the spawned-followup tranches A/B/D/E/F/G.
 
 ---
 
@@ -470,12 +558,12 @@ Answer whichever are easy. The roadmap is shaped enough to make progress on Wave
 ## 10.8 Where to go from here
 
 - **Read chapter 1 → 9 if you haven't.** This chapter is the index; the others have the details.
-- **Pick a Wave 1 item and ship it.** Each is ≤ 1 day and ≤ 1 file. Muscle memory beats further planning.
-- **Keep `[IMPROVE-N]` references alive.** When you fix one, grep `docs/features/` for that ID and cross out. If you add new ones in future work, number them IMPROVE-71+ and note them in the originating chapter.
+- **Pick a Wave 6 pending item and ship it** — see §10.6 above.
+- **Keep `[IMPROVE-N]` references alive.** When you fix one, grep `docs/features/` for that ID and cross out. If you add new ones in future work, number them IMPROVE-75+ (71-74 are taken) and note them in the originating chapter.
 - **The `MEMORY.md` in `~/.claude/projects/...` contains the feedback rule** that improvement suggestions should cite 2025–2026 sources. Every item here has citations in its origin chapter.
 
 ---
 
 **Guide complete.** `docs/features/README.md` → `01-architecture.md` → `02-llm-infrastructure.md` → `03-chat.md` → `04-agents-tools.md` → `05-systems.md` → `06-image-generation.md` → `07-image-editor.md` → `08-partner.md` → `09-observability.md` → `10-improvements.md` *(this file)*.
 
-Every major feature of the Local AI Platform is now documented end-to-end, with 70 research-backed improvement ideas cross-referenced into one prioritized plan.
+Every major feature of the Local AI Platform is now documented end-to-end, with **74** research-backed improvement ideas cross-referenced into one prioritized plan. Wave 5 fully shipped; Wave 6 in progress.
