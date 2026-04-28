@@ -3885,13 +3885,27 @@ def _apply_rules(
     ``note(ctx)`` (or literal note) to ``notes``. Final write of
     ``quality_tier`` + ``quality_notes`` keys preserves the
     pre-IMPROVE-40 output dict shape.
+
+    [IMPROVE-40 telemetry] Emits one ``image.optimization_plan`` event
+    per call with the breakdown — fired rules, suppressed rules + by
+    whom, totals. One event per plan rather than one-per-rule keeps
+    the trace stream readable for runs that evaluate 12+ rules. Names
+    only (no per-rule config dicts) so the event payload stays small
+    even for large rule tables.
     """
     candidates: list[OptimizationRule] = [r for r in rules if r.enable(ctx)]
     suppressed: set[str] = set()
+    # [IMPROVE-40 telemetry] Track who suppressed whom — useful when a
+    # user expects rule X to fire and it doesn't, this points at the
+    # conflicting rule.
+    suppressed_by: dict[str, str] = {}
     for rule in candidates:
-        suppressed.update(rule.conflicts)
+        for victim in rule.conflicts:
+            suppressed.add(victim)
+            suppressed_by.setdefault(victim, rule.name)
     opts: dict[str, Any] = {}
     notes: list[str] = []
+    rules_fired: list[str] = []
     for rule in candidates:
         if rule.name in suppressed:
             continue
@@ -3905,8 +3919,43 @@ def _apply_rules(
             nt = rule.note
         if nt:
             notes.append(nt)
+        rules_fired.append(rule.name)
     opts["quality_tier"] = ctx.quality_tier
     opts["quality_notes"] = notes
+
+    # [IMPROVE-40 telemetry] Per-plan event. Wrapped because the rule
+    # evaluator runs inside the hot generation path; an emit failure
+    # (SQLite locked, observability disabled) must not poison
+    # optimization planning.
+    try:
+        rules_suppressed = [
+            r.name for r in candidates if r.name in suppressed
+        ]
+        emit(
+            "image", "optimization_plan", status="ok",
+            context={
+                "backend": ctx.backend,
+                "family": ctx.family,
+                "quality_tier": ctx.quality_tier,
+                "steps": ctx.steps,
+                "is_few_step": ctx.is_few_step,
+                "is_cpu": ctx.is_cpu,
+                "rules_fired": rules_fired,
+                "rules_suppressed": rules_suppressed,
+                "rules_suppressed_by": {
+                    k: v for k, v in suppressed_by.items()
+                    if k in rules_suppressed
+                },
+            },
+            perf={
+                "candidate_count": len(candidates),
+                "fired_count": len(rules_fired),
+                "suppressed_count": len(rules_suppressed),
+            },
+        )
+    except Exception as exc:  # pragma: no cover - belt and suspenders
+        logger.debug("optimization_plan emit failed: %s", exc)
+
     return opts
 
 

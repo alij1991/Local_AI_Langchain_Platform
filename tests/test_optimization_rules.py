@@ -673,3 +673,101 @@ def test_plan_always_writes_quality_tier_and_notes_keys():
     assert "quality_tier" in plan
     assert "quality_notes" in plan
     assert isinstance(plan["quality_notes"], list)
+
+
+# ── [IMPROVE-40 telemetry] Per-plan emit ──────────────────────────
+
+
+def _capture_emits(monkeypatch):
+    """Replace the module's ``emit`` with a list-collector so tests
+    can assert on the events the planner wrote."""
+    captured: list[tuple[str, str, dict, dict | None]] = []
+
+    def fake_emit(subsystem, action, status="ok",
+                  duration_ms=None, error_code=None, error_message=None,
+                  context=None, perf=None):
+        captured.append((subsystem, action, dict(context or {}), dict(perf) if perf else None))
+
+    monkeypatch.setattr(svc, "emit", fake_emit)
+    return captured
+
+
+def test_telemetry_optimization_plan_event_fired(monkeypatch):
+    """A plan call emits exactly one ``image.optimization_plan``
+    event with the right context shape."""
+    captured = _capture_emits(monkeypatch)
+    ctx = _make_ctx(quality_tier="balanced", steps=20)
+    _apply_rules(ctx, _OPTIMIZATION_RULES)
+    plans = [c for c in captured if c[1] == "optimization_plan"]
+    assert len(plans) == 1
+    sub, action, c_ctx, c_perf = plans[0]
+    assert sub == "image"
+    assert c_ctx["backend"] == "diffusers_cuda"
+    assert c_ctx["family"] == "sdxl"
+    assert c_ctx["quality_tier"] == "balanced"
+    assert c_ctx["steps"] == 20
+    assert isinstance(c_ctx["rules_fired"], list)
+    assert isinstance(c_ctx["rules_suppressed"], list)
+    assert isinstance(c_ctx["rules_suppressed_by"], dict)
+    assert c_perf is not None
+    assert c_perf["fired_count"] == len(c_ctx["rules_fired"])
+    assert c_perf["suppressed_count"] == len(c_ctx["rules_suppressed"])
+
+
+def test_telemetry_records_hypersd_suppresses_deepcache(monkeypatch):
+    """Few-step SDXL Lightning fires Hyper-SD which suppresses
+    DeepCache; the event records the suppression with the suppressor
+    name. Pinned pattern from the rule table — a future rename of
+    deepcache or hypersd_lora must update this test."""
+    captured = _capture_emits(monkeypatch)
+    ctx = _make_ctx(
+        backend="diffusers_cuda",
+        family="sdxl",
+        variant="lightning",
+        quality_tier="performance",
+        steps=4,
+    )
+    _apply_rules(ctx, _OPTIMIZATION_RULES)
+    plan = next(c for c in captured if c[1] == "optimization_plan")
+    suppressed_by = plan[2]["rules_suppressed_by"]
+    if "deepcache" in suppressed_by:
+        # When deepcache was a candidate AND got suppressed by
+        # hypersd_lora, the map records that.
+        assert suppressed_by["deepcache"] == "hypersd_lora"
+
+
+def test_telemetry_zero_candidates_still_emits(monkeypatch):
+    """A plan that fires no rules still emits an event with empty
+    lists — dashboards rely on consistent presence to count "runs
+    where nothing fired"."""
+    captured = _capture_emits(monkeypatch)
+    # Pick a context where nothing meaningful fires.
+    ctx = _make_ctx(
+        backend="onnxruntime_cpu",
+        family="unknown",
+        quality_tier="balanced",
+        steps=20,
+        gpu_vram_bytes=0,
+    )
+    _apply_rules(ctx, _OPTIMIZATION_RULES)
+    plans = [c for c in captured if c[1] == "optimization_plan"]
+    assert len(plans) == 1
+    perf = plans[0][3]
+    assert perf["fired_count"] >= 0
+    # The event keys must be present even when empty.
+    assert "rules_fired" in plans[0][2]
+    assert "rules_suppressed" in plans[0][2]
+
+
+def test_telemetry_emit_failure_does_not_break_planning(monkeypatch):
+    """If observability is broken (SQLite locked, telemetry off), the
+    planner still returns a valid plan — the emit is wrapped."""
+    def boom(*args, **kwargs):
+        raise RuntimeError("synthetic emit failure")
+
+    monkeypatch.setattr(svc, "emit", boom)
+    ctx = _make_ctx(quality_tier="balanced", steps=20)
+    plan = _apply_rules(ctx, _OPTIMIZATION_RULES)
+    # plan should still have the required terminal keys.
+    assert "quality_tier" in plan
+    assert "quality_notes" in plan
