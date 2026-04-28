@@ -573,3 +573,138 @@ def test_oom_error_codes_set_includes_all_pre_improve_44_codes():
     assert "out_of_memory" in _OOM_RETRY_ERROR_CODES
     assert "provider_unavailable" in _OOM_RETRY_ERROR_CODES
     assert "runtime_crash" in _OOM_RETRY_ERROR_CODES
+
+
+# ── [IMPROVE-44 telemetry] Per-stage + ladder events ──────────────
+
+
+def _capture_emits(monkeypatch):
+    captured: list[tuple[str, str, str, dict, dict | None]] = []
+
+    def fake_emit(subsystem, action, status="ok",
+                  duration_ms=None, error_code=None, error_message=None,
+                  context=None, perf=None):
+        captured.append((subsystem, action, status, dict(context or {}), dict(perf) if perf else None))
+
+    monkeypatch.setattr(svc, "emit", fake_emit)
+    return captured
+
+
+def test_telemetry_ladder_engagement_emits_start_event(monkeypatch):
+    """Ladder entry fires a ``image.oom_ladder_start`` event with
+    the planned stages, error_code, and original dimensions."""
+    captured = _capture_emits(monkeypatch)
+    s, _, _ = _make_service(run_results=[_ok()])
+    s._run_oom_retry_ladder(
+        base_args=_base_args(),
+        base_plan={"torch_dtype": "bfloat16"},
+        original_error=_oom("out_of_memory"),
+        orig_width=1024, orig_height=1024,
+        orig_steps=28, orig_timeout_s=120,
+        mask_image_path=None,
+    )
+    starts = [c for c in captured if c[1] == "oom_ladder_start"]
+    assert len(starts) == 1
+    ctx = starts[0][3]
+    assert ctx["error_code"] == "out_of_memory"
+    assert ctx["original_width"] == 1024
+    assert ctx["original_height"] == 1024
+    assert ctx["original_steps"] == 28
+    assert isinstance(ctx["stages_planned"], list) and ctx["stages_planned"]
+    assert ctx["allow_cpu"] is True
+
+
+def test_telemetry_per_stage_attempt_event_per_stage(monkeypatch):
+    """Each stage attempt fires a ``image.oom_stage_attempt`` event —
+    success or failure. The number of attempt events equals the
+    number of ladder iterations actually run."""
+    captured = _capture_emits(monkeypatch)
+    s, _, _ = _make_service(run_results=[
+        _oom(),                # stage 1 fails
+        _oom(),                # stage 2 fails
+        _ok(b"won@offload"),   # stage 3 wins
+    ])
+    s._run_oom_retry_ladder(
+        base_args=_base_args(),
+        base_plan={"torch_dtype": "bfloat16"},
+        original_error=_oom(),
+        orig_width=1024, orig_height=1024,
+        orig_steps=28, orig_timeout_s=120,
+        mask_image_path=None,
+    )
+    attempts = [c for c in captured if c[1] == "oom_stage_attempt"]
+    assert len(attempts) == 3
+    # First two are errors, third is ok.
+    assert [c[2] for c in attempts] == ["error", "error", "ok"]
+
+
+def test_telemetry_ladder_done_success_carries_stage_name(monkeypatch):
+    """A successful ladder fires ``image.oom_ladder_done`` with
+    status="ok" + the winning stage name + the full attempted list."""
+    captured = _capture_emits(monkeypatch)
+    s, _, _ = _make_service(run_results=[
+        _oom(), _oom(), _ok(b"recovered"),
+    ])
+    s._run_oom_retry_ladder(
+        base_args=_base_args(),
+        base_plan={"torch_dtype": "bfloat16"},
+        original_error=_oom(),
+        orig_width=1024, orig_height=1024,
+        orig_steps=28, orig_timeout_s=120,
+        mask_image_path=None,
+    )
+    dones = [c for c in captured if c[1] == "oom_ladder_done"]
+    assert len(dones) == 1
+    assert dones[0][2] == "ok"
+    ctx = dones[0][3]
+    assert ctx["successful_stage"] is not None
+    # First two stages tried + winning stage = 3 entries.
+    assert len(ctx["stages_tried"]) == 3
+    assert ctx["stage_count"] == 3
+
+
+def test_telemetry_ladder_done_all_failed_status_error(monkeypatch):
+    """When every stage fails OOM, ladder_done fires with
+    status="error" and successful_stage=None."""
+    captured = _capture_emits(monkeypatch)
+    # Build a service that returns OOM for every stage. Use tiny
+    # input so only 2 stages apply (cpu pure + maybe cpu_offload).
+    s, _, _ = _make_service(run_results=[
+        _oom(), _oom(), _oom(), _oom(), _oom(), _oom(),
+    ])
+    s._run_oom_retry_ladder(
+        base_args=_base_args(),
+        base_plan={"torch_dtype": "bfloat16"},
+        original_error=_oom(),
+        orig_width=1024, orig_height=1024,
+        orig_steps=28, orig_timeout_s=120,
+        mask_image_path=None,
+    )
+    dones = [c for c in captured if c[1] == "oom_ladder_done"]
+    assert len(dones) == 1
+    assert dones[0][2] == "error"
+    assert dones[0][3]["successful_stage"] is None
+
+
+def test_telemetry_non_oom_mid_ladder_emits_done_with_error(monkeypatch):
+    """A non-OOM error mid-ladder aborts and still emits a
+    ``oom_ladder_done`` so dashboards see the ladder closed."""
+    captured = _capture_emits(monkeypatch)
+    s, _, _ = _make_service(run_results=[
+        _oom(),       # stage 1 OOM
+        _non_oom(),   # stage 2 non-OOM → abort
+    ])
+    s._run_oom_retry_ladder(
+        base_args=_base_args(),
+        base_plan={"torch_dtype": "bfloat16"},
+        original_error=_oom(),
+        orig_width=1024, orig_height=1024,
+        orig_steps=28, orig_timeout_s=120,
+        mask_image_path=None,
+    )
+    dones = [c for c in captured if c[1] == "oom_ladder_done"]
+    assert len(dones) == 1
+    assert dones[0][2] == "error"
+    # 2 attempts, both recorded
+    attempts = [c for c in captured if c[1] == "oom_stage_attempt"]
+    assert len(attempts) == 2

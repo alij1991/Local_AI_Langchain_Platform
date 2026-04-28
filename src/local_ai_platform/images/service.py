@@ -4626,6 +4626,40 @@ class _GenerationCancelled(RuntimeError):
     """
 
 
+def _emit_oom_ladder_done(
+    *,
+    success: bool,
+    ladder_t0: float,
+    successful_stage: str | None,
+    attempted: list[str],
+    error_code: str | None,
+) -> None:
+    """[IMPROVE-44 telemetry] Emit the ladder-completion event.
+
+    Module-level (not a method) so it's testable in isolation and the
+    method body stays readable. Wrapped emit because the ladder runs
+    inside the failure path — telemetry must never escalate a
+    recoverable OOM into a 500 by raising itself.
+    """
+    duration_ms = int((time.monotonic() - ladder_t0) * 1000)
+    try:
+        emit(
+            "image",
+            "oom_ladder_done",
+            status="ok" if success else "error",
+            duration_ms=duration_ms,
+            error_code=None if success else error_code,
+            context={
+                "successful_stage": successful_stage,
+                "stages_tried": list(attempted),
+                "stage_count": len(attempted),
+            },
+            perf={"stage_count": len(attempted)},
+        )
+    except Exception as exc:  # pragma: no cover
+        logger.debug("oom_ladder_done emit failed: %s", exc)
+
+
 class ImageGenerationService:
     def __init__(self, config: AppConfig) -> None:
         self.config = config
@@ -8805,7 +8839,28 @@ class ImageGenerationService:
             [s.name for s in stages],
         )
 
+        # [IMPROVE-44 telemetry] Ladder-engagement event so operators
+        # have a stable stream marker for "this run hit OOM and
+        # entered recovery". Pairs with the ladder_done event below
+        # so dashboards can compute ladder wall-clock + success rate.
+        ladder_t0 = time.monotonic()
+        try:
+            emit(
+                "image", "oom_ladder_start", status="start",
+                context={
+                    "error_code": original_error.error_code,
+                    "original_width": orig_width,
+                    "original_height": orig_height,
+                    "original_steps": orig_steps,
+                    "stages_planned": [s.name for s in stages],
+                    "allow_cpu": allow_cpu,
+                },
+            )
+        except Exception as exc:  # pragma: no cover
+            logger.debug("oom_ladder_start emit failed: %s", exc)
+
         attempted: list[str] = []
+        successful_stage: str | None = None
         for stage in stages:
             retry_plan, retry_w, retry_h, warning = _apply_oom_stage_to_plan(
                 stage, base_plan, orig_width, orig_height,
@@ -8839,6 +8894,7 @@ class ImageGenerationService:
                 stage.name, retry_w, retry_h, retry_steps, retry_timeout,
             )
 
+            stage_t0 = time.monotonic()
             retry = self._run_diffusers(
                 **base_args,
                 width=retry_w,
@@ -8848,6 +8904,7 @@ class ImageGenerationService:
                 execution_plan=retry_plan,
                 timeout_s=retry_timeout,
             )
+            stage_ms = int((time.monotonic() - stage_t0) * 1000)
             if retry.ok:
                 md = dict(retry.metadata or {})
                 md["oom_recovery"] = True
@@ -8866,7 +8923,51 @@ class ImageGenerationService:
                     "[IMG] [IMPROVE-44] OOM recovery succeeded at stage '%s'",
                     stage.name,
                 )
+                # [IMPROVE-44 telemetry] Per-stage success event.
+                successful_stage = stage.name
+                try:
+                    emit(
+                        "image", "oom_stage_attempt", status="ok",
+                        duration_ms=stage_ms,
+                        context={
+                            "stage_name": stage.name,
+                            "retry_width": retry_w,
+                            "retry_height": retry_h,
+                            "retry_steps": retry_steps,
+                            "retry_timeout_s": retry_timeout,
+                            "retry_device": stage.device,
+                        },
+                    )
+                except Exception as exc:  # pragma: no cover
+                    logger.debug("oom_stage_attempt emit failed: %s", exc)
+                _emit_oom_ladder_done(
+                    success=True, ladder_t0=ladder_t0,
+                    successful_stage=successful_stage, attempted=attempted,
+                    error_code=None,
+                )
                 return retry
+
+            # [IMPROVE-44 telemetry] Per-stage failure event. error_code
+            # carries the underlying _run_diffusers result so the
+            # operator can see which stages ran out of which kind of
+            # memory.
+            try:
+                emit(
+                    "image", "oom_stage_attempt", status="error",
+                    duration_ms=stage_ms,
+                    error_code=retry.error_code,
+                    error_message=(retry.error_message or "")[:200],
+                    context={
+                        "stage_name": stage.name,
+                        "retry_width": retry_w,
+                        "retry_height": retry_h,
+                        "retry_steps": retry_steps,
+                        "retry_timeout_s": retry_timeout,
+                        "retry_device": stage.device,
+                    },
+                )
+            except Exception as exc:  # pragma: no cover
+                logger.debug("oom_stage_attempt emit failed: %s", exc)
 
             # Non-OOM error mid-ladder → stop. Continuing wastes time on
             # a failure mode the ladder can't fix (corrupt model file,
@@ -8881,6 +8982,11 @@ class ImageGenerationService:
                 md["oom_recovery_attempted"] = True
                 md["oom_stages_tried"] = list(attempted)
                 retry.metadata = md
+                _emit_oom_ladder_done(
+                    success=False, ladder_t0=ladder_t0,
+                    successful_stage=None, attempted=attempted,
+                    error_code=retry.error_code,
+                )
                 return retry
 
         # Every stage failed with an OOM-class error. Return the
@@ -8893,6 +8999,11 @@ class ImageGenerationService:
         logger.warning(
             "[IMG] [IMPROVE-44] All %d ladder stages failed; returning original error",
             len(attempted),
+        )
+        _emit_oom_ladder_done(
+            success=False, ladder_t0=ladder_t0,
+            successful_stage=None, attempted=attempted,
+            error_code=original_error.error_code,
         )
         return original_error
 
