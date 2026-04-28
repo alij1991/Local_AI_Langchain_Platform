@@ -1368,11 +1368,17 @@ def upscale_image_endpoint(
     body: dict[str, Any],
     image_service: ImageGenerationService = Depends(get_image_service),
 ):
-    """Upscale an image using ML super-resolution (RealESRGAN) or LANCZOS fallback."""
+    """Upscale an image. Methods: ``realesrgan`` (default, fast),
+    ``lanczos`` (CPU fallback), ``latent`` (2x diffusers, [IMPROVE-46]),
+    ``sdxl_x4`` (4x diffusers, [IMPROVE-46]).
+    """
     image_id = body.get("image_id", "")
     session_id = body.get("session_id", "")
     prompt = body.get("prompt", "high quality, detailed")
     scale = int(body.get("scale", 4))
+    # [IMPROVE-46] Method picker. Pre-IMPROVE-46 callers (no method
+    # field) get realesrgan as before — backward compat.
+    method = (body.get("method") or "realesrgan").lower().strip()
 
     # Resolve image path from ID
     image_path = ""
@@ -1389,9 +1395,14 @@ def upscale_image_endpoint(
     if not image_path:
         raise HTTPException(400, "image_id or image_path required")
 
-    result = image_service.upscale_image(image_path=image_path, prompt=prompt, scale=scale)
+    result = image_service.upscale_image(
+        image_path=image_path, prompt=prompt, scale=scale, method=method,
+    )
     if not result.ok:
-        raise HTTPException(500, {"error": {"code": result.error_code, "message": result.error_message}})
+        # [IMPROVE-46] invalid_method is a client error (400) not
+        # server error.
+        status = 400 if result.error_code == "invalid_method" else 500
+        raise HTTPException(status, {"error": {"code": result.error_code, "message": result.error_message}})
 
     # Save upscaled image to session
     if session_id and result.image_bytes:

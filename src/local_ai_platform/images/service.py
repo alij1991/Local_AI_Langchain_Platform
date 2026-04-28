@@ -4664,6 +4664,11 @@ class ImageGenerationService:
     def __init__(self, config: AppConfig) -> None:
         self.config = config
         self._pipelines: dict[tuple[str, str, str, str], Any] = {}
+        # [IMPROVE-46] Separate cache for diffusers upscalers (latent /
+        # SDX4). Keyed by method name so the same pipeline survives
+        # repeated upscale calls — load is ~3-6 GB and ~30 s, repeat
+        # calls should reuse.
+        self._upscale_pipelines: dict[str, Any] = {}
         self._models_cache: dict[str, Any] = {"ts": 0.0, "items": []}
         # Progress tracking for the current generation job
         self._current_stage_file: str | None = None
@@ -6150,13 +6155,29 @@ class ImageGenerationService:
         image_path: str,
         prompt: str = "",
         scale: int = 4,
+        method: str = "realesrgan",
         timeout_sec: int | None = None,
     ) -> ImageRuntimeResult:
         """Upscale an image using ML super-resolution.
 
-        Tries (in order): RealESRGAN (fast, lightweight) → LANCZOS (fallback).
-        The diffusers SD x4 upscaler is skipped for now — it requires ~6GB
-        VRAM and is slow on CPU, making it impractical for weak hardware.
+        [IMPROVE-46] ``method`` selects the upscaler:
+
+          * ``"realesrgan"`` (default) — fast, ~200MB model, GPU or CPU.
+            Same as pre-IMPROVE-46. Falls back to LANCZOS on any failure.
+          * ``"lanczos"`` — pure-CPU resize, zero ML. Fastest, lowest
+            quality. No external weights, no VRAM.
+          * ``"latent"`` — diffusers ``stabilityai/sd-x2-latent-upscaler``.
+            2x scale (overrides any other ``scale``). Needs ``prompt`` to
+            guide upscaling. ~3GB VRAM with sequential offload. Best for
+            SD 1.5 / SDXL outputs already at decent resolution.
+          * ``"sdxl_x4"`` — diffusers ``stabilityai/stable-diffusion-x4-upscaler``.
+            4x scale (overrides any other ``scale``). Needs ``prompt``.
+            ~6GB VRAM with sequential offload — heavy on 8GB cards;
+            falls back to RealESRGAN if VRAM is insufficient.
+
+        The diffusers paths require ``diffusers`` + ``torch`` and a
+        first-use HF download. Both are gated behind ``method`` so
+        defaults don't pull a ~9GB combined download on every install.
         """
         Image, _ = _require_pillow()
         try:
@@ -6164,7 +6185,37 @@ class ImageGenerationService:
         except Exception as exc:
             return ImageRuntimeResult(ok=False, error_code="invalid_image", error_message=str(exc))
 
-        # Try RealESRGAN (fast, ~200MB model, GPU or CPU)
+        method_norm = (method or "realesrgan").lower().strip()
+        if method_norm not in {"realesrgan", "lanczos", "latent", "sdxl_x4"}:
+            return ImageRuntimeResult(
+                ok=False, error_code="invalid_method",
+                error_message=f"Unknown upscale method: {method}",
+            )
+
+        # [IMPROVE-46] Diffusers-based upscalers — opt-in via method=.
+        if method_norm == "latent":
+            return self._upscale_latent(img=img, prompt=prompt)
+        if method_norm == "sdxl_x4":
+            result = self._upscale_sdxl_x4(img=img, prompt=prompt)
+            if result.ok:
+                return result
+            # SDXL x4 OOM / load-fail → fall through to RealESRGAN
+            logger.warning(
+                "[IMPROVE-46] sdxl_x4 upscale failed (%s); falling back "
+                "to RealESRGAN", result.error_code,
+            )
+
+        if method_norm == "lanczos":
+            new_w, new_h = img.width * scale, img.height * scale
+            result_img = img.resize((new_w, new_h), Image.Resampling.LANCZOS)
+            buf = io.BytesIO()
+            result_img.save(buf, format="PNG")
+            return ImageRuntimeResult(
+                ok=True, image_bytes=buf.getvalue(),
+                metadata={"method": "lanczos", "scale": scale, "original_size": f"{img.width}x{img.height}", "upscaled_size": f"{new_w}x{new_h}"},
+            )
+
+        # Try RealESRGAN (default; also the sdxl_x4 fallback)
         try:
             from realesrgan import RealESRGANer
             from basicsr.archs.rrdbnet_arch import RRDBNet
@@ -6198,6 +6249,150 @@ class ImageGenerationService:
             ok=True, image_bytes=buf.getvalue(),
             metadata={"method": "lanczos", "scale": scale, "original_size": f"{img.width}x{img.height}", "upscaled_size": f"{new_w}x{new_h}"},
         )
+
+    def _upscale_latent(
+        self,
+        *,
+        img: Any,
+        prompt: str,
+    ) -> ImageRuntimeResult:
+        """[IMPROVE-46] 2x latent-space upscaler.
+
+        Uses ``stabilityai/sd-x2-latent-upscaler`` (3 GB). Sequential
+        offload keeps it on an 8 GB card. Needs a guidance prompt; if
+        empty, defaults to ``"high quality, detailed"`` so the
+        endpoint contract still works for the no-prompt case.
+        """
+        Image, _ = _require_pillow()
+        guide = prompt.strip() or "high quality, detailed"
+        cache_key = "latent"
+        try:
+            pipe = self._upscale_pipelines.get(cache_key)
+            if pipe is None:
+                from diffusers import StableDiffusionLatentUpscalePipeline
+                import torch
+
+                pipe = StableDiffusionLatentUpscalePipeline.from_pretrained(
+                    "stabilityai/sd-x2-latent-upscaler",
+                    torch_dtype=torch.float16 if torch.cuda.is_available() else torch.float32,
+                )
+                if torch.cuda.is_available():
+                    pipe.enable_sequential_cpu_offload()
+                else:
+                    pipe = pipe.to("cpu")
+                self._upscale_pipelines[cache_key] = pipe
+
+            import torch
+
+            # The latent upscaler expects either an image OR a latent;
+            # passing PIL works because diffusers auto-encodes.
+            output = pipe(
+                prompt=guide,
+                image=img,
+                num_inference_steps=20,
+                guidance_scale=0.0,
+                generator=torch.Generator(device="cpu").manual_seed(0),
+            ).images[0]
+            buf = io.BytesIO()
+            output.save(buf, format="PNG")
+            return ImageRuntimeResult(
+                ok=True, image_bytes=buf.getvalue(),
+                metadata={
+                    "method": "latent",
+                    "scale": 2,
+                    "original_size": f"{img.width}x{img.height}",
+                    "upscaled_size": f"{output.width}x{output.height}",
+                    "prompt": guide,
+                },
+            )
+        except ImportError as exc:
+            return ImageRuntimeResult(
+                ok=False, error_code="missing_dependency",
+                error_message=f"Latent upscaler requires diffusers + torch: {exc}",
+            )
+        except Exception as exc:
+            error_code = (
+                "out_of_memory"
+                if "out of memory" in str(exc).lower()
+                or "cuda" in type(exc).__name__.lower()
+                else "runtime_crash"
+            )
+            return ImageRuntimeResult(
+                ok=False, error_code=error_code,
+                error_message=str(exc),
+            )
+
+    def _upscale_sdxl_x4(
+        self,
+        *,
+        img: Any,
+        prompt: str,
+    ) -> ImageRuntimeResult:
+        """[IMPROVE-46] 4x diffusers upscaler (SD x4 — same model
+        family as Stability's original SD 1.5 upscaler, used here as
+        a heavy-quality option for SDXL outputs).
+
+        ``stabilityai/stable-diffusion-x4-upscaler`` is ~6 GB; runs on
+        8 GB cards via sequential offload but tight. Caller-side
+        fallback to RealESRGAN handles VRAM exhaustion gracefully.
+        """
+        Image, _ = _require_pillow()
+        guide = prompt.strip() or "high quality, detailed"
+        cache_key = "sdxl_x4"
+        try:
+            pipe = self._upscale_pipelines.get(cache_key)
+            if pipe is None:
+                from diffusers import StableDiffusionUpscalePipeline
+                import torch
+
+                pipe = StableDiffusionUpscalePipeline.from_pretrained(
+                    "stabilityai/stable-diffusion-x4-upscaler",
+                    torch_dtype=torch.float16 if torch.cuda.is_available() else torch.float32,
+                )
+                if torch.cuda.is_available():
+                    pipe.enable_sequential_cpu_offload()
+                else:
+                    pipe = pipe.to("cpu")
+                self._upscale_pipelines[cache_key] = pipe
+
+            import torch
+
+            output = pipe(
+                prompt=guide,
+                image=img,
+                num_inference_steps=20,
+                guidance_scale=0.0,
+                generator=torch.Generator(device="cpu").manual_seed(0),
+            ).images[0]
+            buf = io.BytesIO()
+            output.save(buf, format="PNG")
+            return ImageRuntimeResult(
+                ok=True, image_bytes=buf.getvalue(),
+                metadata={
+                    "method": "sdxl_x4",
+                    "scale": 4,
+                    "original_size": f"{img.width}x{img.height}",
+                    "upscaled_size": f"{output.width}x{output.height}",
+                    "prompt": guide,
+                },
+            )
+        except ImportError as exc:
+            return ImageRuntimeResult(
+                ok=False, error_code="missing_dependency",
+                error_message=f"SDXL x4 upscaler requires diffusers + torch: {exc}",
+            )
+        except Exception as exc:
+            msg_lower = str(exc).lower()
+            error_code = (
+                "out_of_memory"
+                if "out of memory" in msg_lower
+                or "cuda out of memory" in msg_lower
+                else "runtime_crash"
+            )
+            return ImageRuntimeResult(
+                ok=False, error_code=error_code,
+                error_message=str(exc),
+            )
 
     def doctor(self) -> dict[str, Any]:
         status = self.get_device_status()
