@@ -12,9 +12,10 @@ import time
 import traceback
 import tempfile
 import multiprocessing as mp
+from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import Any, Final
 
 from local_ai_platform.config import AppConfig, get_settings
 from local_ai_platform.formatting import format_bytes_human
@@ -3668,6 +3669,621 @@ def _diffusers_worker(payload: dict[str, Any], out_q: Any) -> None:
             "metadata": {"worker_traceback": traceback.format_exc(), "stage": stage},
         })
 
+# ── [IMPROVE-40] Declarative optimization rule table ────────────────
+#
+# Pre-IMPROVE-40 ``_plan_optimizations`` was 290 lines of imperative
+# ``if/elif`` covering 13 optimization levers × 8 model families × 3
+# quality tiers × 4 hardware tiers. Adding a new optimization or family
+# touched multiple branches; conflicts (Hyper-SD ↔ DeepCache, FasterCache
+# ↔ TaylorSeer) were inline ``del opts[...]`` and ``not opts.get(...)``
+# guards; nothing was unit-testable in isolation.
+#
+# This block replaces that with a declarative ``OptimizationRule`` list.
+# Each rule has:
+#   - name: unique identifier used by ``conflicts`` references
+#   - enable(ctx) -> bool: gate
+#   - config(ctx) -> dict: opts to merge when enabled
+#   - note(ctx) -> str | None | str: optional ``quality_notes`` line
+#   - conflicts: tuple[str, ...] of rule names this rule suppresses
+#
+# The planner (``_apply_rules``) is a two-pass evaluator: pass 1
+# determines which rules WOULD fire from ``enable(ctx)`` alone, pass 2
+# unions every firing rule's ``conflicts`` into a ``suppressed`` set,
+# pass 3 emits opts + notes in original rule order, skipping anything
+# in ``suppressed``. Two passes preserve note ORDER (callers and the
+# Flutter UI display ``quality_notes`` in emission order) while still
+# supporting suppression — a single-pass model would either reorder
+# or fail to suppress already-emitted ops.
+#
+# Inline family sets are hoisted to module-level frozensets so rule
+# callables can close over them without redefining per-call. Same for
+# the Hyper-SD LoRA map and the per-family parameter estimate table.
+#
+# Sources (2025-2026):
+#   - Diffusers 0.37 Modular Diffusers (composition-first pipelines):
+#     https://github.com/huggingface/diffusers/releases
+#   - Diffusers Pipelines API (building-blocks pattern):
+#     https://huggingface.co/docs/diffusers/api/pipelines/overview
+
+
+# Family-set constants. Frozensets so rule callables can use ``in`` in
+# their ``enable()`` lambdas without rebuilding the set each call.
+_UNET_FAMILIES: Final[frozenset[str]] = frozenset(
+    {"sd15", "sd1.5", "sdxl", "sd2", "kandinsky"},
+)
+_TOME_INCOMPATIBLE: Final[frozenset[str]] = frozenset(
+    {"flux", "z-image", "dit", "pixart", "sd3"},
+)
+_FREEU_FAMILIES: Final[frozenset[str]] = frozenset(
+    {"sd15", "sd1.5", "sdxl", "sd2"},
+)
+_FASTER_CACHE_FAMILIES: Final[frozenset[str]] = frozenset(
+    {"z-image", "flux", "dit", "pixart", "sd3"},
+)
+_PAB_FAMILIES: Final[frozenset[str]] = frozenset(
+    {"z-image", "flux", "dit", "pixart", "sd3"},
+)
+_TAYLORSEER_FAMILIES: Final[frozenset[str]] = frozenset(
+    {"z-image", "flux", "dit", "pixart", "sd3"},
+)
+_QUANTIZATION_FAMILIES: Final[frozenset[str]] = frozenset(
+    {"z-image", "flux", "dit", "sdxl", "pixart", "sd3"},
+)
+
+
+# Hyper-SD ByteDance LoRA map. Keys MUST match ``model_family`` values
+# from ``_detect_model_hints()``. Values: ``(lora_file, steps, guidance)``.
+_HYPERSD_LORA_MAP: Final[dict[str, tuple[str, int, float]]] = {
+    "sdxl": ("Hyper-SDXL-4steps-lora.safetensors", 4, 0.0),
+    "sd15": ("Hyper-SD15-4steps-lora.safetensors", 4, 0.0),
+    "sd1.5": ("Hyper-SD15-4steps-lora.safetensors", 4, 0.0),
+}
+
+
+# Per-family parameter estimates for VRAM threshold decisions. Tuple is
+# ``(transformer_params, text_encoder_params)``. Used by the quantization
+# rule to size the FP8/NF4 decision under tight VRAM.
+_PARAM_ESTIMATES: Final[dict[str, tuple[int, int]]] = {
+    "flux":    (int(12e9),  int(5e9)),     # 12B transformer + 4.7B T5
+    "sd3":     (int(8e9),   int(5.5e9)),   # 8B transformer + 3 text encoders
+    "z-image": (int(6.6e9), int(5e9)),     # 6.6B transformer + text encoders
+    "dit":     (int(1.5e9), int(0.5e9)),   # varies
+    "sdxl":    (int(2.6e9), int(0.8e9)),   # 2.6B UNet + CLIP encoders
+    "pixart":  (int(0.6e9), int(5e9)),     # 0.6B transformer + T5
+}
+
+
+@dataclass(frozen=True)
+class _OptContext:
+    """Frozen bag of inputs + pre-computed derived flags. Built once per
+    ``_plan_optimizations`` call and passed to every rule's
+    ``enable``/``config``/``note`` callable.
+
+    Frozen so rule callables can't accidentally mutate shared state —
+    the rules are pure functions of context, by design. Pre-computing
+    derived flags (``is_few_step``, ``is_cpu``, ``low_vram`` ...) here
+    means individual rule lambdas don't redo string-lower / set-
+    membership checks; the rule list stays readable.
+    """
+    # Raw inputs
+    backend: str
+    family: str
+    variant: str
+    quality_tier: str
+    steps: int
+    device: str
+    # Derived flags (pre-computed once — rules read them as fields)
+    is_few_step: bool
+    is_cpu: bool
+    is_gpu: bool
+    gpu_vram: int
+    low_vram: bool
+    is_sdxl_class: bool
+    weak_hw: bool
+    # Hardware + config refs (rules reach into ``hw.deepcache_available``,
+    # ``hw.tomesd_available``, ``hw.xformers_available``, and the
+    # per-instance ``image_quantization_threshold_gb`` /
+    # ``image_enable_torch_compile`` config flags).
+    hw: Any  # HardwareProfile (forward ref — class defined later in file)
+    config: Any  # AppConfig
+    # TAESD per-family lookup table (passed in so the table stays
+    # owned by ImageGenerationService, not duplicated module-level).
+    taesd_map: dict[str, str]
+
+
+@dataclass(frozen=True)
+class OptimizationRule:
+    """A single optimization decision. Pure functions of ``_OptContext``
+    — no closure over instance state, no side effects.
+
+    Per-call lifecycle:
+      1. ``_apply_rules`` calls ``rule.enable(ctx)``. False → skip.
+      2. If True, the rule is recorded as "would fire".
+      3. After every rule has been polled, the union of every firing
+         rule's ``conflicts`` becomes the ``suppressed`` set.
+      4. For each firing rule NOT in ``suppressed``, ``rule.config(ctx)``
+         is merged into the output dict and ``rule.note(ctx)`` (or the
+         literal-string note) is appended to ``quality_notes``.
+
+    The two-pass model preserves note emission order (rules emit in
+    list order) while still allowing a higher-priority rule to suppress
+    a lower-priority one — e.g. Hyper-SD LoRA suppresses DeepCache
+    because 4-step distillation makes DeepCache useless.
+    """
+    name: str
+    enable: Callable[[_OptContext], bool]
+    config: Callable[[_OptContext], dict[str, Any]] | None = None
+    # ``note`` is either a literal string (always emitted when rule
+    # fires) or a callable that returns ``str | None`` based on context
+    # (so e.g. DeepCache can emit its conservative-interval note ONLY
+    # in the max_quality tier, matching pre-IMPROVE-40 behavior).
+    note: Callable[[_OptContext], str | None] | str | None = None
+    conflicts: tuple[str, ...] = ()
+
+
+def _build_opt_context(
+    *,
+    backend: str,
+    model_hints: dict[str, Any],
+    hw: Any,
+    steps: int,
+    quality_tier: str,
+    device: str,
+    config: Any,
+    taesd_map: dict[str, str],
+) -> _OptContext:
+    """Build a frozen ``_OptContext`` from the same raw inputs the old
+    imperative ``_plan_optimizations`` body unpacked at the top.
+
+    Derived-flag computation is centralized here so rule callables
+    don't redo the same checks. Matches the original definitions:
+      - ``is_few_step``: variant in {turbo, lightning, lcm, hyper, schnell}
+      - ``is_cpu``: backend in the CPU set (diffusers_cpu, openvino_*,
+        onnxruntime_cpu)
+      - ``low_vram``: gpu_vram < 4 GiB
+      - ``is_sdxl_class``: family in the "modern, larger" UNet/transformer set
+      - ``weak_hw``: is_cpu OR (low_vram AND gpu_vram < 6 GiB)
+    """
+    family = str(model_hints.get("model_family", "")).lower()
+    variant = str(model_hints.get("model_variant", "")).lower()
+    is_few_step = variant in ("turbo", "lightning", "lcm", "hyper", "schnell")
+    is_cpu = backend in (
+        "diffusers_cpu", "openvino_int8", "openvino_fp32", "onnxruntime_cpu",
+    )
+    is_gpu = not is_cpu
+    gpu_vram = hw.primary_gpu.vram_bytes if hw.primary_gpu else 0
+    low_vram = gpu_vram < 4 * 1024**3
+    is_sdxl_class = family in (
+        "sdxl", "sd3", "flux", "dit", "pixart", "z-image",
+    )
+    weak_hw = is_cpu or (low_vram and gpu_vram < 6 * 1024**3)
+    return _OptContext(
+        backend=backend, family=family, variant=variant,
+        quality_tier=quality_tier, steps=steps, device=device,
+        is_few_step=is_few_step, is_cpu=is_cpu, is_gpu=is_gpu,
+        gpu_vram=gpu_vram, low_vram=low_vram,
+        is_sdxl_class=is_sdxl_class, weak_hw=weak_hw,
+        hw=hw, config=config, taesd_map=taesd_map,
+    )
+
+
+def _apply_rules(
+    ctx: _OptContext, rules: list[OptimizationRule],
+) -> dict[str, Any]:
+    """Two-pass rule evaluator preserving note order + supporting
+    suppression.
+
+    Pass 1: enumerate which rules' ``enable(ctx)`` returns True. These
+    are "candidate" rules — they would emit if not suppressed.
+
+    Pass 2: union the ``conflicts`` of every candidate rule into a
+    single ``suppressed`` set. This is order-independent — any firing
+    rule can suppress any other rule by name.
+
+    Pass 3: walk candidates in original list order, skip those in
+    ``suppressed``, merge ``config(ctx)`` into ``opts``, append
+    ``note(ctx)`` (or literal note) to ``notes``. Final write of
+    ``quality_tier`` + ``quality_notes`` keys preserves the
+    pre-IMPROVE-40 output dict shape.
+    """
+    candidates: list[OptimizationRule] = [r for r in rules if r.enable(ctx)]
+    suppressed: set[str] = set()
+    for rule in candidates:
+        suppressed.update(rule.conflicts)
+    opts: dict[str, Any] = {}
+    notes: list[str] = []
+    for rule in candidates:
+        if rule.name in suppressed:
+            continue
+        cfg = rule.config(ctx) if rule.config else {}
+        if cfg:
+            opts.update(cfg)
+        nt: str | None
+        if callable(rule.note):
+            nt = rule.note(ctx)
+        else:
+            nt = rule.note
+        if nt:
+            notes.append(nt)
+    opts["quality_tier"] = ctx.quality_tier
+    opts["quality_notes"] = notes
+    return opts
+
+
+# ── Per-rule helpers (def-form for the gnarly ones; lambdas inline) ──
+# ``def`` over multi-line lambda for readability. The simple rules
+# (channels_last, attention_backend, torch_compile) stay as inline
+# lambdas in the rule table itself.
+
+
+def _deepcache_enable(c: _OptContext) -> bool:
+    return (
+        c.backend.startswith("diffusers")
+        and c.steps >= 8
+        and not c.is_few_step
+        and c.hw.deepcache_available
+        and c.family in _UNET_FAMILIES
+        and (c.quality_tier != "max_quality" or (c.is_cpu and c.steps >= 20))
+    )
+
+
+def _deepcache_config(c: _OptContext) -> dict[str, Any]:
+    """Adaptive DeepCache interval per tier × steps. Matches the
+    pre-IMPROVE-40 imperative branches verbatim:
+      - max_quality           → interval 3
+      - performance + steps   → 2/3/4 ramp by step count
+      - balanced + cpu + 20+  → 3 (or 4 at >=30)
+      - balanced + GPU        → 2 (or 3 at >=25)
+    """
+    if c.quality_tier == "max_quality":
+        interval = 3
+    elif c.quality_tier == "performance":
+        if c.steps >= 30:
+            interval = 4
+        elif c.steps >= 15:
+            interval = 3
+        else:
+            interval = 2
+    elif c.is_cpu and c.steps >= 20:
+        interval = 3 if c.steps < 30 else 4
+    else:
+        interval = 2 if c.steps < 25 else 3
+    return {"use_deepcache": True, "deepcache_interval": interval}
+
+
+def _deepcache_note(c: _OptContext) -> str | None:
+    """Pre-IMPROVE-40 quirk preserved: DeepCache only emits a
+    ``quality_notes`` line in the ``max_quality`` tier (the
+    "conservative interval=3" message). Other tiers set the interval
+    silently. Pin via test ``test_deepcache_note_only_for_max_quality``.
+    """
+    if c.quality_tier == "max_quality":
+        return "DeepCache: conservative interval=3"
+    return None
+
+
+def _taesd_enable(c: _OptContext) -> bool:
+    if c.backend == "sdcpp_gguf":
+        return False
+    if c.quality_tier == "performance":
+        return c.family in c.taesd_map
+    if c.quality_tier == "balanced" and (c.is_cpu or c.low_vram):
+        return c.family in c.taesd_map
+    return False
+
+
+def _taesd_config(c: _OptContext) -> dict[str, Any]:
+    return {"use_tiny_vae": True, "tiny_vae_model": c.taesd_map[c.family]}
+
+
+def _tome_enable(c: _OptContext) -> bool:
+    return (
+        c.backend.startswith("diffusers")
+        and c.hw.tomesd_available
+        and c.quality_tier != "max_quality"
+        and c.family not in _TOME_INCOMPATIBLE
+    )
+
+
+def _tome_config(c: _OptContext) -> dict[str, Any]:
+    if c.quality_tier == "balanced":
+        ratio = 0.3 if c.is_sdxl_class else 0.4
+    else:  # performance
+        ratio = 0.4 if c.is_sdxl_class else 0.5
+    return {"use_tome": True, "tome_ratio": ratio}
+
+
+def _tome_note(c: _OptContext) -> str:
+    # ToMe ratio recomputed here to match pre-IMPROVE-40 note text exactly.
+    if c.quality_tier == "balanced":
+        ratio = 0.3 if c.is_sdxl_class else 0.4
+    else:
+        ratio = 0.4 if c.is_sdxl_class else 0.5
+    return f"ToMe: merging {int(ratio * 100)}% of attention tokens"
+
+
+def _freeu_config(c: _OptContext) -> dict[str, Any]:
+    if c.family == "sdxl":
+        params = {"b1": 1.3, "b2": 1.4, "s1": 0.9, "s2": 0.2}
+    else:  # SD 1.5 / SD 2 — both use the higher-b params
+        params = {"b1": 1.4, "b2": 1.6, "s1": 0.9, "s2": 0.2}
+    return {"use_freeu": True, "freeu_params": params}
+
+
+def _hypersd_enable(c: _OptContext) -> bool:
+    """Pre-IMPROVE-40 logic verbatim:
+      performance tier + family in HYPERSD_MAP + not few-step + weak_hw
+      OR
+      balanced tier + family in HYPERSD_MAP + not few-step + is_cpu
+    Plus the outer ``backend.startswith("diffusers") and steps > 8``
+    that gates the actual config emission in the original code.
+    """
+    if c.family not in _HYPERSD_LORA_MAP or c.is_few_step:
+        return False
+    if not c.backend.startswith("diffusers") or c.steps <= 8:
+        return False
+    if c.quality_tier == "performance" and c.weak_hw:
+        return True
+    if c.quality_tier == "balanced" and c.is_cpu:
+        return True
+    return False
+
+
+def _hypersd_config(c: _OptContext) -> dict[str, Any]:
+    lora_file, hsd_steps, hsd_guidance = _HYPERSD_LORA_MAP[c.family]
+    return {
+        "use_lightning_lora": True,  # reuse existing worker key
+        "lightning_lora_repo": "ByteDance/Hyper-SD",
+        "lightning_lora_file": lora_file,
+        "lightning_steps": hsd_steps,
+        "lightning_guidance": hsd_guidance,
+    }
+
+
+def _hypersd_note(c: _OptContext) -> str:
+    _, hsd_steps, _ = _HYPERSD_LORA_MAP[c.family]
+    return (
+        f"Hyper-SD LoRA: {hsd_steps}-step distillation "
+        "(better quality than Lightning)"
+    )
+
+
+def _quant_threshold_bytes(c: _OptContext) -> int:
+    return int(getattr(
+        c.config, "image_quantization_threshold_gb", 8.0,
+    ) * 1024**3)
+
+
+def _quant_has_fp8_hw(c: _OptContext) -> bool:
+    """True iff ``primary_gpu.compute_capability >= (8, 9)`` (Ada Lovelace
+    or newer). FP8 on pre-Ada gives no perf — keep it gated."""
+    pg = c.hw.primary_gpu
+    if pg is None or not hasattr(pg, "compute_capability"):
+        return False
+    cc = pg.compute_capability or (0, 0)
+    return cc >= (8, 9)
+
+
+def _quant_enable(c: _OptContext) -> bool:
+    return (
+        c.backend in ("diffusers_cuda", "diffusers_rocm")
+        and c.family in _QUANTIZATION_FAMILIES
+        and c.gpu_vram > 0
+    )
+
+
+def _quant_config(c: _OptContext) -> dict[str, Any]:
+    """Three-way internal branch:
+      A) gpu_vram > threshold → ``{"use_quantization": False}`` (above-
+         threshold means no quant needed; explicit False so the planner
+         output is unambiguous downstream).
+      B) Ada+ FP8 hardware → ``use_fp8_layerwise + use_group_offloading``
+         (FP8 only enabled for FLUX — other architectures hit
+         Float8_e4m3fn vs BFloat16 dtype mismatches).
+      C) Pre-Ada → ``nf4`` quantization with text-encoder quant
+         disabled at max_quality.
+    """
+    if c.gpu_vram > _quant_threshold_bytes(c):
+        return {"use_quantization": False}
+    if _quant_has_fp8_hw(c):
+        fp8_compatible = c.family == "flux"
+        return {
+            "use_quantization": False,
+            "use_fp8_layerwise": fp8_compatible,
+            "use_group_offloading": True,
+        }
+    return {
+        "use_quantization": True,
+        "quantization_type": "nf4",
+        "quantize_transformer": True,
+        "quantize_text_encoder": c.quality_tier != "max_quality",
+    }
+
+
+def _quant_note(c: _OptContext) -> str | None:
+    if c.gpu_vram > _quant_threshold_bytes(c):
+        return None  # No note when above threshold (matches pre-IMPROVE-40)
+    if _quant_has_fp8_hw(c):
+        if c.family == "flux":
+            return (
+                "FP8 layerwise + group offloading: native Ada FP8 hardware, "
+                f"layers streamed to GPU (device={c.device})"
+            )
+        return (
+            "Group offloading (bf16): layers streamed to GPU one at a time "
+            f"(FP8 incompatible with {c.family} architecture)"
+        )
+    base = "NF4 quantization: fits large model in VRAM"
+    if c.is_few_step:
+        base += " (NF4 — no per-layer hooks for few-step model)"
+    return base
+
+
+def _attention_backend_config(c: _OptContext) -> dict[str, Any]:
+    if c.device.startswith("cuda") and c.hw.xformers_available:
+        return {"attention_backend": "xformers"}
+    if c.device.startswith("cuda") or c.device == "mps" or c.device.startswith("xpu"):
+        return {"attention_backend": "sdpa"}  # PyTorch 2.0+ scaled_dot_product_attention
+    return {"attention_backend": "sliced"}  # CPU: attention slicing
+
+
+# ── The rule table itself ────────────────────────────────────────────
+#
+# Order matters for TWO reasons:
+#   1. Note emission order: rules emit in list order. Reordering
+#      changes ``quality_notes`` ordering, which is observable to the
+#      Flutter UI and /system/info consumers.
+#   2. Suppression semantics: ``conflicts`` is enforced by union-of-
+#      candidate-conflicts (see ``_apply_rules`` pass 2), so order
+#      WITHIN a conflict pair doesn't matter for correctness. But
+#      placing the higher-priority rule first keeps the table readable.
+#
+# Original imperative order preserved (TAESD, DeepCache, ToMe, FreeU,
+# Hyper-SD, FasterCache, PAB, TaylorSeer, Quantization, ChannelsLast,
+# AttentionBackend, TorchCompile) so a side-by-side diff against the
+# pre-IMPROVE-40 body is easy to read during review.
+
+_OPTIMIZATION_RULES: Final[list[OptimizationRule]] = [
+    # 1. TAESD (Tiny VAE) — VAE decode shortcut on CPU/low-VRAM.
+    #    Quality: moderate. Speed: ~3x decode on CPU, ~1.5x on GPU.
+    OptimizationRule(
+        name="taesd",
+        enable=_taesd_enable,
+        config=_taesd_config,
+        note="TAESD: slightly softer VAE decode (saves ~3x decode time)",
+    ),
+    # 2. DeepCache (UNet feature caching). Suppressed by Hyper-SD LoRA
+    #    when both would fire — at 4 steps the cache window is too
+    #    short to amortize.
+    OptimizationRule(
+        name="deepcache",
+        enable=_deepcache_enable,
+        config=_deepcache_config,
+        note=_deepcache_note,
+    ),
+    # 3. ToMe (Token Merging). UNet attention only — transformer models
+    #    use joint/cross-attention that ``tomesd`` can't patch correctly.
+    OptimizationRule(
+        name="tome",
+        enable=_tome_enable,
+        config=_tome_config,
+        note=_tome_note,
+    ),
+    # 4. FreeU v2 (UNet backbone/skip rebalancing). Free quality boost
+    #    — zero compute/memory cost. UNet families only, balanced or
+    #    max_quality, not few-step (Hyper-SD changes UNet behavior).
+    OptimizationRule(
+        name="freeu",
+        enable=lambda c: (
+            c.backend.startswith("diffusers")
+            and c.family in _FREEU_FAMILIES
+            and c.quality_tier in ("balanced", "max_quality")
+            and not c.is_few_step
+        ),
+        config=_freeu_config,
+        note="FreeU v2: backbone/skip rebalancing for better detail (free)",
+    ),
+    # 5. Hyper-SD LoRA (ByteDance step distillation). Conflicts with
+    #    DeepCache: 4-step distillation makes a multi-step UNet cache
+    #    useless. The conflict is name-based — Hyper-SD doesn't need
+    #    to know HOW DeepCache emits its opts.
+    OptimizationRule(
+        name="hypersd_lora",
+        enable=_hypersd_enable,
+        config=_hypersd_config,
+        note=_hypersd_note,
+        conflicts=("deepcache",),
+    ),
+    # 6. FasterCache (transformer attention caching, performance tier
+    #    only). Conflicts with TaylorSeer — both modify transformer
+    #    attention behavior; stacking degrades quality.
+    OptimizationRule(
+        name="faster_cache",
+        enable=lambda c: (
+            c.backend.startswith("diffusers")
+            and c.family in _FASTER_CACHE_FAMILIES
+            and not c.is_few_step
+            and c.steps >= 8
+            and c.quality_tier == "performance"
+        ),
+        config=lambda c: {"use_faster_cache": True},
+        note="FasterCache: attention state caching for transformer models",
+        conflicts=("taylorseer",),
+    ),
+    # 7. PAB (Pyramid Attention Broadcast). Independent transformer
+    #    speedup; does not conflict with FasterCache or TaylorSeer.
+    OptimizationRule(
+        name="pab",
+        enable=lambda c: (
+            c.backend.startswith("diffusers")
+            and c.family in _PAB_FAMILIES
+            and not c.is_few_step
+            and c.steps >= 12
+            and c.quality_tier == "performance"
+        ),
+        config=lambda c: {"use_pab": True, "pab_spatial_skip": 2},
+        note="PAB: pyramid attention broadcast for additional speedup",
+    ),
+    # 8. TaylorSeer Cache (ICCV 2025). Balanced tier on transformers.
+    #    Suppressed by FasterCache when performance tier overlaps.
+    OptimizationRule(
+        name="taylorseer",
+        enable=lambda c: (
+            c.backend.startswith("diffusers")
+            and c.family in _TAYLORSEER_FAMILIES
+            and not c.is_few_step
+            and c.steps >= 12
+            and c.quality_tier == "balanced"
+        ),
+        config=lambda c: {
+            "use_taylorseer": True,
+            "taylorseer_cache_interval": 5,
+            "taylorseer_max_order": 1,
+        },
+        note=(
+            "TaylorSeer: Taylor-series feature prediction "
+            "(up to 3x, balanced tier)"
+        ),
+    ),
+    # 9. Quantization (FP8 layerwise / NF4 / above-threshold no-op).
+    #    Internal branching in config + note callables — see
+    #    ``_quant_config`` and ``_quant_note``.
+    OptimizationRule(
+        name="quantization",
+        enable=_quant_enable,
+        config=_quant_config,
+        note=_quant_note,
+    ),
+    # 10. Channels-last memory format. GPU only, not for sdcpp_gguf
+    #     (uses native GGUF tensor layout) or onnxruntime_cpu.
+    OptimizationRule(
+        name="channels_last",
+        enable=lambda c: (
+            c.is_gpu and c.backend not in ("sdcpp_gguf", "onnxruntime_cpu")
+        ),
+        config=lambda c: {"use_channels_last": True},
+    ),
+    # 11. Attention backend (xformers / sdpa / sliced). Always one of
+    #     the three for diffusers backends.
+    OptimizationRule(
+        name="attention_backend",
+        enable=lambda c: c.backend.startswith("diffusers"),
+        config=_attention_backend_config,
+    ),
+    # 12. torch.compile. Off by default — first-run JIT cost (60-120s)
+    #     dominates per-step speedup for single-image use. User opts in
+    #     via ``image_enable_torch_compile`` config flag.
+    OptimizationRule(
+        name="torch_compile",
+        enable=lambda c: (
+            c.backend.startswith("diffusers")
+            and getattr(c.config, "image_enable_torch_compile", False)
+        ),
+        config=lambda c: {"use_torch_compile": True},
+    ),
+]
+
+
 class ImageGenerationService:
     def __init__(self, config: AppConfig) -> None:
         self.config = config
@@ -3886,281 +4502,25 @@ class ImageGenerationService:
           - "performance": Aggressive (TAESD always, ToMe@0.5, Lightning LoRA)
 
         Conflict avoidance:
-          - Lightning LoRA (4-step) + DeepCache → disable DeepCache (too few steps)
-          - Sequential/model CPU offload + torch.compile → skip compile (hooks break dynamo)
+          - Hyper-SD LoRA (4-step) + DeepCache → DeepCache suppressed
+            (too few steps to amortize the cache window).
+          - FasterCache (performance) + TaylorSeer (balanced) → TaylorSeer
+            suppressed (both modify transformer attention behavior;
+            stacking degrades quality).
+
+        [IMPROVE-40] Body replaced by a declarative ``OptimizationRule``
+        list (see ``_OPTIMIZATION_RULES`` above). Each lever is now a
+        pure function of ``_OptContext`` — independently testable, no
+        cross-rule coupling beyond name-based ``conflicts`` suppression.
+        Adding a new optimization is one ``OptimizationRule`` entry.
         """
-        family = str(model_hints.get("model_family", "")).lower()
-        variant = str(model_hints.get("model_variant", "")).lower()
-        is_few_step = variant in ("turbo", "lightning", "lcm", "hyper", "schnell")
-        is_cpu = backend in ("diffusers_cpu", "openvino_int8", "openvino_fp32", "onnxruntime_cpu")
-        is_gpu = not is_cpu
-        gpu_vram = hw.primary_gpu.vram_bytes if hw.primary_gpu else 0
-        low_vram = gpu_vram < 4 * 1024**3
-        is_sdxl_class = family in ("sdxl", "sd3", "flux", "dit", "pixart", "z-image")
-        weak_hw = is_cpu or (low_vram and gpu_vram < 6 * 1024**3)
-
-        opts: dict[str, Any] = {}
-        quality_notes: list[str] = []
-
-        # ── 1. TAESD (Tiny VAE) ──
-        # Quality impact: Moderate (slightly softer details in VAE decode)
-        # Speed impact:  ~3x faster decode on CPU, ~1.5x on GPU
-        use_taesd = False
-        if backend != "sdcpp_gguf":
-            if quality_tier == "performance":
-                use_taesd = True  # Always for performance
-            elif quality_tier == "balanced" and (is_cpu or low_vram):
-                use_taesd = True  # Only when needed
-            # max_quality: never use TAESD
-        if use_taesd:
-            taesd_model = self._TAESD_MAP.get(family)
-            if taesd_model:
-                opts["use_tiny_vae"] = True
-                opts["tiny_vae_model"] = taesd_model
-                quality_notes.append("TAESD: slightly softer VAE decode (saves ~3x decode time)")
-
-        # ── 2. DeepCache (UNet feature caching — only for UNet models) ──
-        # Quality impact: Minimal at interval=2, moderate at interval=3+
-        # Speed impact:  ~2.3x UNet speedup at interval=2
-        # NOTE: DeepCache only works with UNet-based models (SD1.5, SDXL, SD2).
-        # Transformer models (Flux, Z-Image, PixArt, DiT, SD3) use FasterCache instead.
-        _UNET_FAMILIES = {"sd15", "sd1.5", "sdxl", "sd2", "kandinsky"}
-        if (backend.startswith("diffusers") and steps >= 8
-                and not is_few_step and hw.deepcache_available
-                and family in _UNET_FAMILIES):
-            if quality_tier != "max_quality" or (is_cpu and steps >= 20):
-                opts["use_deepcache"] = True
-                # Adaptive interval: more steps → can cache more aggressively
-                # interval=2: ~2.3x speedup, minimal quality loss (default)
-                # interval=3: ~3x speedup, slight quality loss
-                # interval=4: ~3.5x speedup, noticeable on fine detail
-                if quality_tier == "max_quality":
-                    opts["deepcache_interval"] = 3
-                    quality_notes.append("DeepCache: conservative interval=3")
-                elif quality_tier == "performance":
-                    # More steps = can use larger interval safely
-                    if steps >= 30:
-                        opts["deepcache_interval"] = 4
-                    elif steps >= 15:
-                        opts["deepcache_interval"] = 3
-                    else:
-                        opts["deepcache_interval"] = 2
-                elif is_cpu and steps >= 20:
-                    opts["deepcache_interval"] = 3 if steps < 30 else 4
-                else:
-                    opts["deepcache_interval"] = 2 if steps < 25 else 3
-
-        # ── 3. ToMe (Token Merging) ──
-        # Quality impact: Varies with ratio (0.3=minimal, 0.5=noticeable on fine detail)
-        # Speed impact:  ~1.3-1.8x depending on ratio
-        # NOTE: tomesd patches UNet self-attention layers.  Transformer models
-        # (Flux, Z-Image, DiT, PixArt, SD3) use joint/cross-attention that
-        # tomesd cannot patch correctly → skip to avoid quality degradation.
-        _TOME_INCOMPATIBLE = {"flux", "z-image", "dit", "pixart", "sd3"}
-        if (backend.startswith("diffusers") and hw.tomesd_available
-                and quality_tier != "max_quality" and family not in _TOME_INCOMPATIBLE):
-            opts["use_tome"] = True
-            if quality_tier == "balanced":
-                opts["tome_ratio"] = 0.3 if is_sdxl_class else 0.4
-            else:  # performance
-                opts["tome_ratio"] = 0.4 if is_sdxl_class else 0.5
-            quality_notes.append(f"ToMe: merging {int(opts['tome_ratio']*100)}% of attention tokens")
-
-        # ── 3b. FreeU v2 (UNet backbone/skip-connection rebalancing) ──
-        # Quality impact: POSITIVE (better detail and coherence, no quality loss)
-        # Speed impact:  None (zero additional computation or memory)
-        # Works with UNet-based models ONLY (SDXL, SD1.5, SD2) — NOT transformers.
-        # Not enabled for performance tier (Hyper-SD LoRA changes UNet behavior).
-        _FREEU_FAMILIES = {"sd15", "sd1.5", "sdxl", "sd2"}
-        if (backend.startswith("diffusers") and family in _FREEU_FAMILIES
-                and quality_tier in ("balanced", "max_quality") and not is_few_step):
-            opts["use_freeu"] = True
-            if family in ("sdxl",):
-                opts["freeu_params"] = {"b1": 1.3, "b2": 1.4, "s1": 0.9, "s2": 0.2}
-            else:  # SD1.5, SD2
-                opts["freeu_params"] = {"b1": 1.4, "b2": 1.6, "s1": 0.9, "s2": 0.2}
-            quality_notes.append("FreeU v2: backbone/skip rebalancing for better detail (free)")
-
-        # ── 4. Hyper-SD LoRA (step-distillation, better than Lightning) ──
-        # Quality impact: Moderate (changes model behavior but +0.68 CLIP, +0.51 Aesthetic vs Lightning)
-        # Speed impact:  ~6x (25 steps → 4 steps) for SDXL, also available for SD1.5
-        # ByteDance Hyper-SD: successor to SDXL-Lightning with better quality at same speed
-        _HYPERSD_LORA_MAP: dict[str, tuple[str, int, float]] = {
-            # family: (lora_file, steps, guidance_scale)
-            "sdxl": ("Hyper-SDXL-4steps-lora.safetensors", 4, 0.0),
-            "sd15": ("Hyper-SD15-4steps-lora.safetensors", 4, 0.0),
-            "sd1.5": ("Hyper-SD15-4steps-lora.safetensors", 4, 0.0),
-        }
-        use_hypersd = False
-        if quality_tier == "performance" and family in _HYPERSD_LORA_MAP and not is_few_step and weak_hw:
-            use_hypersd = True
-        elif quality_tier == "balanced" and family in _HYPERSD_LORA_MAP and not is_few_step and is_cpu:
-            use_hypersd = True  # On CPU, SDXL/SD1.5 without distillation is impractically slow
-        if use_hypersd and backend.startswith("diffusers") and steps > 8:
-            _hsd_file, _hsd_steps, _hsd_guidance = _HYPERSD_LORA_MAP[family]
-            opts["use_lightning_lora"] = True  # reuse same worker key
-            opts["lightning_lora_repo"] = "ByteDance/Hyper-SD"
-            opts["lightning_lora_file"] = _hsd_file
-            opts["lightning_steps"] = _hsd_steps
-            opts["lightning_guidance"] = _hsd_guidance
-            quality_notes.append(f"Hyper-SD LoRA: {_hsd_steps}-step distillation (better quality than Lightning)")
-            # Conflict: Hyper-SD 4 steps + DeepCache is useless (too few steps)
-            if opts.get("use_deepcache"):
-                del opts["use_deepcache"]
-                if "deepcache_interval" in opts:
-                    del opts["deepcache_interval"]
-
-        # ── 4b. FasterCache (attention caching for transformer models) ──
-        # Quality impact: Moderate on Flux/MMDiT (joint text-image attention caching
-        #   can break text-image alignment).  Minimal on single-stream models.
-        # Speed impact:  ~1.5-2x on transformer-based pipelines
-        # Only for transformer architectures (Flux, Z-Image, PixArt, DiT, SD3) — not UNet.
-        # Restricted to "performance" tier because caching joint attention states
-        # in the detail phase causes noticeable quality degradation on balanced.
-        _FASTER_CACHE_FAMILIES = {"z-image", "flux", "dit", "pixart", "sd3"}
-        if (backend.startswith("diffusers") and family in _FASTER_CACHE_FAMILIES
-                and not is_few_step and steps >= 8 and quality_tier == "performance"):
-            opts["use_faster_cache"] = True
-            quality_notes.append("FasterCache: attention state caching for transformer models")
-
-        # ── 4c. Pyramid Attention Broadcast (PAB) ──
-        # Quality impact: Minimal (exploits attention similarity between timesteps)
-        # Speed impact:  ~1.3-1.5x for transformer models with cross-attention
-        _PAB_FAMILIES = {"z-image", "flux", "dit", "pixart", "sd3"}
-        if (backend.startswith("diffusers") and family in _PAB_FAMILIES
-                and not is_few_step and steps >= 12 and quality_tier == "performance"):
-            opts["use_pab"] = True
-            opts["pab_spatial_skip"] = 2
-            quality_notes.append("PAB: pyramid attention broadcast for additional speedup")
-
-        # ── 4d. TaylorSeer Cache (Taylor series feature prediction for transformers) ──
-        # Quality impact: Negligible (ICCV 2025 — Taylor expansion predicts features)
-        # Speed impact:  Up to 3x speedup on transformer models
-        # Better than FirstBlockCache: predicts features instead of just skipping blocks.
-        # Mutually exclusive with FasterCache (both modify transformer attention behavior).
-        # TaylorSeer for balanced tier; FasterCache for performance tier.
-        # Requires diffusers >= 0.36.0 with TaylorSeerCacheConfig.
-        _TAYLORSEER_FAMILIES = {"z-image", "flux", "dit", "pixart", "sd3"}
-        if (backend.startswith("diffusers") and family in _TAYLORSEER_FAMILIES
-                and not is_few_step and steps >= 12
-                and quality_tier == "balanced"
-                and not opts.get("use_faster_cache")):  # Don't stack with FasterCache
-            opts["use_taylorseer"] = True
-            opts["taylorseer_cache_interval"] = 5  # Recompute every 5th step, predict others
-            opts["taylorseer_max_order"] = 1  # First-order Taylor (best quality/speed)
-            quality_notes.append("TaylorSeer: Taylor-series feature prediction (up to 3x, balanced tier)")
-
-        # ── 5. Quantization / compression strategy ──
-        # Strategy selection (best to worst for Ada GPUs on tight VRAM):
-        #
-        # A) FP8 layerwise + group_offloading (Ada Lovelace, cc≥8.9):
-        #    - Stores weights as float8_e4m3fn, computes in bf16 (native HW)
-        #    - FP8 weights are REGULAR tensors → can move between CPU/GPU
-        #    - group_offloading: loads 1-2 layers at a time with CUDA stream
-        #      prefetching.  Only ~300-600MB on GPU at any moment.
-        #    - Works on ANY VRAM size — no shared memory spillover
-        #    - Better quality than NF4 (8-bit vs 4-bit)
-        #
-        # B) NF4 (BitsAndBytes, non-Ada fallback):
-        #    - 4-bit quantization, deepest compression (~75% vs fp16)
-        #    - BUT: Params4bit are PINNED to CUDA, cannot be offloaded
-        #    - On 8GB VRAM with Flux (~9GB NF4 total), spills to Windows
-        #      shared GPU memory (PCIe) = ~16x slower than GDDR6
-        #    - Only use when FP8 hardware not available
-        #
-        _QUANTIZATION_FAMILIES = {"z-image", "flux", "dit", "sdxl", "pixart", "sd3"}
-        needs_quantization = (
-            backend in ("diffusers_cuda", "diffusers_rocm")
-            and family in _QUANTIZATION_FAMILIES
-            and gpu_vram > 0
+        ctx = _build_opt_context(
+            backend=backend, model_hints=model_hints, hw=hw,
+            steps=steps, quality_tier=quality_tier, device=device,
+            config=self.config, taesd_map=self._TAESD_MAP,
         )
-        if needs_quantization:
-            threshold_bytes = int(getattr(self.config, "image_quantization_threshold_gb", 8.0) * 1024**3)
-            if gpu_vram <= threshold_bytes:
-                _PARAM_ESTIMATES: dict[str, tuple[int, int]] = {
-                    # family: (transformer_params, text_encoder_params)
-                    "flux":    (int(12e9),  int(5e9)),     # 12B transformer + 4.7B T5
-                    "sd3":     (int(8e9),   int(5.5e9)),   # 8B transformer + 3 text encoders
-                    "z-image": (int(6.6e9), int(5e9)),     # 6.6B transformer + text encoders
-                    "dit":     (int(1.5e9), int(0.5e9)),   # varies
-                    "sdxl":    (int(2.6e9), int(0.8e9)),   # 2.6B UNet + CLIP encoders
-                    "pixart":  (int(0.6e9), int(5e9)),     # 0.6B transformer + T5
-                }
-                _est_trans, _est_te = _PARAM_ESTIMATES.get(family, (int(3e9), int(1e9)))
-                _fp8_vram_est = _est_trans * 1 + _est_te * 2  # FP8 transformer + FP16 encoders
+        return _apply_rules(ctx, _OPTIMIZATION_RULES)
 
-                # Check for Ada Lovelace FP8 hardware support
-                # FP8 is a weight storage optimization — works equally well
-                # for few-step (turbo/lightning) and full-step models.
-                _has_fp8_hw = False
-                if hw.primary_gpu and hasattr(hw.primary_gpu, "compute_capability"):
-                    _cc = hw.primary_gpu.compute_capability or (0, 0)
-                    if _cc >= (8, 9):
-                        _has_fp8_hw = True
-
-                if _has_fp8_hw:
-                    # Ada GPU: use group_offloading to stream layers through GPU.
-                    # FP8 layerwise casting works for Flux but causes dtype
-                    # mismatch (Float8_e4m3fn vs BFloat16) on Z-Image and some
-                    # other architectures, so only enable FP8 for known-good families.
-                    _fp8_compatible = family in ("flux",)
-                    opts["use_quantization"] = False
-                    opts["use_fp8_layerwise"] = _fp8_compatible
-                    opts["use_group_offloading"] = True
-                    if _fp8_compatible:
-                        quality_notes.append(
-                            f"FP8 layerwise + group offloading: native Ada FP8 hardware, "
-                            f"layers streamed to GPU (device={device})"
-                        )
-                    else:
-                        quality_notes.append(
-                            f"Group offloading (bf16): layers streamed to GPU one at a time "
-                            f"(FP8 incompatible with {family} architecture)"
-                        )
-                else:
-                    # Non-Ada GPU: use NF4 (no FP8 hardware).
-                    # NF4 pins to CUDA; may spill to shared memory on very tight VRAM.
-                    opts["use_quantization"] = True
-                    opts["quantization_type"] = "nf4"
-                    opts["quantize_transformer"] = True
-                    opts["quantize_text_encoder"] = quality_tier != "max_quality"
-                    _q_note = "NF4 quantization: fits large model in VRAM"
-                    if is_few_step:
-                        _q_note += " (NF4 — no per-layer hooks for few-step model)"
-                    quality_notes.append(_q_note)
-            else:
-                opts["use_quantization"] = False
-
-        # ── 6. Channels-last memory format ──
-        # Quality impact: None (purely a memory layout optimization)
-        # Speed impact:  5-15% on NVIDIA/AMD GPUs with conv-heavy models
-        if is_gpu and backend not in ("sdcpp_gguf", "onnxruntime_cpu"):
-            opts["use_channels_last"] = True
-
-        # ── 7. Attention backend selection ──
-        # Quality impact: None (mathematically equivalent)
-        # Speed impact:  Flash Attention ~2x, SDPA ~1.5x vs vanilla
-        if backend.startswith("diffusers"):
-            if device.startswith("cuda") and hw.xformers_available:
-                opts["attention_backend"] = "xformers"
-            elif device.startswith("cuda") or device == "mps" or device.startswith("xpu"):
-                opts["attention_backend"] = "sdpa"  # PyTorch 2.0+ scaled_dot_product_attention
-            else:
-                opts["attention_backend"] = "sliced"  # CPU: use attention slicing
-
-        # ── 8. torch.compile ──
-        # Quality impact: None (JIT compilation, same math)
-        # Speed impact:  15-50% after warm-up; but FIRST RUN takes 60-120s (JIT)
-        # For single-image generation: compile overhead >> per-step speedup.
-        # Disabled by default.  User can enable via config: image_enable_torch_compile=true
-        # Also causes dynamo warnings (lru_cache, WON'T CONVERT) and crtdbg.h
-        # errors on Windows that confuse users into thinking GPU isn't being used.
-        if backend.startswith("diffusers") and hasattr(self, "config") and getattr(self.config, "image_enable_torch_compile", False):
-            opts["use_torch_compile"] = True  # Worker will check compiler availability
-
-        opts["quality_tier"] = quality_tier
-        opts["quality_notes"] = quality_notes
-        return opts
 
     def get_generation_progress(self) -> dict[str, Any]:
         """Read current generation progress.
