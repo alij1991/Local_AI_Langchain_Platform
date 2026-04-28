@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import functools
 import io
 import json
 import logging
@@ -831,19 +832,175 @@ def _read_safetensors_metadata(model_path: str | Path) -> dict[str, str]:
     return {}
 
 
+def _read_structural_config(model_path: str | Path) -> dict[str, Any]:
+    """[IMPROVE-39] Return the diffusers ``transformer/config.json`` or
+    ``unet/config.json`` ground-truth fingerprint, if present.
+
+    This is the missing tier-2 signal the IMPROVE-39 design adds to the
+    detection chain. Pre-IMPROVE-39 family detection ORed three string-ish
+    signals — ``model_index.json::_class_name``, safetensors
+    ``__metadata__``, and the path basename. All three can lie or be
+    absent: a renamed FLUX checkpoint folder ``black-forest-base/`` (no
+    flux keyword anywhere, no metadata stamped) was classified as
+    ``unknown``; an opaque hash-style folder with no metadata was also
+    ``unknown``. The diffusers-canonical fix is to read the component
+    config that already sits next to the weights — every model that
+    loads via ``DiffusionPipeline.from_pretrained`` has either
+    ``transformer/config.json`` (FLUX, PixArt, DiT) or
+    ``unet/config.json`` (SD 1.5, SD 2.x, SDXL, Kandinsky), and the
+    ``_class_name`` plus a few key dimensions are an unambiguous
+    architecture fingerprint.
+
+    Priority order: ``transformer/`` → ``unet/``. A given checkpoint
+    has at most one of these. We return the FIRST hit and stop —
+    architectures that ship with a transformer-only encoder (FLUX,
+    PixArt, modern DiT) never have a ``unet/`` directory, and
+    SD-family checkpoints never have a ``transformer/`` directory.
+
+    Returned keys (any subset, all optional):
+      - ``subdir``: ``"transformer"`` | ``"unet"``
+      - ``class_name``: the diffusers ``_class_name`` (e.g.
+        ``"FluxTransformer2DModel"``, ``"PixArtTransformer2DModel"``,
+        ``"UNet2DConditionModel"``).
+      - ``cross_attention_dim``: int (UNet only — 768 → SD 1.5,
+        1024 → SD 2.x, 2048 → SDXL).
+      - ``hidden_size``, ``num_attention_heads``: secondary fingerprints.
+      - ``joint_attention_dim``, ``axes_dims_rope``: FLUX/RoPE markers.
+
+    Returns ``{}`` on any failure (missing, unreadable, malformed).
+    Never raises — callers OR the result into existing branch
+    conditions.
+
+    Sources (2025-2026):
+      - DiffusionPipeline ``_class_name`` docs:
+        https://huggingface.co/docs/diffusers/using-diffusers/loading
+      - ``UNet2DConditionModel`` config schema (cross_attention_dim
+        is the documented family discriminator):
+        https://huggingface.co/docs/diffusers/api/models/unet2d-cond
+      - Diffusers 0.37 Modular Diffusers (composition-first pipelines
+        reinforce structural over string detection):
+        https://github.com/huggingface/diffusers/releases
+    """
+    model_path = Path(model_path)
+    if not model_path.exists():
+        return {}
+
+    for sub in ("transformer", "unet"):
+        cfg_path = model_path / sub / "config.json"
+        if not cfg_path.exists():
+            continue
+        try:
+            cfg = json.loads(cfg_path.read_text(encoding="utf-8"))
+        except Exception:
+            # Malformed JSON — treat as missing and try the next sub.
+            continue
+        if not isinstance(cfg, dict):
+            continue
+        out: dict[str, Any] = {"subdir": sub}
+        # ``_class_name`` becomes ``class_name`` for cleaner downstream
+        # access (no leading-underscore name-mangling concerns).
+        if "_class_name" in cfg:
+            out["class_name"] = cfg.get("_class_name")
+        for key in (
+            "cross_attention_dim", "hidden_size", "num_attention_heads",
+            "joint_attention_dim", "axes_dims_rope",
+        ):
+            if key in cfg:
+                out[key] = cfg[key]
+        return out
+    return {}
+
+
+def _detection_mtime_key(model_path: Path) -> float:
+    """[IMPROVE-39] Return the mtime of the most-relevant config file
+    for cache invalidation, or 0.0 if no config exists.
+
+    The LRU cache around ``_detect_model_hints`` keys on
+    ``(path_str, mtime_key)``. When any of the detection-relevant config
+    files changes (user replaces a checkpoint in-place), mtime shifts
+    and the cache misses cleanly. We pick the FIRST existing of these
+    in priority order — that's the file most-likely to determine the
+    detection outcome, and using just one gives us a stable single-stat
+    cost for cache lookups.
+    """
+    for rel in (
+        "model_index.json", "transformer/config.json", "unet/config.json",
+    ):
+        p = model_path / rel
+        if p.exists():
+            try:
+                return p.stat().st_mtime
+            except OSError:
+                continue
+    return 0.0
+
+
 def _detect_model_hints(model_path: str | Path) -> dict[str, Any]:
     """Detect the model architecture and return optimal parameter hints.
 
     Reads model_index.json, scheduler_config.json, text_encoder/config.json,
-    AND the primary safetensors ``__metadata__`` header to identify the
-    model type (SD 1.5, SDXL, Turbo, Flux, DiT, etc.) and returns the best
+    transformer/-or-unet/config.json (structural fingerprint), AND the
+    primary safetensors ``__metadata__`` header to identify the model
+    type (SD 1.5, SDXL, Turbo, Flux, DiT, etc.) and returns the best
     default parameters for that specific architecture.
 
-    Metadata is checked alongside the other signals in each family branch;
-    when present it's authoritative (a filename is easy to fake, a
-    ``modelspec.architecture`` header is not), but it's often missing, so
-    the existing ``model_index.json`` + path-string detection remains the
-    fallback. See [IMPROVE-47] in ch 6 for the full rationale.
+    Detection priority (per ch 6 §IMPROVE-39):
+      1. ``model_index.json::_class_name`` — pipeline class (authoritative
+         when present).
+      2. ``transformer/config.json`` or ``unet/config.json`` — diffusers-
+         canonical structural fingerprint ([IMPROVE-39]). Wins over
+         metadata + path because the config is what diffusers itself reads
+         to instantiate the model: it physically can't be wrong without
+         the weights also being wrong.
+      3. Safetensors ``__metadata__`` ([IMPROVE-47]) — Diffusers / Kohya /
+         ComfyUI write ``modelspec.architecture`` and
+         ``ss_base_model_version`` here. Often missing, occasionally
+         stale, but authoritative when both present and recent.
+      4. Filename keywords — only as a tiebreaker for
+         variant disambiguation (Flux dev vs schnell; SDXL base vs turbo).
+
+    Cached by ``(path, config_mtime)`` so repeated UI calls (validate,
+    list, recommend_settings) don't re-parse the same files. Cache
+    invalidates automatically when any tier-1/tier-2 config file's
+    mtime changes.
+    """
+    model_path = Path(model_path)
+    mtime_key = _detection_mtime_key(model_path)
+    payload_json = _detect_hints_payload_cached(str(model_path), mtime_key)
+    payload = json.loads(payload_json)
+    hints = payload["hints"]
+    signals = payload["signals"]
+    # Emit on EVERY call (cache hits included) so observability
+    # accurately reflects "how often is detection requested" — the
+    # cache is a perf optimization, not a behavior change.
+    _emit_detection_event(hints, signals)
+    return hints
+
+
+@functools.lru_cache(maxsize=64)
+def _detect_hints_payload_cached(path_str: str, mtime_key: float) -> str:
+    """[IMPROVE-39] LRU-cached body of ``_detect_model_hints``.
+
+    Returns a JSON-encoded ``{"hints": ..., "signals": ...}`` string
+    — JSON makes the cached value immutable, so callers that mutate
+    the returned ``hints`` dict (e.g. ``result["hints"] =
+    _detect_model_hints(...)`` followed by later ``hints["foo"] =
+    bar``) can't poison subsequent cache hits.
+
+    The ``mtime_key`` is part of the cache key, NOT the value — that's
+    what makes "edit a config in place, immediately re-detect" work.
+    """
+    hints, signals = _compute_model_hints(Path(path_str))
+    return json.dumps({"hints": hints, "signals": signals})
+
+
+def _compute_model_hints(model_path: Path) -> tuple[dict[str, Any], dict[str, Any]]:
+    """[IMPROVE-39] Pure detection logic — no cache, no emit.
+
+    Returns ``(hints, signals)`` where ``signals`` is the bag of per-
+    tier presence flags ``_emit_detection_event`` writes into the
+    observability context. Split out from the public API so the cache
+    layer + emit layer wrap a deterministic, side-effect-free function.
     """
     model_path = Path(model_path)
     # Use the full path string for name-based matching (the .name might be a hash)
@@ -905,6 +1062,15 @@ def _detect_model_hints(model_path: str | Path) -> dict[str, Any]:
     metadata_kohya = str(st_metadata.get("ss_base_model_version") or "").lower()
     metadata_hits = f"{metadata_arch} {metadata_kohya}"
 
+    # [IMPROVE-39] Structural fingerprint from transformer/config.json
+    # or unet/config.json — diffusers-canonical architecture identity.
+    # Wins over metadata + path because the config IS what diffusers
+    # reads to instantiate the model; it can't disagree with the actual
+    # weight shapes without the load failing outright.
+    struct_cfg = _read_structural_config(model_path)
+    struct_class = str(struct_cfg.get("class_name") or "")
+    struct_dim = struct_cfg.get("cross_attention_dim")  # int | None
+
     # ── Detect model family from pipeline + scheduler + text encoder ──
 
     # ── Detect model family from pipeline + scheduler + text encoder ──
@@ -943,7 +1109,16 @@ def _detect_model_hints(model_path: str | Path) -> dict[str, Any]:
     # Flux models
     # Metadata: ``flux-1-dev``/``flux-1-schnell`` (modelspec) or ``flux1``
     # (Kohya SS) — authoritative when present.
-    elif "Flux" in pipeline_class or "flux" in path_str_lower or "flux" in metadata_hits:
+    # [IMPROVE-39] Structural: ``transformer/config.json::_class_name ==
+    # "FluxTransformer2DModel"`` is the diffusers-canonical fingerprint.
+    # Wins for renamed folders (``black-forest-base/`` with no flux
+    # keyword anywhere) because diffusers itself reads this same file
+    # to instantiate the pipeline.
+    elif (
+        "Flux" in pipeline_class or "flux" in path_str_lower
+        or "flux" in metadata_hits
+        or struct_class == "FluxTransformer2DModel"
+    ):
         is_schnell = "schnell" in path_str_lower or "schnell" in metadata_hits
         hints.update({
             "model_family": "flux",
@@ -979,9 +1154,16 @@ def _detect_model_hints(model_path: str | Path) -> dict[str, Any]:
     # SDXL Turbo / Lightning / LCM (distilled SDXL)
     # Metadata: ``stable-diffusion-xl-v1-base`` (modelspec) or
     # ``sdxl_base_v1-0`` (Kohya SS).
+    # [IMPROVE-39] Structural: ``unet/config.json::_class_name ==
+    # "UNet2DConditionModel"`` AND ``cross_attention_dim == 2048`` is
+    # the SDXL-specific shape (SD 1.5 uses 768, SD 2.x uses 1024 — the
+    # cross-attention dim is the documented family discriminator). Wins
+    # when path contains a misleading ``"xl"`` substring without ``sdxl``
+    # itself, or when neither path nor metadata contains a marker.
     elif ("SDXL" in pipeline_class or "stable-diffusion-xl" in path_str_lower
           or "sdxl" in path_str_lower or "sdxl" in metadata_hits
-          or "stable-diffusion-xl" in metadata_hits):
+          or "stable-diffusion-xl" in metadata_hits
+          or (struct_class == "UNet2DConditionModel" and struct_dim == 2048)):
         is_turbo = (
             any(k in path_str_lower for k in ("turbo", "lightning", "lcm", "hyper"))
             or any(k in metadata_hits for k in ("turbo", "lightning", "lcm", "hyper"))
@@ -1066,10 +1248,17 @@ def _detect_model_hints(model_path: str | Path) -> dict[str, Any]:
     # Standard SD 1.x / 2.x
     # Metadata: ``stable-diffusion-v1`` / ``stable-diffusion-v2``
     # (modelspec) or ``sd_v1`` / ``sd_v2`` (Kohya SS).
+    # [IMPROVE-39] Structural: ``unet/config.json::_class_name ==
+    # "UNet2DConditionModel"`` enters the branch (SDXL was already
+    # handled by the dim==2048 check above), and ``cross_attention_dim``
+    # picks SD 2.x (1024) vs SD 1.5 (768) without needing path markers.
+    # This is the canonical "renamed folder with no metadata" save —
+    # before IMPROVE-39 such folders went to ``unknown``.
     elif ("StableDiffusion" in pipeline_class or "stable-diffusion" in path_str_lower
           or "stable-diffusion-v1" in metadata_hits
           or "stable-diffusion-v2" in metadata_hits
-          or "sd_v1" in metadata_hits or "sd_v2" in metadata_hits):
+          or "sd_v1" in metadata_hits or "sd_v2" in metadata_hits
+          or struct_class == "UNet2DConditionModel"):
         # Path-string SD2 detection uses a whitelist of explicit markers
         # instead of a bare ``"2" in path_str_lower`` check — the old check
         # misfired on any folder whose name happened to contain a digit-2
@@ -1077,10 +1266,14 @@ def _detect_model_hints(model_path: str | Path) -> dict[str, Any]:
         # → classified as SD2, pytest's own ``pytest-of-<user>/pytest-12/``
         # tmp parent → intermittently classified as SD2 depending on the
         # pytest counter). Authoritative metadata still wins when present.
+        # [IMPROVE-39] Structural ``cross_attention_dim == 1024`` is
+        # added as the strongest SD2 signal (a value-typed config field
+        # can't accidentally match the way a 2-substring can).
         _sd2_path_markers = ("sd_v2", "sd-v2", "stable-diffusion-2", "sd2-", "-sd2")
         is_v2 = (
             "stable-diffusion-v2" in metadata_hits or "sd_v2" in metadata_hits
             or any(marker in path_str_lower for marker in _sd2_path_markers)
+            or (struct_class == "UNet2DConditionModel" and struct_dim == 1024)
         )
         if is_v2:
             hints.update({
@@ -1140,8 +1333,11 @@ def _detect_model_hints(model_path: str | Path) -> dict[str, Any]:
 
     # Pixart / DiT-based models
     # Metadata: ``pixart-alpha`` / ``pixart-sigma`` (modelspec).
+    # [IMPROVE-39] Structural: ``transformer/config.json::_class_name ==
+    # "PixArtTransformer2DModel"`` is the diffusers-canonical fingerprint.
     elif ("PixArt" in pipeline_class or "pixart" in path_str_lower
-          or "pixart" in metadata_hits):
+          or "pixart" in metadata_hits
+          or struct_class == "PixArtTransformer2DModel"):
         is_sigma = "sigma" in path_str_lower or "sigma" in metadata_hits
         hints.update({
             "model_family": "pixart",
@@ -1230,32 +1426,57 @@ def _detect_model_hints(model_path: str | Path) -> dict[str, Any]:
             ],
         })
 
-    # Record which signals were available, so a later review query can
-    # answer "how often did safetensors metadata contribute vs. pipeline
-    # class vs. path-string matching?" — the whole point of IMPROVE-47 is
-    # improving the signal mix, and we can only tell if we log it. The
-    # event fires once per detect call (user-triggered, not hot-path).
+    # [IMPROVE-39] Collect per-tier presence flags into a single
+    # ``signals`` dict so the cache layer can serialize the full
+    # detection-result payload, and the emit layer can read these
+    # back on every call (cache hits included). The ``structural_*``
+    # fields are new — they let a SQLite query answer "how often did
+    # IMPROVE-39 structural detection actually contribute?", which is
+    # the same observability question IMPROVE-47 added for metadata.
+    signals: dict[str, Any] = {
+        "has_pipeline_class": bool(pipeline_class),
+        "has_sched_class": bool(sched_class),
+        "has_te_arch": bool(te_arch),
+        "has_safetensors_metadata": bool(st_metadata),
+        "metadata_arch": metadata_arch or None,
+        "metadata_kohya": metadata_kohya or None,
+        "has_structural_config": bool(struct_cfg),
+        "structural_class_name": struct_class or None,
+        "structural_cross_attention_dim": (
+            struct_dim if isinstance(struct_dim, int) else None
+        ),
+    }
+    return hints, signals
+
+
+def _emit_detection_event(
+    hints: dict[str, Any], signals: dict[str, Any],
+) -> None:
+    """[IMPROVE-39 / IMPROVE-47] Emit one ``images.detect_hints``
+    observability event with the family/variant + per-tier signal
+    presence.
+
+    Never raises — telemetry must NEVER block detection. The event
+    fires on every call to ``_detect_model_hints`` (cache hits
+    included) so the row-count accurately reflects "how often is
+    detection requested" — caching is a perf optimization, not a
+    behavior change.
+    """
     try:
+        family = hints.get("model_family")
         emit(
             "images", "detect_hints",
-            status="ok" if hints["model_family"] != "unknown" else "error",
-            error_code=None if hints["model_family"] != "unknown" else "UnknownFamily",
+            status="ok" if family != "unknown" else "error",
+            error_code=None if family != "unknown" else "UnknownFamily",
             context={
-                "family": hints["model_family"],
+                "family": family,
                 "variant": hints.get("model_variant"),
-                "has_pipeline_class": bool(pipeline_class),
-                "has_sched_class": bool(sched_class),
-                "has_te_arch": bool(te_arch),
-                "has_safetensors_metadata": bool(st_metadata),
-                "metadata_arch": metadata_arch or None,
-                "metadata_kohya": metadata_kohya or None,
+                **signals,
             },
         )
     except Exception:
         # Never let telemetry break detection.
         logger.debug("emit(images.detect_hints) failed", exc_info=True)
-
-    return hints
 
 
 
