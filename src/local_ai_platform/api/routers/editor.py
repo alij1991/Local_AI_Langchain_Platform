@@ -101,17 +101,30 @@ async def editor_enhance_prompt(
     model = (body.get("model") or "pix2pix").lower().strip()
     if not instruction:
         raise HTTPException(400, "instruction is required")
-    from local_ai_platform.images.ai_enhance import enhance_edit_prompt
+    # [IMPROVE-55] Use the detailed variant so the response carries
+    # ``available`` / ``source`` / ``fallback_reason`` — the UI shows
+    # "no enhancer model available" when available=False rather than
+    # making the user wonder why their prompt wasn't rewritten.
+    from local_ai_platform.images.ai_enhance import enhance_edit_prompt_detailed
     loop = asyncio.get_event_loop()
     try:
-        enhanced = await loop.run_in_executor(
+        detail = await loop.run_in_executor(
             None,
-            lambda: enhance_edit_prompt(instruction, router=router, config=config, model=model),
+            lambda: enhance_edit_prompt_detailed(instruction, router=router, config=config, model=model),
         )
     except Exception as e:
         logger.error("enhance-prompt failed: %s", e)
         raise HTTPException(500, f"Prompt enhancement failed: {e}")
-    return {"original": instruction, "enhanced": enhanced, "model": model}
+    return {
+        "original": instruction,
+        "enhanced": detail["enhanced"],
+        "model": model,
+        # [IMPROVE-55] Surface the enhancer status. Pre-IMPROVE-55
+        # callers reading only ``enhanced`` keep working.
+        "available": detail["available"],
+        "source": detail["source"],
+        "fallback_reason": detail["fallback_reason"],
+    }
 
 
 @router.get("/editor/operations/list")

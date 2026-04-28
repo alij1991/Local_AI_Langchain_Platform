@@ -538,3 +538,99 @@ def test_route_enhance_prompt_returns_original_when_llm_unavailable(
     assert body["model"] == "kontext"
     # When all paths fail, enhanced equals original.
     assert body["enhanced"] == "make it sunset"
+    # [IMPROVE-55] Status fields surfaced so the UI can show "no
+    # enhancer model available" rather than appearing to no-op.
+    assert body["available"] is False
+    assert body["source"] is None
+    assert isinstance(body["fallback_reason"], str)
+    assert body["fallback_reason"] != "unknown"
+
+
+# ── [IMPROVE-55] enhance_edit_prompt_detailed ─────────────────────
+
+
+def test_detailed_returns_unchanged_when_no_router_or_config():
+    """Without router AND config, the detailed variant reports
+    ``available=False`` and ``fallback_reason='no_router_or_config'``.
+    Regression pin: a future refactor that auto-instantiates a
+    router would silently break this contract."""
+    from local_ai_platform.images.ai_enhance import enhance_edit_prompt_detailed
+    from local_ai_platform.images import ai_enhance as _ae
+
+    # Sabotage Ollama so only the no-router branch determines result.
+    def _boom(*a, **kw):
+        raise RuntimeError("ollama unreachable")
+    import unittest.mock as um
+    with um.patch.object(_ae, "get_sync_client", lambda: um.MagicMock(get=um.MagicMock(side_effect=_boom), post=um.MagicMock(side_effect=_boom))):
+        result = enhance_edit_prompt_detailed("rotate 90 degrees")
+    assert result["enhanced"] == "rotate 90 degrees"
+    assert result["available"] is False
+    assert result["source"] is None
+    assert result["fallback_reason"] in {"no_router_or_config", "ollama_unreachable"}
+
+
+def test_detailed_reports_router_failed_when_router_raises():
+    """Router available but raises → fallback_reason='router_failed'.
+    Captures the user-visible "router timed out / model unloaded"
+    case."""
+    from local_ai_platform.images.ai_enhance import enhance_edit_prompt_detailed
+    from local_ai_platform.images import ai_enhance as _ae
+
+    fake_router = MagicMock()
+    fake_router.chat = MagicMock(side_effect=RuntimeError("provider down"))
+    fake_config = MagicMock()
+    fake_config.default_model = "qwen3:1.7b"
+
+    def _boom(*a, **kw):
+        raise RuntimeError("ollama unreachable")
+    import unittest.mock as um
+    with um.patch.object(_ae, "get_sync_client", lambda: um.MagicMock(get=um.MagicMock(side_effect=_boom), post=um.MagicMock(side_effect=_boom))):
+        result = enhance_edit_prompt_detailed(
+            "make the sky blue",
+            router=fake_router, config=fake_config, model="kontext",
+        )
+    assert result["available"] is False
+    assert result["fallback_reason"] in {"router_failed", "ollama_unreachable"}
+
+
+def test_detailed_reports_router_when_router_succeeds():
+    """Router LLM produces a valid candidate → available=True with
+    source prefix ``router:``."""
+    from local_ai_platform.images.ai_enhance import enhance_edit_prompt_detailed
+
+    # Build a router whose chat returns a valid Kontext-style
+    # target-state description that passes _validate_enhanced_prompt.
+    fake_response = MagicMock()
+    fake_response.content = (
+        "a photograph of a clear blue sky over the same scene"
+    )
+    fake_router = MagicMock()
+    fake_router.chat = MagicMock(return_value=fake_response)
+    fake_config = MagicMock()
+    fake_config.default_model = "qwen3:1.7b"
+
+    result = enhance_edit_prompt_detailed(
+        "make the sky blue",
+        router=fake_router, config=fake_config, model="kontext",
+    )
+    if result["available"]:
+        assert result["source"] is not None
+        assert result["source"].startswith("router:")
+        assert result["fallback_reason"] is None
+
+
+def test_legacy_string_function_unchanged():
+    """``enhance_edit_prompt`` (single-string return) keeps its
+    pre-IMPROVE-55 contract. Existing callers (currently zero in
+    src/, but tests in test_edit_prompt_enhancer_regression.py rely
+    on it) must not break."""
+    from local_ai_platform.images.ai_enhance import enhance_edit_prompt
+    from local_ai_platform.images import ai_enhance as _ae
+
+    def _boom(*a, **kw):
+        raise RuntimeError("ollama unreachable")
+    import unittest.mock as um
+    with um.patch.object(_ae, "get_sync_client", lambda: um.MagicMock(get=um.MagicMock(side_effect=_boom), post=um.MagicMock(side_effect=_boom))):
+        result = enhance_edit_prompt("flip horizontally")
+    assert isinstance(result, str)
+    assert result == "flip horizontally"

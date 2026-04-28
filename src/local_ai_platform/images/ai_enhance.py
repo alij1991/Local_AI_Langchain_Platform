@@ -3381,6 +3381,37 @@ def _validate_enhanced_prompt(original: str, enhanced: str, model: str) -> tuple
     return True, f"{preserved}/{len(content_words)} content words preserved ({ratio:.0%})"
 
 
+def enhance_edit_prompt_detailed(
+    instruction: str,
+    router=None,
+    config=None,
+    model: str = "kontext",
+) -> dict[str, Any]:
+    """[IMPROVE-55] Detailed variant of ``enhance_edit_prompt`` that
+    returns the full status dict the UI needs to distinguish "the LLM
+    ran and decided no rewrite was useful" from "no LLM available,
+    no enhancement happened".
+
+    Returns
+    -------
+    {
+        "enhanced": str,             # The (possibly unchanged) instruction
+        "source": str | None,        # "router:<model>", "ollama:<model>", or None
+        "available": bool,           # True iff some enhancer ran successfully
+        "fallback_reason": str | None,  # Set when available=False; one of
+                                        # "no_router_or_config", "router_failed",
+                                        # "ollama_unreachable",
+                                        # "ollama_no_models", "all_rejected",
+                                        # "router_rejected".
+    }
+
+    ``enhance_edit_prompt`` (the legacy single-string return) is a
+    thin wrapper that drops everything but ``enhanced`` so existing
+    callers keep working.
+    """
+    return _enhance_edit_prompt_inner(instruction, router, config, model)
+
+
 def enhance_edit_prompt(
     instruction: str,
     router=None,
@@ -3401,6 +3432,19 @@ def enhance_edit_prompt(
     of the user's request. The new version validates that at least 60% of
     the content words from the original survive into the enhanced version,
     and falls back to the original if validation fails.
+    """
+    return _enhance_edit_prompt_inner(instruction, router, config, model)["enhanced"]
+
+
+def _enhance_edit_prompt_inner(
+    instruction: str,
+    router,
+    config,
+    model: str,
+) -> dict[str, Any]:
+    """Real implementation. Both ``enhance_edit_prompt`` and
+    ``enhance_edit_prompt_detailed`` delegate here so the rewrite
+    logic + LLM-attempt cascade exists in one place. [IMPROVE-55]
     """
     logger.info(
         "[ENHANCE] called for model=%s: '%s' (router=%s, config=%s)",
@@ -3423,6 +3467,15 @@ def enhance_edit_prompt(
     # Try router-based LLM first (if available)
     enhanced = None
     source = None
+    # [IMPROVE-55] Track WHY the enhancer didn't run / didn't accept,
+    # so the UI can show "no enhancer model available" vs "router
+    # rejected the candidate" specifically. Order: router_failed >
+    # router_rejected > ollama_unreachable > ollama_no_models >
+    # all_rejected. The latest reason wins (it's the bottom of the
+    # cascade).
+    fallback_reason: str | None = None
+    if not router or not config:
+        fallback_reason = "no_router_or_config"
     if router and config:
         try:
             from local_ai_platform.providers import ChatMessage, GenerationSettings
@@ -3446,9 +3499,11 @@ def enhance_edit_prompt(
                 source = f"router:{model_str}"
                 logger.info("[ENHANCE] router LLM accepted: %s", reason)
             else:
+                fallback_reason = "router_rejected"
                 logger.warning("[ENHANCE] router LLM rejected: %s. candidate='%s'",
                                reason, candidate[:120])
         except Exception as e:
+            fallback_reason = "router_failed"
             logger.warning("[ENHANCE] router LLM failed: %s", e)
 
     # Direct Ollama fallback
@@ -3470,6 +3525,7 @@ def enhance_edit_prompt(
             except Exception as _list_err:
                 logger.info("[ENHANCE] could not list ollama models: %s", _list_err)
                 ollama_model = None
+                fallback_reason = "ollama_unreachable"
 
             if ollama_model:
                 logger.info("[ENHANCE] trying direct Ollama: %s", ollama_model)
@@ -3501,23 +3557,42 @@ def enhance_edit_prompt(
                 if is_valid:
                     enhanced = candidate
                     source = f"ollama:{ollama_model}"
+                    fallback_reason = None
                     logger.info("[ENHANCE] direct Ollama accepted: %s", reason)
                 else:
+                    fallback_reason = "all_rejected"
                     logger.warning("[ENHANCE] direct Ollama rejected: %s. candidate='%s'",
                                    reason, candidate[:120])
+            elif fallback_reason is None:
+                # Ollama reachable but no usable models in tags
+                fallback_reason = "ollama_no_models"
         except Exception as e:
+            fallback_reason = "ollama_unreachable"
             logger.warning("[ENHANCE] direct Ollama failed: %s", e)
 
     if enhanced:
         logger.info("[ENHANCE] result via %s: original=%r → enhanced=%r",
                     source, instruction[:80], enhanced[:120])
-        return enhanced
+        return {
+            "enhanced": enhanced,
+            "source": source,
+            "available": True,
+            "fallback_reason": None,
+        }
 
     # No LLM available or all attempts rejected — return original UNCHANGED.
     # We do NOT append "high quality, photorealistic, 8k" style suffixes
     # anymore because they don't help editing models and muddy the prompt.
-    logger.info("[ENHANCE] no enhancement available — returning original unchanged")
-    return instruction
+    logger.info(
+        "[ENHANCE] no enhancement available (%s) — returning original unchanged",
+        fallback_reason or "unknown",
+    )
+    return {
+        "enhanced": instruction,
+        "source": None,
+        "available": False,
+        "fallback_reason": fallback_reason or "unknown",
+    }
 
 
 # ── Auto Enhance (algorithmic, no ML) ────────────────────────────
