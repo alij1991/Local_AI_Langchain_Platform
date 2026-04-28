@@ -8,8 +8,16 @@ Endpoints (7):
   GET    /system/info             — hardware detection + recommendations
   POST   /benchmark/quick         — TTFT + decode tok/s mini-benchmark
   GET    /settings/hf-token       — HF token configured? (never echoes the token)
-  POST   /settings/hf-token       — validate + persist HF token to .env
-  DELETE /settings/hf-token       — wipe HF token from .env
+  POST   /settings/hf-token       — validate + persist HF token to OS keyring
+  DELETE /settings/hf-token       — wipe HF token from keyring + .env
+
+[IMPROVE-10] Token persistence migrated from ``.env``-only to OS
+keyring (Windows Credential Locker / macOS Keychain / Linux
+SecretService) via ``local_ai_platform.secrets``. New writes land
+in keyring; legacy ``HF_API_TOKEN`` lines in ``.env`` continue to
+be read by the resolver but are no longer the write target.
+``DELETE`` removes from BOTH for a clean reset regardless of
+where the token was stored.
 
 These are the smallest, most self-contained surfaces and use only the
 shared cache helpers + a couple of Depends targets — perfect first
@@ -17,6 +25,7 @@ extraction to validate the router-split pattern.
 
 References (2025–2026):
 * FastAPI APIRouter — https://fastapi.tiangolo.com/tutorial/bigger-applications/
+* keyring library — https://github.com/jaraco/keyring
 * Local AI on consumer laptops 2024-2026 (benchmark protocol).
 """
 from __future__ import annotations
@@ -211,8 +220,23 @@ async def quick_benchmark(
 async def get_hf_token_status(
     config: AppConfig = Depends(get_app_config),
 ):
-    """Check if a HuggingFace token is configured (never exposes the token)."""
-    token = (config.hf_api_token or "").strip()
+    """Check if a HuggingFace token is configured (never exposes the token).
+
+    [IMPROVE-10] Read priority: keyring first, then legacy
+    ``config.hf_api_token`` (env / .env). Mirrors the resolver
+    in ``ai_enhance._get_hf_token`` — the same token surface
+    used by gated FLUX.1-dev / Kontext loads."""
+    from local_ai_platform.secrets import get_hf_token as _get_keyring_hf
+
+    token: str | None = None
+    try:
+        token = _get_keyring_hf()
+    except Exception:
+        token = None
+    if not token:
+        # Fall back to legacy AppConfig (env / .env) — backward compat.
+        token = (config.hf_api_token or "").strip() or None
+
     if not token:
         return {"configured": False, "username": None}
     try:
@@ -228,12 +252,29 @@ async def set_hf_token(
     body: dict[str, Any],
     config: AppConfig = Depends(get_app_config),
 ):
-    """Validate and save a HuggingFace token."""
+    """Validate and save a HuggingFace token to the OS keyring.
+
+    [IMPROVE-10] Writes to OS keyring (Windows Credential Locker /
+    macOS Keychain / Linux SecretService) via
+    ``local_ai_platform.secrets.set_hf_token``. The legacy
+    ``HF_API_TOKEN=...`` line in ``.env`` is NOT written — the
+    point of the migration is that new writes go to encrypted
+    user-scoped storage. Users with an existing ``.env`` token
+    continue to work via the resolver's tier-2 fallback.
+
+    Falls back to the legacy ``.env``-write path only when keyring
+    is unavailable (e.g. headless Linux without SecretService) so
+    the endpoint still functions on bare-bones deployments.
+    """
+    from local_ai_platform.secrets import is_keyring_available
+    from local_ai_platform.secrets import set_hf_token as _set_keyring_hf
+
     token = (body.get("token") or "").strip()
     if not token:
         raise HTTPException(400, "Token is required")
 
-    # Validate by calling whoami
+    # Validate by calling whoami before writing — never store an
+    # unvalidated value.
     username = None
     try:
         from huggingface_hub import whoami
@@ -242,7 +283,16 @@ async def set_hf_token(
     except Exception as exc:
         raise HTTPException(401, f"Invalid token: {exc}")
 
-    # Save to .env file
+    if is_keyring_available() and _set_keyring_hf(token):
+        # Mirror to legacy AppConfig field so the in-process resolver
+        # for code that still reads ``config.hf_api_token`` directly
+        # (e.g. /system/info) sees the new value without a restart.
+        config.hf_api_token = token
+        return {
+            "configured": True, "username": username, "storage": "keyring",
+        }
+
+    # Keyring unavailable — fall back to legacy .env write path.
     env_path = Path(".env")
     if env_path.exists():
         lines = env_path.read_text(encoding="utf-8").splitlines()
@@ -251,20 +301,34 @@ async def set_hf_token(
         env_path.write_text("\n".join(new_lines) + "\n", encoding="utf-8")
     else:
         env_path.write_text(f"HF_API_TOKEN={token}\n", encoding="utf-8")
-
-    # Mutating the shared AppConfig instance is intentional — the
-    # module global and app.state.config point at the same object, so
-    # updating it here keeps /models/hf/* and friends in sync without
-    # a process restart.
     config.hf_api_token = token
-    return {"configured": True, "username": username}
+    return {
+        "configured": True, "username": username, "storage": "env",
+    }
 
 
 @router.delete("/settings/hf-token")
 async def delete_hf_token(
     config: AppConfig = Depends(get_app_config),
 ):
-    """Remove the HuggingFace token."""
+    """Remove the HuggingFace token from BOTH the OS keyring AND
+    ``.env``.
+
+    [IMPROVE-10] Cleaning both surfaces matters because users
+    upgrading from pre-IMPROVE-10 builds may have a token in
+    ``.env`` while new builds write to keyring. A single DELETE
+    must produce the user-visible "no token stored" state
+    regardless of where the existing value was."""
+    from local_ai_platform.secrets import delete_hf_token as _delete_keyring_hf
+
+    # Clear keyring (idempotent — returns True even if not stored).
+    try:
+        _delete_keyring_hf()
+    except Exception:
+        # Defensive: never let keyring errors block the .env clear.
+        pass
+
+    # Also clear legacy .env entry.
     env_path = Path(".env")
     if env_path.exists():
         lines = env_path.read_text(encoding="utf-8").splitlines()

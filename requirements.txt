@@ -41,6 +41,14 @@ accelerate>=0.34.0
 huggingface-hub>=0.30.0
 safetensors>=0.4.0
 
+# ── Secrets (HF token storage) ──
+# [IMPROVE-10] Cross-platform credential storage. On Windows uses
+# WinVaultKeyring (Credential Locker — encrypted, user-scoped). On
+# macOS uses Keychain; on Linux SecretService (gnome-keyring/kwallet).
+# Falls back gracefully when no native backend is available — see
+# src/local_ai_platform/secrets/keyring_store.py::is_keyring_available.
+keyring>=25.0
+
 # ── Image Generation ──
 diffusers>=0.30.0
 Pillow>=10.0.0

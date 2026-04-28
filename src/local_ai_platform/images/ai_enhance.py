@@ -480,30 +480,49 @@ INSTRUCT_MODELS = {
 
 
 def _get_hf_token() -> str | None:
-    """Get HuggingFace token from AppSettings or the HF CLI cache.
+    """Get HuggingFace token from keyring, AppSettings, or the HF CLI cache.
+
+    [IMPROVE-10] OS keyring (Windows Credential Locker / macOS
+    Keychain / Linux SecretService) is the new top tier. Tokens
+    written via ``POST /settings/hf-token`` after IMPROVE-10 land
+    here; older ``.env``-based setups continue to work via the
+    fallback tiers.
 
     [IMPROVE-69] Pre-migration this function had three tiers: shell
     env → direct ``.env`` parse → ``huggingface-cli`` cache. Tiers 1
-    and 2 are now collapsed into ``AppSettings.hf_token`` — that
-    field uses ``AliasChoices(HF_TOKEN, HUGGING_FACE_HUB_TOKEN,
+    and 2 (now tier 2) are collapsed into ``AppSettings.hf_token`` —
+    that field uses ``AliasChoices(HF_TOKEN, HUGGING_FACE_HUB_TOKEN,
     HUGGINGFACE_TOKEN)`` and ``.env`` is auto-loaded with the same
     "file wins over shell" priority the old hand-rolled parser
     advertised, so the observable behavior for the env/.env path is
     unchanged.
 
-    The CLI cache fallback is deliberately kept. Users who ran
-    ``huggingface-cli login`` but never populated ``.env`` (common on
-    personal machines) would break on FLUX.1-dev access without it,
-    and there's no observable warning — the gated-model request just
-    returns 401. Keeping the tier preserves the working setup.
+    The CLI cache fallback (now tier 3) is deliberately kept. Users
+    who ran ``huggingface-cli login`` but never populated ``.env``
+    (common on personal machines) would break on FLUX.1-dev access
+    without it, and there's no observable warning — the gated-model
+    request just returns 401. Keeping the tier preserves the
+    working setup.
     """
-    # Tier 1: AppSettings (shell env or .env — AliasChoices covers
+    # Tier 1: OS keyring (encrypted, user-scoped). Returns None
+    # cleanly when keyring is unavailable or no token stored.
+    try:
+        from local_ai_platform.secrets import get_hf_token as _get_keyring_hf
+        token = _get_keyring_hf()
+        if token:
+            return token
+    except Exception:
+        # Defensive: never let a keyring import / lookup error
+        # short-circuit the fallback chain.
+        pass
+
+    # Tier 2: AppSettings (shell env or .env — AliasChoices covers
     # HF_TOKEN / HUGGING_FACE_HUB_TOKEN / HUGGINGFACE_TOKEN).
     token = get_settings().hf_token.strip()
     if token:
         return token
 
-    # Tier 2: huggingface-cli login cache (~/.cache/huggingface/token).
+    # Tier 3: huggingface-cli login cache (~/.cache/huggingface/token).
     try:
         from huggingface_hub import HfFolder
         return HfFolder.get_token()
