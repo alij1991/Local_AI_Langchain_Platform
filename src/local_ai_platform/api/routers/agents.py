@@ -58,6 +58,58 @@ from local_ai_platform.repositories.agents_repo import (
 router = APIRouter()
 
 
+# [IMPROVE-71] The two default agent names seeded by the lifespan
+# (api_server.py ~268). DELETE /agents/{name} rejects these with 400 +
+# detail.error.code == "protected_agent". The lifespan recreates them on
+# next startup, but any pinned state (conversation FK, saved prompt) is
+# silently dropped — better to refuse the destructive op than let the
+# user shoot themselves in the foot. Pre-IMPROVE-71 the guard was lost
+# during the [IMPROVE-1] router split (Wave 2 residual #3).
+PROTECTED_AGENTS: frozenset[str] = frozenset({"assistant", "chat"})
+
+
+def _validate_tool_ids(orchestrator: AgentOrchestrator, tool_ids: list[str]) -> None:
+    """[IMPROVE-71] Reject tool_ids that don't match a registered tool.
+
+    Empty list is allowed (default — no tools bound). Validation runs
+    BEFORE ``orchestrator.add_agent`` in create/update so an unknown tool
+    can't leave a half-registered agent in ``self.definitions``.
+
+    The ``known`` set unions the orchestrator's runtime tools and any
+    DB-stored tools (custom user tools, MCP-discovered tools), which
+    matches what ``GET /tools`` surfaces. Without the union a user who
+    creates a custom tool and then tries to bind it to an agent gets a
+    spurious 400 — the runtime registry only carries the 19 built-ins.
+    DB read failures degrade to runtime-only validation; better to risk
+    a missed false-negative than to escalate a transient SQLite hiccup
+    into a 500 on agent create.
+    """
+    if not tool_ids:
+        return
+    known = set(orchestrator.get_tool_names())
+    try:
+        from local_ai_platform.repositories.tools_repo import list_tools_db
+
+        for row in list_tools_db():
+            name = row.get("name") if isinstance(row, dict) else None
+            if name:
+                known.add(name)
+    except Exception:
+        pass
+
+    unknown = [tid for tid in tool_ids if tid not in known]
+    if unknown:
+        raise HTTPException(
+            status_code=400,
+            detail={
+                "error": {
+                    "code": "invalid_tool",
+                    "message": f"Unknown tool_ids: {unknown}",
+                }
+            },
+        )
+
+
 # ── Request models ───────────────────────────────────────────────
 
 
@@ -82,13 +134,44 @@ class AgentCreateRequest(BaseModel):
 class SupervisorCreateRequest(BaseModel):
     name: str
     model_name: str
-    specialist_agents: list[str]
+    # [IMPROVE-71] A supervisor with zero specialists has nothing to
+    # supervise — reject at boundary.
+    specialist_agents: list[str] = Field(min_length=1)
     provider: str = "ollama"
 
 
 class WorkflowRequest(BaseModel):
     user_input: str
-    sequence: list[str]
+    # [IMPROVE-71] An empty sequence runs no agents and returns
+    # ``outputs: []`` — almost certainly a client bug. Reject at boundary.
+    sequence: list[str] = Field(min_length=1)
+
+
+class PromptDraftRequest(BaseModel):
+    """[IMPROVE-71] Schema for ``POST /agents/prompt-draft``.
+
+    Replaces the free-form ``dict[str, Any]`` body so empty payloads
+    return 422 instead of generating a fallback prompt for ``Goal: ``.
+    Wave 2 residual #2.
+    """
+
+    goal: str = Field(min_length=1)
+    context: str = ""
+    requirements: str = ""
+    constraints: str = ""
+    output_format: str = ""
+
+
+class AgentTestRequest(BaseModel):
+    """[IMPROVE-71] Schema for ``POST /agents/{name}/test``.
+
+    Replaces the free-form ``dict[str, Any]`` body so type errors are
+    caught at the boundary. ``message`` keeps a default of ``"Hello"``
+    to preserve pre-IMPROVE-71 behaviour where empty bodies still
+    produced a smoke-test response.
+    """
+
+    message: str = "Hello"
 
 
 # ── Agent Workflow ────────────────────────────────────────────────
@@ -167,6 +250,10 @@ async def create_agent(
     req: AgentCreateRequest,
     orchestrator: AgentOrchestrator = Depends(get_orchestrator),
 ):
+    # [IMPROVE-71] Validate tool_ids BEFORE add_agent so an unknown
+    # tool name can't leave a half-registered agent in self.definitions.
+    _validate_tool_ids(orchestrator, req.tool_ids)
+
     orchestrator.add_agent(
         name=req.name,
         model_name=req.resolved_model,
@@ -189,6 +276,11 @@ async def update_agent(
     req: AgentCreateRequest,
     orchestrator: AgentOrchestrator = Depends(get_orchestrator),
 ):
+    # [IMPROVE-71] Validate tool_ids BEFORE the underlying add_agent —
+    # PUT goes through the same code path as POST, so the same gap
+    # affected updates pre-IMPROVE-71.
+    _validate_tool_ids(orchestrator, req.tool_ids)
+
     orchestrator.add_agent(
         name=name,
         model_name=req.resolved_model,
@@ -297,16 +389,15 @@ async def get_agent_definition(
 @router.post("/agents/{name}/test")
 async def test_agent(
     name: str,
-    body: dict[str, Any],
+    req: AgentTestRequest,
     orchestrator: AgentOrchestrator = Depends(get_orchestrator),
 ):
     """Quick test of an agent with a single message."""
     if name not in orchestrator.definitions:
         raise HTTPException(404, f"Agent '{name}' not found")
 
-    message = body.get("message", "Hello")
     start = time.perf_counter()
-    response = orchestrator.chat_with_agent(name, message, persist_history=False)
+    response = orchestrator.chat_with_agent(name, req.message, persist_history=False)
     elapsed = int((time.perf_counter() - start) * 1000)
     return {"response": response, "latency_ms": elapsed}
 
@@ -316,6 +407,22 @@ async def remove_agent(
     name: str,
     orchestrator: AgentOrchestrator | None = Depends(get_orchestrator_or_none),
 ):
+    # [IMPROVE-71] Reject deletion of the default agents seeded by the
+    # lifespan. The lifespan recreates them on next startup but any
+    # pinned state (conversation FK, saved prompt) drops on the floor.
+    # Guard runs BEFORE the graceful-cleanup path so it fires even when
+    # the orchestrator is alive.
+    if name in PROTECTED_AGENTS:
+        raise HTTPException(
+            status_code=400,
+            detail={
+                "error": {
+                    "code": "protected_agent",
+                    "message": f"Agent '{name}' is a default agent and cannot be deleted",
+                }
+            },
+        )
+
     # Graceful: DELETE must succeed even if the orchestrator never
     # booted — the DB row still needs cleaning up.
     if orchestrator and name in orchestrator.definitions:
@@ -339,25 +446,19 @@ async def update_agent_model(
 
 @router.post("/agents/prompt-draft")
 async def generate_prompt_draft(
-    body: dict[str, Any],
+    req: PromptDraftRequest,
     orchestrator: AgentOrchestrator = Depends(get_orchestrator),
 ):
     """Generate a system prompt from a description (for the prompt builder)."""
-    goal = body.get("goal", "")
-    context = body.get("context", "")
-    requirements = body.get("requirements", "")
-    constraints = body.get("constraints", "")
-    output_format = body.get("output_format", "")
-
-    description = f"Goal: {goal}"
-    if context:
-        description += f"\nContext: {context}"
-    if requirements:
-        description += f"\nRequirements: {requirements}"
-    if constraints:
-        description += f"\nConstraints: {constraints}"
-    if output_format:
-        description += f"\nOutput format: {output_format}"
+    description = f"Goal: {req.goal}"
+    if req.context:
+        description += f"\nContext: {req.context}"
+    if req.requirements:
+        description += f"\nRequirements: {req.requirements}"
+    if req.constraints:
+        description += f"\nConstraints: {req.constraints}"
+    if req.output_format:
+        description += f"\nOutput format: {req.output_format}"
 
     try:
         prompt = orchestrator.generate_system_prompt(description)

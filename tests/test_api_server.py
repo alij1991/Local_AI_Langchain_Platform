@@ -45,14 +45,13 @@ def _run_lifespan():
 #      ``{status, items}`` instead of ``{refreshed, ...}``). Those
 #      tests were updated to match the current payloads.
 #
-#   3. Genuine behavioral regressions still in the code:
-#      - ``/agents`` accepts agents with unknown tool_ids (should 400)
-#      - ``/agents/prompt-draft`` accepts empty body (should 422)
-#      - ``DELETE /agents/assistant`` succeeds (should be protected)
-#      Those are tracked as an improvements item and the tests are
-#      xfail'd here so the expectation doesn't disappear from the
-#      codebase. See docs/features/10-improvements.md §10.5 Wave 2
-#      residuals.
+#   3. Three genuine behavioral regressions (Wave 2 residuals from the
+#      [IMPROVE-1] router split). All three were restored in
+#      [IMPROVE-71] (Wave 6); the four tests covering them now pass:
+#      - ``/agents`` accepts agents with unknown tool_ids → now 400
+#      - ``/agents/prompt-draft`` accepts empty body → now 422
+#      - ``DELETE /agents/assistant`` succeeds → now 400 protected_agent
+#      Boundary validation pinned by tests/test_agents_validation_audit.py.
 #
 # Post-[IMPROVE-5] Commit 3: the patch targets below use
 # ``api_server.app.state.orchestrator`` / ``.image_service`` to reach
@@ -67,16 +66,18 @@ def test_health_endpoint():
     assert response.json()['status'] == 'ok'
 
 
-@pytest.mark.xfail(
-    reason="Regression: /agents accepts unknown tool_ids. Tracked in "
-           "docs/features/10-improvements.md §10.5 Wave 2 residuals.",
-    strict=False,
-)
 def test_agents_crud_and_validation(monkeypatch):
+    # Pre-IMPROVE-71 this test was xfail'd because POST /agents accepted
+    # unknown tool_ids without 400. With validation restored, the test
+    # walks the current CRUD surface: bad-tool reject, create, read via
+    # /definition (the flat ``GET /agents/{name}`` was retired during
+    # the [IMPROVE-1] router split), update, delete. The retired
+    # ``GET /agents/{name}/effective-config`` is not part of this audit.
     monkeypatch.setitem(api_server.app.state.orchestrator.definitions, 'assistant', object())
 
     bad = client.post('/agents', json={'name': 'a', 'provider': 'ollama', 'model_id': 'x', 'tool_ids': ['missing']})
     assert bad.status_code == 400
+    assert bad.json()['detail']['error']['code'] == 'invalid_tool'
 
     create = client.post('/agents', json={
         'name': 'agent-a',
@@ -90,9 +91,9 @@ def test_agents_crud_and_validation(monkeypatch):
     })
     assert create.status_code == 200
 
-    read = client.get('/agents/agent-a')
+    read = client.get('/agents/agent-a/definition')
     assert read.status_code == 200
-    assert read.json()['model_id'] == 'gemma3:1b'
+    assert read.json()['agent_json']['model_id'] == 'gemma3:1b'
 
     update = client.put('/agents/agent-a', json={
         'name': 'agent-a',
@@ -105,10 +106,6 @@ def test_agents_crud_and_validation(monkeypatch):
         'resource_limits': {'max_context_messages': 10},
     })
     assert update.status_code == 200
-
-    eff = client.get('/agents/agent-a/effective-config')
-    assert eff.status_code == 200
-    assert 'settings' in eff.json()
 
     delete = client.delete('/agents/agent-a')
     assert delete.status_code == 200
@@ -127,11 +124,6 @@ def test_agent_tool_creation(monkeypatch):
     assert response.json()['type'] == 'agent_tool'
 
 
-@pytest.mark.xfail(
-    reason="Regression: DELETE /agents/assistant is no longer protected. "
-           "Tracked in docs/features/10-improvements.md §10.5 Wave 2 residuals.",
-    strict=False,
-)
 def test_agents_list_includes_default_assistant_and_protects_delete():
     response = client.get('/agents')
     assert response.status_code == 200
@@ -182,11 +174,6 @@ def test_prompt_draft_minimal_payload_returns_200():
     assert 'used_fallback' in payload
 
 
-@pytest.mark.xfail(
-    reason="Regression: /agents/prompt-draft accepts empty body. "
-           "Tracked in docs/features/10-improvements.md §10.5 Wave 2 residuals.",
-    strict=False,
-)
 def test_prompt_draft_missing_goal_returns_422():
     response = client.post('/agents/prompt-draft', json={})
     assert response.status_code == 422
@@ -218,11 +205,6 @@ def test_agent_create_with_valid_builtin_tool_id_succeeds(monkeypatch):
     assert response.status_code == 200
 
 
-@pytest.mark.xfail(
-    reason="Regression: /agents accepts unknown tool_ids without 400. "
-           "Tracked in docs/features/10-improvements.md §10.5 Wave 2 residuals.",
-    strict=False,
-)
 def test_agent_create_with_unknown_tool_id_fails():
     response = client.post('/agents', json={
         'name': 'bad-tool-agent',
