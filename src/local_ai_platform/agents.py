@@ -1657,10 +1657,90 @@ Guidelines:
                  "edge_count": len(edges),
              })
 
+        # [IMPROVE-36] Read parallel-waves flag once. Default False
+        # preserves the pre-IMPROVE-36 sequential semantics (token
+        # budget + per-node ordering). When on, sibling nodes in the
+        # same wave run concurrently via ``asyncio.to_thread`` over
+        # ``chat_with_agent``. Doc rationale at
+        # docs/features/05-systems.md:444-455.
+        parallel_waves = bool(system_definition.get("parallel_waves", False))
+
         step = 0
         while current_nodes and step < max_steps:
             step += 1
             next_nodes: list[str] = []
+
+            # [IMPROVE-36] Pre-pass: when parallel_waves is on AND the
+            # wave is safe (no duplicate agents), run all runnable
+            # ``chat_with_agent`` calls concurrently and stash their
+            # outputs. The existing per-node loop below then reuses
+            # the stashed result instead of re-running the LLM call.
+            #
+            # "Safe" = no two nodes in the wave share the same agent.
+            # The doc warns about shared in-memory state on the same
+            # agent (``_smart_memories[agent]``); the conservative
+            # fallback to sequential mode keeps that case correct
+            # without requiring callers to reason about it.
+            #
+            # Sequential semantics still apply WITHIN a wave when
+            # parallel mode is off — node 2 in the same wave sees
+            # node 1's output via the rebuilt context block. Parallel
+            # mode intentionally TRADES that pipelining for speed:
+            # all siblings see the same pre-wave context.
+            preloaded_outputs: dict[str, tuple[str, int, Exception | None]] = {}
+            runnable_for_parallel = [
+                n for n in current_nodes
+                if n not in visited and n in node_map
+                and node_map[n].get("agent", "") in self.definitions
+            ]
+            if parallel_waves and len(runnable_for_parallel) > 1:
+                wave_agents = [
+                    node_map[n].get("agent", "") for n in runnable_for_parallel
+                ]
+                if len(wave_agents) == len(set(wave_agents)):
+                    # Wave is safe to parallelize.
+                    pre_wave_ctx = _build_inter_node_context(
+                        node_outputs, budget_tokens=context_budget,
+                    )
+
+                    async def _preload(_nid: str):
+                        _node_def = node_map[_nid]
+                        _agent = _node_def.get("agent", "")
+                        if pre_wave_ctx:
+                            _prompt = (
+                                f"{user_input}\n\nContext from prior agents:\n"
+                                f"{pre_wave_ctx}"
+                            )
+                        else:
+                            _prompt = user_input
+                        _t0 = _time.monotonic()
+                        try:
+                            _out = await asyncio.to_thread(
+                                self.chat_with_agent, _agent, _prompt,
+                            )
+                            return _nid, _out, int(
+                                (_time.monotonic() - _t0) * 1000,
+                            ), None
+                        except Exception as _exc:
+                            return _nid, "", int(
+                                (_time.monotonic() - _t0) * 1000,
+                            ), _exc
+
+                    results = await asyncio.gather(
+                        *[_preload(n) for n in runnable_for_parallel],
+                    )
+                    for _nid, _out, _dur, _exc in results:
+                        preloaded_outputs[_nid] = (_out, _dur, _exc)
+                    logger.info(
+                        "[IMPROVE-36] parallel wave: %d nodes ran "
+                        "concurrently", len(runnable_for_parallel),
+                    )
+                else:
+                    logger.info(
+                        "[IMPROVE-36] parallel_waves on but wave has "
+                        "duplicate agents (%s); falling back to "
+                        "sequential", wave_agents,
+                    )
 
             for nid in current_nodes:
                 if nid in visited:
@@ -1705,8 +1785,19 @@ Guidelines:
                               "node_id": nid, "agent": agent_name, "role": role,
                               "step": step})
                 try:
-                    output = self.chat_with_agent(agent_name, prompt)
-                    duration_ms = int((_time.monotonic() - node_start) * 1000)
+                    # [IMPROVE-36] Use preloaded output when this node
+                    # ran in parallel above. Otherwise call into
+                    # chat_with_agent normally (sequential path).
+                    if nid in preloaded_outputs:
+                        output, duration_ms, _preload_exc = preloaded_outputs[nid]
+                        if _preload_exc is not None:
+                            # Re-raise so the existing except handler
+                            # below records the error consistently
+                            # with the sequential code path.
+                            raise _preload_exc
+                    else:
+                        output = self.chat_with_agent(agent_name, prompt)
+                        duration_ms = int((_time.monotonic() - node_start) * 1000)
                     node_outputs.append({
                         "node": nid, "agent": agent_name, "role": role,
                         "text": output, "status": "ok",
