@@ -90,6 +90,7 @@ from local_ai_platform.api.deps import (
     get_ollama_pulls_state,
     get_router,
     get_router_or_none,
+    get_task_registry,
 )
 from local_ai_platform.api.helpers import (
     _assess_hardware_fit,
@@ -770,7 +771,14 @@ async def pull_ollama_model(
     if name in pulls_state and pulls_state[name]["status"] == "pulling":
         return {"status": "pulling", "model": name, "progress": pulls_state[name].get("progress", "")}
 
-    pulls_state[name] = {"status": "pulling", "progress": "Starting download...", "error": None}
+    # [IMPROVE-9] ``started_at`` + ``progress_pct`` are additive
+    # fields used by the unified ``GET /models/tasks`` endpoint.
+    # Existing readers ignore them; absence falls back to None
+    # cleanly via the registry's defensive reads.
+    pulls_state[name] = {
+        "status": "pulling", "progress": "Starting download...",
+        "error": None, "started_at": time.time(), "progress_pct": None,
+    }
     logger.info("Starting background pull for model: %s", name)
     emit("model", "download.start", status="start",
          context={"provider": "ollama", "model_id": name})
@@ -797,6 +805,11 @@ async def pull_ollama_model(
                     if total and completed:
                         pct = min(100, int(completed / total * 100))
                         last_status = f"{status} {pct}%"
+                        # [IMPROVE-9] Mirror pct into the additive
+                        # ``progress_pct`` slot for the unified
+                        # ``/models/tasks`` endpoint. The legacy
+                        # ``progress`` string is unchanged.
+                        pulls_state[name]["progress_pct"] = float(pct)
                         # Emit progress at every 10% bucket crossed
                         _bucket = (pct // 10) * 10
                         if _bucket > _last_pct_emitted and _bucket <= 100:
@@ -815,6 +828,9 @@ async def pull_ollama_model(
 
             pulls_state[name]["status"] = "done"
             pulls_state[name]["progress"] = "Complete"
+            # [IMPROVE-9] Mark terminal state for the registry view.
+            pulls_state[name]["progress_pct"] = 100.0
+            pulls_state[name]["completed_at"] = time.time()
             _invalidate_cache("models:")
             logger.info("Pull complete: %s", name)
             emit("model", "download.done", status="ok",
@@ -823,6 +839,9 @@ async def pull_ollama_model(
         except Exception as exc:
             pulls_state[name]["status"] = "error"
             pulls_state[name]["error"] = str(exc)
+            # [IMPROVE-9] Stamp completion even on error so the
+            # registry can show a "task ended at..." timestamp.
+            pulls_state[name]["completed_at"] = time.time()
             logger.error("Pull failed for %s: %s", name, exc)
             emit("model", "download.error", status="error",
                  duration_ms=int((time.monotonic() - _pull_t0) * 1000),
@@ -2077,6 +2096,12 @@ def _hf_download_worker(
         "progress": 0.0,
         "error": None,
         "thread": threading.current_thread().name,
+        # [IMPROVE-9] ``started_at`` is read by the unified
+        # ``GET /models/tasks`` endpoint so clients can sort tasks by
+        # most-recent. Wall-clock seconds (epoch) — ``time.monotonic``
+        # would be wrong here because the value is exposed across
+        # process boundaries and needs absolute meaning.
+        "started_at": time.time(),
     }
     _hf_t0 = time.monotonic()
     emit("model", "download.start", status="start",
@@ -2226,6 +2251,9 @@ def _hf_download_worker(
 
         downloads_state[download_key]["status"] = "completed"
         downloads_state[download_key]["progress"] = 1.0
+        # [IMPROVE-9] Stamp terminal time so the registry can render
+        # an "ended at..." marker.
+        downloads_state[download_key]["completed_at"] = time.time()
         logger.info("HF download completed: %s%s", model_id, f" ({gguf_filename})" if gguf_filename else "")
         # Invalidate model caches so new model shows up
         _invalidate_cache("models")
@@ -2242,6 +2270,9 @@ def _hf_download_worker(
     except Exception as exc:
         downloads_state[download_key]["status"] = "failed"
         downloads_state[download_key]["error"] = str(exc)
+        # [IMPROVE-9] Stamp terminal time even on failure (matches
+        # success path; UI can show same "ended at" widget).
+        downloads_state[download_key]["completed_at"] = time.time()
         logger.warning("HF download failed for %s: %s", model_id, exc)
         emit("model", "download.error", status="error",
              duration_ms=int((time.monotonic() - _hf_t0) * 1000),
@@ -2267,6 +2298,70 @@ async def get_hf_downloads(
             "error": info.get("error"),
         })
     return {"items": items[:limit]}
+
+
+# ── [IMPROVE-9] Unified background-task poll endpoint ────────────
+
+
+@router.get("/models/tasks")
+async def list_background_tasks(
+    kind: str | None = None,
+    limit: int = 50,
+    tasks: Any = Depends(get_task_registry),
+) -> dict[str, Any]:
+    """[IMPROVE-9] Unified poll endpoint for background download/pull
+    jobs across both kinds (Ollama pulls + HF downloads).
+
+    Returns a normalized response shape so clients only need one
+    polling loop + one status vocabulary instead of merging the two
+    legacy endpoints' divergent shapes::
+
+        {
+          "items": [
+            {"task_id": "ollama:llama3.2:3b",
+             "kind": "ollama_pull",
+             "target": "llama3.2:3b",
+             "status": "running",          # normalized: pending|running|done|error
+             "progress_pct": 75.0,         # 0-100, or null
+             "progress_text": "downloading 75%",
+             "error": null,
+             "started_at": 1714325000.123,
+             "completed_at": null,
+             "extra": {}},
+            {"task_id": "hf:black-forest-labs/FLUX.1-dev",
+             "kind": "hf_download",
+             ...},
+          ]
+        }
+
+    Query params:
+      * ``kind``: filter by ``"ollama_pull"`` or ``"hf_download"``.
+        Unknown values return 400.
+      * ``limit``: max items returned (sorted by ``started_at`` desc
+        so most-recent are surfaced first). Default 50.
+
+    Q22=B small patch — the legacy ``GET /models/ollama/pull/status``
+    and ``GET /models/hf/downloads`` endpoints stay unchanged for
+    backward compat. New clients should prefer ``/models/tasks``.
+    """
+    from local_ai_platform.tasks import TaskKind
+
+    if kind is not None:
+        try:
+            kind_enum = TaskKind(kind)
+        except ValueError:
+            raise HTTPException(
+                400, f"Unknown task kind: {kind!r}. Valid values: "
+                f"{[k.value for k in TaskKind]}",
+            )
+        items = tasks.list_by_kind(kind_enum)
+    else:
+        items = tasks.list_all()
+
+    # Most-recent first. Tasks without a ``started_at`` (legacy rows
+    # mid-write) sort to the end via the 0.0 default.
+    items.sort(key=lambda t: t.started_at, reverse=True)
+    return {"items": [t.to_dict() for t in items[:limit]]}
 
 
 @router.post("/models/hf/download")

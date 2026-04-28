@@ -189,6 +189,17 @@ async def lifespan(app: FastAPI):
     app.state._ollama_pulls = _ollama_pulls
     app.state._hf_downloads = _hf_downloads
 
+    # [IMPROVE-9] Unified TaskRegistry — thin read-side wrapper over
+    # the two dicts above. Storage stays in the dicts (load-bearing
+    # for IMPROVE-5 backward-compat tests); the registry adds
+    # normalized status + a single ``GET /models/tasks`` endpoint.
+    # Q22=B: small patch only — no SQLite persistence, no cancel.
+    from local_ai_platform.tasks import TaskRegistry
+    app.state.tasks = TaskRegistry(
+        ollama_pulls_dict=_ollama_pulls,
+        hf_downloads_dict=_hf_downloads,
+    )
+
     # Wire image service directly to tools (avoids circular HTTP calls)
     try:
         from local_ai_platform.tools.image_tools import set_image_service

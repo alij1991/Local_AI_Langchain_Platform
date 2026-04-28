@@ -209,3 +209,20 @@ def get_hf_downloads_state(request: Request) -> dict[str, dict[str, Any]]:
     rationale as ``get_ollama_pulls_state`` (the
     ``/models/hf/downloads`` handler is called ``get_hf_downloads``)."""
     return request.app.state._hf_downloads
+
+
+def get_task_registry(request: Request) -> Any:
+    """[IMPROVE-9] Unified background-task registry — read-side
+    wrapper over the existing ``_ollama_pulls`` + ``_hf_downloads``
+    dicts. The legacy state-dict accessors above remain unchanged
+    for backward compat; this returns the new typed view used by
+    ``GET /models/tasks``.
+
+    Return type is ``Any`` because importing ``TaskRegistry`` here
+    would create a circular import — the registry lives in the
+    plain ``local_ai_platform.tasks`` module which has no FastAPI
+    deps, but ``deps.py`` is imported by routers at module load.
+    Routes that depend on this helper should annotate their
+    parameter as ``TaskRegistry`` directly.
+    """
+    return request.app.state.tasks
