@@ -220,6 +220,108 @@ def _compute_diff_metrics(path_a: str, path_b: str) -> dict[str, Any]:
     }
 
 
+# ── [IMPROVE-57] Mask-composite post-processing ──────────────────
+#
+# Doc rationale (07-image-editor.md:460-471): Kontext / Nunchaku /
+# CosXL all edit the whole image per instruction. To localize an
+# edit ("just change the sky") today the user has to hope the model
+# respects "everything else unchanged" in the prompt — unreliable.
+# This helper does the simple post-processing that fixes the worst
+# 90% of the problem: blend the model's whole-image output back
+# with the source using a user-drawn mask.
+#
+# Convention matches Photoshop layer masks: white = "apply edited",
+# black = "keep source". Mask is grayscale; values blend linearly.
+# Feathering = Gaussian blur on the mask, sigma in pixels, so a
+# hard 0/1 cutoff becomes a soft gradient.
+#
+# Generic across all editor ops, not Kontext-only — the math doesn't
+# care which model produced ``edited``. Doc framing is "Kontext-
+# family" because that's the user-pain motivation, but a future
+# "mask my classical sharpen" use-case works identically.
+
+
+def _decode_mask_base64(mask_b64: str) -> bytes:
+    """Decode a base64 mask payload, accepting both bare base64 and
+    the ``data:image/<fmt>;base64,...`` data-URL form.
+
+    Pulled out so the helper has a clean re-use point and the test
+    suite can pin the prefix-stripping behaviour without going
+    through the full composite pipeline.
+    """
+    import base64
+
+    if "," in mask_b64 and mask_b64.lstrip().startswith("data:"):
+        mask_b64 = mask_b64.split(",", 1)[1]
+    return base64.b64decode(mask_b64)
+
+
+def _apply_mask_composite(
+    source: "Image.Image",
+    edited: "Image.Image",
+    mask_b64: str,
+    feather_px: int = 4,
+) -> "Image.Image":
+    """[IMPROVE-57] Blend ``edited`` back onto ``source`` using the
+    user-drawn mask.
+
+    ``mask_b64`` is base64-encoded image bytes (with or without the
+    ``data:image/...;base64,`` data-URL prefix). White = "apply
+    edited", black = "keep source", grays = linear blend.
+
+    The mask is converted to grayscale, resized to ``edited.size``,
+    then Gaussian-blurred with ``sigma=feather_px`` so hard mask
+    edges fade smoothly. ``feather_px=0`` skips the blur for callers
+    who want a sharp boundary.
+
+    ``source`` is also resized to ``edited.size`` if dims differ —
+    instruct_edit can return slightly different dimensions than its
+    input (e.g. snapping to multiples of 64), which would otherwise
+    break the per-pixel blend.
+
+    Returns an RGB PIL Image. Raises on corrupt input — callers in
+    apply_edit catch the exception and fall back to the unmasked
+    edit so a malformed mask can't escalate into a 500.
+    """
+    import io
+
+    import numpy as np
+    from PIL import ImageFilter
+
+    raw = _decode_mask_base64(mask_b64)
+    mask_img = Image.open(io.BytesIO(raw)).convert("L")
+
+    target_size = edited.size
+    if mask_img.size != target_size:
+        mask_img = mask_img.resize(target_size, Image.LANCZOS)
+
+    # ``feather_px=0`` skips the blur entirely — saves a Gaussian
+    # convolution when the caller wants a sharp boundary (rare but
+    # legitimate, e.g. a pre-feathered mask coming from another
+    # tool).
+    if feather_px and feather_px > 0:
+        mask_img = mask_img.filter(ImageFilter.GaussianBlur(radius=float(feather_px)))
+
+    src_img = source
+    if src_img.size != target_size:
+        src_img = src_img.resize(target_size, Image.LANCZOS)
+    if src_img.mode != "RGB":
+        src_img = src_img.convert("RGB")
+
+    edited_rgb = edited if edited.mode == "RGB" else edited.convert("RGB")
+
+    src_arr = np.asarray(src_img, dtype=np.float32)
+    edt_arr = np.asarray(edited_rgb, dtype=np.float32)
+    # mask normalized to [0, 1]; broadcast along the channel axis so
+    # one mask blends all 3 RGB channels identically.
+    mask_arr = np.asarray(mask_img, dtype=np.float32) / 255.0
+    mask_arr = mask_arr[..., None]  # (H, W, 1)
+
+    out_arr = mask_arr * edt_arr + (1.0 - mask_arr) * src_arr
+    out_arr = np.clip(out_arr, 0.0, 255.0).astype(np.uint8)
+    return Image.fromarray(out_arr, mode="RGB")
+
+
 @dataclass
 class EditStep:
     """A single edit operation in the history."""
@@ -766,6 +868,43 @@ class ImageEditorService:
                  error_message=str(exc),
                  context=_edit_ctx)
             raise
+
+        # ── [IMPROVE-57] Mask-composite post-processing ─────────
+        # If the caller supplied ``mask_image_base64`` in params,
+        # blend the operation's whole-image output with the source
+        # image the operation consumed. Source = ``image`` so the
+        # convention matches per-op semantics:
+        #   * preset / auto_enhance / lut → blend with ORIGINAL
+        #     (the same image the op consumed via _use_original)
+        #   * everything else → blend with the CURRENT view
+        # This matches user mental-model: "apply this op, but only
+        # to the region I painted, using my current view as backdrop."
+        #
+        # ``result`` may be a dict (only for ``analyze``, which
+        # returned early above) — by the time control reaches here
+        # we know it's an image. Still defensive-check the type so a
+        # future op that returns a dict can't silently bypass.
+        _mask_b64 = params.get("mask_image_base64")
+        if _mask_b64 and isinstance(result, Image.Image):
+            try:
+                _feather_px = int(params.get("mask_feather_px", 4))
+                result = _apply_mask_composite(
+                    image, result, _mask_b64, _feather_px,
+                )
+                _edit_ctx["mask_applied"] = True
+                _edit_ctx["mask_feather_px"] = _feather_px
+            except Exception as mask_exc:
+                # Don't escalate a malformed mask into a 500. The
+                # user's edit succeeded; the mask is the cosmetic
+                # add-on. Log + record + fall through to the
+                # unmasked result.
+                logger.warning(
+                    "[IMPROVE-57] mask composite failed for session=%s "
+                    "operation=%s: %s",
+                    session_id, operation, mask_exc,
+                )
+                _edit_ctx["mask_applied"] = False
+                _edit_ctx["mask_error"] = str(mask_exc)
 
         duration_ms = int((time.monotonic() - start) * 1000)
 
