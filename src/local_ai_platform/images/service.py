@@ -4284,6 +4284,280 @@ _OPTIMIZATION_RULES: Final[list[OptimizationRule]] = [
 ]
 
 
+# ── [IMPROVE-44] Graduated OOM retry ladder ─────────────────────────
+#
+# Pre-IMPROVE-44 the only OOM recovery path was a single-shot fallback
+# to CPU at clamped 768x768 with float32 + slicing + tiling — no
+# matter how minor the OOM. A 1024x1024 generation that would have
+# fit at 768x768 on the SAME GPU paid the full ~20x CPU penalty.
+#
+# This block adds a 5-stage retry ladder. Each stage tries one
+# specific recovery strategy; if the result is still ``out_of_memory``
+# the next stage runs. Order is "cheapest recovery first":
+#
+#   Stage 1: GPU at 768 max-side + vae_tiling
+#       → typical for "FLUX dev OOMed at 1024x1024 but fits at
+#         768x768" — succeeds in seconds.
+#   Stage 2: GPU at 512 max-side + vae_tiling + attention_slicing
+#       → harsher resolution clamp + activation chunking.
+#   Stage 3: GPU at original resolution + model_cpu_offload
+#       → keeps pixels but offloads inactive model parts to RAM.
+#   Stage 4: GPU at original resolution + sequential_cpu_offload
+#       → heaviest offload (per-layer); slowest GPU strategy.
+#   Stage 5: CPU pure with float32 + slicing + tiling, max-side 768
+#       → byte-equivalent to the pre-IMPROVE-44 single-shot fallback.
+#
+# Selection rules (``_select_oom_stages``):
+#   * Skip stages 1-2 whose ``max_side >= max(orig_w, orig_h)``
+#     (wouldn't reduce resolution → no point).
+#   * Skip stage 5 when ``hf_image_allow_cpu_fallback=False``
+#     (preserves today's "no CPU fallback" semantics).
+#   * Stages 3-4 always apply (offload-based, not resolution-based).
+#
+# Aspect ratio preserved by ``_clamp_to_max_side`` — pre-IMPROVE-44
+# code clamped each dimension independently (``min(width, 768),
+# min(height, 768)``) which DISTORTED non-square inputs (1024x768 →
+# 768x768, dropping the 4:3 aspect). The ladder fixes this as a
+# side effect: 1024x768 with max_side=768 → 768x576 (4:3 preserved).
+#
+# Sources (2025-2026):
+#   - FLUX VRAM Requirements & Local Setup Guide 2026 (localaimaster):
+#     https://localaimaster.com/blog/flux-local-image-generation
+#   - How Much VRAM for FLUX Image Generation? (tensorrigs, 2025):
+#     https://tensorrigs.com/blog/flux-vram-guide/
+#   - Diffusers memory optimization (model_cpu_offload vs sequential):
+#     https://huggingface.co/docs/diffusers/optimization/memory
+
+
+# Error codes that trigger the OOM retry ladder. ``out_of_memory`` is
+# the canonical CUDA-OOM tag from ``_is_memory_error``;
+# ``insufficient_memory`` covers MemoryError / "cannot allocate"
+# host-RAM cases; ``pagefile_too_small`` is the Windows-specific
+# pagefile-exhaustion variant. ``provider_unavailable`` /
+# ``runtime_crash`` are NON-OOM but the pre-IMPROVE-44 code also
+# fell back to CPU on them — preserved here so semantics match.
+_OOM_RETRY_ERROR_CODES: Final[frozenset[str]] = frozenset({
+    "out_of_memory", "insufficient_memory", "pagefile_too_small",
+    "provider_unavailable", "runtime_crash",
+})
+
+
+@dataclass(frozen=True)
+class _OOMStage:
+    """One rung of the graduated OOM retry ladder.
+
+    Frozen so the ``_OOM_RETRY_LADDER`` constant is genuinely constant —
+    callers can't mutate stage flags between attempts.
+
+    Fields:
+      * ``name``: short tag for metadata + warning text.
+      * ``device``: ``"cuda"`` for stages 1-4, ``"cpu"`` for stage 5.
+      * ``max_side``: 0 means "keep original resolution"; otherwise the
+        larger dimension is clamped to this value with aspect ratio
+        preserved (see ``_clamp_to_max_side``).
+      * ``use_vae_tiling`` / ``use_attention_slicing`` /
+        ``use_model_cpu_offload`` / ``use_sequential_cpu_offload``:
+        merged into the retry ``execution_plan`` overlay.
+      * ``torch_dtype``: ``None`` inherits the base plan's dtype; only
+        stage 5 overrides this (forces ``"float32"`` to match
+        pre-IMPROVE-44 CPU fallback).
+      * ``clamp_steps``: when True, retry with
+        ``max(12, min(steps, 20))`` — only stage 5 needs this (CPU
+        speed dictates fewer steps; GPU stages keep the original
+        step count).
+      * ``stretch_timeout``: when True, retry with
+        ``max(timeout_s, 420)`` — only stage 5 needs this (CPU is
+        ~20x slower than GPU).
+    """
+    name: str
+    device: str
+    max_side: int
+    use_vae_tiling: bool
+    use_attention_slicing: bool
+    use_model_cpu_offload: bool
+    use_sequential_cpu_offload: bool
+    torch_dtype: str | None
+    clamp_steps: bool
+    stretch_timeout: bool
+
+
+# The ladder itself. Order matters — each stage runs only if all
+# preceding stages returned an OOM-class error. See ``_select_oom_stages``
+# for which stages apply to a given (width, height, allow_cpu) tuple.
+_OOM_RETRY_LADDER: Final[list[_OOMStage]] = [
+    _OOMStage(
+        name="768_vae_tile",
+        device="cuda",
+        max_side=768,
+        use_vae_tiling=True,
+        use_attention_slicing=False,
+        use_model_cpu_offload=False,
+        use_sequential_cpu_offload=False,
+        torch_dtype=None,
+        clamp_steps=False,
+        stretch_timeout=False,
+    ),
+    _OOMStage(
+        name="512_slicing",
+        device="cuda",
+        max_side=512,
+        use_vae_tiling=True,
+        use_attention_slicing=True,
+        use_model_cpu_offload=False,
+        use_sequential_cpu_offload=False,
+        torch_dtype=None,
+        clamp_steps=False,
+        stretch_timeout=False,
+    ),
+    _OOMStage(
+        name="model_offload",
+        device="cuda",
+        max_side=0,  # keep original resolution
+        use_vae_tiling=True,
+        use_attention_slicing=True,
+        use_model_cpu_offload=True,
+        use_sequential_cpu_offload=False,
+        torch_dtype=None,
+        clamp_steps=False,
+        stretch_timeout=False,
+    ),
+    _OOMStage(
+        name="sequential_offload",
+        device="cuda",
+        max_side=0,  # keep original resolution
+        use_vae_tiling=True,
+        use_attention_slicing=True,
+        use_model_cpu_offload=False,
+        use_sequential_cpu_offload=True,
+        torch_dtype=None,
+        clamp_steps=False,
+        stretch_timeout=False,
+    ),
+    _OOMStage(
+        name="cpu_pure",
+        device="cpu",
+        max_side=768,
+        use_vae_tiling=True,
+        use_attention_slicing=True,
+        use_model_cpu_offload=False,
+        use_sequential_cpu_offload=False,
+        torch_dtype="float32",
+        clamp_steps=True,
+        stretch_timeout=True,
+    ),
+]
+
+
+def _clamp_to_max_side(width: int, height: int, max_side: int) -> tuple[int, int]:
+    """Aspect-preserving clamp. If ``max_side <= 0`` returns the
+    original dimensions unchanged. Otherwise the larger dimension is
+    set to ``max_side`` and the smaller is scaled proportionally.
+
+    Diffusers expects dimensions to be multiples of 8 (VAE downscales
+    by 8). We round DOWN to the nearest multiple of 8 to avoid going
+    over the budget on the longer side.
+
+    Pre-IMPROVE-44 the CPU fallback used per-dimension clamping
+    ``min(w, 768), min(h, 768)`` which distorted non-square inputs
+    (1024x768 → 768x768, losing the 4:3 aspect). The ladder fixes
+    this as a side effect of using a single max-side clamp.
+    """
+    if max_side <= 0 or (width <= max_side and height <= max_side):
+        return width, height
+    longer = max(width, height)
+    scale = max_side / longer
+    new_w = int(width * scale)
+    new_h = int(height * scale)
+    # Round down to nearest multiple of 8.
+    new_w = max(8, (new_w // 8) * 8)
+    new_h = max(8, (new_h // 8) * 8)
+    return new_w, new_h
+
+
+def _select_oom_stages(
+    orig_width: int, orig_height: int, *, allow_cpu_pure: bool,
+) -> list[_OOMStage]:
+    """Pick which ladder stages apply for the given input.
+
+    Skip rules:
+      * Stages with positive ``max_side >= max(orig_w, orig_h)`` are
+        skipped — they wouldn't reduce resolution, so they're
+        equivalent to a re-run with no recovery. Pin via test
+        ``test_skip_stage_1_when_input_already_768x768``.
+      * The ``cpu_pure`` stage is dropped when
+        ``allow_cpu_pure=False`` (i.e. the user set
+        ``HF_IMAGE_ALLOW_CPU_FALLBACK=false``). Stages 1-4 still run
+        because they're GPU-only — the user's "no CPU" preference
+        doesn't preclude GPU-side recovery.
+    """
+    longer = max(orig_width, orig_height)
+    out: list[_OOMStage] = []
+    for stage in _OOM_RETRY_LADDER:
+        if stage.name == "cpu_pure" and not allow_cpu_pure:
+            continue
+        # The "skip if max_side wouldn't reduce resolution" rule
+        # applies ONLY to GPU stages whose recovery strategy IS
+        # resolution reduction (stages 1+2). The cpu_pure stage runs
+        # whenever allowed regardless of resolution — its ``max_side``
+        # is a CPU-runtime cap (CPU is ~20x slower; clamp keeps wall
+        # time tractable), not a "skip if not reducing" gate. Stages
+        # 3+4 use ``max_side=0`` so this branch never fires for them.
+        if (
+            stage.device == "cuda"
+            and stage.max_side > 0
+            and stage.max_side >= longer
+        ):
+            continue
+        out.append(stage)
+    return out
+
+
+def _apply_oom_stage_to_plan(
+    stage: _OOMStage, base_plan: dict[str, Any],
+    orig_width: int, orig_height: int,
+) -> tuple[dict[str, Any], int, int, str]:
+    """Build the retry ``execution_plan`` overlay for one stage.
+
+    Returns ``(retry_plan, retry_w, retry_h, warning_text)``.
+
+    The retry plan is ``{**base_plan, ...stage_overlays}`` — preserves
+    everything else the original plan had (model_id, dtype, scheduler,
+    optimization flags from IMPROVE-40). ``device_plan`` is set to
+    ``"cpu_low_memory"`` for the cpu_pure stage to match what the
+    pre-IMPROVE-44 single-shot fallback wrote — downstream code reads
+    ``device_plan`` to decide whether to tighten loaders.
+
+    The warning text is what gets appended to ``execution_plan["warnings"]``
+    so the user sees "OOM at 1024x1024; retried at 768x576 with
+    768_vae_tile" in the API response.
+    """
+    new_w, new_h = _clamp_to_max_side(orig_width, orig_height, stage.max_side)
+    overlay: dict[str, Any] = {
+        "use_vae_tiling": stage.use_vae_tiling,
+        "use_attention_slicing": stage.use_attention_slicing,
+        "use_model_cpu_offload": stage.use_model_cpu_offload,
+        "use_sequential_cpu_offload": stage.use_sequential_cpu_offload,
+    }
+    if stage.torch_dtype is not None:
+        overlay["torch_dtype"] = stage.torch_dtype
+    if stage.device == "cpu":
+        # Mirror pre-IMPROVE-44 cpu_pure path — downstream loader
+        # branches on ``device_plan`` for low-memory configuration.
+        overlay["device_plan"] = "cpu_low_memory"
+    retry_plan = {**base_plan, **overlay}
+    if stage.max_side > 0 and (new_w, new_h) != (orig_width, orig_height):
+        warning = (
+            f"OOM recovery [{stage.name}]: retried at {new_w}x{new_h} "
+            f"(original {orig_width}x{orig_height})"
+        )
+    else:
+        warning = (
+            f"OOM recovery [{stage.name}]: retried at original "
+            f"{orig_width}x{orig_height} with offload/slicing"
+        )
+    return retry_plan, new_w, new_h, warning
+
+
 class ImageGenerationService:
     def __init__(self, config: AppConfig) -> None:
         self.config = config
@@ -8189,6 +8463,180 @@ class ImageGenerationService:
             logger.error("[IMG] Exception during generation: %s", exc, exc_info=True)
             return ImageRuntimeResult(ok=False, error_code="provider_unavailable", error_message=str(exc), metadata={"device_used": device})
 
+    def _run_oom_retry_ladder(
+        self,
+        *,
+        base_args: dict[str, Any],
+        base_plan: dict[str, Any],
+        original_error: ImageRuntimeResult,
+        orig_width: int,
+        orig_height: int,
+        orig_steps: int,
+        orig_timeout_s: int,
+        mask_image_path: str | None,
+    ) -> ImageRuntimeResult:
+        """[IMPROVE-44] Run the graduated OOM retry ladder until one
+        stage succeeds or all applicable stages have failed.
+
+        Replaces the pre-IMPROVE-44 single-shot CPU fallback. The full
+        ladder is documented at module level (see the
+        ``_OOM_RETRY_LADDER`` block) — this method just wires together
+        ``_select_oom_stages`` + ``_apply_oom_stage_to_plan`` +
+        ``self._run_diffusers``.
+
+        Parameters
+        ----------
+        base_args:
+            kwargs for ``self._run_diffusers`` EXCEPT
+            ``width/height/steps/device/execution_plan/timeout_s`` —
+            those are stage-derived. Must contain
+            ``model_id_or_path``, ``model_source``, ``prompt``,
+            ``negative_prompt``, ``seed``, ``guidance_scale``,
+            ``init_image_path``, ``strength``.
+        base_plan:
+            The original ``execution_plan`` dict. Each stage's retry
+            plan starts from this and overlays stage-specific flags
+            via ``_apply_oom_stage_to_plan``.
+        original_error:
+            The non-ok ``ImageRuntimeResult`` from the base generation
+            that triggered the ladder. Returned (with attempted-stages
+            metadata) when every applicable stage also fails.
+        orig_width, orig_height:
+            Used for stage selection (skip stages whose ``max_side``
+            wouldn't reduce resolution) and the warning text.
+        orig_steps, orig_timeout_s:
+            Defaults for stages where ``clamp_steps``/``stretch_timeout``
+            are False; the cpu_pure stage applies the
+            pre-IMPROVE-44 ``max(12, min(steps, 20))`` and
+            ``max(timeout_s, 420)`` clamps.
+        mask_image_path:
+            Re-injected into every stage's retry plan — pre-IMPROVE-44
+            code did this for the cpu_pure path
+            (``_cpu_plan["_mask_image_path"] = mask_image_path``);
+            preserved here for inpaint runs.
+
+        Returns
+        -------
+        First successful retry's result with stamped metadata
+        (``oom_recovery=True``, ``oom_recovery_stage=<name>``,
+        ``oom_original_width/height``), OR ``original_error`` with
+        ``metadata.oom_recovery_attempted=True`` and
+        ``metadata.oom_stages_tried=[...]`` listing each stage that
+        was attempted.
+        """
+        allow_cpu = bool(self.config.hf_image_allow_cpu_fallback)
+        stages = _select_oom_stages(
+            orig_width, orig_height, allow_cpu_pure=allow_cpu,
+        )
+        if not stages:
+            # No applicable stages (e.g. tiny input + no CPU fallback).
+            # Return original error with the "ladder ran but found
+            # nothing to try" signal so callers can distinguish this
+            # from "ladder skipped entirely".
+            md = dict(original_error.metadata or {})
+            md["oom_recovery_attempted"] = True
+            md["oom_stages_tried"] = []
+            original_error.metadata = md
+            return original_error
+
+        logger.warning(
+            "[IMG] [IMPROVE-44] OOM recovery ladder engaged "
+            "(error_code=%s, %d stages applicable: %s)",
+            original_error.error_code, len(stages),
+            [s.name for s in stages],
+        )
+
+        attempted: list[str] = []
+        for stage in stages:
+            retry_plan, retry_w, retry_h, warning = _apply_oom_stage_to_plan(
+                stage, base_plan, orig_width, orig_height,
+            )
+            if mask_image_path:
+                retry_plan["_mask_image_path"] = mask_image_path
+            retry_plan["warnings"] = list(retry_plan.get("warnings") or []) + [warning]
+
+            # Each stage starts from a clean pipeline cache. Offload
+            # changes pipeline construction; a stale cached pipeline
+            # would skip the new offload setup and re-OOM identically.
+            self._pipelines.clear()
+            # Lazy torch import — service.py imports torch inside
+            # methods, not at module top, to keep cold-start cheap.
+            try:
+                import torch as _torch
+                if _torch.cuda.is_available():
+                    _torch.cuda.empty_cache()
+            except Exception:
+                pass
+
+            retry_steps = (
+                max(12, min(orig_steps, 20)) if stage.clamp_steps else orig_steps
+            )
+            retry_timeout = (
+                max(orig_timeout_s, 420) if stage.stretch_timeout else orig_timeout_s
+            )
+            attempted.append(stage.name)
+            logger.info(
+                "[IMG] [IMPROVE-44] Trying stage '%s' at %dx%d (steps=%d, timeout=%ds)",
+                stage.name, retry_w, retry_h, retry_steps, retry_timeout,
+            )
+
+            retry = self._run_diffusers(
+                **base_args,
+                width=retry_w,
+                height=retry_h,
+                steps=retry_steps,
+                device=stage.device,
+                execution_plan=retry_plan,
+                timeout_s=retry_timeout,
+            )
+            if retry.ok:
+                md = dict(retry.metadata or {})
+                md["oom_recovery"] = True
+                md["oom_recovery_stage"] = stage.name
+                md["oom_original_width"] = orig_width
+                md["oom_original_height"] = orig_height
+                md["oom_recovery_width"] = retry_w
+                md["oom_recovery_height"] = retry_h
+                md["oom_stages_tried"] = list(attempted)
+                if stage.device == "cpu":
+                    md["device_used"] = "cpu"
+                    md["fallback_used"] = True
+                    md["fallback_reason"] = original_error.error_message
+                retry.metadata = md
+                logger.info(
+                    "[IMG] [IMPROVE-44] OOM recovery succeeded at stage '%s'",
+                    stage.name,
+                )
+                return retry
+
+            # Non-OOM error mid-ladder → stop. Continuing wastes time on
+            # a failure mode the ladder can't fix (corrupt model file,
+            # auth error, etc.).
+            if retry.error_code not in _OOM_RETRY_ERROR_CODES:
+                logger.warning(
+                    "[IMG] [IMPROVE-44] Stage '%s' failed with non-OOM error "
+                    "%s; aborting ladder",
+                    stage.name, retry.error_code,
+                )
+                md = dict(retry.metadata or {})
+                md["oom_recovery_attempted"] = True
+                md["oom_stages_tried"] = list(attempted)
+                retry.metadata = md
+                return retry
+
+        # Every stage failed with an OOM-class error. Return the
+        # ORIGINAL error (preserves its error_code semantics for
+        # downstream callers) with the attempted-stages list stamped.
+        md = dict(original_error.metadata or {})
+        md["oom_recovery_attempted"] = True
+        md["oom_stages_tried"] = list(attempted)
+        original_error.metadata = md
+        logger.warning(
+            "[IMG] [IMPROVE-44] All %d ladder stages failed; returning original error",
+            len(attempted),
+        )
+        return original_error
+
     def generate(
         self,
         *,
@@ -8599,42 +9047,51 @@ class ImageGenerationService:
                 # Clear again for next dtype attempt
                 self._pipelines.clear()
 
-        if not result.ok and preferred != "cpu" and bool(self.config.hf_image_allow_cpu_fallback) and result.error_code in {"out_of_memory", "provider_unavailable", "runtime_crash"}:
-            logger.warning("[IMG] ⚠️  CUDA generation FAILED (code=%s: %s) — FALLING BACK TO CPU. "
-                          "This will be much slower! Check RAM/VRAM availability.",
-                          result.error_code, (result.error_message or "")[:200])
+        # [IMPROVE-44] Graduated OOM retry ladder. Pre-IMPROVE-44 this
+        # was a single-shot CPU fallback at clamped 768x768 + float32 +
+        # slicing/tiling. The new ladder tries cheaper recoveries first
+        # (GPU at 768/512, then GPU offloads at original resolution)
+        # and only falls all the way to CPU if every GPU strategy fails.
+        # See module-level ``_OOM_RETRY_LADDER`` for the full ladder
+        # definition; ``_run_oom_retry_ladder`` is the loop.
+        if (
+            not result.ok and preferred != "cpu"
+            and result.error_code in _OOM_RETRY_ERROR_CODES
+        ):
+            logger.warning(
+                "[IMG] [IMPROVE-44] Generation failed on %s (code=%s: %s) — "
+                "engaging OOM retry ladder.",
+                preferred, result.error_code,
+                (result.error_message or "")[:200],
+            )
             execution_plan["warnings"] = list(execution_plan.get("warnings") or []) + [
-                f"CUDA generation failed ({result.error_code}); fell back to CPU. "
+                f"GPU generation failed ({result.error_code}); engaging OOM retry ladder. "
                 f"Reason: {(result.error_message or '')[:100]}"
             ]
-            self._pipelines.clear()
-            _cpu_plan = {**execution_plan, "device_plan": "cpu_low_memory", "torch_dtype": "float32", "use_model_cpu_offload": False, "use_sequential_cpu_offload": False, "use_attention_slicing": True, "use_vae_tiling": True}
-            if mask_image_path:
-                _cpu_plan["_mask_image_path"] = mask_image_path
-            retry = self._run_diffusers(
-                model_id_or_path=resolved_model,
-                model_source=model_source,
-                prompt=prompt,
-                negative_prompt=negative_prompt,
-                seed=seed,
-                steps=max(12, min(steps, 20)),
-                guidance_scale=guidance_scale,
-                width=min(width, 768),
-                height=min(height, 768),
-                init_image_path=init_image_path,
-                strength=strength,
-                device="cpu",
-                execution_plan=_cpu_plan,
-                timeout_s=max(timeout_s, 420),
+            _ladder_base_args = {
+                "model_id_or_path": resolved_model,
+                "model_source": model_source,
+                "prompt": prompt,
+                "negative_prompt": negative_prompt,
+                "seed": seed,
+                "guidance_scale": guidance_scale,
+                "init_image_path": init_image_path,
+                "strength": strength,
+            }
+            ladder_result = self._run_oom_retry_ladder(
+                base_args=_ladder_base_args,
+                base_plan=execution_plan,
+                original_error=result,
+                orig_width=width,
+                orig_height=height,
+                orig_steps=steps,
+                orig_timeout_s=timeout_s,
+                mask_image_path=mask_image_path,
             )
-            if retry.ok:
-                result = retry
-                result.metadata = {
-                    **(result.metadata or {}),
-                    "fallback_used": True,
-                    "fallback_reason": result.error_message,
-                    "device_used": "cpu",
-                }
+            # Either succeeded at some stage (returned with new metadata)
+            # or every stage failed (returned original error). Either way
+            # the ladder result is now authoritative.
+            result = ladder_result
 
         if not result.ok:
             logger.warning("[IMG] Generation FAILED: %s — %s", result.error_code, result.error_message)
