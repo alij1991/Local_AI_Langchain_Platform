@@ -617,6 +617,105 @@ async def partner_voice_gender_get(partner=Depends(get_partner_engine)):
     return {"gender": partner.get_voice_gender()}
 
 
+# ── [IMPROVE-63] Voice picker with samples ────────────────────────
+
+
+@router.get("/partner/voice/catalog")
+async def partner_voice_catalog(partner=Depends(get_partner_engine)):
+    """[IMPROVE-63] Return the Kokoro voice catalog so the Flutter
+    picker can render a grid of choices instead of the legacy
+    binary female/male toggle.
+
+    Response::
+
+        {
+          "voices": [
+            {"id": "af_heart", "display_name": "Heart",
+             "gender": "female", "language": "en-US",
+             "description": "Warm, natural — the default"},
+            ...
+          ],
+          "current_voice_id": "af_heart",
+          "fallback_gender": "female",
+          "sample_endpoint": "/partner/voice/sample/{voice_id}"
+        }
+
+    ``current_voice_id`` reflects ``set_voice_id`` if used,
+    otherwise the gender default — same priority TTS uses.
+    Flutter calls ``GET /partner/voice/sample/{id}`` to play a
+    preview before committing."""
+    return {
+        "voices": partner.get_voice_catalog(),
+        "current_voice_id": partner.get_voice_id(),
+        "fallback_gender": partner.get_voice_gender(),
+        "sample_endpoint": "/partner/voice/sample/{voice_id}",
+    }
+
+
+@router.get("/partner/voice/id")
+async def partner_voice_id_get(partner=Depends(get_partner_engine)):
+    """[IMPROVE-63] Current voice id (catalog-resolved)."""
+    return {"voice_id": partner.get_voice_id()}
+
+
+@router.post("/partner/voice/id")
+async def partner_voice_id_set(
+    body: dict[str, Any],
+    partner=Depends(get_partner_engine),
+):
+    """[IMPROVE-63] Set the partner's voice. Body
+    ``{"voice_id": "af_bella"}``. Maps unknown voice_id to 400
+    (the engine raises ValueError; we surface its message)."""
+    voice_id = (body.get("voice_id") or "").strip()
+    if not voice_id:
+        raise HTTPException(400, "voice_id is required")
+    try:
+        partner.set_voice_id(voice_id)
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+    return {
+        "status": "ok",
+        "voice_id": partner.get_voice_id(),
+        "gender": partner.get_voice_gender(),
+    }
+
+
+@router.get("/partner/voice/sample/{voice_id}")
+async def partner_voice_sample(
+    voice_id: str,
+    partner=Depends(get_partner_engine),
+):
+    """[IMPROVE-63] Render a short fixed phrase in ``voice_id`` and
+    return the WAV bytes. Lets the Flutter picker show "Play
+    sample" buttons next to each catalog entry.
+
+    Returns 503 when Kokoro isn't loaded (e.g. ONNX model files
+    missing). 400 when ``voice_id`` isn't in the catalog. The
+    user's currently-active voice is NOT changed by playing a
+    sample — pin via
+    ``test_voice_sample_does_not_change_active_voice``.
+    """
+    try:
+        wav = partner.synthesize_voice_sample(voice_id)
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+    if wav is None:
+        raise HTTPException(
+            503,
+            "TTS engine not initialised (Kokoro model files missing). "
+            "Place kokoro-v1.0.onnx + voices-v1.0.bin alongside the "
+            "server and restart, then try again.",
+        )
+    return Response(
+        content=wav,
+        media_type="audio/wav",
+        headers={
+            "X-Voice-Id": voice_id,
+            "X-Sample-Bytes": str(len(wav)),
+        },
+    )
+
+
 @router.post("/partner/voice/transcribe")
 async def partner_voice_transcribe(
     body: dict[str, Any],

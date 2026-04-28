@@ -1151,21 +1151,150 @@ class PartnerEngine:
         "male": "am_adam",     # Adam — warm, natural default male voice
     }
 
-    def _get_voice_for_emotion(self, emotion: str) -> str:
-        """Return the consistent voice for the current gender setting.
+    # [IMPROVE-63] Static catalog of Kokoro voices the user can pick
+    # from in the Flutter voice picker. Pre-IMPROVE-63 the only knob
+    # was a binary female/male toggle; doc rationale at
+    # docs/features/08-partner.md:604-608 calls this out as the worst
+    # voice UX paper-cut — Kokoro ships ~9 distinct speakers and the
+    # user couldn't choose.
+    #
+    # ID prefixes: ``af_`` = American female, ``am_`` = American
+    # male, ``bf_`` = British female (matches Kokoro's upstream
+    # convention).
+    _VOICE_CATALOG: list[dict[str, str]] = [
+        {"id": "af_heart",    "display_name": "Heart",    "gender": "female",
+         "language": "en-US", "description": "Warm, natural — the default"},
+        {"id": "af_sky",      "display_name": "Sky",      "gender": "female",
+         "language": "en-US", "description": "Bright, friendly"},
+        {"id": "af_bella",    "display_name": "Bella",    "gender": "female",
+         "language": "en-US", "description": "Smooth, professional"},
+        {"id": "af_nicole",   "display_name": "Nicole",   "gender": "female",
+         "language": "en-US", "description": "Calm, measured"},
+        {"id": "af_sarah",    "display_name": "Sarah",    "gender": "female",
+         "language": "en-US", "description": "Energetic, youthful"},
+        {"id": "am_adam",     "display_name": "Adam",     "gender": "male",
+         "language": "en-US", "description": "Warm, natural — the default"},
+        {"id": "am_michael",  "display_name": "Michael",  "gender": "male",
+         "language": "en-US", "description": "Deep, authoritative"},
+        {"id": "bf_emma",     "display_name": "Emma",     "gender": "female",
+         "language": "en-GB", "description": "British, refined"},
+        {"id": "bf_isabella", "display_name": "Isabella", "gender": "female",
+         "language": "en-GB", "description": "British, melodic"},
+    ]
 
-        Uses a single voice per gender so the partner always sounds like
-        the same person. Emotion affects what they say, not who they sound like.
+    # Sample text for the voice-preview endpoint. Short enough to
+    # keep generation under ~100 ms on Kokoro, long enough to give
+    # the user a real sense of the voice's timbre.
+    _VOICE_SAMPLE_TEXT = "Hello, this is a sample of my voice."
+
+    def get_voice_catalog(self) -> list[dict[str, str]]:
+        """[IMPROVE-63] Return the full Kokoro voice catalog. Caller
+        (route) wraps in JSON. The list is a static class-level
+        constant — no runtime cost, no Kokoro init required."""
+        # Return a copy so a route handler that mutates the response
+        # can't poison the next call.
+        return [dict(v) for v in self._VOICE_CATALOG]
+
+    def get_voice_id(self) -> str:
+        """[IMPROVE-63] Return the user-selected voice ID, or fall
+        back to the gender default when no specific voice is set.
+
+        Mirrors the priority used in ``_get_voice_for_emotion`` so
+        the route's ``current_voice_id`` reflects what TTS will
+        actually use.
         """
+        explicit = getattr(self, '_voice_id', None)
+        if explicit:
+            return explicit
+        gender = getattr(self, '_voice_gender', 'female')
+        return self._VOICE_MAP.get(gender, "af_heart")
+
+    def set_voice_id(self, voice_id: str) -> str:
+        """[IMPROVE-63] Set the user's specific voice. Validates
+        against ``_VOICE_CATALOG`` — unknown IDs raise ValueError so
+        the route can map to 400 with a useful error.
+
+        Also updates ``_voice_gender`` from the catalog entry so
+        downstream code that branches on gender (Chatterbox sync,
+        emotion-aware fallbacks) stays consistent.
+        """
+        catalog_index = {v["id"]: v for v in self._VOICE_CATALOG}
+        entry = catalog_index.get(voice_id)
+        if entry is None:
+            raise ValueError(
+                f"Unknown voice_id: {voice_id!r}. "
+                f"Valid: {[v['id'] for v in self._VOICE_CATALOG]}",
+            )
+        self._voice_id = voice_id
+        # Keep gender in sync with the chosen voice. Chatterbox sync
+        # downstream uses gender, not voice_id, so this avoids a
+        # confusing "I picked Bella but voice still sounds male"
+        # state if something flips back to gender-based dispatch.
+        self._voice_gender = entry["gender"]
+        if self._tts_emotional:
+            try:
+                get_sync_client().post(
+                    f"{self._tts_emotional}/gender",
+                    json={"gender": entry["gender"]},
+                    timeout=3,
+                )
+            except Exception:
+                pass
+        logger.info(
+            "[IMPROVE-63] voice_id set to %s (%s, %s)",
+            voice_id, entry["display_name"], entry["gender"],
+        )
+        return voice_id
+
+    def synthesize_voice_sample(self, voice_id: str) -> bytes | None:
+        """[IMPROVE-63] Render a short fixed phrase in ``voice_id``
+        for the voice-picker preview UI. Returns WAV bytes, or
+        ``None`` if Kokoro isn't loaded (caller maps to 503).
+
+        Doesn't touch ``self._voice_id`` — picking "play sample for
+        bella" while currently set to af_heart should NOT change the
+        active voice.
+        """
+        catalog_ids = {v["id"] for v in self._VOICE_CATALOG}
+        if voice_id not in catalog_ids:
+            raise ValueError(f"Unknown voice_id: {voice_id!r}")
+        # Reuse the existing synthesize() pipeline — same WAV
+        # encoding, same emit hooks, same error handling. Kokoro's
+        # voice argument bypasses the emotion-mapping path, so the
+        # sample is rendered in exactly the requested voice.
+        return self.synthesize(
+            self._VOICE_SAMPLE_TEXT, voice=voice_id, emotion="neutral",
+        )
+
+    def _get_voice_for_emotion(self, emotion: str) -> str:
+        """Return the consistent voice for the current settings.
+
+        [IMPROVE-63] Priority: explicit ``_voice_id`` (set via
+        ``set_voice_id``) wins over the gender default. Pre-IMPROVE-63
+        callers that only set ``_voice_gender`` continue to get the
+        gender's default voice — no behaviour change.
+        """
+        explicit = getattr(self, '_voice_id', None)
+        if explicit:
+            return explicit
         gender = getattr(self, '_voice_gender', 'female')
         return self._VOICE_MAP.get(gender, "af_heart")
 
     def set_voice_gender(self, gender: str) -> str:
-        """Set voice gender: 'female' or 'male'."""
+        """Set voice gender: 'female' or 'male'.
+
+        [IMPROVE-63] Also clears any explicit ``_voice_id`` so the
+        gender's default voice takes effect again. Without this,
+        a user toggling "back to male" after picking Bella would
+        still hear Bella — surprising. Clearing the override on
+        gender-change matches the legacy "single consistent voice
+        per gender" intent.
+        """
         gender = gender.lower().strip()
         if gender not in ("female", "male"):
             return f"Invalid gender: {gender}. Use 'female' or 'male'."
         self._voice_gender = gender
+        self._voice_id = None  # [IMPROVE-63] reset specific voice
         # Sync gender to Chatterbox server if available
         if self._tts_emotional:
             try:
