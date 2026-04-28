@@ -27,6 +27,9 @@ Endpoints (15):
   POST   /editor/{session_id}/export         — write final file (PNG/JPEG/WEBP)
   GET    /editor/archived                    — [IMPROVE-53] list archived sessions
   POST   /editor/{session_id}/restore        — [IMPROVE-53] unarchive a session
+  POST   /editor/{session_id}/blend-previous — [IMPROVE-52] soft-undo slider:
+                                               blend current step with the
+                                               one before; new history step
 
 The /editor/files/{session_id}/{filename} handler does explicit path
 traversal hardening: rejects ``..`` and slash characters in path
@@ -401,6 +404,53 @@ async def editor_compare(
     """
     try:
         return editor.compare(session_id, a, b, metrics=metrics)
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+
+
+# ── [IMPROVE-52] Partial undo / blend-with-previous slider ────────
+
+
+@router.post("/editor/{session_id}/blend-previous")
+async def editor_blend_previous(
+    session_id: str,
+    body: dict[str, Any],
+    editor=Depends(get_editor_service),
+):
+    """[IMPROVE-52] Blend the current step with the one before it
+    and append the result as a new history step.
+
+    Body::
+
+        {"blend": 0.5}    # 0.0 = pure previous, 1.0 = pure current
+
+    Use case: the user applied a strong edit but wants only ~30% of
+    its effect. Without this endpoint they'd have to undo, then
+    re-apply with a different ``strength`` param (which only some
+    ops accept). The slider here works on ANY two adjacent history
+    steps regardless of the underlying operation.
+
+    The blend produces a NEW step (operation
+    ``"blend_with_previous"``) — the original full-strength edit
+    stays in history, accessible via undo. Matches the doc's
+    intent: "the slider is a creative control, not a history
+    primitive" (07-image-editor.md:402-406).
+
+    400 when:
+      * ``blend`` is missing, non-numeric, or outside ``[0.0, 1.0]``
+      * The session has no edits yet (``current_step < 0``)
+      * The session itself is unknown
+    """
+    raw = body.get("blend")
+    if raw is None:
+        raise HTTPException(400, "blend is required (float in [0.0, 1.0])")
+    try:
+        blend = float(raw)
+    except (TypeError, ValueError):
+        raise HTTPException(400, f"blend must be numeric; got {raw!r}")
+
+    try:
+        return editor.blend_with_previous(session_id, blend)
     except ValueError as e:
         raise HTTPException(400, str(e))
 

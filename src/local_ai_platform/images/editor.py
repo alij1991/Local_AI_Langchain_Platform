@@ -1013,6 +1013,143 @@ class ImageEditorService:
             "can_redo": len(session.redo_stack) > 0,
         }
 
+    def blend_with_previous(
+        self, session_id: str, blend: float,
+    ) -> dict[str, Any]:
+        """[IMPROVE-52] Blend the current step with the previous step
+        and append the result as a NEW history step.
+
+        ``blend`` is in ``[0.0, 1.0]``:
+          * ``0.0`` = pure previous step (effectively a "soft undo").
+          * ``1.0`` = pure current step (no-op visually, but a new
+            history entry).
+          * Values in between linearly interpolate per-pixel.
+
+        The "previous step" is ``history[current_step - 1]`` when one
+        exists, otherwise ``source_path``. So the very first edit can
+        also be blend-attenuated (blend with the original).
+
+        Doc rationale (07-image-editor.md:402-406): an undo reverts
+        the latest edit in full. If the user only wanted to back off
+        the last edit's strength to e.g. 30%, they had to re-apply
+        from scratch with new params. This method gives that knob.
+
+        The blend is saved as a NEW history step (operation
+        ``"blend_with_previous"``) — it does NOT mutate the prior
+        step. Undo behaves normally: undo of a blend reverts to the
+        original full-strength edit, preserving the audit trail.
+        Matches doc's "creative control, not a history primitive".
+        """
+        if not (0.0 <= float(blend) <= 1.0):
+            raise ValueError(
+                f"blend must be in [0.0, 1.0]; got {blend}",
+            )
+
+        session = self._sessions.get(session_id) or self._restore_session(session_id)
+        if not session:
+            raise ValueError(f"Session '{session_id}' not found.")
+
+        if session.current_step < 0:
+            # No edits yet — there's no "previous" to blend with.
+            # The source IS the current view; there's nothing to
+            # attenuate. Return 400 rather than silently producing
+            # a no-op.
+            raise ValueError(
+                "No edits to blend with. Apply an edit first, then "
+                "use blend_with_previous to soften it.",
+            )
+
+        # Resolve the two endpoints.
+        current_path = session.current_path
+        if session.current_step >= 1:
+            previous_path = session.history[session.current_step - 1].result_path
+        else:
+            # current_step == 0 → previous is the original source.
+            previous_path = session.source_path
+
+        start = time.monotonic()
+        _blend_ctx = {
+            "session_id": session_id,
+            "blend": float(blend),
+            "current_step": session.current_step,
+        }
+
+        try:
+            # Lazy numpy import — the helper file already pays this
+            # cost via _compute_diff_metrics / _apply_mask_composite,
+            # so the module's import-time graph is unchanged.
+            import numpy as np
+
+            cur_img = Image.open(current_path).convert("RGB")
+            prev_img = Image.open(previous_path).convert("RGB")
+            # Resize previous to current's dims if they differ — an
+            # op that changed image size (rotate with expand=True,
+            # resize, crop) won't share dimensions with its input.
+            if prev_img.size != cur_img.size:
+                prev_img = prev_img.resize(cur_img.size, Image.LANCZOS)
+
+            cur_arr = np.asarray(cur_img, dtype=np.float32)
+            prev_arr = np.asarray(prev_img, dtype=np.float32)
+            f = float(blend)
+            out_arr = prev_arr * (1.0 - f) + cur_arr * f
+            out_arr = np.clip(out_arr, 0.0, 255.0).astype(np.uint8)
+            result = Image.fromarray(out_arr, mode="RGB")
+        except FileNotFoundError as exc:
+            emit("editor", "blend_with_previous", status="error",
+                 error_code="FileMissing",
+                 error_message=str(exc),
+                 context=_blend_ctx)
+            raise ValueError(
+                f"Could not load step image: {exc}",
+            ) from exc
+
+        duration_ms = int((time.monotonic() - start) * 1000)
+
+        # Same save dance as apply_edit: truncate any redo branch,
+        # clear redo_stack, write file, append to history, persist.
+        session_dir = self._session_dir(session_id)
+        step_num = session.current_step + 1
+        if step_num < len(session.history):
+            session.history = session.history[:step_num]
+        session.redo_stack.clear()
+
+        result_filename = f"step_{step_num:03d}_blend_with_previous.png"
+        result_path = session_dir / result_filename
+        result.save(str(result_path), "PNG")
+
+        step = EditStep(
+            step_number=step_num,
+            operation="blend_with_previous",
+            params={"blend": float(blend)},
+            result_path=str(result_path),
+            duration_ms=duration_ms,
+            timestamp=datetime.now(timezone.utc).isoformat(),
+            width=result.width,
+            height=result.height,
+            file_size=result_path.stat().st_size,
+        )
+        session.history.append(step)
+        session.current_step = step_num
+        self._save_step_db(session_id, step)
+
+        emit("editor", "blend_with_previous", status="ok",
+             duration_ms=duration_ms,
+             context=_blend_ctx,
+             perf={"width": result.width, "height": result.height,
+                   "file_size": result_path.stat().st_size,
+                   "step_number": step_num})
+
+        return {
+            "session_id": session_id,
+            "step_number": step_num,
+            "operation": "blend_with_previous",
+            "image_path": str(result_path),
+            "width": result.width,
+            "height": result.height,
+            "file_size": result_path.stat().st_size,
+            "duration_ms": duration_ms,
+        }
+
     def get_history(self, session_id: str) -> list[dict[str, Any]]:
         session = self._sessions.get(session_id)
         if not session:
