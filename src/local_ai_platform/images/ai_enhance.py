@@ -3826,31 +3826,212 @@ AI_OPERATIONS: dict[str, dict] = {
 }
 
 
-def check_available() -> dict[str, bool]:
-    """Check which AI models/libraries are installed."""
-    available = {}
+# [IMPROVE-51] Weights-readiness registry. Maps a library to the
+# weight files it lazily downloads on first use. ``check_available()``
+# probes the candidate paths to tell the caller whether the user is
+# about to hit a multi-minute download — the original ``check_available``
+# only checked Python-import availability, which produced the "Restore
+# faces hangs for 60 seconds on first click" UX trap the doc proposal
+# at 07-image-editor.md:392-396 calls out.
+#
+# Each entry:
+#   * ``name``  — display name for UI badge ("U²-Net", "GFPGANv1.4")
+#   * ``size_mb`` — expected download size, shown as
+#     "First use: will download X MB"
+#   * ``candidates`` — list of (description, path-builder) tuples.
+#     Probe in order; first existing wins. The path-builder is a
+#     callable so ``Path.home()`` and env-var lookups happen at
+#     call time (tests can monkeypatch ``Path.home``).
+#
+# Path conventions confirmed from upstream defaults:
+#   * rembg uses pooch with default dir ~/.u2net/ (or $U2NET_HOME).
+#     Default model = u2net.onnx (~176 MB).
+#   * gfpgan + realesrgan use torch.hub which caches under
+#     ~/.cache/torch/hub/checkpoints/ on Linux/macOS or
+#     %USERPROFILE%/.cache/torch/hub/checkpoints/ on Windows. The
+#     same files often live in the package's own weights/ dir
+#     (e.g. gfpgan/weights/), but those paths can't be probed
+#     without importing the package first.
+import os as _os_module
+
+_WEIGHTS_REGISTRY: dict[str, dict[str, Any]] = {
+    "rembg": {
+        "name": "U²-Net",
+        "size_mb": 176,
+        "candidates": [
+            (
+                "U2NET_HOME env",
+                lambda: (
+                    Path(_os_module.environ["U2NET_HOME"]) / "u2net.onnx"
+                    if _os_module.environ.get("U2NET_HOME") else None
+                ),
+            ),
+            (
+                "~/.u2net/",
+                lambda: Path.home() / ".u2net" / "u2net.onnx",
+            ),
+        ],
+    },
+    "gfpgan": {
+        "name": "GFPGANv1.4",
+        "size_mb": 333,
+        "candidates": [
+            (
+                "torch hub cache",
+                lambda: (
+                    Path.home() / ".cache" / "torch" / "hub"
+                    / "checkpoints" / "GFPGANv1.4.pth"
+                ),
+            ),
+        ],
+    },
+    "realesrgan": {
+        "name": "RealESRGAN_x4plus",
+        "size_mb": 64,
+        "candidates": [
+            (
+                "torch hub cache",
+                lambda: (
+                    Path.home() / ".cache" / "torch" / "hub"
+                    / "checkpoints" / "RealESRGAN_x4plus.pth"
+                ),
+            ),
+        ],
+    },
+}
+
+
+def _resolve_weights(library: str) -> dict[str, Any]:
+    """Probe known weight-cache paths for ``library``. Returns the
+    new sub-dict shape used by ``check_available``.
+
+    For libraries with no entry in ``_WEIGHTS_REGISTRY`` (torch,
+    basicsr, diffusers, builtin), the helper returns
+    ``{weights_ready: True, weights_path: None, weights_size_mb: 0,
+    expected_size_mb: 0}`` so the caller can union it with the
+    library's ``installed`` flag without special-casing the no-
+    weights case at every call site. ``weights_ready=True`` here
+    means "no separate weight file to download" — the library
+    being importable is sufficient.
+    """
+    spec = _WEIGHTS_REGISTRY.get(library)
+    if spec is None:
+        return {
+            "weights_ready": True,
+            "weights_path": None,
+            "weights_size_mb": 0,
+            "expected_size_mb": 0,
+        }
+
+    for _label, builder in spec["candidates"]:
+        try:
+            path = builder()
+        except Exception:
+            # A misconfigured env var shouldn't escalate into a 500.
+            continue
+        if path is None:
+            continue
+        try:
+            if path.is_file():
+                size_mb = int(round(path.stat().st_size / (1024 * 1024)))
+                return {
+                    "weights_ready": True,
+                    "weights_path": str(path),
+                    "weights_size_mb": size_mb,
+                    "expected_size_mb": int(spec["size_mb"]),
+                }
+        except OSError:
+            # Filesystem hiccup (permissions, network drive offline).
+            # Treat as missing rather than blowing up the endpoint.
+            continue
+
+    return {
+        "weights_ready": False,
+        "weights_path": None,
+        "weights_size_mb": 0,
+        "expected_size_mb": int(spec["size_mb"]),
+    }
+
+
+def check_available() -> dict[str, dict[str, Any]]:
+    """[IMPROVE-51] Check which AI libraries are installed AND
+    whether their weight files have been downloaded.
+
+    Pre-IMPROVE-51 this returned ``dict[str, bool]`` keyed by
+    library name. The new shape is::
+
+        {
+          "rembg": {
+            "installed": True,            # python import works
+            "weights_ready": False,       # weights file exists
+            "weights_path": None,         # path on disk, when ready
+            "weights_size_mb": 0,         # actual size, when ready
+            "expected_size_mb": 176,      # download size, always
+          },
+          ...
+        }
+
+    The Flutter editor page can show "First use: will download
+    176 MB" badges next to operations whose ``weights_ready`` is
+    False — eliminating the silent multi-minute download on first
+    click that the doc proposal at 07-image-editor.md:392-396
+    flagged as the editor's worst first-use UX trap.
+
+    Libraries with no registry entry (torch, basicsr, diffusers,
+    builtin) return ``weights_ready=installed`` since they have no
+    discrete weight file we can cheaply probe.
+    """
+    available: dict[str, dict[str, Any]] = {}
     for name in ("rembg", "gfpgan", "realesrgan", "basicsr", "diffusers", "torch"):
         try:
             __import__(name)
-            available[name] = True
+            installed = True
         except ImportError:
-            available[name] = False
-    available["builtin"] = True   # Pure algorithmic, always available
+            installed = False
+
+        weights = _resolve_weights(name)
+        # If the library itself isn't installed, ``weights_ready``
+        # is meaningless — surface ``installed=False`` explicitly so
+        # the UI shows "Install <library>" rather than "Download X MB".
+        if not installed:
+            weights["weights_ready"] = False
+        available[name] = {"installed": installed, **weights}
+
+    # ``builtin`` is pure-Python algorithms; nothing to download.
+    available["builtin"] = {
+        "installed": True,
+        "weights_ready": True,
+        "weights_path": None,
+        "weights_size_mb": 0,
+        "expected_size_mb": 0,
+    }
     return available
 
 
 def list_ai_operations() -> list[dict]:
-    """Return AI operations with availability status."""
+    """Return AI operations with availability status.
+
+    [IMPROVE-51] Each op now also reports ``weights_ready``,
+    ``weights_size_mb``, and ``expected_size_mb`` so the Flutter
+    UI can warn the user before a first-use download. The legacy
+    ``installed: bool`` field is preserved for backward compat —
+    existing Flutter code that only checks ``installed`` keeps
+    working unchanged.
+    """
     avail = check_available()
     result = []
     for name, info in AI_OPERATIONS.items():
+        lib_status = avail.get(info["requires"], {})
         result.append({
             "name": name,
             "category": info["category"],
             "params": info["params"],
             "description": info["description"],
             "requires": info["requires"],
-            "installed": avail.get(info["requires"], False),
+            "installed": bool(lib_status.get("installed", False)),
+            "weights_ready": bool(lib_status.get("weights_ready", False)),
+            "weights_size_mb": int(lib_status.get("weights_size_mb", 0)),
+            "expected_size_mb": int(lib_status.get("expected_size_mb", 0)),
             "gpu": info["gpu"],
             "estimated_seconds": info["estimated_seconds"],
             "ai": True,
