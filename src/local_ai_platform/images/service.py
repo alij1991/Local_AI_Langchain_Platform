@@ -4558,6 +4558,25 @@ def _apply_oom_stage_to_plan(
     return retry_plan, new_w, new_h, warning
 
 
+class _GenerationCancelled(RuntimeError):
+    """[IMPROVE-41] Sentinel raised by the in-process step callback when
+    ``self._cancel_event`` is set and the loaded pipeline doesn't expose
+    ``_interrupt`` (the documented diffusers cooperative-cancel hook).
+
+    Caught by ``_run_diffusers``'s exception handler which converts it
+    to ``ImageRuntimeResult(ok=False, error_code="cancelled", ...)``.
+    Pipeline cache is deliberately PRESERVED across the raise — the
+    whole point of cooperative cancel is that a subsequent generation
+    reuses the loaded pipeline without paying the reload cost.
+
+    Subclasses ``RuntimeError`` (not ``Exception``) so any blanket
+    ``except Exception:`` handler still catches it; subclasses
+    ``BaseException`` indirectly through ``RuntimeError`` so it
+    interrupts tensor ops cleanly without bypassing
+    ``KeyboardInterrupt`` semantics.
+    """
+
+
 class ImageGenerationService:
     def __init__(self, config: AppConfig) -> None:
         self.config = config
@@ -4574,6 +4593,16 @@ class ImageGenerationService:
         self._current_job_started: float = 0.0
         self._current_job_model: str = ""
         self._current_worker_proc: Any = None  # multiprocessing.Process
+        # [IMPROVE-41] Cooperative cancel signal for the in-process
+        # ``_run_diffusers`` path. ``cancel_generation()`` sets this;
+        # the in-process step callback polls it and aborts the run by
+        # setting ``pipe._interrupt = True`` (or raising
+        # ``_GenerationCancelled`` for older pipelines that lack the
+        # attribute). Cleared at the START of each new
+        # ``_run_diffusers`` call so a stale cancel from a prior run
+        # can't bleed into the next. Pipeline cache survives —
+        # subsequent generations reuse the loaded model.
+        self._cancel_event = threading.Event()
         # Hardware profile (lazy-detected on first access)
         self._hw_profile: HardwareProfile | None = None
 
@@ -4905,11 +4934,86 @@ class ImageGenerationService:
         self._current_progress_channel = channel
         return channel
 
+    def _check_cancel_in_step(
+        self, pipe_obj: Any, step: int, total_steps: int,
+    ) -> None:
+        """[IMPROVE-41] Per-step cancel check used by the in-process
+        step callback. No-op when the cancel event is unset (the hot
+        path — runs every step).
+
+        When set, signals cancellation through whichever mechanism the
+        loaded pipeline supports:
+
+          1. **Preferred**: ``pipe_obj._interrupt = True`` — the
+             documented diffusers ≥ 0.30 cooperative-cancel hook. The
+             pipeline returns partial output via its normal success
+             path; the outer ``_run_diffusers`` reads
+             ``self._cancel_event`` AFTER the pipe call and raises
+             ``_GenerationCancelled`` to flow into the cancel exception
+             handler.
+          2. **Fallback**: raise ``_GenerationCancelled`` directly.
+             Older pipelines (some custom community ones) don't expose
+             ``_interrupt``; the raise interrupts the per-step loop and
+             unwinds to the outer exception handler.
+
+        Extracted from the inner ``_step_cb`` closure so tests can
+        drive it with a fake pipe object — exercising the in-process
+        cancel logic without spinning up a real diffusers pipeline.
+        """
+        if not self._cancel_event.is_set():
+            return
+        if hasattr(pipe_obj, "_interrupt"):
+            pipe_obj._interrupt = True
+            logger.info(
+                "[IMG] [IMPROVE-41] Cancel signaled at step %d/%d "
+                "(via pipe._interrupt)",
+                step, total_steps,
+            )
+            return
+        logger.info(
+            "[IMG] [IMPROVE-41] Cancel signaled at step %d/%d "
+            "(via _GenerationCancelled raise)",
+            step, total_steps,
+        )
+        raise _GenerationCancelled(
+            f"cancelled_at_step_{step}_of_{total_steps}"
+        )
+
     def cancel_generation(self) -> bool:
-        """Kill the current worker process if one is running."""
+        """Cancel the in-process generation cooperatively AND kill any
+        live worker subprocess.
+
+        [IMPROVE-41] Pre-IMPROVE-41 this only did ``proc.terminate()``
+        on ``_current_worker_proc``. For the live in-process path
+        (``_run_diffusers``) ``_current_worker_proc`` is None — clicking
+        cancel did NOTHING; generation ran to completion.
+
+        Now we also set ``self._cancel_event`` which the in-process
+        step callback polls and converts to either
+        ``pipe._interrupt = True`` (diffusers ≥ 0.30 cooperative hook)
+        or a ``_GenerationCancelled`` raise. Pipeline cache survives —
+        subsequent generations reuse the loaded model.
+
+        Returns True when EITHER an in-process generation was active
+        (event newly set) OR a subprocess was terminated. Returns
+        False when there's no active generation at all.
+        """
+        # [IMPROVE-41] Set the cooperative cancel event for the
+        # in-process path. Idempotent — a second cancel during the
+        # same run is a no-op.
+        in_process_cancelled = (
+            self._current_job_started > 0.0 and self._current_worker_proc is None
+        )
+        if in_process_cancelled:
+            self._cancel_event.set()
+            logger.info("[IMG] [IMPROVE-41] Cancel event set for in-process generation")
+
         proc = self._current_worker_proc
         if proc is None:
-            return False
+            # In-process cancel: return True iff we actually flagged a
+            # running generation (so callers can distinguish "cancel
+            # had effect" from "no active generation").
+            return in_process_cancelled
         try:
             if proc.is_alive():
                 proc.terminate()
@@ -7666,7 +7770,28 @@ class ImageGenerationService:
         Unlike _run_diffusers_isolated(), this keeps the pipeline loaded in
         memory between requests, eliminating the 190s model-loading overhead
         on subsequent generations.
+
+        [IMPROVE-41] Cooperative cancellation via ``self._cancel_event``:
+          - Cleared at function entry so a stale cancel from a prior run
+            doesn't bleed into this one.
+          - Checked once before pipeline load so an early-arriving
+            cancel skips the load cost entirely.
+          - Checked inside the per-step callback during inference;
+            triggers either ``pipe._interrupt = True`` (modern
+            diffusers) or a ``_GenerationCancelled`` raise (fallback).
+          - Pipeline cache (``self._pipelines``) is NEVER cleared on
+            cancel — the whole point is that the next gen reuses the
+            loaded model.
         """
+        # [IMPROVE-41] Reset the cooperative cancel event at the start
+        # of EVERY run. Otherwise a cancel that fired while no
+        # generation was active (or fired after the previous run
+        # completed but before clear) would silently abort this run.
+        # Critical that this happens BEFORE any work — including the
+        # cheap pre-flight checks below, which can take real time
+        # (file IO for cache_dir resolution).
+        self._cancel_event.clear()
+
         try:
             import torch
             import numpy as np
@@ -7675,6 +7800,23 @@ class ImageGenerationService:
 
         if model_source == "remote" and not self._cache_dir(model_id_or_path) and not self.config.hf_image_allow_auto_download:
             return ImageRuntimeResult(ok=False, error_code="model_not_found", error_message="Remote model is not cached locally. Download the model via HuggingFace or set HF_IMAGE_ALLOW_AUTO_DOWNLOAD=true.")
+
+        # [IMPROVE-41] Early cancel check — if the user clicked cancel
+        # between when ``generate()`` set up the run and when this
+        # function actually starts, skip the pipeline load entirely.
+        # Returns the same ``cancelled`` shape callers see for mid-
+        # inference cancels so error-handling code doesn't need a
+        # separate "early cancel" branch.
+        if self._cancel_event.is_set():
+            return ImageRuntimeResult(
+                ok=False,
+                error_code="cancelled",
+                error_message="Generation cancelled by user",
+                metadata={
+                    "device_used": device,
+                    "cancelled_before_load": True,
+                },
+            )
 
         execution_plan = execution_plan or {}
         mask_image_path = execution_plan.get("_mask_image_path")  # passed via execution_plan for inpaint
@@ -8109,6 +8251,10 @@ class ImageGenerationService:
                 clamped = min(step + 1, total_steps)
                 _write_stage_marker(stage_file_path, f"inference:{clamped}/{total_steps}", _progress_queue_local)
 
+                # [IMPROVE-41] Cooperative cancel check (extracted to
+                # ``_check_cancel_in_step`` for unit-testability).
+                self._check_cancel_in_step(pipe_obj, clamped, total_steps)
+
                 # Per-step elapsed (not cumulative) ──
                 _now = time.time()
                 _step_dt = _now - _step_last_ts[0]
@@ -8256,6 +8402,15 @@ class ImageGenerationService:
                     _t2i_kwargs["negative_prompt"] = _ip_neg
                 result = pipe(**_t2i_kwargs)
 
+            # [IMPROVE-41] Post-call cancel check. When the step
+            # callback set ``pipe._interrupt = True`` the pipeline
+            # returns NORMALLY with a partial-convergence result —
+            # no exception fires. Translate that into the same
+            # ``cancelled`` error path the raise variant takes by
+            # raising the sentinel here.
+            if self._cancel_event.is_set():
+                raise _GenerationCancelled("cancelled_via_pipe_interrupt")
+
             inf_elapsed = time.time() - inf_start
             _log_stage("inference", steps=total_steps, elapsed_sec=round(inf_elapsed, 2),
                        sec_per_step=round(inf_elapsed / max(total_steps, 1), 2))
@@ -8397,6 +8552,61 @@ class ImageGenerationService:
                         "scheduler": ep.get("scheduler"),
                         "cpu_threads": os.cpu_count(),
                     },
+                },
+            )
+        except _GenerationCancelled as exc:
+            # [IMPROVE-41] Cooperative cancel path. Pipeline cache is
+            # DELIBERATELY PRESERVED (no ``self._pipelines.clear()``)
+            # — the whole point of cooperative cancel is that the
+            # next generation reuses the loaded model. ALSO:
+            # ``torch.cuda.empty_cache()`` is intentionally NOT called
+            # here — keeping the cached allocator state warm avoids
+            # paying re-fragmentation cost on the next gen.
+            self._current_stage_file = None
+            try:
+                if not _pre_attached:
+                    _progress_channel.stop()
+                    self._current_progress_channel = None
+            except (NameError, UnboundLocalError, Exception):
+                pass
+            self._current_job_started = 0.0
+            try:
+                Path(stage_file_path).unlink(missing_ok=True)
+            except Exception:
+                pass
+            if _step_previews_dir and Path(_step_previews_dir).exists():
+                try:
+                    import shutil
+                    shutil.rmtree(_step_previews_dir, ignore_errors=True)
+                except Exception:
+                    pass
+            # Try to extract step number from the exception message
+            # (formatted as ``cancelled_at_step_N_of_M`` by the step
+            # callback). Falls back to 0 when the cancel was via
+            # ``pipe._interrupt`` (no step in the message).
+            cancelled_step: int | None = None
+            msg = str(exc)
+            if "cancelled_at_step_" in msg:
+                try:
+                    cancelled_step = int(msg.split("cancelled_at_step_")[1].split("_")[0])
+                except (IndexError, ValueError):
+                    cancelled_step = None
+            logger.info(
+                "[IMG] [IMPROVE-41] Generation cancelled cooperatively (step=%s)",
+                cancelled_step,
+            )
+            return ImageRuntimeResult(
+                ok=False,
+                error_code="cancelled",
+                error_message="Generation cancelled by user",
+                metadata={
+                    "device_used": device,
+                    "cancelled_at_step": cancelled_step,
+                    "cancelled_method": (
+                        "pipe_interrupt" if "interrupt" in msg
+                        else "callback_raise"
+                    ),
+                    "pipeline_cache_preserved": True,
                 },
             )
         except RuntimeError as exc:
