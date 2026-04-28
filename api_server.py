@@ -287,6 +287,17 @@ async def lifespan(app: FastAPI):
             except Exception:
                 logger.info("Default agent '%s' created (tool binding failed)", default_name)
 
+    # [IMPROVE-72] Route-order shadowing lint. Surface any literal
+    # path declared after a parametric catch-all on the same method —
+    # the IMPROVE-53 / IMPROVE-54 trap. Warnings only; local-only
+    # deployment prefers notification over hard-fail at boot.
+    try:
+        from local_ai_platform.api.route_lint import warn_on_route_shadowing
+
+        warn_on_route_shadowing(app)
+    except Exception as exc:
+        logger.debug("[IMPROVE-72] route_lint pass failed: %s", exc)
+
     startup_ms = int((time.monotonic() - t0) * 1000)
     logger.info("Startup complete — %d agents loaded", agents_loaded)
     # [IMPROVE-5] One boot event per process. Shows up in
