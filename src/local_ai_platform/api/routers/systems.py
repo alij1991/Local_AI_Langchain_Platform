@@ -75,6 +75,7 @@ from local_ai_platform.repositories.systems import (
 from local_ai_platform.systems_validator import (
     SystemValidationError,
     check_no_cycles,
+    validate_definition_schema,
 )
 
 router = APIRouter()
@@ -203,15 +204,54 @@ async def recommend_systems(
 
 
 def _validate_system_or_400(name: str, definition: dict) -> None:
-    """Reject cycle-containing system definitions at save time.
+    """Reject malformed or cycle-containing system definitions at save time.
 
-    [IMPROVE-37] — runs Kahn's topological sort via
-    systems_validator.check_no_cycles. Emits a system.validate event
-    (ok or error) so the weekly /observability/summary review can
-    count rejected saves alongside other subsystem errors. On cycle,
-    raises HTTPException 400 with a structured body the Flutter client
-    can render directly.
+    [IMPROVE-31] Schema validation via Pydantic ``SystemDefinition``
+    runs FIRST — fields-out-of-shape (missing ``id``, orphan edges,
+    duplicate node ids, unknown ``start_node_id``) tell the user
+    exactly what to fix before they need to think about graph
+    topology. Emits ``system.validate`` with ``error_code=
+    "SchemaInvalid"`` on schema failure.
+
+    [IMPROVE-37] Kahn cycle check runs SECOND, only when the shape
+    is valid. Emits ``system.validate`` with ``error_code=
+    "CycleDetected"`` on cycles.
+
+    Both raise ``HTTPException(400)`` with a structured body the
+    Flutter client can render directly. The ``error`` field
+    distinguishes the two failure modes
+    (``"schema_invalid"`` vs ``"cycle_detected"``) so the UI can
+    branch on it.
     """
+    # [IMPROVE-31] Schema check first. A definition that's both
+    # schema-invalid AND cyclic will surface the schema error —
+    # more actionable.
+    try:
+        validate_definition_schema(definition)
+    except SystemValidationError as exc:
+        emit(
+            "system",
+            "validate",
+            status="error",
+            error_code="SchemaInvalid",
+            error_message=str(exc),
+            context={
+                "system_name": name,
+                "errors": exc.errors,
+                "node_count": len((definition or {}).get("nodes") or []),
+                "edge_count": len((definition or {}).get("edges") or []),
+            },
+        )
+        raise HTTPException(
+            400,
+            {
+                "error": "schema_invalid",
+                "message": str(exc),
+                "errors": exc.errors,
+            },
+        )
+
+    # [IMPROVE-37] Cycle check second.
     try:
         check_no_cycles(definition)
         emit(
