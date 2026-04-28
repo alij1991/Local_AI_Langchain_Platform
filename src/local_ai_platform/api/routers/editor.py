@@ -30,6 +30,11 @@ Endpoints (15):
   POST   /editor/{session_id}/blend-previous — [IMPROVE-52] soft-undo slider:
                                                blend current step with the
                                                one before; new history step
+  POST   /editor/{session_id}/preset/save    — [IMPROVE-54] save last N steps
+                                               as a named user preset
+  POST   /editor/{session_id}/preset/apply/{preset_id} — replay preset on session
+  GET    /editor/presets                     — list user presets
+  DELETE /editor/presets/{preset_id}         — delete a user preset
 
 The /editor/files/{session_id}/{filename} handler does explicit path
 traversal hardening: rejects ``..`` and slash characters in path
@@ -198,6 +203,96 @@ async def editor_list_archived(
     excluded — this endpoint is only for the archive view.
     """
     return {"archived": editor.list_archived()}
+
+
+# ── [IMPROVE-54] User-defined editor presets ─────────────────────
+#
+# The catch-all-shadowing problem from IMPROVE-53 applies here too:
+# ``GET /editor/presets`` MUST be declared before
+# ``GET /editor/{session_id}`` or the literal "presets" path
+# segment gets parsed as a session id. The DELETE form
+# ``/editor/presets/{preset_id}`` is fine because the path has
+# more segments than the session catch-all, but the GET shape
+# matters. Pinned by ``test_presets_route_not_shadowed`` so a
+# future refactor can't silently revert the order.
+
+
+@router.get("/editor/presets")
+async def editor_list_presets(
+    editor=Depends(get_editor_service),
+):
+    """[IMPROVE-54] List user-saved presets (newest-first).
+
+    Each entry: ``{id, name, description, steps, created_at}``.
+    ``steps`` is the list of ``{operation, params}`` dicts the
+    apply path replays via ``apply_edit``."""
+    return {"presets": editor.list_user_presets()}
+
+
+@router.delete("/editor/presets/{preset_id}")
+async def editor_delete_preset(
+    preset_id: str,
+    editor=Depends(get_editor_service),
+):
+    """[IMPROVE-54] Delete a saved preset. Idempotent — returns
+    ``{"deleted": false}`` when no preset existed at that id."""
+    deleted = editor.delete_user_preset(preset_id)
+    return {"deleted": bool(deleted), "preset_id": preset_id}
+
+
+@router.post("/editor/{session_id}/preset/save")
+async def editor_save_preset(
+    session_id: str,
+    body: dict[str, Any],
+    editor=Depends(get_editor_service),
+):
+    """[IMPROVE-54] Snapshot the session's last ``last_n`` history
+    steps into a named preset.
+
+    Body: ``{"name": str, "description": str (optional),
+    "last_n": int (optional)}``. Omitting ``last_n`` saves the
+    full history. Empty history → 400 ("apply at least one
+    operation first")."""
+    name = (body.get("name") or "").strip()
+    if not name:
+        raise HTTPException(400, "name is required")
+    description = body.get("description") or ""
+    last_n_raw = body.get("last_n")
+    last_n: int | None
+    if last_n_raw is None:
+        last_n = None
+    else:
+        try:
+            last_n = int(last_n_raw)
+        except (TypeError, ValueError):
+            raise HTTPException(400, f"last_n must be an int; got {last_n_raw!r}")
+
+    try:
+        preset = editor.save_preset_from_session(
+            session_id, name, description, last_n,
+        )
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+    return preset
+
+
+@router.post("/editor/{session_id}/preset/apply/{preset_id}")
+async def editor_apply_preset(
+    session_id: str,
+    preset_id: str,
+    editor=Depends(get_editor_service),
+):
+    """[IMPROVE-54] Replay a saved preset's steps on a session.
+
+    Returns ``{preset_id, steps_total, steps_applied,
+    steps_skipped, last_step}``. ``steps_skipped`` reflects ops
+    that no longer exist (e.g. renamed since the preset was
+    saved) — those are skipped rather than aborting the whole
+    playback so partial application is still useful."""
+    try:
+        return editor.apply_preset_to_session(session_id, preset_id)
+    except ValueError as e:
+        raise HTTPException(400, str(e))
 
 
 @router.post("/editor/{session_id}/restore")

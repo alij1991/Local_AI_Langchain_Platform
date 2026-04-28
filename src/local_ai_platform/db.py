@@ -290,6 +290,22 @@ CREATE TABLE IF NOT EXISTS edit_history (
     FOREIGN KEY (session_id) REFERENCES editor_sessions(id) ON DELETE CASCADE
 );
 
+-- [IMPROVE-54] User-defined editor presets. ``apply_preset`` in
+-- processors.py only handles a hard-coded set of recipes (vivid,
+-- cinematic, …); this table lets the user save the last N steps
+-- from a session as a named preset and replay it on fresh images.
+-- ``steps_json`` is a JSON-encoded list of ``{operation, params}``
+-- dicts in the order they were applied.
+CREATE TABLE IF NOT EXISTS editor_presets (
+    id TEXT PRIMARY KEY,
+    name TEXT NOT NULL,
+    description TEXT,
+    steps_json TEXT NOT NULL,
+    created_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_editor_presets_created
+    ON editor_presets(created_at DESC);
+
 CREATE TABLE IF NOT EXISTS app_events (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     ts TEXT NOT NULL,

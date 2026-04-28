@@ -697,6 +697,144 @@ class ImageEditorService:
             logger.warning("[IMPROVE-53] list_archived failed: %s", exc)
             return []
 
+    # ── [IMPROVE-54] User-defined editor presets ──────────────────
+
+    def save_preset_from_session(
+        self,
+        session_id: str,
+        name: str,
+        description: str = "",
+        last_n: int | None = None,
+    ) -> dict[str, Any]:
+        """[IMPROVE-54] Snapshot the last ``last_n`` history steps
+        from a session into a named preset.
+
+        ``last_n=None`` saves ALL history (the user's full workflow).
+        ``last_n=5`` saves only the most recent 5 ops — useful when
+        the user explored a few directions before settling.
+
+        Steps are saved as ``{operation, params}`` dicts in
+        chronological order. Apply replays them oldest-first on a
+        fresh session via ``apply_edit``.
+
+        Raises ValueError when the session has no history (nothing
+        to save) or doesn't exist — caller maps to 400.
+        """
+        session = self._sessions.get(session_id) or self._restore_session(session_id)
+        if not session:
+            raise ValueError(f"Session '{session_id}' not found.")
+        if not session.history:
+            raise ValueError(
+                "Session has no edits yet — apply at least one operation "
+                "before saving a preset.",
+            )
+
+        history = session.history
+        if last_n is not None and last_n > 0:
+            history = history[-last_n:]
+        elif last_n is not None and last_n <= 0:
+            raise ValueError(f"last_n must be positive; got {last_n}")
+
+        steps = [
+            {"operation": s.operation, "params": s.params}
+            for s in history
+        ]
+
+        from local_ai_platform.repositories.editor_presets import create_preset
+        preset = create_preset(
+            name=name.strip() or "Untitled preset",
+            description=(description or "").strip(),
+            steps=steps,
+        )
+        logger.info(
+            "[IMPROVE-54] saved preset %s (%d steps) from session %s",
+            preset["id"], len(steps), session_id,
+        )
+        return preset
+
+    def apply_preset_to_session(
+        self,
+        session_id: str,
+        preset_id: str,
+    ) -> dict[str, Any]:
+        """[IMPROVE-54] Replay a saved preset's steps on a session.
+
+        Each step is dispatched through ``apply_edit`` so the same
+        validation, type-coercion, observability hooks, and history
+        recording apply as if the user clicked through manually.
+
+        Skips steps with unknown operation names (logs a warning)
+        rather than aborting — a preset that references an op that
+        was renamed shouldn't deadlock the rest of the playback.
+
+        Raises ValueError on missing session/preset (caller → 400).
+        Returns ``{preset_id, steps_total, steps_applied,
+        steps_skipped, last_step}`` so the UI can show progress.
+        """
+        from local_ai_platform.repositories.editor_presets import get_preset
+        from . import processors, ai_enhance
+
+        preset = get_preset(preset_id)
+        if preset is None:
+            raise ValueError(f"Preset '{preset_id}' not found.")
+
+        session = self._sessions.get(session_id) or self._restore_session(session_id)
+        if not session:
+            raise ValueError(f"Session '{session_id}' not found.")
+
+        # Build the set of known operation names so unknown ops can
+        # skip cleanly instead of erroring out the whole playback.
+        # Mirrors the dispatcher's three registries in apply_edit.
+        known_ops = set(processors.OPERATIONS.keys()) | set(
+            ai_enhance.AI_OPERATIONS.keys()
+        )
+        try:
+            from . import ai_models
+            known_ops |= set(ai_models.AI_CV_OPERATIONS.keys())
+        except ImportError:
+            pass
+
+        applied = 0
+        skipped = 0
+        last_step: dict[str, Any] | None = None
+        for step in preset["steps"]:
+            op = step.get("operation")
+            params = step.get("params") or {}
+            if op not in known_ops:
+                logger.warning(
+                    "[IMPROVE-54] preset %s skipping unknown op %r",
+                    preset_id, op,
+                )
+                skipped += 1
+                continue
+            last_step = self.apply_edit(session_id, op, dict(params))
+            applied += 1
+
+        logger.info(
+            "[IMPROVE-54] applied preset %s to session %s "
+            "(applied=%d, skipped=%d)",
+            preset_id, session_id, applied, skipped,
+        )
+        return {
+            "preset_id": preset_id,
+            "steps_total": len(preset["steps"]),
+            "steps_applied": applied,
+            "steps_skipped": skipped,
+            "last_step": last_step,
+        }
+
+    def list_user_presets(self) -> list[dict[str, Any]]:
+        """[IMPROVE-54] Pass-through to the repository so the route
+        handler can stay thin."""
+        from local_ai_platform.repositories.editor_presets import list_presets
+        return list_presets()
+
+    def delete_user_preset(self, preset_id: str) -> bool:
+        """[IMPROVE-54] Delete a preset. Returns True on success,
+        False when no row existed (idempotent)."""
+        from local_ai_platform.repositories.editor_presets import delete_preset
+        return delete_preset(preset_id)
+
     # ── Edit Operations ───────────────────────────────────────────
 
     def _restore_session(self, session_id: str) -> EditSession | None:
