@@ -25,6 +25,21 @@ logger = logging.getLogger(__name__)
 EDITOR_DATA_DIR = Path("data/images/editor")
 
 
+def _editor_archive_root() -> Path:
+    """[IMPROVE-53] Closed-but-recoverable sessions land under
+    ``EDITOR_DATA_DIR/_archive/{YYYY-MM-DD}/{sid}/``.
+
+    Computed at call time (not as a module-level constant) so tests
+    that monkeypatch ``EDITOR_DATA_DIR`` to a tmp path see the
+    archive under the same tmp tree without having to patch a
+    second constant. The date-bucket layout lets a future TTL prune
+    cron walk only directories older than N days without scanning
+    every archived session — see spawned follow-up
+    ``IMPROVE-53 Phase B: TTL cleanup``.
+    """
+    return EDITOR_DATA_DIR / "_archive"
+
+
 @dataclass
 class EditStep:
     """A single edit operation in the history."""
@@ -135,27 +150,292 @@ class ImageEditorService:
             "height": h,
         }
 
-    def close_session(self, session_id: str, cleanup_files: bool = True) -> None:
-        """Close session and optionally clean up files on disk."""
+    def close_session(
+        self,
+        session_id: str,
+        *,
+        archive: bool = True,
+        purge: bool = False,
+    ) -> dict[str, Any]:
+        """[IMPROVE-53] Close a session. Three behaviour modes.
+
+        Default is ``archive=True`` — moves the session directory to
+        ``_archive/{YYYY-MM-DD}/{sid}/`` and stamps ``archived_at`` on
+        the DB row. The session can be brought back later with
+        ``unarchive_session``. This is the safe default — accidental
+        close no longer destroys work.
+
+        ``archive=False, purge=True`` is the legacy destructive path:
+        ``shutil.rmtree`` the session directory AND DELETE the DB row
+        so no zombie row points at deleted files. Use only when the
+        user explicitly wants the data gone.
+
+        ``archive=False, purge=False`` is a soft close — pop in-memory
+        state but leave files and DB intact. Useful for tests and for
+        callers that want the row preserved without entering the
+        archive workflow.
+
+        Returns a small summary dict::
+
+            {"session_id", "mode", "archive_path" (when archived)}
+
+        ``mode`` is one of ``"archived" | "purged" | "soft"``.
+        """
         self._sessions.pop(session_id, None)
-        if cleanup_files:
+
+        if purge:
+            # Legacy destructive path. Drop files first, DB row second
+            # so a crash mid-step leaves an obvious zombie (file gone
+            # but row exists) rather than the inverse (row gone but
+            # files orphaned and unreferenced).
             session_dir = EDITOR_DATA_DIR / session_id
             if session_dir.exists():
                 try:
                     shutil.rmtree(session_dir, ignore_errors=True)
-                    logger.info("Cleaned up editor session directory: %s", session_dir)
+                    logger.info("[IMPROVE-53] purged editor session dir: %s", session_dir)
                 except Exception as e:
-                    logger.debug("Could not clean up session %s: %s", session_id, e)
+                    logger.debug("Could not purge session %s: %s", session_id, e)
+            self._delete_session_db_row(session_id)
+            return {"session_id": session_id, "mode": "purged"}
+
+        if archive:
+            archive_path = self._archive_session_dir(session_id)
+            self._stamp_archived_at(session_id)
+            return {
+                "session_id": session_id,
+                "mode": "archived",
+                "archive_path": str(archive_path) if archive_path else None,
+            }
+
+        # Soft close — neither archive nor purge.
+        return {"session_id": session_id, "mode": "soft"}
+
+    # ── [IMPROVE-53] Archive helpers ──────────────────────────────
+
+    def _archive_session_dir(self, session_id: str) -> Path | None:
+        """Move ``EDITOR_DATA_DIR/{sid}`` to ``_archive/{date}/{sid}``.
+
+        Returns the final archive path on success, or ``None`` when
+        the session directory doesn't exist (already gone — log and
+        carry on so close-on-already-purged sessions don't 500).
+
+        Idempotent against partial state: if the destination already
+        exists (e.g. a retried close), the existing archive is left
+        untouched and the orphaned source dir is removed.
+        """
+        active_dir = EDITOR_DATA_DIR / session_id
+        if not active_dir.exists():
+            logger.info(
+                "[IMPROVE-53] archive: session dir already gone (%s); "
+                "stamping DB only", active_dir,
+            )
+            return None
+
+        date_bucket = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+        target_parent = _editor_archive_root() / date_bucket
+        target_parent.mkdir(parents=True, exist_ok=True)
+        target = target_parent / session_id
+
+        if target.exists():
+            # Re-archive of something that's already archived (rare —
+            # the route deduplicates, but a process crash mid-archive
+            # could leave both dirs around). Drop the source and keep
+            # the existing archive — its archived_at predates the
+            # crash.
+            logger.warning(
+                "[IMPROVE-53] archive target exists (%s); removing "
+                "duplicate active dir", target,
+            )
+            shutil.rmtree(active_dir, ignore_errors=True)
+            return target
+
+        shutil.move(str(active_dir), str(target))
+        logger.info("[IMPROVE-53] archived %s → %s", active_dir, target)
+        return target
+
+    def _stamp_archived_at(self, session_id: str) -> None:
+        """Set ``editor_sessions.archived_at`` to now (UTC ISO).
+
+        Silent no-op when the row is missing — keeps ``close_session``
+        idempotent against a row that was already purged in some
+        other tab. Pin via test_close_archive_missing_db_row_is_no_op.
+        """
+        try:
+            from local_ai_platform.db import get_conn
+            ts = datetime.now(timezone.utc).isoformat()
+            conn = get_conn()
+            try:
+                conn.execute(
+                    "UPDATE editor_sessions SET archived_at = ? WHERE id = ?",
+                    (ts, session_id),
+                )
+                conn.commit()
+            finally:
+                conn.close()
+        except Exception as exc:
+            logger.debug(
+                "[IMPROVE-53] could not stamp archived_at for %s: %s",
+                session_id, exc,
+            )
+
+    def _delete_session_db_row(self, session_id: str) -> None:
+        """DELETE the editor_sessions row + cascading edit_history.
+
+        FK ``edit_history.session_id REFERENCES editor_sessions(id)
+        ON DELETE CASCADE`` (db.py:284) takes care of the history.
+        Silent on errors so a failed delete here can't escalate the
+        whole purge into an HTTP 500 — the file rmtree already ran.
+        """
+        try:
+            from local_ai_platform.db import get_conn
+            conn = get_conn()
+            try:
+                conn.execute(
+                    "DELETE FROM editor_sessions WHERE id = ?", (session_id,),
+                )
+                conn.commit()
+            finally:
+                conn.close()
+        except Exception as exc:
+            logger.debug(
+                "[IMPROVE-53] could not delete DB row for %s: %s",
+                session_id, exc,
+            )
+
+    def unarchive_session(self, session_id: str) -> bool:
+        """[IMPROVE-53] Move an archived session back to the active
+        directory and clear ``archived_at``.
+
+        Returns ``True`` on success, ``False`` when:
+          * the session has no DB row, OR
+          * its ``archived_at`` is NULL (was never archived), OR
+          * the archive directory is missing on disk.
+
+        The lookup walks ``_archive/*/{sid}`` rather than relying on a
+        stored archive path, so a manually moved bucket still finds
+        the session as long as the sid leaf is present.
+        """
+        try:
+            from local_ai_platform.db import get_conn
+            conn = get_conn()
+            try:
+                row = conn.execute(
+                    "SELECT archived_at FROM editor_sessions WHERE id = ?",
+                    (session_id,),
+                ).fetchone()
+                if not row:
+                    logger.info(
+                        "[IMPROVE-53] unarchive: no DB row for %s", session_id,
+                    )
+                    return False
+                if row["archived_at"] is None:
+                    logger.info(
+                        "[IMPROVE-53] unarchive: %s is not archived",
+                        session_id,
+                    )
+                    return False
+
+                # Find the archived dir under any date bucket.
+                archived_dir: Path | None = None
+                archive_root = _editor_archive_root()
+                if archive_root.exists():
+                    for bucket in archive_root.iterdir():
+                        if not bucket.is_dir():
+                            continue
+                        candidate = bucket / session_id
+                        if candidate.exists():
+                            archived_dir = candidate
+                            break
+
+                if archived_dir is None:
+                    logger.warning(
+                        "[IMPROVE-53] unarchive: DB says archived but no "
+                        "dir found for %s", session_id,
+                    )
+                    return False
+
+                target = EDITOR_DATA_DIR / session_id
+                if target.exists():
+                    # Active dir somehow already present — refuse to
+                    # clobber. Pin via test_unarchive_refuses_when_active_dir_exists.
+                    logger.warning(
+                        "[IMPROVE-53] unarchive: active dir already "
+                        "exists for %s; refusing to clobber", session_id,
+                    )
+                    return False
+
+                shutil.move(str(archived_dir), str(target))
+                conn.execute(
+                    "UPDATE editor_sessions SET archived_at = NULL WHERE id = ?",
+                    (session_id,),
+                )
+                conn.commit()
+                logger.info(
+                    "[IMPROVE-53] unarchived %s → %s", session_id, target,
+                )
+                return True
+            finally:
+                conn.close()
+        except Exception as exc:
+            logger.warning(
+                "[IMPROVE-53] unarchive failed for %s: %s", session_id, exc,
+            )
+            return False
+
+    def list_archived(self) -> list[dict[str, Any]]:
+        """[IMPROVE-53] Return archived sessions newest-first.
+
+        Each row carries the same minimal shape Flutter's "recently
+        closed" panel needs: ``id``, ``archived_at``,
+        ``source_image_path`` (so a thumbnail can render). Active
+        sessions (``archived_at IS NULL``) are excluded.
+        """
+        try:
+            from local_ai_platform.db import get_conn
+            conn = get_conn()
+            try:
+                rows = conn.execute(
+                    "SELECT id, archived_at, source_image_path, "
+                    "current_image_path FROM editor_sessions "
+                    "WHERE archived_at IS NOT NULL "
+                    "ORDER BY archived_at DESC"
+                ).fetchall()
+                return [
+                    {
+                        "id": r["id"],
+                        "archived_at": r["archived_at"],
+                        "source_image_path": r["source_image_path"],
+                        "current_image_path": r["current_image_path"],
+                    }
+                    for r in rows
+                ]
+            finally:
+                conn.close()
+        except Exception as exc:
+            logger.warning("[IMPROVE-53] list_archived failed: %s", exc)
+            return []
 
     # ── Edit Operations ───────────────────────────────────────────
 
     def _restore_session(self, session_id: str) -> EditSession | None:
-        """Restore a session from DB including full edit history."""
+        """Restore a session from DB including full edit history.
+
+        [IMPROVE-53] Archived sessions (``archived_at IS NOT NULL``)
+        are skipped here — ``get_session`` returns None for them, so
+        the route layer surfaces 404. Callers that want archived
+        state must go through ``GET /editor/archived`` and then
+        ``POST /editor/{sid}/restore`` to bring the session back to
+        active.
+        """
         conn = None
         try:
             from local_ai_platform.db import get_conn
             conn = get_conn()
-            row = conn.execute("SELECT * FROM editor_sessions WHERE id = ?", (session_id,)).fetchone()
+            row = conn.execute(
+                "SELECT * FROM editor_sessions WHERE id = ? "
+                "AND archived_at IS NULL",
+                (session_id,),
+            ).fetchone()
             if not row:
                 return None
 

@@ -269,7 +269,13 @@ CREATE TABLE IF NOT EXISTS editor_sessions (
     source_session_id TEXT,
     source_image_id TEXT,
     created_at TEXT NOT NULL,
-    updated_at TEXT NOT NULL
+    updated_at TEXT NOT NULL,
+    -- [IMPROVE-53] Set when ``DELETE /editor/{sid}`` archives instead
+    -- of purging. NULL for active sessions; ISO-8601 UTC timestamp for
+    -- archived ones. ``GET /editor/archived`` filters on
+    -- ``archived_at IS NOT NULL`` so the active-session lookup still
+    -- ignores archived rows.
+    archived_at TEXT
 );
 
 CREATE TABLE IF NOT EXISTS edit_history (
@@ -347,6 +353,18 @@ def init_db() -> None:
         ).fetchall()]
         if "thread_id" not in conv_cols:
             conn.execute("ALTER TABLE conversations ADD COLUMN thread_id TEXT")
+
+        # [IMPROVE-53] Add archived_at column to editor_sessions so
+        # ``DELETE /editor/{sid}`` can archive instead of rmtree by
+        # default. Pre-migration rows stay NULL (= active). The
+        # ``archived_at IS NOT NULL`` filter is what distinguishes
+        # archived from active in GET /editor/archived and in
+        # ``unarchive_session`` lookup.
+        editor_cols = [r[1] for r in conn.execute(
+            "PRAGMA table_info(editor_sessions)"
+        ).fetchall()]
+        if "archived_at" not in editor_cols:
+            conn.execute("ALTER TABLE editor_sessions ADD COLUMN archived_at TEXT")
 
         conn.commit()
     finally:

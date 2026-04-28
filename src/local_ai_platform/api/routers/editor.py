@@ -6,20 +6,24 @@ on the lazy-init ``Depends(get_editor_service)`` (the singleton lives on
 expensive (loads CV / classical kernels), so it's done on first hit
 rather than at lifespan startup.
 
-Endpoints (13):
+Endpoints (15):
   POST   /editor/enhance-prompt              — model-aware instruction enhance
   GET    /editor/operations/list             — available ops + status
   POST   /editor/{session_id}/analyze        — quality + suggested tools
   POST   /editor/open                        — open image (file or generated)
   GET    /editor/files/{session_id}/{file}   — serve session file
   GET    /editor/{session_id}                — session state
-  DELETE /editor/{session_id}                — close session
+  DELETE /editor/{session_id}                — close session [IMPROVE-53]
+                                               default: archive (recoverable)
+                                               ?purge=true: rmtree + drop row
   POST   /editor/{session_id}/edit           — apply operation
   POST   /editor/{session_id}/undo
   POST   /editor/{session_id}/redo
   GET    /editor/{session_id}/history
   GET    /editor/{session_id}/compare        — diff two history steps
   POST   /editor/{session_id}/export         — write final file (PNG/JPEG/WEBP)
+  GET    /editor/archived                    — [IMPROVE-53] list archived sessions
+  POST   /editor/{session_id}/restore        — [IMPROVE-53] unarchive a session
 
 The /editor/files/{session_id}/{filename} handler does explicit path
 traversal hardening: rejects ``..`` and slash characters in path
@@ -164,6 +168,56 @@ async def editor_serve_file(session_id: str, filename: str):
     return FileResponse(str(file_path), media_type=media_type)
 
 
+# ── [IMPROVE-53] Archive list + restore ───────────────────────────
+#
+# These two routes MUST be declared BEFORE the catch-all
+# ``GET /editor/{session_id}`` and ``POST /editor/{session_id}/...``
+# handlers. FastAPI matches by registration order, so a literal path
+# segment like ``/archived`` would otherwise resolve to the
+# ``{session_id}`` parametrized route with ``session_id="archived"``
+# and return a confusing 404. Position-sensitive — pin via
+# ``test_archived_route_not_shadowed_by_session_route``.
+
+
+@router.get("/editor/archived")
+async def editor_list_archived(
+    editor=Depends(get_editor_service),
+):
+    """[IMPROVE-53] Recently closed sessions, newest-first.
+
+    Returns ``{"archived": [{"id", "archived_at",
+    "source_image_path", "current_image_path"}, ...]}``. The Flutter
+    "recently closed" panel calls this to show thumbnails + a
+    restore button. Active sessions (``archived_at IS NULL``) are
+    excluded — this endpoint is only for the archive view.
+    """
+    return {"archived": editor.list_archived()}
+
+
+@router.post("/editor/{session_id}/restore")
+async def editor_restore(
+    session_id: str,
+    editor=Depends(get_editor_service),
+):
+    """[IMPROVE-53] Unarchive a previously closed session.
+
+    Returns ``{"status": "restored", "session_id": ...}`` on
+    success. Returns 404 when:
+      * No DB row exists for ``session_id``, OR
+      * The row exists but ``archived_at`` is NULL (was never
+        archived), OR
+      * The archive directory is missing on disk.
+
+    All three failure modes surface as 404 because from the user's
+    perspective there's nothing to restore — the differences only
+    matter to the developer reading logs.
+    """
+    ok = editor.unarchive_session(session_id)
+    if not ok:
+        raise HTTPException(404, f"No archived session for '{session_id}'")
+    return {"status": "restored", "session_id": session_id}
+
+
 @router.get("/editor/{session_id}")
 async def editor_get_session(
     session_id: str,
@@ -178,10 +232,33 @@ async def editor_get_session(
 @router.delete("/editor/{session_id}")
 async def editor_close(
     session_id: str,
+    purge: bool = False,
     editor=Depends(get_editor_service),
 ):
-    editor.close_session(session_id)
-    return {"status": "closed"}
+    """[IMPROVE-53] Close an editor session.
+
+    Default behaviour archives the session — files move to
+    ``data/images/editor/_archive/{YYYY-MM-DD}/{sid}/`` and the DB
+    row gets ``archived_at`` stamped. Recoverable via
+    ``POST /editor/{session_id}/restore``.
+
+    Pass ``?purge=true`` to take the legacy destructive path:
+    ``shutil.rmtree`` of the session dir + ``DELETE`` of the DB row
+    (and cascading edit_history). No recovery after purge — surface
+    a confirmation dialog in the UI before sending this.
+
+    The ``status: "closed"`` field is preserved verbatim from the
+    pre-IMPROVE-53 response so existing Flutter clients (which
+    only check that key) keep working. New ``mode`` field
+    distinguishes ``"archived"`` from ``"purged"``.
+    """
+    summary = editor.close_session(session_id, archive=not purge, purge=purge)
+    body: dict[str, Any] = {"status": "closed", "mode": summary["mode"]}
+    if "archive_path" in summary:
+        body["archive_path"] = summary["archive_path"]
+    return body
+
+
 
 
 @router.post("/editor/{session_id}/edit")
