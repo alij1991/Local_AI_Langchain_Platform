@@ -196,6 +196,29 @@ async def lifespan(app: FastAPI):
     except Exception:
         pass
 
+    # [IMPROVE-50] Register Ollama as a VRAM holder so the editor's
+    # ``_evict_ollama_from_gpu`` path (now routed through the
+    # coordinator) can call into Ollama without ai_enhance importing
+    # the eviction body directly. Pre-IMPROVE-50 the API-eviction
+    # call was inline in ai_enhance; this commit relocates it into
+    # the coordinator-registered ``ollama_keep_alive_zero``
+    # callback. Re-registering on every lifespan start (test reload,
+    # Uvicorn --reload) replaces any stale callback from the
+    # previous boot.
+    try:
+        from local_ai_platform.images.ai_enhance import (
+            ollama_keep_alive_zero,
+            ollama_query_vram_bytes,
+        )
+        from local_ai_platform.vram import get_coordinator
+        get_coordinator().register_holder(
+            "ollama",
+            on_release=ollama_keep_alive_zero,
+            get_bytes_held=ollama_query_vram_bytes,
+        )
+    except Exception as exc:
+        logger.warning("VRAM coordinator: Ollama holder registration failed: %s", exc)
+
     # Eager model scan so first request is fast
     try:
         img_models = image_service.refresh_models()
@@ -268,6 +291,13 @@ async def lifespan(app: FastAPI):
     )
     yield
     logger.info("Shutting down Local AI Platform")
+    # [IMPROVE-50] Unregister VRAM holders on shutdown — the
+    # callbacks would point at half-torn-down clients otherwise.
+    try:
+        from local_ai_platform.vram import get_coordinator
+        get_coordinator().unregister_holder("ollama")
+    except Exception as exc:
+        logger.debug("VRAM coordinator: shutdown unregister failed: %s", exc)
     # [IMPROVE-7] Close the shared httpx clients so any in-flight
     # async requests get torn down cleanly before the event loop
     # closes — avoids "Event loop is closed" warnings that pollute

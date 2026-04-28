@@ -556,17 +556,27 @@ def _check_vram_available(min_free_gb: float = 7.0) -> None:
         logger.info("[KONTEXT] VRAM precheck skipped: %s", e)
 
 
-def _evict_ollama_from_gpu() -> None:
-    """Tell Ollama to unload its current model from VRAM.
+def ollama_keep_alive_zero() -> None:
+    """[IMPROVE-50] Cooperative-tier Ollama VRAM eviction.
 
-    Ollama holds LLM weights in VRAM (~7GB for a 7-8B model). Kontext needs
-    ~6.7GB for the GGUF transformer. They cannot coexist on an 8GB GPU.
-    Sending keep_alive=0 to Ollama evicts the model without terminating Ollama.
-    The model reloads automatically on the next chat request.
+    Sends ``/api/ps`` to discover loaded models, then ``/api/generate``
+    with ``keep_alive: 0`` per model. Evicts weights from VRAM
+    without terminating the daemon — the model reloads automatically
+    on the next chat request.
+
+    Used as the registered VRAM-coordinator ``on_release`` callback
+    for the ``ollama`` holder (see api_server lifespan startup).
+    Pre-IMPROVE-50 this body lived inline in ``_evict_ollama_from_gpu``;
+    extraction lets the cooperative tier work without the editor
+    importing it directly.
+
+    Best-effort: any error (daemon down, network) is logged and
+    swallowed. The coordinator's ``acquire`` path also swallows
+    holder exceptions — defense in depth so callers never see
+    Ollama errors when they wanted "free some VRAM if possible".
     """
     import gc
     try:
-        # Get the currently loaded model name from Ollama
         ps_resp = get_sync_client().get(
             "http://localhost:11434/api/ps", timeout=3,
         )
@@ -575,68 +585,133 @@ def _evict_ollama_from_gpu() -> None:
         models_in_vram = ps_data.get("models", [])
         if not models_in_vram:
             logger.info("[KONTEXT] Ollama: no models in VRAM")
-        else:
-            for m in models_in_vram:
-                model_name = m.get("name") or m.get("model", "")
-                if not model_name:
-                    continue
-                logger.info("[KONTEXT] Evicting Ollama model '%s' from VRAM...", model_name)
-                # Sending keep_alive=0 evicts the model without
-                # terminating Ollama; the daemon reloads on the next
-                # chat. 10s timeout because eviction can stall on
-                # large models flushing CUDA buffers.
-                evict_resp = get_sync_client().post(
-                    "http://localhost:11434/api/generate",
-                    json={"model": model_name, "keep_alive": 0},
-                    timeout=10,
-                )
-                evict_resp.raise_for_status()
-                logger.info("[KONTEXT] Ollama model '%s' evicted from VRAM", model_name)
-            gc.collect()
+            return
+        for m in models_in_vram:
+            model_name = m.get("name") or m.get("model", "")
+            if not model_name:
+                continue
+            logger.info(
+                "[KONTEXT] Evicting Ollama model '%s' from VRAM...",
+                model_name,
+            )
+            # Sending keep_alive=0 evicts without terminating
+            # Ollama; the daemon reloads on the next chat. 10s
+            # timeout because eviction can stall on large models
+            # flushing CUDA buffers.
+            evict_resp = get_sync_client().post(
+                "http://localhost:11434/api/generate",
+                json={"model": model_name, "keep_alive": 0},
+                timeout=10,
+            )
+            evict_resp.raise_for_status()
+            logger.info(
+                "[KONTEXT] Ollama model '%s' evicted from VRAM",
+                model_name,
+            )
+        gc.collect()
     except Exception as e:
-        logger.info("[KONTEXT] Ollama eviction skipped (%s) — Ollama may not be running", e)
+        logger.info(
+            "[KONTEXT] Ollama eviction skipped (%s) — Ollama may not be running",
+            e,
+        )
 
-    # Stop the Ollama Windows service AND kill the process to free its CUDA
-    # context (~300-500MB). Just killing ollama.exe doesn't work — the Windows
-    # service ("Ollama") auto-restarts it within milliseconds, so the CUDA
-    # context is never actually freed. We must stop the service first, THEN
-    # kill any remaining process. The service will be restarted automatically
-    # when the user next uses the Chat page (via _restart_ollama_service).
-    if get_settings().kontext_kill_ollama:
-        try:
-            import subprocess
-            import time as _tkill
-            # Step 1: Stop the Windows service (prevents auto-restart)
-            svc_result = subprocess.run(
-                ["net", "stop", "ollama"],
-                capture_output=True, text=True, timeout=10,
+
+def ollama_query_vram_bytes() -> int:
+    """[IMPROVE-50] Optional ``get_bytes_held`` callback for the
+    Ollama VRAM holder. Sums ``size_vram`` across loaded models from
+    ``/api/ps``. Returns 0 on any error so the coordinator's
+    ``holders()`` snapshot doesn't fail.
+
+    Today this is purely diagnostic (used by the ``holders()``
+    debug surface); a future commit can use it to compute real
+    ``bytes_needed`` deltas for ``acquire``.
+    """
+    try:
+        ps_resp = get_sync_client().get(
+            "http://localhost:11434/api/ps", timeout=2,
+        )
+        ps_resp.raise_for_status()
+        models = ps_resp.json().get("models", [])
+        return sum(int(m.get("size_vram") or 0) for m in models)
+    except Exception:
+        return 0
+
+
+def _evict_ollama_from_gpu() -> None:
+    """[IMPROVE-50] Editor-side VRAM eviction wrapper. Two tiers:
+
+    1. **Cooperative**: route through ``VramCoordinator.acquire("editor",
+       bytes_needed=None)`` which iterates registered non-self holders
+       (Ollama, future image-gen pipelines) and calls each
+       ``on_release``. The Ollama holder runs ``ollama_keep_alive_zero``,
+       same API-call shape as pre-IMPROVE-50.
+    2. **Destructive (gated by KONTEXT_KILL_OLLAMA, default true)**:
+       ``net stop ollama`` + ``taskkill /f`` to free the ~300-500MB
+       CUDA context residual that ``keep_alive=0`` alone leaves
+       behind. Load-bearing on 8GB cards per the comment below;
+       users with bigger GPUs can set the env var false to keep
+       chat warmup instant after edits.
+
+    Existing call sites pass no args — same shape as pre-IMPROVE-50.
+    Existing tests in tests/test_images_ai_httpx.py still pass
+    because the cooperative tier preserves the
+    ``/api/ps`` → ``/api/generate{keep_alive:0}`` HTTP shape.
+    """
+    import gc
+    from local_ai_platform.vram import get_coordinator
+
+    # Tier 1: cooperative eviction via coordinator. Holders'
+    # exceptions are logged and swallowed inside the coordinator.
+    get_coordinator().acquire("editor", bytes_needed=None)
+
+    if not get_settings().kontext_kill_ollama:
+        return
+
+    # Tier 2: destructive fallback. Stop the Ollama Windows service
+    # AND kill the process to free its CUDA context (~300-500MB).
+    # Just killing ollama.exe doesn't work — the Windows service
+    # ("Ollama") auto-restarts it within milliseconds, so the CUDA
+    # context is never actually freed. We must stop the service
+    # first, THEN kill any remaining process. The service will be
+    # restarted automatically when the user next uses the Chat page
+    # (via _restart_ollama_service).
+    try:
+        import subprocess
+        import time as _tkill
+        # Step 1: Stop the Windows service (prevents auto-restart)
+        svc_result = subprocess.run(
+            ["net", "stop", "ollama"],
+            capture_output=True, text=True, timeout=10,
+        )
+        if svc_result.returncode == 0:
+            logger.info("[KONTEXT] Stopped Ollama Windows service")
+        else:
+            # Service might not exist or might be named differently
+            logger.info(
+                "[KONTEXT] 'net stop ollama' returned: %s",
+                svc_result.stderr.strip() or svc_result.stdout.strip(),
             )
-            if svc_result.returncode == 0:
-                logger.info("[KONTEXT] Stopped Ollama Windows service")
-            else:
-                # Service might not exist or might be named differently
-                logger.info("[KONTEXT] 'net stop ollama' returned: %s", svc_result.stderr.strip() or svc_result.stdout.strip())
 
-            # Step 2: Kill any remaining ollama.exe processes
-            kill_result = subprocess.run(
-                ["taskkill", "/f", "/im", "ollama.exe"],
-                capture_output=True, text=True, timeout=5,
-            )
-            if kill_result.returncode == 0:
-                logger.info("[KONTEXT] Killed ollama.exe process(es)")
+        # Step 2: Kill any remaining ollama.exe processes
+        kill_result = subprocess.run(
+            ["taskkill", "/f", "/im", "ollama.exe"],
+            capture_output=True, text=True, timeout=5,
+        )
+        if kill_result.returncode == 0:
+            logger.info("[KONTEXT] Killed ollama.exe process(es)")
 
-            # Step 3: Also kill ollama_runners (the actual GPU process)
-            subprocess.run(
-                ["taskkill", "/f", "/im", "ollama_llama_server.exe"],
-                capture_output=True, text=True, timeout=5,
-            )
+        # Step 3: Also kill ollama_runners (the actual GPU process)
+        subprocess.run(
+            ["taskkill", "/f", "/im", "ollama_llama_server.exe"],
+            capture_output=True, text=True, timeout=5,
+        )
 
-            # Wait for driver to reclaim VRAM
-            _tkill.sleep(2)
-            gc.collect()
-            logger.info("[KONTEXT] Ollama fully stopped — CUDA context should be freed")
-        except Exception as e:
-            logger.info("[KONTEXT] Failed to stop Ollama: %s", e)
+        # Wait for driver to reclaim VRAM
+        _tkill.sleep(2)
+        gc.collect()
+        logger.info("[KONTEXT] Ollama fully stopped — CUDA context should be freed")
+    except Exception as e:
+        logger.info("[KONTEXT] Failed to stop Ollama: %s", e)
 
 
 def _restart_ollama_service() -> None:
@@ -644,7 +719,16 @@ def _restart_ollama_service() -> None:
 
     Called at the end of Kontext editing so chat continues to work.
     Runs in a background thread to avoid blocking the response.
+
+    [IMPROVE-50] Early-return when ``KONTEXT_KILL_OLLAMA=false`` — in
+    that mode the destructive tier never ran, so the service is
+    still up and ``net start ollama`` is a wasted subprocess call.
+    Pre-IMPROVE-50 this function fired unconditionally on every
+    edit completion.
     """
+    if not get_settings().kontext_kill_ollama:
+        return
+
     def _do_restart():
         try:
             import subprocess

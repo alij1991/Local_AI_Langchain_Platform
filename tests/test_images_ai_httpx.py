@@ -108,6 +108,12 @@ def test_evict_ollama_calls_ps_then_generate_with_keep_alive_zero():
     ``keep_alive=0`` via ``/api/generate`` for each model. Pin the
     ordering AND the keep_alive sentinel because dropping it would
     silently no-op the eviction.
+
+    [IMPROVE-50] ``_evict_ollama_from_gpu`` now delegates the
+    cooperative tier to ``VramCoordinator`` — the Ollama holder is
+    registered at lifespan startup (api_server.py). In test isolation
+    we register it explicitly so the same API-call contract is
+    pinned end-to-end.
     """
     seen: list[tuple[str, dict | None]] = []
 
@@ -123,12 +129,26 @@ def test_evict_ollama_calls_ps_then_generate_with_keep_alive_zero():
 
     set_test_clients(sync=httpx.Client(transport=httpx.MockTransport(handler)))
 
-    from local_ai_platform.images.ai_enhance import _evict_ollama_from_gpu
+    from local_ai_platform.images.ai_enhance import (
+        _evict_ollama_from_gpu, ollama_keep_alive_zero, ollama_query_vram_bytes,
+    )
+    from local_ai_platform.vram.coordinator import (
+        _reset_coordinator_for_tests, get_coordinator,
+    )
 
-    # The function may also try to stop the Windows service; that
-    # path checks ``settings.kontext_kill_ollama`` (default False
-    # in tests because we don't set the env var) so it short-circuits.
-    _evict_ollama_from_gpu()
+    # Coordinator-registered holder simulates the lifespan setup.
+    _reset_coordinator_for_tests()
+    get_coordinator().register_holder(
+        "ollama", on_release=ollama_keep_alive_zero,
+        get_bytes_held=ollama_query_vram_bytes,
+    )
+    try:
+        # The function may also try to stop the Windows service; that
+        # path checks ``settings.kontext_kill_ollama`` (default False
+        # in tests because we don't set the env var) so it short-circuits.
+        _evict_ollama_from_gpu()
+    finally:
+        _reset_coordinator_for_tests()
 
     # /api/ps probed first.
     assert seen[0][0].endswith("/api/ps")
@@ -141,16 +161,33 @@ def test_evict_ollama_calls_ps_then_generate_with_keep_alive_zero():
 def test_evict_ollama_swallows_when_daemon_missing():
     """If Ollama isn't running the eviction should log + skip, not
     raise — the caller's contract is "best-effort".
+
+    [IMPROVE-50] The swallow happens inside the coordinator's
+    ``_call_release_safely`` AND inside ``ollama_keep_alive_zero``
+    itself (defense in depth). Either layer absorbing the error is
+    sufficient to keep the contract.
     """
     def handler(request: httpx.Request) -> httpx.Response:
         raise httpx.ConnectError("nope")
 
     set_test_clients(sync=httpx.Client(transport=httpx.MockTransport(handler)))
 
-    from local_ai_platform.images.ai_enhance import _evict_ollama_from_gpu
+    from local_ai_platform.images.ai_enhance import (
+        _evict_ollama_from_gpu, ollama_keep_alive_zero,
+    )
+    from local_ai_platform.vram.coordinator import (
+        _reset_coordinator_for_tests, get_coordinator,
+    )
 
-    # Must not raise.
-    _evict_ollama_from_gpu()
+    _reset_coordinator_for_tests()
+    get_coordinator().register_holder(
+        "ollama", on_release=ollama_keep_alive_zero,
+    )
+    try:
+        # Must not raise.
+        _evict_ollama_from_gpu()
+    finally:
+        _reset_coordinator_for_tests()
 
 
 # ── ai_models._download_model: streaming + retry ────────────────────
