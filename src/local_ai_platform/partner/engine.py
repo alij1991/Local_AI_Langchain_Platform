@@ -28,6 +28,13 @@ from .user_profile import (
 from . import memory
 from ..http_client import get_sync_client
 from ..observability import emit, track_event
+from ..safety import (
+    Severity,
+    compose_safe_response,
+    detect_crisis_signal,
+    log_safety_event,
+    post_check_reply,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -284,6 +291,34 @@ class PartnerEngine:
         """Synchronous chat with the partner."""
         from local_ai_platform.providers import GenerationSettings
 
+        # [IMPROVE-60] Crisis-detection guardrail. HIGH severity short-
+        # circuits the LLM call entirely — the user gets a deterministic
+        # safe response with 988. CONTEXTUAL phrases let the LLM respond
+        # but post-check the reply for dismissive/encouraging content
+        # before returning. NONE passes through unchanged.
+        _crisis_signal = detect_crisis_signal(user_input)
+        if _crisis_signal.severity == Severity.HIGH:
+            safe = compose_safe_response()
+            log_safety_event(
+                source="partner.chat", severity=_crisis_signal.severity,
+                kind="input_short_circuit", action_taken="short_circuit",
+                input_text=user_input, reply_text=safe,
+                matched_label=_crisis_signal.matched_label,
+            )
+            # Persist as a normal exchange so the conversation history
+            # stays coherent for the next turn.
+            memory.add_message("user", user_input)
+            memory.add_message("assistant", safe)
+            self._last_detected_emotion = "neutral"
+            return safe
+        if _crisis_signal.severity == Severity.CONTEXTUAL:
+            log_safety_event(
+                source="partner.chat", severity=_crisis_signal.severity,
+                kind="input_contextual", action_taken="log_only",
+                input_text=user_input,
+                matched_label=_crisis_signal.matched_label,
+            )
+
         messages = self._build_messages(user_input)
         model_str = model or self._get_best_model()
 
@@ -346,6 +381,23 @@ class PartnerEngine:
             except Exception:
                 pass
 
+        # [IMPROVE-60] Post-check the reply when input was flagged
+        # CONTEXTUAL. If the LLM produced dismissive language or
+        # encouraged harm, replace with the deterministic safe
+        # response. HIGH inputs were already short-circuited above.
+        if _crisis_signal.severity == Severity.CONTEXTUAL:
+            _post = post_check_reply(reply, input_severity=_crisis_signal.severity)
+            if not _post.ok:
+                log_safety_event(
+                    source="partner.chat", severity=_crisis_signal.severity,
+                    kind="post_check_replace", action_taken="replace",
+                    input_text=user_input, reply_text=reply,
+                    matched_label=_crisis_signal.matched_label,
+                    reasons=_post.reasons,
+                )
+                reply = compose_safe_response()
+                self._last_detected_emotion = "neutral"
+
         # Persist clean reply
         memory.add_message("user", user_input)
         memory.add_message("assistant", reply)
@@ -378,6 +430,47 @@ class PartnerEngine:
         highest-impact, lowest-effort technique."
         """
         from local_ai_platform.providers import GenerationSettings
+
+        # [IMPROVE-60] Pre-check on user input. HIGH severity short-
+        # circuits — the LLM never streams, the safe response is
+        # yielded as a single token frame followed by sentence_complete
+        # + done + _metrics so the SSE consumer sees the same event
+        # shape as a normal turn. Mid-stream output post-check is
+        # deferred (see docs/features/10-improvements.md follow-up
+        # list); pre-check is the load-bearing half.
+        _crisis_signal = detect_crisis_signal(user_input)
+        if _crisis_signal.severity == Severity.HIGH:
+            safe = compose_safe_response()
+            log_safety_event(
+                source="partner.astream_chat", severity=_crisis_signal.severity,
+                kind="input_short_circuit", action_taken="short_circuit",
+                input_text=user_input, reply_text=safe,
+                matched_label=_crisis_signal.matched_label,
+            )
+            memory.add_message("user", user_input)
+            memory.add_message("assistant", safe)
+            self._last_detected_emotion = "neutral"
+            if enable_thinking_pause:
+                yield {"type": "thinking_pause", "duration_ms": 800}
+                await asyncio.sleep(0.8)
+            yield {"type": "emotion", "emotion": "neutral"}
+            yield {"type": "token", "text": safe}
+            yield {"type": "sentence_complete", "sentence": safe}
+            yield {"type": "done", "full_reply": safe}
+            yield {
+                "type": "_metrics",
+                "reply_length": len(safe),
+                "token_count": 1,
+                "emotion_detected": False,
+            }
+            return
+        if _crisis_signal.severity == Severity.CONTEXTUAL:
+            log_safety_event(
+                source="partner.astream_chat", severity=_crisis_signal.severity,
+                kind="input_contextual", action_taken="log_only",
+                input_text=user_input,
+                matched_label=_crisis_signal.matched_label,
+            )
 
         messages = self._build_messages(user_input)
         model_str = model or self._get_best_model()

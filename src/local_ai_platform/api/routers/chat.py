@@ -61,6 +61,13 @@ from local_ai_platform.repositories.conversations import (
     list_messages,
     set_conversation_thread_id,
 )
+from local_ai_platform.safety import (
+    Severity,
+    compose_safe_response,
+    detect_crisis_signal,
+    log_safety_event,
+    post_check_reply,
+)
 from local_ai_platform.token_counting import count_tokens
 from local_ai_platform.tracing import (
     LocalTraceCallbackHandler,
@@ -553,6 +560,44 @@ async def direct_chat(
     messages = [ChatMessage(role=m["role"], content=m["content"]) for m in req.messages]
     settings = GenerationSettings.from_dict(req.settings)
 
+    # [IMPROVE-60] Crisis-detection guardrail. The provider-direct
+    # path doesn't have an agent layer, so the route IS the only
+    # checkpoint. Pre-check the LAST user message in the messages
+    # list — that's the new content the user just sent. Earlier
+    # messages were already processed in prior turns.
+    _last_user_msg = next(
+        (m["content"] for m in reversed(req.messages) if m.get("role") == "user"),
+        "",
+    )
+    _crisis_signal = detect_crisis_signal(_last_user_msg)
+    if _crisis_signal.severity == Severity.HIGH:
+        safe = compose_safe_response()
+        log_safety_event(
+            source="router.chat_direct", severity=_crisis_signal.severity,
+            kind="input_short_circuit", action_taken="short_circuit",
+            input_text=_last_user_msg, reply_text=safe,
+            matched_label=_crisis_signal.matched_label,
+        )
+        if req.stream:
+            async def _safe_stream():
+                yield f"data: {json.dumps({'chunk': safe})}\n\n"
+                yield "data: [DONE]\n\n"
+
+            return StreamingResponse(_safe_stream(), media_type="text/event-stream")
+        return {
+            "content": safe,
+            "model": req.model,
+            "provider": "guardrail",
+            "usage": None,
+        }
+    if _crisis_signal.severity == Severity.CONTEXTUAL:
+        log_safety_event(
+            source="router.chat_direct", severity=_crisis_signal.severity,
+            kind="input_contextual", action_taken="log_only",
+            input_text=_last_user_msg,
+            matched_label=_crisis_signal.matched_label,
+        )
+
     if req.stream:
         async def stream_gen():
             async for chunk in router.astream(req.model, messages, settings):
@@ -562,6 +607,28 @@ async def direct_chat(
         return StreamingResponse(stream_gen(), media_type="text/event-stream")
 
     response = await router.achat(req.model, messages, settings)
+
+    # [IMPROVE-60] Post-check non-streaming reply when input was
+    # CONTEXTUAL. (Streaming post-check deferred per plan.)
+    if _crisis_signal.severity == Severity.CONTEXTUAL:
+        _post = post_check_reply(
+            response.content, input_severity=_crisis_signal.severity,
+        )
+        if not _post.ok:
+            log_safety_event(
+                source="router.chat_direct", severity=_crisis_signal.severity,
+                kind="post_check_replace", action_taken="replace",
+                input_text=_last_user_msg, reply_text=response.content,
+                matched_label=_crisis_signal.matched_label,
+                reasons=_post.reasons,
+            )
+            return {
+                "content": compose_safe_response(),
+                "model": response.model,
+                "provider": response.provider,
+                "usage": response.usage,
+            }
+
     return {
         "content": response.content,
         "model": response.model,
@@ -603,6 +670,42 @@ async def agent_chat(
 
     # Set up tracing
     run_id = str(uuid.uuid4())
+
+    # [IMPROVE-60] Crisis-detection guardrail. HIGH severity short-
+    # circuits the orchestrator entirely — same protection regardless
+    # of which agent is configured. The route layer is the last line
+    # of defense before the agent runtime, where a custom-built agent
+    # could have an alignment regression.
+    _crisis_signal = detect_crisis_signal(req.message)
+    if _crisis_signal.severity == Severity.HIGH:
+        safe = compose_safe_response()
+        log_safety_event(
+            source="router.chat", severity=_crisis_signal.severity,
+            kind="input_short_circuit", action_taken="short_circuit",
+            input_text=req.message, reply_text=safe,
+            matched_label=_crisis_signal.matched_label, run_id=run_id,
+        )
+        add_message(conv_id, "assistant", safe, agent=agent_name, run_id=run_id)
+        # Restore the original model immediately — we're returning
+        # before the normal try/finally block.
+        if req.model:
+            orchestrator.definitions[agent_name].model_name = original_model
+            orchestrator.definitions[agent_name].provider = original_provider
+        return {
+            "assistant_reply": safe,
+            "response": safe,
+            "conversation_id": conv_id,
+            "agent": agent_name,
+            "run_id": run_id,
+        }
+    if _crisis_signal.severity == Severity.CONTEXTUAL:
+        log_safety_event(
+            source="router.chat", severity=_crisis_signal.severity,
+            kind="input_contextual", action_taken="log_only",
+            input_text=req.message,
+            matched_label=_crisis_signal.matched_label, run_id=run_id,
+        )
+
     trace_cfg = load_trace_config()
     recorder = TraceRecorder(
         trace_cfg, run_id, conv_id,
@@ -637,6 +740,24 @@ async def agent_chat(
                 run_id=run_id,
                 settings_override=req.settings,
             )
+
+            # [IMPROVE-60] Post-check the agent reply when input was
+            # CONTEXTUAL. If the LLM produced dismissive language or
+            # encouraged harm, replace with the deterministic safe
+            # response. HIGH inputs were already short-circuited above.
+            if _crisis_signal.severity == Severity.CONTEXTUAL:
+                _post = post_check_reply(
+                    response, input_severity=_crisis_signal.severity,
+                )
+                if not _post.ok:
+                    log_safety_event(
+                        source="router.chat", severity=_crisis_signal.severity,
+                        kind="post_check_replace", action_taken="replace",
+                        input_text=req.message, reply_text=response,
+                        matched_label=_crisis_signal.matched_label,
+                        reasons=_post.reasons, run_id=run_id,
+                    )
+                    response = compose_safe_response()
 
             add_message(
                 conv_id, "assistant", response,
@@ -721,6 +842,49 @@ async def agent_chat_stream(
     add_message(conv_id, "user", req.message)
 
     run_id = str(uuid.uuid4())
+
+    # [IMPROVE-60] Crisis-detection guardrail. HIGH severity short-
+    # circuits the orchestrator's streaming path — yields start →
+    # token (safe response) → end events so the SSE consumer sees
+    # the same shape as a normal turn. The orchestrator + LangGraph
+    # are bypassed entirely. Mid-stream output post-check is
+    # deferred (pre-check is the load-bearing half per the doc).
+    _crisis_signal = detect_crisis_signal(req.message)
+    if _crisis_signal.severity == Severity.HIGH:
+        safe = compose_safe_response()
+        log_safety_event(
+            source="router.chat_stream", severity=_crisis_signal.severity,
+            kind="input_short_circuit", action_taken="short_circuit",
+            input_text=req.message, reply_text=safe,
+            matched_label=_crisis_signal.matched_label, run_id=run_id,
+        )
+        add_message(conv_id, "assistant", safe, agent=agent_name, run_id=run_id)
+        # Restore the original model immediately — we're returning
+        # before the normal try/finally block.
+        if req.model:
+            orchestrator.definitions[agent_name].model_name = original_model
+            orchestrator.definitions[agent_name].provider = original_provider
+
+        async def _safe_stream():
+            yield (
+                f"event: start\ndata: "
+                f"{json.dumps({'conversation_id': conv_id, 'run_id': run_id, 'thread_id': None})}\n\n"
+            )
+            yield f"event: token\ndata: {json.dumps({'text': safe})}\n\n"
+            yield (
+                f"event: end\ndata: "
+                f"{json.dumps({'conversation_id': conv_id, 'run_id': run_id, 'thread_id': None, 'perf': {'tokens': 1, 'guarded': True}})}\n\n"
+            )
+
+        return StreamingResponse(_safe_stream(), media_type="text/event-stream")
+    if _crisis_signal.severity == Severity.CONTEXTUAL:
+        log_safety_event(
+            source="router.chat_stream", severity=_crisis_signal.severity,
+            kind="input_contextual", action_taken="log_only",
+            input_text=req.message,
+            matched_label=_crisis_signal.matched_label, run_id=run_id,
+        )
+
     trace_cfg = load_trace_config()
     recorder = TraceRecorder(
         trace_cfg, run_id, conv_id,

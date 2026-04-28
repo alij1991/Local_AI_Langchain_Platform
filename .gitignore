@@ -44,6 +44,7 @@ data/uploads/
 data/images/
 data/traces/
 data/partner/
+data/safety_events.jsonl
 
 # ── Keep directory structure ──
 !data/.gitkeep
