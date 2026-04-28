@@ -195,6 +195,53 @@ class AgentOrchestrator:
         tools = self._tools_for_agent(agent_name)
         return any(bool((t.metadata or {}).get("dangerous")) for t in tools)
 
+    def _dangerous_tool_names_for_agent(self, agent_name: str) -> set[str]:
+        """[IMPROVE-29] Return the SET of dangerous tool names bound to
+        this agent.
+
+        Used by the per-call interrupt logic in
+        ``astream_chat_with_agent`` and ``astream_resume_after_interrupt``
+        to decide whether a specific pending tool call should trigger a
+        human-in-the-loop interrupt or be auto-resumed.
+
+        Pre-IMPROVE-29 the agent-level guard ``_has_dangerous_tools``
+        gave a single boolean: any-dangerous → interrupt EVERY tool
+        call. This helper enables the finer-grained "interrupt only
+        when the SPECIFIC pending call is dangerous" decision.
+
+        Today only ``run_python`` and ``run_shell`` (in
+        ``tools/code_exec.py``) carry ``metadata["dangerous"]=True``;
+        future tools that grow that flag are picked up automatically
+        because the metadata read is lazy (per-call).
+        """
+        tools = self._tools_for_agent(agent_name)
+        return {
+            t.name for t in tools
+            if bool((t.metadata or {}).get("dangerous"))
+        }
+
+    @staticmethod
+    def _extract_pending_tool_calls(state: Any) -> list[dict[str, Any]]:
+        """[IMPROVE-29] Pull pending tool_calls from a LangGraph state
+        snapshot when the graph is paused at the ``tools`` node.
+
+        Walks ``state.values["messages"]`` in reverse and returns the
+        ``tool_calls`` from the most-recent AI message that carries
+        them. Returns ``[]`` when the state has no pending calls
+        (interrupt fired but messages list is empty / corrupt /
+        truncated by recursion limit).
+
+        Centralized so the read happens identically in
+        ``astream_chat_with_agent`` and ``astream_resume_after_interrupt``
+        — both need the same "what's pending right now?" answer.
+        """
+        if state is None:
+            return []
+        for msg in reversed(state.values.get("messages", []) or []):
+            if hasattr(msg, "tool_calls") and msg.tool_calls:
+                return list(msg.tool_calls)
+        return []
+
     async def astream_resume_after_interrupt(
         self,
         agent_name: str,
@@ -231,47 +278,122 @@ class AgentOrchestrator:
 
         if action == "reject":
             # Send a human message saying the tool call was rejected
-            resume_input = Command(resume={"action": "reject"})
+            stream_input: Any = Command(resume={"action": "reject"})
         else:
-            resume_input = Command(resume={"action": "approve"})
+            stream_input = Command(resume={"action": "approve"})
 
+        # [IMPROVE-29] Per-call dangerous-tool decision applies on the
+        # resume path too — after the user approves the FIRST
+        # interrupt, the agent may emit MORE tool calls. Without this
+        # logic, those subsequent calls would auto-execute (since the
+        # graph just runs to completion after a single resume) — even
+        # if they're dangerous. With it, we re-enter the same auto-
+        # resume vs interrupt loop ``astream_chat_with_agent`` uses
+        # so each batch of pending calls gets the per-call check.
+        dangerous_names = self._dangerous_tool_names_for_agent(agent_name)
+        _AUTO_RESUME_CAP = 10
+        auto_resume_iters = 0
         full_text = ""
+        interrupted = False
         try:
-            async for event in agent.astream_events(
-                resume_input, config=cfg, version="v2",
-            ):
-                kind = event.get("event", "")
-                data = event.get("data", {})
+            while True:
+                async for event in agent.astream_events(
+                    stream_input, config=cfg, version="v2",
+                ):
+                    kind = event.get("event", "")
+                    data = event.get("data", {})
 
-                if kind == "on_chat_model_stream":
-                    chunk = data.get("chunk")
-                    if chunk and isinstance(chunk, AIMessageChunk):
-                        text = self._stringify_content(chunk.content)
-                        if text:
-                            full_text += text
-                            yield {"type": "token", "text": text}
-                        if chunk.tool_call_chunks:
-                            for tc in chunk.tool_call_chunks:
-                                if tc.get("name"):
-                                    yield {
-                                        "type": "tool_call",
-                                        "name": tc.get("name", ""),
-                                        "args": tc.get("args", ""),
-                                        "call_id": tc.get("id", ""),
-                                    }
-                elif kind == "on_tool_end":
-                    output = data.get("output", "")
-                    tool_name = event.get("name", "")
+                    if kind == "on_chat_model_stream":
+                        chunk = data.get("chunk")
+                        if chunk and isinstance(chunk, AIMessageChunk):
+                            text = self._stringify_content(chunk.content)
+                            if text:
+                                full_text += text
+                                yield {"type": "token", "text": text}
+                            if chunk.tool_call_chunks:
+                                for tc in chunk.tool_call_chunks:
+                                    if tc.get("name"):
+                                        yield {
+                                            "type": "tool_call",
+                                            "name": tc.get("name", ""),
+                                            "args": tc.get("args", ""),
+                                            "call_id": tc.get("id", ""),
+                                        }
+                    elif kind == "on_tool_end":
+                        output = data.get("output", "")
+                        tool_name = event.get("name", "")
+                        yield {
+                            "type": "tool_result",
+                            "name": tool_name,
+                            "content": str(output)[:2000],
+                            "call_id": event.get("run_id", ""),
+                        }
+
+                # [IMPROVE-29] Same loop-and-decide shape as
+                # astream_chat_with_agent. See that method for the
+                # full rationale.
+                state = agent.get_state(cfg)
+                if not state or not state.next:
+                    break
+
+                pending_calls = self._extract_pending_tool_calls(state)
+                pending_dangerous = [
+                    tc for tc in pending_calls
+                    if tc.get("name") in dangerous_names
+                ]
+
+                if pending_dangerous or not pending_calls:
+                    interrupted = True
                     yield {
-                        "type": "tool_result",
-                        "name": tool_name,
-                        "content": str(output)[:2000],
-                        "call_id": event.get("run_id", ""),
+                        "type": "interrupt",
+                        "interrupt_type": "tool_approval",
+                        "thread_id": thread_id,
+                        "tool_calls": [
+                            {"name": tc.get("name", ""), "args": tc.get("args", {}), "id": tc.get("id", "")}
+                            for tc in pending_calls
+                        ],
                     }
+                    break
+
+                auto_resume_iters += 1
+                if auto_resume_iters > _AUTO_RESUME_CAP:
+                    logger.warning(
+                        "[IMPROVE-29] Resume-path auto-resume cap (%d) "
+                        "exceeded for agent=%s thread=%s",
+                        _AUTO_RESUME_CAP, agent_name, thread_id,
+                    )
+                    interrupted = True
+                    yield {
+                        "type": "interrupt",
+                        "interrupt_type": "tool_approval",
+                        "thread_id": thread_id,
+                        "tool_calls": [
+                            {"name": tc.get("name", ""), "args": tc.get("args", {}), "id": tc.get("id", "")}
+                            for tc in pending_calls
+                        ],
+                        "reason": "auto_resume_cap_exceeded",
+                    }
+                    break
+
+                logger.info(
+                    "[IMPROVE-29] Resume path auto-resuming %d safe "
+                    "tool call(s) (iter=%d): %s",
+                    len(pending_calls), auto_resume_iters,
+                    [tc.get("name") for tc in pending_calls],
+                )
+                emit("agent", "tool_auto_resume", status="ok",
+                     context={
+                         "agent": agent_name,
+                         "thread_id": thread_id,
+                         "tool_names": [tc.get("name") for tc in pending_calls],
+                         "iter": auto_resume_iters,
+                         "via": "resume",
+                     })
+                stream_input = Command(resume={"action": "approve"})
         except Exception as exc:
             yield {"type": "error", "content": str(exc)}
 
-        yield {"type": "done", "content": full_text}
+        yield {"type": "done", "content": full_text, "interrupted": interrupted}
 
     def _get_smart_memory(self, agent_name: str) -> SmartMemory:
         if agent_name not in self._smart_memories:
@@ -871,74 +993,123 @@ class AgentOrchestrator:
                     interrupt_before=["tools"] if has_dangerous else None,
                 )
 
-                input_messages = [HumanMessage(content=user_input)]
                 cfg = {"configurable": {"thread_id": tid}}
+                # [IMPROVE-29] Per-call dangerous-tool decision needs
+                # the SET of dangerous names — empty set means we
+                # never auto-suppress (no interrupt would have fired
+                # anyway because ``interrupt_before`` is None).
+                dangerous_names = (
+                    self._dangerous_tool_names_for_agent(agent_name)
+                    if has_dangerous else set()
+                )
+
+                # First iteration takes the user's HumanMessage; later
+                # auto-resume iterations pass a ``Command(resume=...)``
+                # to LangGraph so the graph picks up at the
+                # interrupted ``tools`` node and runs the (verified-
+                # safe) pending calls.
+                stream_input: Any = {"messages": [HumanMessage(content=user_input)]}
 
                 full_text = ""
                 interrupted = False
-                async for event in agent.astream_events(
-                    {"messages": input_messages}, config=cfg, version="v2",
-                ):
-                    kind = event.get("event", "")
-                    data = event.get("data", {})
+                # [IMPROVE-29] Defense-in-depth cap. LangGraph's own
+                # ``recursion_limit`` (default 25) caps agent
+                # iteration count; this caps how many times WE
+                # auto-resume an interrupt. Anything above 10
+                # consecutive auto-resumes within one user turn is
+                # almost certainly a bug or a malicious infinite
+                # loop — break out and surface a manual-approve
+                # interrupt to the user.
+                _AUTO_RESUME_CAP = 10
+                auto_resume_iters = 0
 
-                    if kind == "on_chat_model_stream":
-                        chunk = data.get("chunk")
-                        if chunk and isinstance(chunk, AIMessageChunk):
-                            # Text token
-                            text = self._stringify_content(chunk.content)
-                            if text:
-                                full_text += text
-                                yield {"type": "token", "text": text}
-                            # Tool call chunks
-                            if chunk.tool_call_chunks:
-                                for tc in chunk.tool_call_chunks:
-                                    if tc.get("name"):
-                                        logger.info("Tool call: %s args=%s", tc.get("name"), str(tc.get("args", ""))[:200])
-                                        emit("agent", "tool_call", status="ok",
-                                             context={
-                                                 "agent": agent_name,
-                                                 "tool": tc.get("name", ""),
-                                                 "call_id": tc.get("id", ""),
-                                                 "args_preview": str(tc.get("args", ""))[:200],
-                                                 "thread_id": tid,
-                                             })
-                                        yield {
-                                            "type": "tool_call",
-                                            "name": tc.get("name", ""),
-                                            "args": tc.get("args", ""),
-                                            "call_id": tc.get("id", ""),
-                                        }
+                while True:
+                    # ── Stream this iteration's events ─────────────
+                    async for event in agent.astream_events(
+                        stream_input, config=cfg, version="v2",
+                    ):
+                        kind = event.get("event", "")
+                        data = event.get("data", {})
 
-                    elif kind == "on_tool_end":
-                        output = data.get("output", "")
-                        tool_name = event.get("name", "")
-                        logger.info("Tool result: %s len=%d", tool_name, len(str(output)))
-                        emit("agent", "tool_result", status="ok",
-                             context={
-                                 "agent": agent_name,
-                                 "tool": tool_name,
-                                 "call_id": event.get("run_id", ""),
-                                 "thread_id": tid,
-                             },
-                             perf={"output_length": len(str(output))})
-                        yield {
-                            "type": "tool_result",
-                            "name": tool_name,
-                            "content": str(output)[:2000],
-                            "call_id": event.get("run_id", ""),
-                        }
+                        if kind == "on_chat_model_stream":
+                            chunk = data.get("chunk")
+                            if chunk and isinstance(chunk, AIMessageChunk):
+                                # Text token
+                                text = self._stringify_content(chunk.content)
+                                if text:
+                                    full_text += text
+                                    yield {"type": "token", "text": text}
+                                # Tool call chunks
+                                if chunk.tool_call_chunks:
+                                    for tc in chunk.tool_call_chunks:
+                                        if tc.get("name"):
+                                            logger.info("Tool call: %s args=%s", tc.get("name"), str(tc.get("args", ""))[:200])
+                                            emit("agent", "tool_call", status="ok",
+                                                 context={
+                                                     "agent": agent_name,
+                                                     "tool": tc.get("name", ""),
+                                                     "call_id": tc.get("id", ""),
+                                                     "args_preview": str(tc.get("args", ""))[:200],
+                                                     "thread_id": tid,
+                                                 })
+                                            yield {
+                                                "type": "tool_call",
+                                                "name": tc.get("name", ""),
+                                                "args": tc.get("args", ""),
+                                                "call_id": tc.get("id", ""),
+                                            }
 
-                # Check if graph was interrupted (pending tool calls needing approval)
-                if has_dangerous:
+                        elif kind == "on_tool_end":
+                            output = data.get("output", "")
+                            tool_name = event.get("name", "")
+                            logger.info("Tool result: %s len=%d", tool_name, len(str(output)))
+                            emit("agent", "tool_result", status="ok",
+                                 context={
+                                     "agent": agent_name,
+                                     "tool": tool_name,
+                                     "call_id": event.get("run_id", ""),
+                                     "thread_id": tid,
+                                 },
+                                 perf={"output_length": len(str(output))})
+                            yield {
+                                "type": "tool_result",
+                                "name": tool_name,
+                                "content": str(output)[:2000],
+                                "call_id": event.get("run_id", ""),
+                            }
+
+                    # ── Did the graph interrupt? ─────────────────────
+                    # When ``interrupt_before=["tools"]`` is set the
+                    # graph pauses with ``state.next`` populated. When
+                    # it's None (no dangerous tools) the graph just
+                    # finishes and the loop breaks below.
+                    if not has_dangerous:
+                        break
                     state = agent.get_state(cfg)
-                    if state and state.next:
-                        # Graph paused before tools node — needs human approval
-                        pending_calls = []
-                        for msg in reversed(state.values.get("messages", [])):
-                            if hasattr(msg, "tool_calls") and msg.tool_calls:
-                                pending_calls = msg.tool_calls
-                                break
+                    if not state or not state.next:
+                        # Graph completed naturally — no pending tool
+                        # calls. Break out of the auto-resume loop.
+                        break
+
+                    pending_calls = self._extract_pending_tool_calls(state)
+
+                    # [IMPROVE-29] Per-call dangerous check. Interrupt
+                    # only when at least one PENDING call uses a
+                    # dangerous tool. All-safe batches auto-resume
+                    # transparently — the user clicks "approve" zero
+                    # times for a turn that uses ``web_search``,
+                    # ``read_file``, etc. while the agent's bound set
+                    # also includes ``run_python``.
+                    pending_dangerous = [
+                        tc for tc in pending_calls
+                        if tc.get("name") in dangerous_names
+                    ]
+
+                    if pending_dangerous or not pending_calls:
+                        # At least one dangerous call (or empty list →
+                        # defensive: yield the interrupt so the
+                        # client sees the pause rather than silently
+                        # auto-resuming with no info). Surface to user.
                         interrupted = True
                         yield {
                             "type": "interrupt",
@@ -949,6 +1120,48 @@ class AgentOrchestrator:
                                 for tc in pending_calls
                             ],
                         }
+                        break
+
+                    # All pending calls are safe → auto-resume without
+                    # bothering the user. Bump iteration counter; the
+                    # cap guards against infinite loops.
+                    auto_resume_iters += 1
+                    if auto_resume_iters > _AUTO_RESUME_CAP:
+                        logger.warning(
+                            "[IMPROVE-29] Auto-resume cap (%d) exceeded for "
+                            "agent=%s thread=%s — surfacing manual approval",
+                            _AUTO_RESUME_CAP, agent_name, tid,
+                        )
+                        interrupted = True
+                        yield {
+                            "type": "interrupt",
+                            "interrupt_type": "tool_approval",
+                            "thread_id": tid,
+                            "tool_calls": [
+                                {"name": tc.get("name", ""), "args": tc.get("args", {}), "id": tc.get("id", "")}
+                                for tc in pending_calls
+                            ],
+                            "reason": "auto_resume_cap_exceeded",
+                        }
+                        break
+
+                    logger.info(
+                        "[IMPROVE-29] Auto-resuming %d safe tool call(s) (iter=%d): %s",
+                        len(pending_calls), auto_resume_iters,
+                        [tc.get("name") for tc in pending_calls],
+                    )
+                    emit("agent", "tool_auto_resume", status="ok",
+                         context={
+                             "agent": agent_name,
+                             "thread_id": tid,
+                             "tool_names": [tc.get("name") for tc in pending_calls],
+                             "iter": auto_resume_iters,
+                         })
+                    # Resume the graph at the tools node. Subsequent
+                    # ``astream_events`` call picks up from the
+                    # checkpoint.
+                    from langgraph.types import Command
+                    stream_input = Command(resume={"action": "approve"})
 
                 yield {"type": "done", "content": full_text, "interrupted": interrupted}
 
