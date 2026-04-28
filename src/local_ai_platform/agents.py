@@ -5,6 +5,7 @@ import base64
 import inspect
 import logging
 import mimetypes
+import re
 import time
 import uuid
 from dataclasses import dataclass, field
@@ -1445,6 +1446,127 @@ Guidelines:
         result = builder.compile().invoke({"user_input": user_input, "outputs": {}})
         return result.get("outputs", {})
 
+    def _classify_llm_router_edges(
+        self,
+        edges: list[tuple[str, str, str, dict[str, Any]]],
+        source_output: str,
+        visited: set[str],
+    ) -> str | None:
+        """[IMPROVE-35] Run ONE LLM classification call covering all
+        ``llm_router`` sibling edges out of a source node.
+
+        Returns the chosen option string (an option name from the
+        union of edges' ``options`` arrays) or ``None`` when:
+
+          * No llm_router edges exist among the input.
+          * The router/config isn't available.
+          * The classification call fails or returns junk.
+
+        The caller fires only the edge whose ``target`` matches the
+        returned option. ``None`` means NO llm_router edges fire —
+        users wanting deadlock-resilience should add an
+        ``always`` fallback edge.
+
+        Doc rationale at docs/features/05-systems.md:425-437. The
+        single-call shape (vs per-edge classification) is the
+        important detail — three llm_router edges out of one node
+        cost one LLM round-trip, not three.
+        """
+        # Gather candidate options + the first non-empty instruction.
+        # Sibling edges typically share the same instruction; if they
+        # differ, we use the first one (predictable) and union the
+        # options.
+        instruction = ""
+        options: list[str] = []
+        relevant_targets: list[str] = []
+        for target, rule_type, _rule_notes, rule in edges:
+            if rule_type != "llm_router":
+                continue
+            if target in visited:
+                continue
+            if not instruction:
+                instruction = (
+                    rule.get("instruction") or "Pick the next branch."
+                )
+            edge_opts = rule.get("options") or []
+            if edge_opts:
+                options.extend(edge_opts)
+            else:
+                # No explicit options — use the edge's own target as
+                # the option name. The convention matches the doc's
+                # canonical example where ``options`` carries node
+                # names that line up with edge targets.
+                options.append(target)
+            relevant_targets.append(target)
+
+        if not relevant_targets:
+            return None
+
+        # Dedupe options preserving order (first occurrence wins).
+        options = list(dict.fromkeys(options))
+
+        # Refuse gracefully if the router isn't reachable. The DAG
+        # falls through with chosen_option=None; callers can add an
+        # always-edge fallback for resilience.
+        if self.router is None:
+            logger.info(
+                "[IMPROVE-35] llm_router skipped: no router on orchestrator",
+            )
+            return None
+
+        try:
+            from local_ai_platform.providers import (
+                ChatMessage, GenerationSettings,
+            )
+            model = f"ollama:{self.config.prompt_builder_model}"
+            options_block = "\n".join(f"- {o}" for o in options)
+            classify_prompt = (
+                "You are a routing decision agent for a multi-agent "
+                "workflow. Pick exactly ONE option for the branch that "
+                "should execute next.\n\n"
+                f"Source agent's output:\n\"\"\"\n{source_output}\n\"\"\"\n\n"
+                f"Decision criterion:\n{instruction}\n\n"
+                f"Options (pick exactly one):\n{options_block}\n\n"
+                "Reply with ONLY the chosen option's name. No quotes, no "
+                "explanation, no preamble."
+            )
+            response = self.router.chat(
+                model,
+                [ChatMessage(role="user", content=classify_prompt)],
+                GenerationSettings(temperature=0.2, max_tokens=64),
+            )
+            text = (response.content or "").strip()
+            # Strip qwen3/r1 thinking tags (same idiom as the prompt
+            # enhancer at ai_enhance.py:3437-3438).
+            text = re.sub(
+                r"<think>.*?</think>", "", text, flags=re.DOTALL,
+            ).strip()
+            text_lc = text.lower()
+
+            # Pick the FIRST option that appears as a substring. Most
+            # local models echo the option name verbatim; some wrap
+            # it in punctuation or a sentence.
+            for opt in options:
+                if opt.lower() in text_lc:
+                    logger.info(
+                        "[IMPROVE-35] llm_router chose %r from %s",
+                        opt, options,
+                    )
+                    return opt
+
+            logger.warning(
+                "[IMPROVE-35] llm_router output didn't match any option. "
+                "options=%s response=%r",
+                options, text[:120],
+            )
+            return None
+        except Exception as exc:
+            logger.warning(
+                "[IMPROVE-35] llm_router call failed (%s); no edges fire",
+                exc,
+            )
+            return None
+
     async def execute_system_graph(
         self,
         system_definition: dict,
@@ -1480,8 +1602,14 @@ Guidelines:
 
         # Build graph structures
         node_map = {n["id"]: n for n in nodes}
-        # Edges with routing rules: {source: [(target, rule_type, notes)]}
-        edge_map: dict[str, list[tuple[str, str, str]]] = {n["id"]: [] for n in nodes}
+        # Edges with routing rules: {source: [(target, rule_type, notes, full_rule)]}
+        # [IMPROVE-35] Carry the full rule dict so the llm_router rule
+        # can read its ``options`` and ``instruction`` fields without
+        # another tuple expansion. Existing rule_type / rule_notes
+        # callers keep working since they unpack the first 3 elements.
+        edge_map: dict[str, list[tuple[str, str, str, dict[str, Any]]]] = {
+            n["id"]: [] for n in nodes
+        }
         in_degree: dict[str, int] = {n["id"]: 0 for n in nodes}
         for e in edges:
             src, tgt = e.get("source"), e.get("target")
@@ -1489,7 +1617,7 @@ Guidelines:
             rule_type = rule.get("type", e.get("ruleType", "always"))
             rule_notes = rule.get("notes", e.get("notes", ""))
             if src in edge_map and tgt in node_map:
-                edge_map[src].append((tgt, rule_type, rule_notes))
+                edge_map[src].append((tgt, rule_type, rule_notes, rule))
                 in_degree[tgt] = in_degree.get(tgt, 0) + 1
 
         # Find start node
@@ -1604,8 +1732,14 @@ Guidelines:
                                   "node_id": nid, "agent": agent_name, "role": role})
                     output = str(exc)
 
-                # Evaluate edge routing rules to determine next nodes
-                for target, rule_type, rule_notes in edge_map.get(nid, []):
+                # [IMPROVE-35] Evaluate edge routing — llm_router edges
+                # share ONE classification call per source node, so a
+                # 3-way conditional doesn't cost 3 LLM round-trips.
+                # Other rule types still evaluate independently.
+                chosen_option = self._classify_llm_router_edges(
+                    edge_map.get(nid, []), output, visited,
+                )
+                for target, rule_type, rule_notes, rule in edge_map.get(nid, []):
                     if target in visited:
                         continue
 
@@ -1620,6 +1754,18 @@ Guidelines:
                     elif rule_type == "on_tool_result":
                         # Follow if output suggests a tool was used
                         should_follow = any(marker in output for marker in ["Tool", "tool", "Result:", "```"])
+                    elif rule_type == "llm_router":
+                        # [IMPROVE-35] Edge fires iff its target matches
+                        # the LLM-classified option. ``chosen_option``
+                        # being None means the LLM failed (router
+                        # unavailable, classification failed) — in that
+                        # case NO llm_router edges fire so the user can
+                        # add an "always" fallback edge for resilience
+                        # rather than guessing wrong.
+                        should_follow = (
+                            chosen_option is not None
+                            and chosen_option == target
+                        )
                     else:
                         should_follow = True  # unknown rule = always follow
 
@@ -1898,8 +2044,12 @@ Guidelines:
                     "duration_ms": duration_ms,
                 }
 
-                # Edge routing — same rules as execute_system_graph:1152-1171.
-                for target, rule_type, rule_notes in edge_map.get(nid, []):
+                # Edge routing — same rules as execute_system_graph
+                # (IMPROVE-35 added llm_router with shared classification).
+                chosen_option = self._classify_llm_router_edges(
+                    edge_map.get(nid, []), output, visited,
+                )
+                for target, rule_type, rule_notes, rule in edge_map.get(nid, []):
                     if target in visited:
                         continue
                     should_follow = False
@@ -1911,6 +2061,11 @@ Guidelines:
                         should_follow = any(kw in output_lower for kw in keywords) if keywords else True
                     elif rule_type == "on_tool_result":
                         should_follow = any(marker in output for marker in ["Tool", "tool", "Result:", "```"])
+                    elif rule_type == "llm_router":
+                        should_follow = (
+                            chosen_option is not None
+                            and chosen_option == target
+                        )
                     else:
                         should_follow = True
 
