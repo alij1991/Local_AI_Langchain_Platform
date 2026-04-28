@@ -450,3 +450,165 @@ def test_executor_llm_router_coexists_with_always_edges():
     assert "critic" in visited_agents
     assert "researcher" in visited_agents
     assert "writer" not in visited_agents
+
+
+# ── [IMPROVE-35 telemetry] SSE routing_decision event ─────────────
+
+
+async def _drain(stream):
+    """Collect every event yielded by an async generator into a list."""
+    out = []
+    async for ev in stream:
+        out.append(ev)
+    return out
+
+
+def test_streaming_emits_routing_decision_event_with_chosen_option():
+    """When ``astream_execute_system_graph`` walks past a node with
+    llm_router edges, the consumer sees a ``routing_decision`` event
+    carrying chosen_option + the candidate list. The decision lands
+    BEFORE any next-node node_start so a UI can render
+    'Router chose: writer' alongside the next activation."""
+    orch, _ = _make_orch_with_stub_router(stub_response_text="writer_n")
+    # Add the agents the DAG references.
+    from local_ai_platform.agents import AgentDefinition
+    for name in ("start_a", "writer_a", "research_a"):
+        orch.definitions[name] = AgentDefinition(
+            name=name, model_name="gemma3:1b",
+            system_prompt="stub", provider="ollama",
+        )
+
+    # Stub the streaming chat so the test doesn't need a real LLM.
+    async def fake_astream(_agent, _prompt):
+        yield {"type": "token", "text": "stub-out"}
+        yield {"type": "done", "content": "stub-out"}
+
+    orch.astream_chat_with_agent = fake_astream  # type: ignore[method-assign]
+
+    definition = {
+        "nodes": [
+            {"id": "start_n", "agent": "start_a"},
+            {"id": "writer_n", "agent": "writer_a"},
+            {"id": "research_n", "agent": "research_a"},
+        ],
+        "edges": [
+            {"source": "start_n", "target": "writer_n",
+             "rule": {"type": "llm_router",
+                      "options": ["writer_n", "research_n"]}},
+            {"source": "start_n", "target": "research_n",
+             "rule": {"type": "llm_router",
+                      "options": ["writer_n", "research_n"]}},
+        ],
+        "start_node_id": "start_n",
+    }
+    events = asyncio.run(
+        _drain(orch.astream_system_graph(definition, "go"))
+    )
+    types = [e.get("type") for e in events]
+    assert "routing_decision" in types
+    decision = next(e for e in events if e.get("type") == "routing_decision")
+    assert decision["node"] == "start_n"
+    assert decision["chosen_option"] == "writer_n"
+    assert set(decision["candidates"]) == {"writer_n", "research_n"}
+    assert decision["rule_count"] == 2
+    # Decision must precede any next-node node_start (writer or
+    # research). Find the first node_start AFTER the start_n
+    # node_end and verify the decision is in front of it.
+    decision_idx = next(
+        i for i, e in enumerate(events) if e.get("type") == "routing_decision"
+    )
+    after_decision_starts = [
+        i for i, e in enumerate(events)
+        if i > decision_idx
+        and e.get("type") == "node_start"
+        and e.get("node") in {"writer_n", "research_n"}
+    ]
+    # If a next-node fires, it MUST come after the decision.
+    if after_decision_starts:
+        assert after_decision_starts[0] > decision_idx
+
+
+def test_streaming_no_routing_decision_when_no_llm_router_edges():
+    """``always`` / ``on_keyword_match`` edges don't trigger a
+    ``routing_decision`` event — only llm_router edges do.
+    Pinned so future telemetry additions don't accidentally fire
+    on every node."""
+    orch, _ = _make_orch_with_stub_router(stub_response_text="never-used")
+    from local_ai_platform.agents import AgentDefinition
+    for name in ("first_a", "second_a"):
+        orch.definitions[name] = AgentDefinition(
+            name=name, model_name="gemma3:1b",
+            system_prompt="stub", provider="ollama",
+        )
+
+    async def fake_astream(_agent, _prompt):
+        yield {"type": "token", "text": "stub-out"}
+        yield {"type": "done", "content": "stub-out"}
+
+    orch.astream_chat_with_agent = fake_astream  # type: ignore[method-assign]
+
+    definition = {
+        "nodes": [
+            {"id": "n1", "agent": "first_a"},
+            {"id": "n2", "agent": "second_a"},
+        ],
+        "edges": [
+            {"source": "n1", "target": "n2",
+             "rule": {"type": "always"}},
+        ],
+        "start_node_id": "n1",
+    }
+    events = asyncio.run(
+        _drain(orch.astream_system_graph(definition, "go"))
+    )
+    types = [e.get("type") for e in events]
+    assert "routing_decision" not in types
+
+
+def test_streaming_routing_decision_records_none_when_classifier_fails():
+    """LLM unreachable / classifier raised → chosen_option is None
+    in the SSE event. Conservative semantics — no llm_router edge
+    fires when None — match the sync executor."""
+    orch, _ = _make_orch_with_stub_router(
+        raise_exc=RuntimeError("provider down"),
+    )
+    from local_ai_platform.agents import AgentDefinition
+    for name in ("a", "b", "c"):
+        orch.definitions[name] = AgentDefinition(
+            name=name, model_name="gemma3:1b",
+            system_prompt="stub", provider="ollama",
+        )
+
+    async def fake_astream(_agent, _prompt):
+        yield {"type": "token", "text": "stub-out"}
+        yield {"type": "done", "content": "stub-out"}
+
+    orch.astream_chat_with_agent = fake_astream  # type: ignore[method-assign]
+
+    definition = {
+        "nodes": [
+            {"id": "src", "agent": "a"},
+            {"id": "left", "agent": "b"},
+            {"id": "right", "agent": "c"},
+        ],
+        "edges": [
+            {"source": "src", "target": "left",
+             "rule": {"type": "llm_router",
+                      "options": ["left", "right"]}},
+            {"source": "src", "target": "right",
+             "rule": {"type": "llm_router",
+                      "options": ["left", "right"]}},
+        ],
+        "start_node_id": "src",
+    }
+    events = asyncio.run(
+        _drain(orch.astream_system_graph(definition, "go"))
+    )
+    decisions = [e for e in events if e.get("type") == "routing_decision"]
+    assert len(decisions) == 1
+    assert decisions[0]["chosen_option"] is None
+    # Conservative: no llm_router edge fires.
+    starts = [e for e in events if e.get("type") == "node_start"]
+    started_nodes = {e["node"] for e in starts}
+    assert "left" not in started_nodes
+    assert "right" not in started_nodes

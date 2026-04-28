@@ -2001,9 +2001,18 @@ Guidelines:
             }
             return
 
-        # Build graph structures (mirrors execute_system_graph:1037-1048)
+        # Build graph structures (mirrors execute_system_graph:1037-1048).
+        # [IMPROVE-35] 4-tuple aligns with the sync executor so the
+        # llm_router rule_type can read its ``options`` /
+        # ``instruction`` from the full rule dict. Pre-IMPROVE-35
+        # streaming variant carried only 3 elements; the unpack at
+        # the edge-routing site (further below) was previously
+        # mismatched but never exercised in tests because they all
+        # stub ``astream_execute_system_graph`` itself.
         node_map = {n["id"]: n for n in nodes}
-        edge_map: dict[str, list[tuple[str, str, str]]] = {n["id"]: [] for n in nodes}
+        edge_map: dict[str, list[tuple[str, str, str, dict[str, Any]]]] = {
+            n["id"]: [] for n in nodes
+        }
         in_degree: dict[str, int] = {n["id"]: 0 for n in nodes}
         for e in edges:
             src, tgt = e.get("source"), e.get("target")
@@ -2011,7 +2020,7 @@ Guidelines:
             rule_type = rule.get("type", e.get("ruleType", "always"))
             rule_notes = rule.get("notes", e.get("notes", ""))
             if src in edge_map and tgt in node_map:
-                edge_map[src].append((tgt, rule_type, rule_notes))
+                edge_map[src].append((tgt, rule_type, rule_notes, rule))
                 in_degree[tgt] = in_degree.get(tgt, 0) + 1
 
         # Find start node (mirrors execute_system_graph:1051-1056)
@@ -2198,6 +2207,38 @@ Guidelines:
                 chosen_option = self._classify_llm_router_edges(
                     edge_map.get(nid, []), output, visited,
                 )
+
+                # [IMPROVE-35 telemetry] Surface the classifier
+                # decision in the SSE stream when at least one
+                # llm_router edge exists out of the current node, so
+                # Flutter can render "Router chose: writer" alongside
+                # the next-node activation. Emit BEFORE the per-edge
+                # iteration so the consumer sees the decision before
+                # the first next-node node_start.
+                _llm_router_targets = [
+                    tgt for tgt, rt, _, _ in edge_map.get(nid, [])
+                    if rt == "llm_router"
+                ]
+                if _llm_router_targets:
+                    yield {
+                        "type": "routing_decision",
+                        "node": nid,
+                        "chosen_option": chosen_option,
+                        "candidates": list(_llm_router_targets),
+                        "rule_count": len(_llm_router_targets),
+                    }
+                    emit(
+                        "system", "routing_decision", status="ok",
+                        context={
+                            "run_id": run_id,
+                            "system_name": system_name,
+                            "node_id": nid,
+                            "chosen_option": chosen_option,
+                            "candidates": list(_llm_router_targets),
+                            "rule_count": len(_llm_router_targets),
+                        },
+                    )
+
                 for target, rule_type, rule_notes, rule in edge_map.get(nid, []):
                     if target in visited:
                         continue
