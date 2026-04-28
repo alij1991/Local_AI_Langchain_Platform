@@ -7,13 +7,16 @@ endpoints. The legacy import path ``api_server.AgentCreateRequest`` is
 preserved via a re-export in api_server.py, mirroring the chat router
 pattern.
 
-Endpoints (12):
+Endpoints (13):
   POST   /workflow                           run a static agent sequence
   GET    /agents                             list agents (Flutter shape)
   GET    /agents/{name}/capabilities         streaming/etc per-agent flags
   POST   /agents                             create or replace an agent
   PUT    /agents/{name}                      update by path
   POST   /agents/supervisor                  create a supervisor + specialists
+  POST   /agents/from-template/{template_id} [IMPROVE-34] one-click deploy
+                                             a preset template as agent
+                                             (replaces /systems/deploy/{tid})
   GET    /agents/{name}/definition           full definition (for editor)
   POST   /agents/{name}/test                 1-shot test, returns latency_ms
   DELETE /agents/{name}                      remove from runtime + DB
@@ -222,6 +225,47 @@ async def create_supervisor_agent(
         "delegatable_agents": req.specialist_agents,
     })
     return {"status": "created", "supervisor": req.name}
+
+
+# ── [IMPROVE-34] Canonical "deploy template as agent" endpoint ────
+#
+# Replaces ``POST /systems/deploy/{template_id}``. The old URL was
+# misleading — it creates an agent, not a system — so any reader
+# auditing the API surface saw the wrong data model. The old route
+# stays as a deprecated alias in ``routers/systems.py`` for one or
+# two release cycles per the doc plan
+# (``docs/features/05-systems.md:417-423``).
+#
+# Both routes call into ``deploy_template_as_agent`` so they cannot
+# drift; ``test_aliases_produce_equivalent_agent`` pins this.
+
+
+@router.post("/agents/from-template/{template_id}")
+async def create_agent_from_template(
+    template_id: str,
+    body: dict[str, Any] | None = None,
+    orchestrator: AgentOrchestrator = Depends(get_orchestrator),
+):
+    """[IMPROVE-34] Deploy a preset template as a saved agent.
+
+    Body (all optional)::
+
+        {"name": "my_research", "model_name": "qwen2.5:7b",
+         "provider": "ollama"}
+
+    Defaults: ``name`` = template id, ``model_name`` = first
+    recommended model (``gemma3:4b`` if the template has none),
+    ``provider`` = ``ollama``.
+
+    Returns ``{"status": "deployed", "agent": ..., "template": ...,
+    "tools": [...]}``. Maps unknown ``template_id`` to 404.
+    """
+    from local_ai_platform.system_templates import deploy_template_as_agent
+
+    try:
+        return deploy_template_as_agent(template_id, body, orchestrator)
+    except KeyError:
+        raise HTTPException(404, f"Template '{template_id}' not found")
 
 
 @router.get("/agents/{name}/definition")

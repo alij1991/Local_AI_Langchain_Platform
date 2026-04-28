@@ -161,3 +161,84 @@ def list_templates() -> list[dict]:
 
 def get_template(template_id: str) -> SystemTemplate | None:
     return TEMPLATES_BY_ID.get(template_id)
+
+
+# [IMPROVE-34] Shared helper used by BOTH the canonical
+# ``POST /agents/from-template/{template_id}`` route and the deprecated
+# ``POST /systems/deploy/{template_id}`` alias. Keeping the deploy logic
+# here (instead of duplicating it across two routers) means the alias
+# can never drift from the canonical endpoint — pin
+# ``test_aliases_produce_equivalent_agent`` enforces this invariant.
+#
+# The doc rationale (``docs/features/05-systems.md:417-423``): the old
+# URL is dishonest because the operation creates *an agent*, not a
+# system. The new URL surfaces that truth. The alias stays for a
+# release or two so existing Flutter clients (``systems_page.dart``)
+# don't break the moment this lands.
+def deploy_template_as_agent(
+    template_id: str,
+    body: dict | None,
+    orchestrator,
+) -> dict:
+    """Instantiate ``template_id`` as a saved agent and return the
+    canonical response payload.
+
+    ``body`` accepts the same overrides the original endpoint took:
+    ``name``, ``model_name``, ``provider``. Missing keys fall back to
+    the template's defaults (first recommended model, ``ollama``
+    provider, template id as agent name).
+
+    Raises ``KeyError`` when ``template_id`` is unknown so the HTTP
+    layer can map it to a 404 with a useful message — keeping HTTP
+    concerns out of this pure helper.
+    """
+    if body is None:
+        body = {}
+
+    template = get_template(template_id)
+    if template is None:
+        raise KeyError(template_id)
+
+    agent_name = body.get("name", template.id)
+    model_name = body.get(
+        "model_name",
+        template.recommended_models[0]
+        if template.recommended_models
+        else "gemma3:4b",
+    )
+    provider = body.get("provider", "ollama")
+
+    orchestrator.add_agent(
+        name=agent_name,
+        model_name=model_name,
+        system_prompt=template.system_prompt,
+        provider=provider,
+        settings=template.default_settings,
+        role="general",
+    )
+    if template.tool_ids:
+        orchestrator.set_agent_tools(agent_name, template.tool_ids)
+
+    # Late import — ``repositories.agents_repo`` pulls in DB code, and
+    # ``system_templates`` is loaded by API-server bootstrap; keeping
+    # this import lazy preserves the module's "data-only" character
+    # at import time.
+    from local_ai_platform.repositories.agents_repo import save_agent
+
+    save_agent(agent_name, {
+        "name": agent_name,
+        "model_name": model_name,
+        "system_prompt": template.system_prompt,
+        "provider": provider,
+        "settings": template.default_settings,
+        "role": "general",
+        "tool_ids": template.tool_ids,
+        "template_id": template.id,
+    })
+
+    return {
+        "status": "deployed",
+        "agent": agent_name,
+        "template": template.id,
+        "tools": template.tool_ids,
+    }

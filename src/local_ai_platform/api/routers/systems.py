@@ -7,7 +7,9 @@ topological sort to reject cycles up front).
 
 Endpoints (13):
   GET    /systems/templates              list pre-built templates
-  POST   /systems/deploy/{template_id}   one-click deploy a template as agent
+  POST   /systems/deploy/{template_id}   [DEPRECATED — IMPROVE-34] use
+                                         POST /agents/from-template/{tid}
+                                         Sunset: 2026-10-28
   GET    /systems/recommend              templates filtered by available models
   GET    /systems                        list custom graph-based systems
   POST   /systems                        create system (cycle-checked)
@@ -41,6 +43,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 import uuid
 from typing import Any
 
@@ -79,6 +82,24 @@ from local_ai_platform.systems_validator import (
 )
 
 router = APIRouter()
+logger = logging.getLogger(__name__)
+
+
+# ── [IMPROVE-34] Deprecation policy for /systems/deploy alias ────
+#
+# RFC 9745 (Deprecation HTTP header field, IETF 2024-12) standardised
+# the boolean ``Deprecation: true`` form for marking endpoints scheduled
+# for removal. RFC 8594 (2019-05; still the normative ref in 2025-2026
+# API-governance practice) defines ``Sunset`` as the IMF-fixdate string
+# at which the endpoint will be retired. RFC 8288 ``Link`` with
+# ``rel="successor-version"`` lets clients machine-discover the
+# replacement URL.
+#
+# Date is the project's chosen 6-month sunset window from when this
+# alias landed (2026-04-28). Pinned by
+# ``test_deprecated_alias_returns_sunset_header`` so it can't drift
+# silently.
+_SYSTEMS_DEPLOY_SUNSET = "Tue, 28 Oct 2026 00:00:00 GMT"
 
 
 # ── [IMPROVE-32] Stream cancel-detection seam ────────────────────
@@ -117,53 +138,48 @@ async def get_system_templates():
 @router.post("/systems/deploy/{template_id}")
 async def deploy_system_template(
     template_id: str,
+    response: Response,
     body: dict[str, Any] | None = None,
     orchestrator: AgentOrchestrator = Depends(get_orchestrator),
 ):
-    """Deploy a system template as a new agent."""
-    if body is None:
-        body = {}
+    """[DEPRECATED — IMPROVE-34] Deploy a system template as a new agent.
 
-    from local_ai_platform.system_templates import get_template
-    template = get_template(template_id)
-    if not template:
-        raise HTTPException(404, f"Template '{template_id}' not found")
+    Replaced by ``POST /agents/from-template/{template_id}``. This
+    alias delegates to the same shared helper
+    (``system_templates.deploy_template_as_agent``) so behaviour is
+    byte-equivalent to the canonical route.
 
-    # Allow overriding the model and name
-    agent_name = body.get("name", template.id)
-    model_name = body.get("model_name", template.recommended_models[0] if template.recommended_models else "gemma3:4b")
-    provider = body.get("provider", "ollama")
+    The response carries RFC 9745 ``Deprecation: true``, RFC 8594
+    ``Sunset`` (2026-10-28), and RFC 8288 ``Link`` headers pointing
+    at the successor so clients (notably the Flutter
+    ``systems_page.dart``) can be migrated incrementally before the
+    sunset date.
 
-    # Create the agent
-    orchestrator.add_agent(
-        name=agent_name,
-        model_name=model_name,
-        system_prompt=template.system_prompt,
-        provider=provider,
-        settings=template.default_settings,
-        role="general",
+    Removal target: 2026-10-28.
+    """
+    # Late import — avoids a circular when API server bootstrap loads
+    # the router before ``system_templates`` is touched anywhere else.
+    from local_ai_platform.system_templates import deploy_template_as_agent
+
+    # Per-call deprecation log (low-traffic endpoint — no flood risk).
+    # Useful in production tracing to see which clients are still
+    # hitting the alias before sunset.
+    logger.info(
+        "[IMPROVE-34] /systems/deploy/%s called (deprecated alias; "
+        "use /agents/from-template/%s before 2026-10-28)",
+        template_id, template_id,
     )
-    if template.tool_ids:
-        orchestrator.set_agent_tools(agent_name, template.tool_ids)
 
-    # Persist to DB
-    save_agent(agent_name, {
-        "name": agent_name,
-        "model_name": model_name,
-        "system_prompt": template.system_prompt,
-        "provider": provider,
-        "settings": template.default_settings,
-        "role": "general",
-        "tool_ids": template.tool_ids,
-        "template_id": template.id,
-    })
+    response.headers["Deprecation"] = "true"
+    response.headers["Sunset"] = _SYSTEMS_DEPLOY_SUNSET
+    response.headers["Link"] = (
+        f'</agents/from-template/{template_id}>; rel="successor-version"'
+    )
 
-    return {
-        "status": "deployed",
-        "agent": agent_name,
-        "template": template.id,
-        "tools": template.tool_ids,
-    }
+    try:
+        return deploy_template_as_agent(template_id, body, orchestrator)
+    except KeyError:
+        raise HTTPException(404, f"Template '{template_id}' not found")
 
 
 @router.get("/systems/recommend")
