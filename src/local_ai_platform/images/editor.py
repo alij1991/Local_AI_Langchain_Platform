@@ -25,6 +25,40 @@ logger = logging.getLogger(__name__)
 EDITOR_DATA_DIR = Path("data/images/editor")
 
 
+# ── [IMPROVE-56] Diff metrics for /editor/{sid}/compare ──────────
+#
+# All numpy / skimage imports are lazy inside ``_compute_diff_metrics``
+# so this module stays cheap to import at app startup. Diff-metrics
+# compute is opt-in via ``?metrics=true`` on the route, so the cost
+# only lands when the caller actually wants it.
+#
+# Resize policy: both inputs are downscaled to max-side 1024 BEFORE any
+# per-pixel math. Avoids OOM on 8K images (4K × 4K × 3 bytes = ~50MB
+# per channel × 3 = 150MB just for one input). Metrics computed on the
+# downscaled view are still meaningful for "did anything change?" — and
+# at 1024 px an SSIM window of 7 still has plenty of variance to score
+# against. The region-map output is downscaled further to max-side
+# 256 so the base64 payload stays small enough for an SSE/JSON channel.
+
+# Threshold matches the doc proposal (07-image-editor.md:449). 8/255
+# is roughly "perceptually one JND on midtones" — Catmull-Rom + ITU
+# BT.601 quantisation noise sits around 4-6 already, so 8 keeps the
+# region map from lighting up on pure encoder jitter.
+_DIFF_THRESHOLD = 8
+
+# Internal resize cap before computing metrics. Any image larger than
+# this on its longest side is shrunk via LANCZOS. Higher → more memory
+# + CPU; lower → SSIM windows lose detail. 1024 is the sweet spot per
+# the perception-quality literature (Wang 2004 SSIM paper validated at
+# similar resolutions).
+_METRICS_INPUT_MAX_SIDE = 1024
+
+# Region map preview shrinks further so the base64 payload fits a
+# typical SSE event budget (<32KB after b64 expansion). 256 px keeps
+# enough detail for the Flutter overlay to be useful.
+_REGION_MAP_MAX_SIDE = 256
+
+
 def _editor_archive_root() -> Path:
     """[IMPROVE-53] Closed-but-recoverable sessions land under
     ``EDITOR_DATA_DIR/_archive/{YYYY-MM-DD}/{sid}/``.
@@ -38,6 +72,152 @@ def _editor_archive_root() -> Path:
     ``IMPROVE-53 Phase B: TTL cleanup``.
     """
     return EDITOR_DATA_DIR / "_archive"
+
+
+def _compute_diff_metrics(path_a: str, path_b: str) -> dict[str, Any]:
+    """[IMPROVE-56] Compute per-pair difference metrics for two
+    images.
+
+    Returns a dict with::
+
+        {
+          "mean_pixel_diff": {"r": float, "g": float, "b": float},
+          "changed_pixels_pct": float,
+          "histogram_delta": {"r": float, "g": float, "b": float},
+          "ssim": float | None,
+          "region_map_base64": str,
+          "width": int,
+          "height": int,
+          "aligned": bool,
+        }
+
+    ``aligned`` is False when the source images had different sizes
+    (B is then resized to A's dimensions for comparison). All
+    metrics are computed on the post-alignment, post-downscale view.
+
+    ``ssim`` is None on any compute failure — degenerate inputs
+    (1×1, mismatched channel counts) shouldn't be able to escalate
+    a metrics request into an HTTP 500.
+
+    All heavy deps (numpy, skimage) are imported lazily here so
+    importing ``editor.py`` at app startup stays cheap.
+    """
+    import base64
+    import io
+
+    import numpy as np
+
+    img_a = Image.open(path_a).convert("RGB")
+    img_b = Image.open(path_b).convert("RGB")
+
+    orig_size_a = img_a.size  # (W, H)
+    orig_size_b = img_b.size
+    aligned = orig_size_a == orig_size_b
+
+    # Step 1: align B to A's dimensions if they differ. The realistic
+    # use-case for unaligned inputs is "user applied an edit that
+    # changed the image dimensions" (crop, resize op) — resizing B
+    # to match A's grid is the only way to compute pixel-aligned
+    # metrics. The ``aligned`` flag lets the UI annotate the result.
+    if not aligned:
+        img_b = img_b.resize(orig_size_a, Image.LANCZOS)
+
+    # Step 2: clamp both to max-side 1024 to bound memory + CPU.
+    # See ``_METRICS_INPUT_MAX_SIDE`` rationale above.
+    w, h = img_a.size
+    max_side = max(w, h)
+    if max_side > _METRICS_INPUT_MAX_SIDE:
+        scale = _METRICS_INPUT_MAX_SIDE / max_side
+        new_size = (max(1, int(w * scale)), max(1, int(h * scale)))
+        img_a = img_a.resize(new_size, Image.LANCZOS)
+        img_b = img_b.resize(new_size, Image.LANCZOS)
+
+    arr_a = np.asarray(img_a, dtype=np.uint8)
+    arr_b = np.asarray(img_b, dtype=np.uint8)
+    out_w, out_h = img_a.size
+
+    # ── mean_pixel_diff (per-channel) ────────────────────────────
+    # int16 cast prevents uint8 overflow on the subtraction.
+    diff = np.abs(arr_a.astype(np.int16) - arr_b.astype(np.int16))
+    mean_per_channel = diff.mean(axis=(0, 1))
+    mean_pixel_diff = {
+        "r": float(mean_per_channel[0]),
+        "g": float(mean_per_channel[1]),
+        "b": float(mean_per_channel[2]),
+    }
+
+    # ── changed_pixels_pct ──────────────────────────────────────
+    # A pixel "changed" if ANY channel exceeds the threshold. Using
+    # max-channel rather than mean-channel matches what a user means
+    # by "this region changed" — a pure-blue → pure-red swap shows
+    # as max=255 even though the mean over RGB is 170.
+    max_channel_diff = diff.max(axis=2)
+    changed_mask = max_channel_diff > _DIFF_THRESHOLD
+    changed_pixels_pct = float(changed_mask.sum() / changed_mask.size)
+
+    # ── histogram_delta (per-channel) ───────────────────────────
+    # L1 distance between 256-bin histograms, normalized so the
+    # max-possible (completely disjoint distributions) maps to 1.0.
+    # Total L1 distance for two distributions of size N has max 2N
+    # (each bin off by N at worst), so divide by 2N.
+    total_pixels = arr_a.shape[0] * arr_a.shape[1]
+    hist_delta: dict[str, float] = {}
+    for idx, name in enumerate(("r", "g", "b")):
+        hist_a = np.bincount(arr_a[..., idx].flatten(), minlength=256).astype(np.float64)
+        hist_b = np.bincount(arr_b[..., idx].flatten(), minlength=256).astype(np.float64)
+        l1 = float(np.abs(hist_a - hist_b).sum())
+        hist_delta[name] = l1 / (2.0 * total_pixels) if total_pixels else 0.0
+
+    # ── SSIM ─────────────────────────────────────────────────────
+    # skimage's structural_similarity needs at least win_size pixels
+    # on each side; default win_size=7 means inputs <7×7 fail. Wrap
+    # in try/except so degenerate inputs return None instead of 500.
+    ssim_val: float | None
+    try:
+        from skimage.metrics import structural_similarity as _ssim
+        ssim_val = float(_ssim(
+            arr_a, arr_b,
+            channel_axis=2,
+            data_range=255,
+        ))
+    except Exception as exc:
+        logger.debug(
+            "[IMPROVE-56] ssim compute failed (%s); returning None", exc,
+        )
+        ssim_val = None
+
+    # ── region_map_base64 ────────────────────────────────────────
+    # Build a small visual: desaturated A as background, red overlay
+    # where the diff exceeds the threshold. Flutter drops this
+    # straight into ``Image.memory(base64Decode(...))``.
+    gray = arr_a.mean(axis=2)
+    bg = (gray * 0.5).clip(0, 255).astype(np.uint8)
+    overlay = np.stack([bg, bg, bg], axis=2)
+    overlay[changed_mask] = (255, 0, 0)
+    region_img = Image.fromarray(overlay, mode="RGB")
+    region_max = max(region_img.size)
+    if region_max > _REGION_MAP_MAX_SIDE:
+        rscale = _REGION_MAP_MAX_SIDE / region_max
+        rsize = (
+            max(1, int(region_img.size[0] * rscale)),
+            max(1, int(region_img.size[1] * rscale)),
+        )
+        region_img = region_img.resize(rsize, Image.LANCZOS)
+    buf = io.BytesIO()
+    region_img.save(buf, format="PNG", optimize=True)
+    b64_payload = base64.b64encode(buf.getvalue()).decode("ascii")
+    region_map_base64 = f"data:image/png;base64,{b64_payload}"
+
+    return {
+        "mean_pixel_diff": mean_pixel_diff,
+        "changed_pixels_pct": changed_pixels_pct,
+        "histogram_delta": hist_delta,
+        "ssim": ssim_val,
+        "region_map_base64": region_map_base64,
+        "width": out_w,
+        "height": out_h,
+        "aligned": aligned,
+    }
 
 
 @dataclass
@@ -716,8 +896,24 @@ class ImageEditorService:
             })
         return steps
 
-    def compare(self, session_id: str, step_a: int = -1, step_b: int = -1) -> dict[str, Any]:
-        """Get two image paths for side-by-side comparison."""
+    def compare(
+        self,
+        session_id: str,
+        step_a: int = -1,
+        step_b: int = -1,
+        *,
+        metrics: bool = False,
+    ) -> dict[str, Any]:
+        """Get two image paths for side-by-side comparison.
+
+        [IMPROVE-56] When ``metrics=True``, also compute diff metrics
+        (mean pixel diff, changed-pixel pct, histogram delta, SSIM,
+        and a small region-map PNG). Default is False so existing
+        callers — notably Flutter, which scrubs through history —
+        don't pay the compute cost they don't want. The metrics
+        compute is bounded by ``_METRICS_INPUT_MAX_SIDE`` (1024)
+        so even a 4K input hits a known ceiling.
+        """
         session = self._sessions.get(session_id)
         if not session:
             raise ValueError(f"Session not found: {session_id}")
@@ -729,12 +925,32 @@ class ImageEditorService:
                 return session.history[step].result_path
             return session.current_path
 
-        return {
-            "image_a": _path_for_step(step_a),
-            "image_b": _path_for_step(step_b if step_b >= 0 else session.current_step),
+        path_a = _path_for_step(step_a)
+        path_b = _path_for_step(step_b if step_b >= 0 else session.current_step)
+        result: dict[str, Any] = {
+            "image_a": path_a,
+            "image_b": path_b,
             "step_a": step_a,
             "step_b": step_b if step_b >= 0 else session.current_step,
         }
+
+        if metrics:
+            # Failure here MUST NOT escalate to a 500 — the caller
+            # is asking for a "nice to have" overlay, and a broken
+            # image file shouldn't break the side-by-side view.
+            # Surface the failure as ``metrics: None`` + an inline
+            # error message so the UI can degrade gracefully.
+            try:
+                result["metrics"] = _compute_diff_metrics(path_a, path_b)
+            except Exception as exc:
+                logger.warning(
+                    "[IMPROVE-56] diff-metrics failed for session=%s "
+                    "a=%s b=%s: %s", session_id, step_a, step_b, exc,
+                )
+                result["metrics"] = None
+                result["metrics_error"] = str(exc)
+
+        return result
 
     def export(self, session_id: str, fmt: str = "PNG", quality: int = 95) -> dict[str, Any]:
         """Export the current state to a specific format."""

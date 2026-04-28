@@ -21,6 +21,9 @@ Endpoints (15):
   POST   /editor/{session_id}/redo
   GET    /editor/{session_id}/history
   GET    /editor/{session_id}/compare        — diff two history steps
+                                               ?metrics=true: [IMPROVE-56]
+                                               adds mean-pixel-diff, SSIM,
+                                               changed-pixel %, region map
   POST   /editor/{session_id}/export         — write final file (PNG/JPEG/WEBP)
   GET    /editor/archived                    — [IMPROVE-53] list archived sessions
   POST   /editor/{session_id}/restore        — [IMPROVE-53] unarchive a session
@@ -378,10 +381,26 @@ async def editor_compare(
     session_id: str,
     a: int = -1,
     b: int = -1,
+    metrics: bool = False,
     editor=Depends(get_editor_service),
 ):
+    """Diff two history steps.
+
+    [IMPROVE-56] Pass ``?metrics=true`` to also compute per-pair
+    diff statistics (``mean_pixel_diff``, ``changed_pixels_pct``,
+    ``histogram_delta``, ``ssim``, and a small ``region_map_base64``
+    PNG showing where the pixels changed). Default is False so the
+    common "scrub through history" Flutter path stays cheap — the
+    metrics compute downscales to max-side 1024 internally but still
+    costs tens of ms on each call.
+
+    Failure to compute metrics surfaces as ``metrics: null`` with an
+    inline ``metrics_error`` field — the side-by-side paths are
+    always returned, since the user's primary need is the visual
+    comparison.
+    """
     try:
-        return editor.compare(session_id, a, b)
+        return editor.compare(session_id, a, b, metrics=metrics)
     except ValueError as e:
         raise HTTPException(400, str(e))
 
