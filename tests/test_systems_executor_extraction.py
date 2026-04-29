@@ -136,6 +136,14 @@ def test_executor_module_does_not_import_from_agents_at_top_level():
         # Top-level only — function-body imports start with whitespace.
         if not line or line[0].isspace():
             continue
+        # Skip comments — prose mentions of the forbidden patterns
+        # (e.g., explaining where lazy imports used to live in
+        # IMPROVE-84) are legitimate documentation, not real
+        # imports. Real imports start with the keyword ``import`` or
+        # ``from``, never with ``#``.
+        stripped = line.lstrip()
+        if stripped.startswith("#"):
+            continue
         for forbidden in forbidden_imports:
             assert forbidden not in line, (
                 f"systems/executor.py has a top-level "
@@ -185,3 +193,92 @@ def test_end_to_end_extracted_executor_runs_simple_dag():
     assert result["node_outputs"][0]["text"] == "out:alpha"
     assert result["node_outputs"][1]["text"] == "out:beta"
     assert "run_id" in result
+
+
+# ── [IMPROVE-84] Inter-node-context primitive migration ──────────
+
+
+def test_inter_node_context_primitives_live_in_executor_module():
+    """[IMPROVE-84] Wave 7's [IMPROVE-75] extraction left
+    ``_build_inter_node_context``, ``_estimate_tokens``,
+    ``_INTER_NODE_CONTEXT_BUDGET_TOKENS``, and
+    ``_INTER_NODE_CHARS_PER_TOKEN`` in ``agents.py`` with a lazy
+    ``from ..agents import`` inside the executor's function bodies.
+    Wave 8 [IMPROVE-84] migrated them to ``systems/executor.py``
+    (the only caller). This pin asserts they actually moved — a
+    future revert that re-introduces them in agents.py fails this
+    test.
+    """
+    from local_ai_platform.systems import executor as ex
+
+    assert callable(ex._build_inter_node_context)
+    assert callable(ex._estimate_tokens)
+    assert ex._INTER_NODE_CONTEXT_BUDGET_TOKENS == 4000
+    assert ex._INTER_NODE_CHARS_PER_TOKEN == 4
+
+
+def test_agents_module_no_longer_defines_inter_node_helpers():
+    """[IMPROVE-84] The migration is full — agents.py drops the
+    helpers entirely. No back-compat shim per Q2=B in the Wave 8
+    plan. A future re-introduction (e.g. via partial revert) trips
+    this pin.
+
+    Pinned via ``hasattr`` rather than source-string inspection
+    because a partial-revert that re-adds the names with different
+    bodies would still surface the migration regression.
+    """
+    import local_ai_platform.agents as agents_mod
+
+    assert not hasattr(agents_mod, "_build_inter_node_context"), (
+        "agents.py still defines _build_inter_node_context; per "
+        "[IMPROVE-84] the helper lives in systems/executor.py."
+    )
+    assert not hasattr(agents_mod, "_estimate_tokens"), (
+        "agents.py still defines _estimate_tokens; per "
+        "[IMPROVE-84] the helper lives in systems/executor.py."
+    )
+    assert not hasattr(agents_mod, "_INTER_NODE_CONTEXT_BUDGET_TOKENS"), (
+        "agents.py still defines the budget constant; per "
+        "[IMPROVE-84] the constant lives in systems/executor.py."
+    )
+
+
+def test_executor_does_not_lazy_import_inter_node_helpers_from_agents():
+    """[IMPROVE-84] Source-level pin: the three lazy
+    ``from ..agents import _build_inter_node_context`` calls inside
+    ``_run_parallel_wave_or_fallback``, ``execute_graph``, and
+    ``astream_graph`` are gone.
+
+    The broader ``test_executor_module_does_not_import_from_agents_at_top_level``
+    only catches the TOP-level case. This adds a stricter pin
+    against the lazy form too — once IMPROVE-84 lands, no
+    function-body import of these names should remain.
+    """
+    import importlib
+    src_path = (
+        importlib.resources.files("local_ai_platform.systems")
+        / "executor.py"
+    ).read_text(encoding="utf-8")
+
+    # Strip docstrings/comments to avoid false positives — the only
+    # meaningful occurrences would be in actual import statements.
+    forbidden_substrings = [
+        "import _build_inter_node_context",
+        "import _INTER_NODE_CONTEXT_BUDGET_TOKENS",
+        "import _estimate_tokens",
+    ]
+    for line in src_path.splitlines():
+        stripped = line.lstrip()
+        if stripped.startswith("#"):
+            continue
+        # Only check ``from ... import ...`` lines — docstrings
+        # mentioning the names in prose are fine.
+        if not stripped.startswith("from "):
+            continue
+        for forbidden in forbidden_substrings:
+            assert forbidden not in line, (
+                f"systems/executor.py still imports inter-node "
+                f"helper from agents.py: {line!r}. Per "
+                f"[IMPROVE-84] these helpers live HERE; remove "
+                f"the import."
+            )

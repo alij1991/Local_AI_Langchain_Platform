@@ -64,105 +64,28 @@ class WorkflowState(TypedDict):
     outputs: dict[str, str]
 
 
-# ── [IMPROVE-33] Bounded inter-node context for system DAG runs ──
+# ── [IMPROVE-33 / IMPROVE-84] Bounded inter-node context — moved ─
 #
-# Pre-IMPROVE-33 ``execute_system_graph`` (and its streaming twin)
-# accumulated every prior node's output into a single string that
-# was prepended to the next node's prompt. With 5 nodes producing
-# 2k tokens each, node 5 saw ~10k tokens of context BEFORE the
-# user input — enough to bust the context window of any small
-# local model.
+# Pre-IMPROVE-84 the four primitives below
+# (``_INTER_NODE_CONTEXT_BUDGET_TOKENS``, ``_INTER_NODE_CHARS_PER_TOKEN``,
+# ``_estimate_tokens``, ``_build_inter_node_context``) lived here in
+# agents.py because IMPROVE-33 added them when system-DAG execution
+# was still a method on AgentOrchestrator. Wave 7 [IMPROVE-75]
+# extracted the executor into ``systems/executor.py`` and lazy-
+# imported these helpers back from agents.py — a temporary shim
+# the IMPROVE-75 commit body explicitly listed as a spawned
+# follow-up.
 #
-# Doc rationale at docs/features/05-systems.md:403-415: replace the
-# unbounded string-concat with a token-budgeted, structured
-# context builder. Newest outputs win; older ones get elided when
-# the budget runs out.
+# IMPROVE-84 closes that loop. The helpers now live in
+# ``systems/executor.py`` (the only caller) and the lazy imports
+# are gone. agents.py no longer references them at all — even the
+# 1-line back-compat shim was dropped per Q2=B (full sweep), so
+# every caller imports from systems.executor directly.
 #
-# This is a simpler primitive than IMPROVE-15's full
-# ``ContextCompactor`` (which does LLM-based summarization +
-# key-fact extraction). For DAG runs the typical depth is ~5-10
-# nodes, so a recency-based truncation already buys enough
-# headroom. LLM-summarized inter-node context is a follow-up.
-
-# Default budget targets a comfortable upper bound for most local
-# 3-7B models (gemma3:4b ~4k context after system prompt and tools;
-# qwen2.5:7b 32k but we don't want to spend it all on backref). Per
-# system override via ``definition.context_budget_tokens``.
-_INTER_NODE_CONTEXT_BUDGET_TOKENS = 4000
-
-# Tokens-per-character heuristic for English. Avoids pulling
-# tiktoken into the hot path of every node call — the actual model
-# tokenizer would give a more precise count, but this is a budget
-# guard, not a billing meter, so a 4-char rule of thumb is fine.
-# Pinned by ``test_estimate_tokens_uses_4chars_per_token``.
-_INTER_NODE_CHARS_PER_TOKEN = 4
-
-
-def _estimate_tokens(text: str) -> int:
-    """Rough token-count estimate without a real tokenizer.
-
-    Returns ``max(1, len(text) // 4)`` so any non-empty string
-    contributes at least one token to the budget — prevents an
-    empty-string entry from "free-riding" the budget.
-    """
-    if not text:
-        return 0
-    return max(1, len(text) // _INTER_NODE_CHARS_PER_TOKEN)
-
-
-def _build_inter_node_context(
-    node_outputs: list[dict[str, Any]],
-    budget_tokens: int = _INTER_NODE_CONTEXT_BUDGET_TOKENS,
-) -> str:
-    """[IMPROVE-33] Build a token-budgeted prior-context block.
-
-    Walks ``node_outputs`` newest-first, packing each ``status:
-    "ok"`` entry's text into the result until the token budget is
-    exhausted. Older entries that don't fit are summarized as a
-    single ``[... N earlier output(s) elided ...]`` marker so the
-    downstream agent knows context was truncated.
-
-    Skipped/error entries are dropped — propagating "(agent X not
-    found)" or an exception traceback into a downstream prompt
-    only confuses the next agent.
-
-    Returns an empty string when there are no usable entries —
-    callers can then skip the "Context from prior agents:" prefix
-    entirely (matches the legacy "if accumulated_context" branch).
-    """
-    usable = [r for r in node_outputs if r.get("status") == "ok"]
-    if not usable:
-        return ""
-
-    # Walk newest-first; the most recent context is always preserved.
-    chunks_newest_first: list[str] = []
-    used_tokens = 0
-    elided_count = 0
-
-    for idx in range(len(usable) - 1, -1, -1):
-        rec = usable[idx]
-        agent = rec.get("agent", "?")
-        role = rec.get("role", "")
-        text = rec.get("text") or ""
-        chunk = f"\n[{agent} ({role})]: {text}\n"
-        chunk_tokens = _estimate_tokens(chunk)
-
-        if used_tokens + chunk_tokens > budget_tokens:
-            # This record + everything older gets elided.
-            elided_count = idx + 1
-            break
-
-        chunks_newest_first.append(chunk)
-        used_tokens += chunk_tokens
-
-    chunks = list(reversed(chunks_newest_first))
-    if elided_count > 0:
-        prefix = (
-            f"\n[... {elided_count} earlier output(s) elided to fit "
-            f"context budget ...]\n"
-        )
-        chunks.insert(0, prefix)
-    return "".join(chunks)
+# The keystone test
+# ``test_executor_module_does_not_import_from_agents_at_top_level``
+# stays valid: the migration is INTO executor.py, not out, so the
+# forbidden-imports list is unaffected.
 
 
 # ── Agent orchestrator ────────────────────────────────────────────

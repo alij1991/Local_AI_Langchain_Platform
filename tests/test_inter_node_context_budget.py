@@ -21,7 +21,8 @@ This commit:
 
   * Adds ``_build_inter_node_context(node_outputs, budget_tokens)``
     + ``_estimate_tokens(text)`` to ``agents.py``. Pure functions,
-    no dependencies.
+    no dependencies. (Per Wave 8 [IMPROVE-84] both helpers moved to
+    ``systems/executor.py`` since that's the only caller.)
   * Replaces ``accumulated_context`` in BOTH ``execute_system_graph``
     and ``astream_execute_system_graph`` with calls to the helper,
     fed by the existing ``node_outputs`` list.
@@ -55,14 +56,14 @@ def test_estimate_tokens_empty_returns_zero():
     """Empty/None inputs cost 0 tokens. Pin so a refactor that
     returns 1 (the min for non-empty) doesn't over-charge the
     budget on noise."""
-    from local_ai_platform.agents import _estimate_tokens
+    from local_ai_platform.systems.executor import _estimate_tokens
     assert _estimate_tokens("") == 0
 
 
 def test_estimate_tokens_uses_4chars_per_token():
     """The heuristic is documented as len/4 — pin the constant
     indirectly so a tweak to 3 or 5 trips immediately."""
-    from local_ai_platform.agents import _estimate_tokens
+    from local_ai_platform.systems.executor import _estimate_tokens
     assert _estimate_tokens("a" * 4) == 1
     assert _estimate_tokens("a" * 8) == 2
     assert _estimate_tokens("a" * 4000) == 1000
@@ -71,7 +72,7 @@ def test_estimate_tokens_uses_4chars_per_token():
 def test_estimate_tokens_minimum_one_for_non_empty():
     """A 1-2 char string still costs 1 token under the budget so
     a stream of empty-ish entries can't free-ride."""
-    from local_ai_platform.agents import _estimate_tokens
+    from local_ai_platform.systems.executor import _estimate_tokens
     assert _estimate_tokens("x") == 1
     assert _estimate_tokens("xy") == 1
 
@@ -82,13 +83,13 @@ def test_estimate_tokens_minimum_one_for_non_empty():
 def test_build_context_empty_list_returns_empty_string():
     """No node outputs → empty string. Caller skips the
     "Context from prior agents:" prefix entirely."""
-    from local_ai_platform.agents import _build_inter_node_context
+    from local_ai_platform.systems.executor import _build_inter_node_context
     assert _build_inter_node_context([]) == ""
 
 
 def test_build_context_single_ok_entry():
     """One ok entry → ``[agent (role)]: text`` block."""
-    from local_ai_platform.agents import _build_inter_node_context
+    from local_ai_platform.systems.executor import _build_inter_node_context
     out = _build_inter_node_context([
         {"agent": "writer", "role": "general",
          "text": "Hello world", "status": "ok"},
@@ -101,7 +102,7 @@ def test_build_context_drops_skipped_entries():
     """Skipped entries (agent not found) carry "(agent X not
     found)" text — propagating that to the next agent only
     confuses it. Pinned by filtering on status == "ok"."""
-    from local_ai_platform.agents import _build_inter_node_context
+    from local_ai_platform.systems.executor import _build_inter_node_context
     out = _build_inter_node_context([
         {"agent": "ghost", "role": "x",
          "text": "(agent 'ghost' not found)", "status": "skipped"},
@@ -112,7 +113,7 @@ def test_build_context_drops_skipped_entries():
 def test_build_context_drops_error_entries():
     """Error entries carry exception strings; same reasoning as
     skipped — don't poison the next prompt."""
-    from local_ai_platform.agents import _build_inter_node_context
+    from local_ai_platform.systems.executor import _build_inter_node_context
     out = _build_inter_node_context([
         {"agent": "writer", "role": "x",
          "text": "RuntimeError: out of memory", "status": "error"},
@@ -122,7 +123,7 @@ def test_build_context_drops_error_entries():
 
 def test_build_context_filters_only_ok_from_mixed():
     """Mix of ok/skipped/error: only ok entries surface."""
-    from local_ai_platform.agents import _build_inter_node_context
+    from local_ai_platform.systems.executor import _build_inter_node_context
     out = _build_inter_node_context([
         {"agent": "good_a", "role": "x", "text": "useful_a", "status": "ok"},
         {"agent": "skipped", "role": "y", "text": "noise_skip", "status": "skipped"},
@@ -140,7 +141,7 @@ def test_build_context_filters_only_ok_from_mixed():
 
 def test_build_context_under_budget_includes_all():
     """When all entries fit, no elision marker appears."""
-    from local_ai_platform.agents import _build_inter_node_context
+    from local_ai_platform.systems.executor import _build_inter_node_context
     records = [
         {"agent": "a", "role": "x", "text": "short", "status": "ok"},
         {"agent": "b", "role": "y", "text": "also short", "status": "ok"},
@@ -155,7 +156,7 @@ def test_build_context_over_budget_elides_older():
     """When budget runs out, older entries (earlier in list) get
     dropped. Newest entries stay in full — the most relevant
     backref."""
-    from local_ai_platform.agents import _build_inter_node_context
+    from local_ai_platform.systems.executor import _build_inter_node_context
 
     big = "x" * 4000  # ~1000 tokens per the heuristic
     records = [
@@ -174,7 +175,7 @@ def test_build_context_elision_marker_reports_count():
     """The elision marker carries the number of dropped entries
     so the downstream agent + log readers can see how much
     history was cut."""
-    from local_ai_platform.agents import _build_inter_node_context
+    from local_ai_platform.systems.executor import _build_inter_node_context
 
     big = "x" * 4000
     records = [
@@ -189,7 +190,7 @@ def test_build_context_elision_marker_reports_count():
 def test_build_context_preserves_chronological_order_among_kept():
     """Among entries that fit, the original order is preserved —
     the next agent reads them oldest-to-newest as expected."""
-    from local_ai_platform.agents import _build_inter_node_context
+    from local_ai_platform.systems.executor import _build_inter_node_context
     records = [
         {"agent": "first", "role": "r", "text": "alpha_text", "status": "ok"},
         {"agent": "second", "role": "r", "text": "beta_text", "status": "ok"},
@@ -206,7 +207,7 @@ def test_build_context_preserves_chronological_order_among_kept():
 def test_build_context_zero_budget_elides_everything():
     """``budget_tokens=0`` → nothing fits, every entry elided.
     Pinned defensively — a misconfigured value shouldn't crash."""
-    from local_ai_platform.agents import _build_inter_node_context
+    from local_ai_platform.systems.executor import _build_inter_node_context
     records = [
         {"agent": "a", "role": "r", "text": "x", "status": "ok"},
         {"agent": "b", "role": "r", "text": "y", "status": "ok"},
