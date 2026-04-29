@@ -1384,11 +1384,25 @@ def upscale_image_endpoint(
     No clamping — the operator decides. Falls through to the
     band calibration when the field is absent.
 
-    The override is silently ignored on the realesrgan / lanczos
-    methods (they don't use VAE tiling at all). Bundles
-    metadata.tile_size_overridden=True when the override was
-    used (for dashboards charting "% of upscales bypassing
-    calibration").
+    [IMPROVE-121] Optional ``tile_stride_override`` body field
+    for the same diffusers paths. Sibling of
+    ``tile_size_override`` — overrides the diffusers default
+    tile_overlap_factor (a fraction in 0-1 controlling overlap
+    between adjacent tiles). Per Q2=A in the Wave 14 plan:
+    endpoint validates ``0 < x < 1.0`` (HTTP 400 outside that
+    range); resolver itself doesn't clamp. Sensible operator
+    values sit in (0.1, 0.5). Best-effort under the hood:
+    diffusers VAE classes that accept the
+    ``tile_overlap_factor`` kwarg honor the override; classes
+    that don't (the base AutoencoderKL today) silently fall back
+    to the no-arg path. Metadata records the operator's intent
+    regardless of whether the underlying VAE honored it.
+
+    Both overrides are silently ignored on the realesrgan /
+    lanczos methods (they don't use VAE tiling at all). Bundles
+    metadata.tile_size_overridden=True / tile_stride_overridden=
+    True when the corresponding override was set (for
+    dashboards charting override-rates per method).
     """
     image_id = body.get("image_id", "")
     session_id = body.get("session_id", "")
@@ -1427,6 +1441,43 @@ def upscale_image_endpoint(
                     ),
                 }},
             )
+    # [IMPROVE-121] Sibling power-user knob — float fraction in
+    # (0, 1) for tile_overlap_factor. Reject non-float and
+    # out-of-range values at the boundary (HTTP 400). Resolver
+    # itself doesn't clamp inside the valid range; operator's
+    # decision stands.
+    tile_stride_override_raw = body.get("tile_stride_override")
+    tile_stride_override: float | None = None
+    if tile_stride_override_raw is not None:
+        # Accept int (e.g. 0) and bool-not-allowed handled below
+        # via the range check (bool subclasses int and True == 1
+        # is excluded by the strict ``< 1.0`` upper bound).
+        try:
+            tile_stride_override = float(tile_stride_override_raw)
+        except (TypeError, ValueError):
+            raise HTTPException(
+                400,
+                {"error": {
+                    "code": "invalid_tile_stride_override",
+                    "message": (
+                        f"tile_stride_override must be float, "
+                        f"got {type(tile_stride_override_raw).__name__}: "
+                        f"{tile_stride_override_raw!r}"
+                    ),
+                }},
+            )
+        if not (0.0 < tile_stride_override < 1.0):
+            raise HTTPException(
+                400,
+                {"error": {
+                    "code": "invalid_tile_stride_override",
+                    "message": (
+                        f"tile_stride_override must satisfy "
+                        f"0 < x < 1.0 (overlap fraction); "
+                        f"got {tile_stride_override}"
+                    ),
+                }},
+            )
 
     # Resolve image path from ID
     image_path = ""
@@ -1446,6 +1497,7 @@ def upscale_image_endpoint(
     result = image_service.upscale_image(
         image_path=image_path, prompt=prompt, scale=scale, method=method,
         tile_size_override=tile_size_override,
+        tile_stride_override=tile_stride_override,
     )
     if not result.ok:
         # [IMPROVE-46] invalid_method is a client error (400) not

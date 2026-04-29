@@ -1283,8 +1283,10 @@ def test_upscale_image_threads_tile_size_override(monkeypatch, tmp_path):
     captured = {}
 
     def fake_upscale_latent(*, img, prompt, tile_mode=False,
-                            tile_size_override=None):
+                            tile_size_override=None,
+                            tile_stride_override=None):
         captured["tile_size_override"] = tile_size_override
+        captured["tile_stride_override"] = tile_stride_override
         return ImageRuntimeResult(
             ok=True, image_bytes=b"ok", metadata={"method": "latent"},
         )
@@ -1373,3 +1375,253 @@ def test_upscale_image_metadata_overridden_false_when_not_set(
     )
     assert result.ok is True
     assert result.metadata["tile_size_overridden"] is False
+
+
+# ── [IMPROVE-121] tile_stride_override (sibling power-user knob) ───
+
+
+def test_resolve_tile_stride_override_returns_value_verbatim():
+    """[IMPROVE-121] When override is set, the resolver returns
+    it verbatim. No band calibration today (stride is more
+    sensitive than min_size — per-band calibration paired with
+    min_size bands is a Wave 14+ candidate when an 8GB 30xx
+    benchmark suite surfaces)."""
+    from local_ai_platform.images.service import ImageGenerationService
+    result = ImageGenerationService._resolve_tile_stride_with_override(0.3)
+    assert result == 0.3
+
+
+def test_resolve_tile_stride_override_none_returns_none():
+    """[IMPROVE-121] override=None means "use diffusers default"
+    (typically 0.25 on VAEs that support tile_overlap_factor;
+    no-op on VAEs that don't). Pin the fall-through behaviour."""
+    from local_ai_platform.images.service import ImageGenerationService
+    result = ImageGenerationService._resolve_tile_stride_with_override(None)
+    assert result is None
+
+
+def test_resolve_tile_stride_override_passes_through_edge_values():
+    """[IMPROVE-121] The resolver itself does NOT validate
+    range — that's the endpoint's job (HTTP 400 outside
+    0 < x < 1.0). The resolver's "override always wins"
+    contract holds even for out-of-range values; the endpoint
+    guards the public API."""
+    from local_ai_platform.images.service import ImageGenerationService
+    # If a caller bypasses the endpoint, the resolver doesn't
+    # second-guess them. 0.99 is degenerate but in-range; 1.5
+    # is out-of-range but resolver still returns it.
+    assert ImageGenerationService._resolve_tile_stride_with_override(0.99) == 0.99
+    assert ImageGenerationService._resolve_tile_stride_with_override(1.5) == 1.5
+
+
+def test_resolve_tile_stride_override_accepts_zero_as_user_input():
+    """[IMPROVE-121] Resolver returns 0 verbatim if the caller
+    passes it. The endpoint rejects 0 with HTTP 400 (per Q2=A's
+    ``0 < x < 1.0`` validation) so this only fires if a caller
+    bypasses the endpoint validation. Documents that the
+    resolver is permissive — guard logic lives at the API
+    boundary."""
+    from local_ai_platform.images.service import ImageGenerationService
+    assert ImageGenerationService._resolve_tile_stride_with_override(0.0) == 0.0
+
+
+def test_endpoint_tile_stride_override_invalid_type_returns_400(
+    tmp_path, monkeypatch,
+):
+    """[IMPROVE-121] Non-float tile_stride_override (e.g. dict)
+    surfaces as HTTP 400 with code=invalid_tile_stride_override.
+    Strings that LOOK like floats (e.g. "0.3") also rejected —
+    callers must send actual numeric types."""
+    pytest.importorskip("fastapi")
+    from fastapi.testclient import TestClient
+    from local_ai_platform import db as db_mod
+
+    path = tmp_path / "app.db"
+    monkeypatch.setattr(db_mod, "DB_PATH", path)
+    db_mod.init_db()
+
+    import api_server
+    src = _write_png(tmp_path)
+    with TestClient(api_server.app) as c:
+        resp = c.post(
+            "/images/upscale",
+            json={
+                "image_path": src,
+                "method": "latent",
+                # Dict is not float-coercible.
+                "tile_stride_override": {"x": 0.3},
+            },
+        )
+    assert resp.status_code == 400
+    body = resp.json()
+    assert body["detail"]["error"]["code"] == (
+        "invalid_tile_stride_override"
+    )
+
+
+def test_endpoint_tile_stride_override_zero_returns_400(
+    tmp_path, monkeypatch,
+):
+    """[IMPROVE-121] Zero tile_stride_override returns HTTP 400.
+    0.0 is the lower bound of the valid range (0 < x < 1.0
+    per Q2=A) but excluded since "no overlap" is degenerate."""
+    pytest.importorskip("fastapi")
+    from fastapi.testclient import TestClient
+    from local_ai_platform import db as db_mod
+
+    path = tmp_path / "app.db"
+    monkeypatch.setattr(db_mod, "DB_PATH", path)
+    db_mod.init_db()
+
+    import api_server
+    src = _write_png(tmp_path)
+    with TestClient(api_server.app) as c:
+        resp = c.post(
+            "/images/upscale",
+            json={
+                "image_path": src,
+                "method": "latent",
+                "tile_stride_override": 0.0,
+            },
+        )
+    assert resp.status_code == 400
+    body = resp.json()
+    assert body["detail"]["error"]["code"] == (
+        "invalid_tile_stride_override"
+    )
+
+
+def test_endpoint_tile_stride_override_one_returns_400(
+    tmp_path, monkeypatch,
+):
+    """[IMPROVE-121] tile_stride_override == 1.0 returns HTTP
+    400. 1.0 is the upper bound of the valid range (0 < x < 1.0
+    per Q2=A) but excluded since "full overlap" is degenerate.
+    Pin the strict-less-than upper bound."""
+    pytest.importorskip("fastapi")
+    from fastapi.testclient import TestClient
+    from local_ai_platform import db as db_mod
+
+    path = tmp_path / "app.db"
+    monkeypatch.setattr(db_mod, "DB_PATH", path)
+    db_mod.init_db()
+
+    import api_server
+    src = _write_png(tmp_path)
+    with TestClient(api_server.app) as c:
+        resp = c.post(
+            "/images/upscale",
+            json={
+                "image_path": src,
+                "method": "latent",
+                "tile_stride_override": 1.0,
+            },
+        )
+    assert resp.status_code == 400
+
+
+def test_upscale_image_threads_tile_stride_override(monkeypatch, tmp_path):
+    """[IMPROVE-121] The override threads from upscale_image
+    through _upscale_latent. Pin via stubbing _upscale_latent
+    + asserting the kwarg surfaces unchanged. Mirror of the
+    [IMPROVE-117] threading test for tile_size_override."""
+    from local_ai_platform.images.service import ImageRuntimeResult
+    s = _make_service()
+    src = _write_png(tmp_path)
+
+    captured = {}
+
+    def fake_upscale_latent(*, img, prompt, tile_mode=False,
+                            tile_size_override=None,
+                            tile_stride_override=None):
+        captured["tile_stride_override"] = tile_stride_override
+        return ImageRuntimeResult(
+            ok=True, image_bytes=b"ok", metadata={"method": "latent"},
+        )
+
+    monkeypatch.setattr(s, "_upscale_latent", fake_upscale_latent)
+    monkeypatch.setattr(
+        s, "_probe_vram_for_method",
+        lambda method, tile_mode=False: (True, 16.0, 4.0, ""),
+    )
+
+    s.upscale_image(
+        image_path=src, method="latent",
+        tile_stride_override=0.35,
+    )
+    assert captured["tile_stride_override"] == 0.35
+
+
+def test_upscale_image_metadata_records_stride_override_flag(
+    monkeypatch, tmp_path,
+):
+    """[IMPROVE-121] When tile_stride_override is set + tile_mode
+    engages, metadata.tile_stride_overridden is True AND
+    metadata.tile_overlap_factor records the override value.
+    Pin so dashboards can chart override-rate per method.
+
+    Also pins the chained-fallback in
+    _enable_vae_tiling_with_calibration: when the VAE accepts
+    BOTH kwargs (MagicMock accepts anything), the first attempt
+    wins and ``enable_vae_tiling`` is called with both kwargs."""
+    import sys
+    s = _make_service()
+    src = _write_png(tmp_path)
+    _patch_torch_with_vram(monkeypatch, free_gb=2.0)
+
+    fake_pipe = MagicMock()
+    fake_pipe.return_value.images = [Image.new("RGB", (256, 256))]
+    fake_pipe.enable_sequential_cpu_offload = MagicMock()
+    fake_pipe.enable_vae_tiling = MagicMock()
+    fake_pipe.enable_vae_slicing = MagicMock()
+    fake_pipeline_class = MagicMock()
+    fake_pipeline_class.from_pretrained = MagicMock(return_value=fake_pipe)
+    fake_diffusers = MagicMock()
+    fake_diffusers.StableDiffusionLatentUpscalePipeline = fake_pipeline_class
+    monkeypatch.setitem(sys.modules, "diffusers", fake_diffusers)
+
+    result = s.upscale_image(
+        image_path=src, prompt="x", method="latent",
+        tile_stride_override=0.4,
+    )
+    assert result.ok is True
+    assert result.metadata["tile_mode"] is True
+    assert result.metadata["tile_overlap_factor"] == 0.4
+    assert result.metadata["tile_stride_overridden"] is True
+    # MagicMock accepts both kwargs without TypeError, so the
+    # first attempt (size + stride) wins. Pin that the call
+    # happened with the override factor present.
+    call_kwargs = fake_pipe.enable_vae_tiling.call_args
+    assert call_kwargs.kwargs.get("tile_overlap_factor") == 0.4
+
+
+def test_upscale_image_metadata_stride_overridden_false_when_not_set(
+    monkeypatch, tmp_path,
+):
+    """[IMPROVE-121] When tile_stride_override is None (the
+    default), metadata.tile_stride_overridden is False AND
+    tile_overlap_factor is None. Always-present so dashboards
+    don't need a key-existence check (mirror of
+    [IMPROVE-117]'s tile_size_overridden=False pin)."""
+    import sys
+    s = _make_service()
+    src = _write_png(tmp_path)
+    _patch_torch_with_vram(monkeypatch, free_gb=2.0)
+
+    fake_pipe = MagicMock()
+    fake_pipe.return_value.images = [Image.new("RGB", (256, 256))]
+    fake_pipe.enable_sequential_cpu_offload = MagicMock()
+    fake_pipe.enable_vae_tiling = MagicMock()
+    fake_pipe.enable_vae_slicing = MagicMock()
+    fake_pipeline_class = MagicMock()
+    fake_pipeline_class.from_pretrained = MagicMock(return_value=fake_pipe)
+    fake_diffusers = MagicMock()
+    fake_diffusers.StableDiffusionLatentUpscalePipeline = fake_pipeline_class
+    monkeypatch.setitem(sys.modules, "diffusers", fake_diffusers)
+
+    result = s.upscale_image(
+        image_path=src, prompt="x", method="latent",
+    )
+    assert result.ok is True
+    assert result.metadata["tile_stride_overridden"] is False
+    assert result.metadata["tile_overlap_factor"] is None

@@ -6158,6 +6158,7 @@ class ImageGenerationService:
         method: str = "realesrgan",
         timeout_sec: int | None = None,
         tile_size_override: int | None = None,
+        tile_stride_override: float | None = None,
     ) -> ImageRuntimeResult:
         """Upscale an image using ML super-resolution.
 
@@ -6207,6 +6208,7 @@ class ImageGenerationService:
                 return self._upscale_latent(
                     img=img, prompt=prompt,
                     tile_size_override=tile_size_override,
+                    tile_stride_override=tile_stride_override,
                 )
             # [IMPROVE-93] Per Q3=C: regular probe failed → retry
             # the probe at the LOWER tiled-mode threshold. If THAT
@@ -6229,6 +6231,7 @@ class ImageGenerationService:
                 return self._upscale_latent(
                     img=img, prompt=prompt, tile_mode=True,
                     tile_size_override=tile_size_override,
+                    tile_stride_override=tile_stride_override,
                 )
             return ImageRuntimeResult(
                 ok=False, error_code="insufficient_vram",
@@ -6251,6 +6254,7 @@ class ImageGenerationService:
                 result = self._upscale_sdxl_x4(
                     img=img, prompt=prompt,
                     tile_size_override=tile_size_override,
+                    tile_stride_override=tile_stride_override,
                 )
                 if result.ok:
                     return result
@@ -6284,6 +6288,7 @@ class ImageGenerationService:
                     result = self._upscale_sdxl_x4(
                         img=img, prompt=prompt, tile_mode=True,
                         tile_size_override=tile_size_override,
+                        tile_stride_override=tile_stride_override,
                     )
                     if result.ok:
                         return result
@@ -6441,6 +6446,41 @@ class ImageGenerationService:
             return override
         return cls._calibrate_tile_size_for_method(method, input_max_dim)
 
+    @staticmethod
+    def _resolve_tile_stride_with_override(
+        override: float | None,
+    ) -> float | None:
+        """[IMPROVE-121] Resolve the effective tile overlap-factor
+        (a fraction in 0-1) — when ``override`` is set it's used
+        verbatim; otherwise None means "fall through to the
+        diffusers default" (typically 0.25 on VAE classes that
+        support the kwarg, or no-op on classes that don't).
+
+        Sibling of [IMPROVE-117]'s _resolve_tile_size_with_override
+        — same override-always-wins shape, no per-band calibration
+        (stride is more sensitive to per-card behaviour than
+        min_size; per-band calibration paired with min_size
+        bands is a Wave 14+ candidate when an 8GB 30xx benchmark
+        suite surfaces — see Wave 14 deferred queue).
+
+        Per Q2=A in the Wave 14 plan: endpoint validates
+        ``0 < x < 1.0`` (HTTP 400 on failure for non-positive or
+        ≥1); resolver itself does NOT clamp. Bounded by
+        diffusers semantics: 0 = no overlap (degenerate), 1 =
+        full overlap (also degenerate). Sensible operator values
+        sit in (0.1, 0.5).
+
+        Args:
+            override: User-supplied tile_overlap_factor or None
+                to fall through to diffusers default.
+
+        Returns:
+            float | None — the effective overlap factor to pass
+            to ``enable_vae_tiling``. None means "use diffusers
+            default" (no kwarg).
+        """
+        return override
+
     @classmethod
     def _calibrate_tile_size_for_method(
         cls,
@@ -6483,15 +6523,40 @@ class ImageGenerationService:
     @staticmethod
     def _enable_vae_tiling_with_calibration(
         pipe: Any, tile_size: int | None, method: str,
+        tile_stride: float | None = None,
     ) -> None:
         """[IMPROVE-100] Call ``pipe.enable_vae_tiling`` with the
         calibrated tile_sample_min_size kwarg if supported.
 
-        Compatibility strategy: try with the kwarg first; on
-        TypeError (older diffusers without the kwarg), fall
-        back to the no-arg call. This way, newer diffusers gets
-        the calibration benefit while older versions still get
-        the basic tiling.
+        [IMPROVE-121] When ``tile_stride`` is provided, also
+        attempts to pass it as ``tile_overlap_factor=N``. Stride
+        kwarg support varies across diffusers VAE classes:
+
+          * AutoencoderKLCogVideoX, AutoencoderDC, and the Hunyuan
+            family accept ``tile_overlap_factor`` (a fraction in
+            0-1).
+          * The base AutoencoderKL (used by the SD x4 + latent
+            upscalers today) does NOT accept the kwarg — the call
+            falls back to the no-arg variant when TypeError fires.
+
+        Best-effort try/except chain — newer / kwarg-supporting
+        VAEs get the override; older / non-supporting VAEs still
+        get basic tiling. The metadata records the operator's
+        intent regardless of whether the underlying VAE honored
+        it (so dashboards can chart "% of upscales requesting
+        stride override" independent of "% where the VAE class
+        supported the kwarg").
+
+        Compatibility strategy:
+          1. If neither tile_size nor tile_stride is set →
+             ``enable_vae_tiling()``.
+          2. If tile_size is set + tile_stride is set → try with
+             both kwargs; on TypeError, retry with size only;
+             on TypeError again, fall back to no-arg.
+          3. If only tile_size is set → try with size kwarg; on
+             TypeError, fall back to no-arg.
+          4. If only tile_stride is set → try with stride kwarg;
+             on TypeError, fall back to no-arg.
 
         Wrapped in outer try/except per [IMPROVE-93]'s
         failure-tolerance contract: a missing
@@ -6499,27 +6564,48 @@ class ImageGenerationService:
         version doesn't brick the upscale.
 
         Logs at DEBUG so successful tiling doesn't spam logs;
-        the calibration value lands in metadata via the caller.
+        the calibration / override values land in metadata via
+        the caller.
         """
         try:
-            if tile_size is None:
+            if tile_size is None and tile_stride is None:
                 pipe.enable_vae_tiling()
-            else:
+                return
+            # Build the kwarg attempts in priority order:
+            # 1. Both kwargs (most specific) → may TypeError on
+            #    VAEs supporting only one or neither.
+            # 2. Size only → matches pre-IMPROVE-121 contract.
+            # 3. Stride only → for VAEs that support stride
+            #    without the size kwarg (rare today; future-
+            #    proofing).
+            # 4. Bare → guaranteed-compatible fallback.
+            attempts: list[dict[str, Any]] = []
+            if tile_size is not None and tile_stride is not None:
+                attempts.append({
+                    "tile_sample_min_size": tile_size,
+                    "tile_overlap_factor": tile_stride,
+                })
+            if tile_size is not None:
+                attempts.append({"tile_sample_min_size": tile_size})
+            if tile_stride is not None:
+                attempts.append({"tile_overlap_factor": tile_stride})
+            attempts.append({})  # bare fallback always last
+            last_typeerror: TypeError | None = None
+            for kwargs in attempts:
                 try:
-                    pipe.enable_vae_tiling(
-                        tile_sample_min_size=tile_size,
-                    )
-                except TypeError:
-                    # Older diffusers that doesn't accept the
-                    # kwarg. Fall back to default tiling.
-                    logger.debug(
-                        "[IMPROVE-100] enable_vae_tiling does not "
-                        "accept tile_sample_min_size kwarg "
-                        "(method=%s, tile_size=%d); falling back "
-                        "to default tile size",
-                        method, tile_size,
-                    )
-                    pipe.enable_vae_tiling()
+                    pipe.enable_vae_tiling(**kwargs)
+                    return
+                except TypeError as exc:
+                    last_typeerror = exc
+                    continue
+            # All TypeErrors — log the last one for diagnostics.
+            if last_typeerror is not None:
+                logger.debug(
+                    "[IMPROVE-100/121] enable_vae_tiling kwargs all "
+                    "TypeError'd (method=%s, tile_size=%s, "
+                    "tile_stride=%s); last error: %s",
+                    method, tile_size, tile_stride, last_typeerror,
+                )
         except Exception:
             logger.debug(
                 "[IMPROVE-100] enable_vae_tiling failed for %s "
@@ -6688,6 +6774,7 @@ class ImageGenerationService:
         prompt: str,
         tile_mode: bool = False,
         tile_size_override: int | None = None,
+        tile_stride_override: float | None = None,
     ) -> ImageRuntimeResult:
         """[IMPROVE-46] 2x latent-space upscaler.
 
@@ -6733,12 +6820,23 @@ class ImageGenerationService:
                     # [IMPROVE-117] tile_size_override (when set)
                     # bypasses the band calibration — power-user
                     # knob, no clamping below 256 floor.
+                    # [IMPROVE-121] tile_stride_override (when
+                    # set) bypasses the diffusers default overlap
+                    # factor — sibling power-user knob. Best-
+                    # effort (some VAE classes don't accept the
+                    # kwarg; the chained try/except in
+                    # _enable_vae_tiling_with_calibration handles
+                    # the per-class compatibility).
                     tile_size = self._resolve_tile_size_with_override(
                         "latent", max(img.width, img.height),
                         tile_size_override,
                     )
+                    tile_stride = self._resolve_tile_stride_with_override(
+                        tile_stride_override,
+                    )
                     self._enable_vae_tiling_with_calibration(
                         pipe, tile_size, "latent",
+                        tile_stride=tile_stride,
                     )
                     try:
                         pipe.enable_vae_slicing()
@@ -6782,6 +6880,16 @@ class ImageGenerationService:
                 )
                 if tile_mode else None
             )
+            # [IMPROVE-121] Effective overlap factor — the
+            # override value when set, None when not (None ≡
+            # "fall through to diffusers default"). Mirror of
+            # IMPROVE-117's tile_sample_min_size shape.
+            effective_tile_stride = (
+                self._resolve_tile_stride_with_override(
+                    tile_stride_override,
+                )
+                if tile_mode else None
+            )
             return ImageRuntimeResult(
                 ok=True, image_bytes=buf.getvalue(),
                 metadata={
@@ -6799,6 +6907,13 @@ class ImageGenerationService:
                     # override-rate without a key-existence
                     # check.
                     "tile_size_overridden": tile_size_override is not None,
+                    # [IMPROVE-121] Effective overlap factor
+                    # (None means "diffusers default") and the
+                    # always-present override flag mirroring
+                    # tile_size_overridden. Dashboards can chart
+                    # override-vs-default rate per method.
+                    "tile_overlap_factor": effective_tile_stride,
+                    "tile_stride_overridden": tile_stride_override is not None,
                 },
             )
         except ImportError as exc:
@@ -6825,6 +6940,7 @@ class ImageGenerationService:
         prompt: str,
         tile_mode: bool = False,
         tile_size_override: int | None = None,
+        tile_stride_override: float | None = None,
     ) -> ImageRuntimeResult:
         """[IMPROVE-46] 4x diffusers upscaler (SD x4 — same model
         family as Stability's original SD 1.5 upscaler, used here as
@@ -6869,12 +6985,20 @@ class ImageGenerationService:
                     # [IMPROVE-117] tile_size_override (when set)
                     # bypasses the band calibration — same
                     # contract as the latent path.
+                    # [IMPROVE-121] tile_stride_override (when
+                    # set) bypasses the diffusers default
+                    # overlap factor — same contract as the
+                    # latent path.
                     tile_size = self._resolve_tile_size_with_override(
                         "sdxl_x4", max(img.width, img.height),
                         tile_size_override,
                     )
+                    tile_stride = self._resolve_tile_stride_with_override(
+                        tile_stride_override,
+                    )
                     self._enable_vae_tiling_with_calibration(
                         pipe, tile_size, "sdxl_x4",
+                        tile_stride=tile_stride,
                     )
                     try:
                         pipe.enable_vae_slicing()
@@ -6909,6 +7033,16 @@ class ImageGenerationService:
                 )
                 if tile_mode else None
             )
+            # [IMPROVE-121] Same effective-stride shape as the
+            # latent path. None means "fall through to diffusers
+            # default" which on AutoencoderKL is approximately
+            # 0.25 (or no-op on VAEs that ignore the kwarg).
+            effective_tile_stride = (
+                self._resolve_tile_stride_with_override(
+                    tile_stride_override,
+                )
+                if tile_mode else None
+            )
             return ImageRuntimeResult(
                 ok=True, image_bytes=buf.getvalue(),
                 metadata={
@@ -6923,6 +7057,11 @@ class ImageGenerationService:
                     # latent path; pin so dashboards can chart
                     # override-rate per method.
                     "tile_size_overridden": tile_size_override is not None,
+                    # [IMPROVE-121] Same overlap-factor shape +
+                    # always-present override flag as the latent
+                    # path.
+                    "tile_overlap_factor": effective_tile_stride,
+                    "tile_stride_overridden": tile_stride_override is not None,
                 },
             )
         except ImportError as exc:
