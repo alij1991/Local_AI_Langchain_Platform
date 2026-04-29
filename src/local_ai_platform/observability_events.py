@@ -99,6 +99,14 @@ _IMAGE_ACTIONS = (
     "optimization_plan",
     "plan",
     "postprocess",
+    # [IMPROVE-87] Pre-flight VRAM probe for the diffusers-based
+    # upscalers (latent / sdxl_x4). The probe fires once per
+    # ``upscale_image`` call when the method is one of the
+    # diffusers options. Carries method + available_gb + required_gb
+    # + reason so dashboards can chart "% of upscale calls that
+    # pre-flight rejected the diffusers path" without grepping
+    # logs. Mirror of the IMPROVE-79 commit's spawned-followup #2.
+    "vram_probe",
     "warmup",
 )
 

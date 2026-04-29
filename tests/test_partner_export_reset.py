@@ -564,3 +564,122 @@ def test_delete_partner_user_profile_legacy_endpoint_still_works(client):
     # Pre-IMPROVE-67 returned the user_profile dict directly.
     # Verify it's NOT the new scoped-reset summary shape.
     assert "rows_cleared" not in body
+
+
+# ── [IMPROVE-87] memory_decay.json in partner export ZIP ──────────
+
+
+def test_export_bundle_includes_memory_decay_when_present(
+    tmp_partner_db, stub_engine, tmp_path, monkeypatch,
+):
+    """[IMPROVE-87] When the user has customised the decay config
+    (and IMPROVE-77's ``_persist_decay_config`` has written to
+    ``data/partner/memory_decay.json``), the bundle includes a
+    ``memory_decay.json`` entry mirroring that file."""
+    import json
+    import zipfile
+    from io import BytesIO
+
+    from local_ai_platform.partner import memory as memory_mod
+    from local_ai_platform.partner.export import build_export_bundle
+
+    decay_path = tmp_path / "memory_decay.json"
+    custom_config = {
+        "enabled": True,
+        "base_strength_hours_per_importance": 72.0,
+        "archive_threshold": 0.2,
+        "in_context_floor": 5,
+        "skip_threshold": 0.3,
+    }
+    decay_path.write_text(json.dumps(custom_config))
+    monkeypatch.setattr(memory_mod, "_DECAY_CONFIG_PATH", decay_path)
+
+    bundle = build_export_bundle(stub_engine)
+    with zipfile.ZipFile(BytesIO(bundle), "r") as zf:
+        names = zf.namelist()
+        assert "memory_decay.json" in names
+        decay_in_zip = json.loads(zf.read("memory_decay.json"))
+        assert decay_in_zip == custom_config
+
+
+def test_export_bundle_silently_skips_memory_decay_when_missing(
+    tmp_partner_db, stub_engine, tmp_path, monkeypatch,
+):
+    """[IMPROVE-87] When the user never customised the decay config
+    (no ``data/partner/memory_decay.json`` on disk), the bundle
+    omits ``memory_decay.json`` entirely. Defaults will be picked
+    up by the consumer of the bundle. Pinned so a future "always
+    write a stub" regression doesn't bloat the ZIP."""
+    import zipfile
+    from io import BytesIO
+
+    from local_ai_platform.partner import memory as memory_mod
+    from local_ai_platform.partner.export import build_export_bundle
+
+    nonexistent = tmp_path / "memory_decay.json"
+    # Sanity: ensure the file isn't there.
+    assert not nonexistent.exists()
+    monkeypatch.setattr(memory_mod, "_DECAY_CONFIG_PATH", nonexistent)
+
+    bundle = build_export_bundle(stub_engine)
+    with zipfile.ZipFile(BytesIO(bundle), "r") as zf:
+        names = zf.namelist()
+        assert "memory_decay.json" not in names
+        # Other expected files still land — pin via profile.json.
+        assert "profile.json" in names
+
+
+def test_export_bundle_skips_memory_decay_on_corrupt_file(
+    tmp_partner_db, stub_engine, tmp_path, monkeypatch, caplog,
+):
+    """[IMPROVE-87] A corrupt ``memory_decay.json`` (e.g. half-
+    written from a previous power-cut) must NOT brick the export.
+    Log + skip; the user still gets profile.json + the SQLite
+    tables. Pinned mirror of the existing partner-export safety
+    discipline."""
+    import logging
+    import zipfile
+    from io import BytesIO
+
+    from local_ai_platform.partner import memory as memory_mod
+    from local_ai_platform.partner.export import build_export_bundle
+
+    decay_path = tmp_path / "memory_decay.json"
+    decay_path.write_text("{not-json")  # corrupt
+    monkeypatch.setattr(memory_mod, "_DECAY_CONFIG_PATH", decay_path)
+
+    with caplog.at_level(
+        logging.WARNING, logger="local_ai_platform.partner.export",
+    ):
+        bundle = build_export_bundle(stub_engine)
+
+    with zipfile.ZipFile(BytesIO(bundle), "r") as zf:
+        names = zf.namelist()
+        assert "memory_decay.json" not in names
+        assert "profile.json" in names
+    # Warning logged so the operator can investigate.
+    assert any(
+        "memory_decay.json export failed" in r.getMessage()
+        for r in caplog.records
+    )
+
+
+def test_export_bundle_readme_documents_memory_decay_entry(
+    tmp_partner_db, stub_engine,
+):
+    """[IMPROVE-87] The bundle README.md mentions the
+    memory_decay.json file so a user reading the archive contents
+    knows what it is. Pin so a future README rewrite doesn't drop
+    the entry."""
+    import zipfile
+    from io import BytesIO
+
+    from local_ai_platform.partner.export import build_export_bundle
+
+    bundle = build_export_bundle(stub_engine)
+    with zipfile.ZipFile(BytesIO(bundle), "r") as zf:
+        readme = zf.read("README.md").decode("utf-8")
+    assert "memory_decay.json" in readme
+    # Cross-reference the IMPROVE-N tags so a future doc rebuild
+    # still links to the right history.
+    assert "IMPROVE-77" in readme or "IMPROVE-78" in readme

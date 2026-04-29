@@ -6333,11 +6333,21 @@ class ImageGenerationService:
         """
         required_gb = self._UPSCALE_VRAM_REQUIRED_GB.get(method, 0.0)
         if required_gb == 0.0:
+            self._emit_vram_probe(
+                method=method, ok=True,
+                available_gb=0.0, required_gb=0.0,
+                reason="no_probe_needed",
+            )
             return True, 0.0, 0.0, "no_probe_needed"
 
         try:
             import torch
             if not torch.cuda.is_available():
+                self._emit_vram_probe(
+                    method=method, ok=True,
+                    available_gb=0.0, required_gb=required_gb,
+                    reason="cpu_only_no_cuda_check",
+                )
                 return True, 0.0, required_gb, "cpu_only_no_cuda_check"
             free_bytes, _total_bytes = torch.cuda.mem_get_info()
             available_gb = free_bytes / (1024 ** 3)
@@ -6348,11 +6358,77 @@ class ImageGenerationService:
                 "[IMPROVE-NEW-14] VRAM probe failed (%s); deferring "
                 "to load-time OOM handler", exc,
             )
+            self._emit_vram_probe(
+                method=method, ok=True,
+                available_gb=0.0, required_gb=required_gb,
+                reason="probe_failed_deferring",
+            )
             return True, 0.0, required_gb, "probe_failed_deferring"
 
         if available_gb >= required_gb:
+            self._emit_vram_probe(
+                method=method, ok=True,
+                available_gb=available_gb, required_gb=required_gb,
+                reason="sufficient",
+            )
             return True, available_gb, required_gb, "sufficient"
+        self._emit_vram_probe(
+            method=method, ok=False,
+            available_gb=available_gb, required_gb=required_gb,
+            reason="insufficient_vram",
+        )
         return False, available_gb, required_gb, "insufficient_vram"
+
+    @staticmethod
+    def _emit_vram_probe(
+        *,
+        method: str,
+        ok: bool,
+        available_gb: float,
+        required_gb: float,
+        reason: str,
+    ) -> None:
+        """[IMPROVE-87] Emit ``image.vram_probe`` once per probe call.
+
+        Carries the probe inputs (``method``, ``required_gb``) plus
+        the outputs (``available_gb``, ``reason``, ``ok``) so a
+        weekly-review dashboard can chart:
+
+          * "% of upscale calls that pre-flight rejected the
+            diffusers path" — count(reason='insufficient_vram')
+          * "fraction of probes that ran on CPU-only" —
+            count(reason='cpu_only_no_cuda_check')
+          * "VRAM-probe self-failure rate" —
+            count(reason='probe_failed_deferring')
+          * Histogram of ``available_gb`` for users on the boundary.
+
+        Wrapped in try/except so a registry / observability outage
+        cannot escalate a successful probe into an upscale failure
+        — the probe is a check, not a gate, and the same discipline
+        applies to its telemetry.
+        """
+        try:
+            from ..observability_events import emit_typed
+
+            emit_typed(
+                "image", "vram_probe",
+                status="ok" if ok else "error",
+                context={
+                    "method": method,
+                    "available_gb": round(available_gb, 2),
+                    "required_gb": required_gb,
+                    "reason": reason,
+                    "ok": ok,
+                },
+            )
+        except Exception:
+            # Don't let a telemetry hiccup brick the probe. Log
+            # at debug since the probe call already logged its
+            # own state at the call site.
+            logger.debug(
+                "[IMPROVE-87] vram_probe emit failed; continuing",
+                exc_info=True,
+            )
 
     def _upscale_latent(
         self,

@@ -557,3 +557,146 @@ def test_upscale_thresholds_documented_in_module():
         "latent": 3.5,
         "sdxl_x4": 6.5,
     }
+
+
+# ── [IMPROVE-87] VRAM probe telemetry ─────────────────────────────
+
+
+def _capture_vram_probe_emits(monkeypatch):
+    """Collect ``emit_typed`` calls into a list, patching the
+    function on the observability_events module so the IMPROVE-87
+    probe-emit callsite (inside service.py's _emit_vram_probe) is
+    observable."""
+    captured: list[tuple[str, str, str, dict, dict | None]] = []
+    from local_ai_platform import observability_events as oe
+
+    def fake_emit_typed(subsystem, action, status="ok",
+                        duration_ms=None, error_code=None,
+                        error_message=None, context=None, perf=None):
+        captured.append((
+            subsystem, action, status,
+            dict(context or {}),
+            dict(perf) if perf else None,
+        ))
+
+    monkeypatch.setattr(oe, "emit_typed", fake_emit_typed)
+    return captured
+
+
+def test_probe_emits_vram_probe_event_on_sufficient(monkeypatch):
+    """[IMPROVE-87] A successful probe fires
+    ``image.vram_probe`` with status='ok' carrying method,
+    available_gb, required_gb, reason, and ok=True. Mirror of the
+    IMPROVE-79 commit's spawned-followup #2."""
+    s = _make_service()
+    _patch_torch_with_vram(monkeypatch, free_gb=8.0)
+    captured = _capture_vram_probe_emits(monkeypatch)
+
+    s._probe_vram_for_method("sdxl_x4")
+
+    probe_events = [c for c in captured if c[1] == "vram_probe"]
+    assert len(probe_events) == 1
+    sub, _action, status, ctx, _perf = probe_events[0]
+    assert sub == "image"
+    assert status == "ok"
+    assert ctx["method"] == "sdxl_x4"
+    assert ctx["required_gb"] == 6.5
+    assert ctx["reason"] == "sufficient"
+    assert ctx["ok"] is True
+    assert ctx["available_gb"] >= 6.5
+
+
+def test_probe_emits_vram_probe_event_on_insufficient(monkeypatch):
+    """[IMPROVE-87] A rejected probe fires
+    ``image.vram_probe`` with status='error' so the dashboard can
+    chart "% of upscale calls that pre-flight rejected the
+    diffusers path"."""
+    s = _make_service()
+    _patch_torch_with_vram(monkeypatch, free_gb=2.0)
+    captured = _capture_vram_probe_emits(monkeypatch)
+
+    s._probe_vram_for_method("sdxl_x4")
+
+    probe_events = [c for c in captured if c[1] == "vram_probe"]
+    assert len(probe_events) == 1
+    _sub, _action, status, ctx, _perf = probe_events[0]
+    assert status == "error"
+    assert ctx["reason"] == "insufficient_vram"
+    assert ctx["ok"] is False
+    assert ctx["available_gb"] < ctx["required_gb"]
+
+
+def test_probe_emits_vram_probe_event_on_no_probe_needed():
+    """``realesrgan`` / ``lanczos`` fall through the probe with
+    reason='no_probe_needed' — the event should STILL fire so the
+    dashboard sees the per-call shape uniformly across methods."""
+    import pytest as _pt
+    monkeypatch_ctx = _pt.MonkeyPatch()
+    try:
+        s = _make_service()
+        captured = _capture_vram_probe_emits(monkeypatch_ctx)
+        s._probe_vram_for_method("realesrgan")
+        probe_events = [c for c in captured if c[1] == "vram_probe"]
+        assert len(probe_events) == 1
+        _sub, _action, status, ctx, _perf = probe_events[0]
+        assert status == "ok"
+        assert ctx["reason"] == "no_probe_needed"
+        assert ctx["ok"] is True
+    finally:
+        monkeypatch_ctx.undo()
+
+
+def test_probe_emits_vram_probe_event_on_cpu_only(monkeypatch):
+    """When CUDA isn't available the probe defers but still fires
+    the event with reason='cpu_only_no_cuda_check'. Dashboards
+    can chart "% of users on a CPU-only host" from this."""
+    s = _make_service()
+    _patch_torch_with_vram(monkeypatch, cuda_available=False)
+    captured = _capture_vram_probe_emits(monkeypatch)
+
+    s._probe_vram_for_method("sdxl_x4")
+
+    probe_events = [c for c in captured if c[1] == "vram_probe"]
+    assert len(probe_events) == 1
+    _sub, _action, status, ctx, _perf = probe_events[0]
+    assert status == "ok"
+    assert ctx["reason"] == "cpu_only_no_cuda_check"
+
+
+def test_probe_emits_vram_probe_event_on_probe_failure(monkeypatch):
+    """When mem_get_info raises (rare CUDA-fork hiccup) the probe
+    defers AND fires the event with reason='probe_failed_deferring'.
+    The probe-self-failure rate is a useful dashboard metric — a
+    spike here suggests a host-level CUDA problem to investigate."""
+    s = _make_service()
+    fake_torch = _patch_torch_with_vram(monkeypatch, free_gb=8.0)
+    fake_torch.cuda.mem_get_info.side_effect = RuntimeError("cuda fork")
+    captured = _capture_vram_probe_emits(monkeypatch)
+
+    s._probe_vram_for_method("sdxl_x4")
+
+    probe_events = [c for c in captured if c[1] == "vram_probe"]
+    assert len(probe_events) == 1
+    _sub, _action, status, ctx, _perf = probe_events[0]
+    assert status == "ok"
+    assert ctx["reason"] == "probe_failed_deferring"
+
+
+def test_probe_emit_failure_does_not_break_probe(monkeypatch):
+    """[IMPROVE-87] If emit_typed itself raises, the probe must
+    still return its result — same telemetry-doesn't-escalate
+    discipline as IMPROVE-82 / IMPROVE-85 / IMPROVE-86."""
+    s = _make_service()
+    _patch_torch_with_vram(monkeypatch, free_gb=8.0)
+
+    from local_ai_platform import observability_events as oe
+
+    def boom(*a, **kw):
+        raise RuntimeError("observability outage")
+
+    monkeypatch.setattr(oe, "emit_typed", boom)
+
+    # Probe must still complete successfully.
+    ok, avail, req, reason = s._probe_vram_for_method("sdxl_x4")
+    assert ok is True
+    assert reason == "sufficient"

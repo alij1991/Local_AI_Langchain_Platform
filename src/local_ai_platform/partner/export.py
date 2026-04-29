@@ -1,4 +1,4 @@
-"""[IMPROVE-67] Bundle partner state into a downloadable ZIP.
+"""[IMPROVE-67 / IMPROVE-87] Bundle partner state into a downloadable ZIP.
 
 Maps to GDPR-style data portability: users get their data BEFORE
 choosing to reset via ``DELETE /partner/profile/{scope}``. The
@@ -9,6 +9,7 @@ Bundle contents:
 
   profile.json              — AI persona (PartnerProfile)
   user_profile.json         — BigFive + emotional trajectory
+  memory_decay.json         — Ebbinghaus decay tunables (IMPROVE-87)
   facts.jsonl               — partner_core_facts rows
   key_memories.jsonl        — partner_key_memories rows
   archived.jsonl            — partner_memories_archive rows
@@ -77,6 +78,12 @@ def build_export_bundle(engine: Any) -> bytes:
         # ── In-memory engine state (JSON files) ──────────────────
         _write_profile(zf, engine)
         _write_user_profile(zf, engine)
+        # [IMPROVE-87] User decay tunables. IMPROVE-77 (Wave 7)
+        # added persistence to data/partner/memory_decay.json; this
+        # commit closes the spawned-followup that asked for it to
+        # ride along in the export ZIP. Best-effort: a missing file
+        # (user never customised the decay config) silently skips.
+        _write_memory_decay(zf)
         # ── SQLite tables (JSONL files) ──────────────────────────
         for filename, table in _EXPORT_TABLES.items():
             _write_table_jsonl(zf, filename, table)
@@ -106,6 +113,55 @@ def _write_user_profile(zf: zipfile.ZipFile, engine: Any) -> None:
         )
         data = {}
     zf.writestr("user_profile.json", json.dumps(data, indent=2, default=str))
+
+
+def _write_memory_decay(zf: zipfile.ZipFile) -> None:
+    """[IMPROVE-87] Bundle ``data/partner/memory_decay.json`` (the
+    persisted decay-config file from IMPROVE-77) into the export
+    ZIP as ``memory_decay.json``.
+
+    Best-effort: a missing source file means the user never
+    customised the decay config away from defaults, which is the
+    most common case — silently skip rather than write a stub.
+    Catches the IMPROVE-77 spawned-followup that listed export
+    bundling as a one-line addition.
+
+    Read happens via the live module's ``_DECAY_CONFIG_PATH`` so
+    test fixtures that ``monkeypatch`` the path to a tmp dir for
+    isolation also affect this read — keeps the export tests
+    hermetic with no real ``data/partner/`` writes.
+    """
+    try:
+        from .memory import _DECAY_CONFIG_PATH
+    except Exception as exc:
+        logger.debug(
+            "[IMPROVE-87] decay config path import failed (%s); "
+            "skipping memory_decay.json in export",
+            exc,
+        )
+        return
+
+    try:
+        if not _DECAY_CONFIG_PATH.exists():
+            # User never customised — no file to bundle. Don't
+            # write a stub; the consumer that imports this ZIP can
+            # use the application's defaults instead.
+            return
+        raw = _DECAY_CONFIG_PATH.read_text(encoding="utf-8")
+        # Reformat with indent=2 so the bundle's view is human-
+        # readable even if the on-disk file was minified.
+        data = json.loads(raw)
+        zf.writestr(
+            "memory_decay.json", json.dumps(data, indent=2, default=str),
+        )
+    except Exception as exc:
+        # A corrupt / unreadable on-disk file should NOT brick the
+        # export. Log + skip so the user still gets profile.json +
+        # the SQLite tables.
+        logger.warning(
+            "[IMPROVE-87] memory_decay.json export failed (%s); "
+            "continuing without it", exc,
+        )
 
 
 def _write_table_jsonl(
@@ -167,6 +223,10 @@ or to satisfy data-portability requests.
 - `user_profile.json` — Your BigFive personality estimates +
   emotional trajectory + interaction summary. Mirrors
   `data/partner/user_profile.json`.
+- `memory_decay.json` — Your customised Ebbinghaus memory-decay
+  tunables (per IMPROVE-77 / IMPROVE-78). Only present if you
+  changed the defaults via `POST /partner/memory/decay` or one
+  of the named presets. Mirrors `data/partner/memory_decay.json`.
 - `facts.jsonl` — Durable facts the partner extracted about you
   (one fact per line). Backs `partner_core_facts` table.
 - `key_memories.jsonl` — Notable conversation moments with
