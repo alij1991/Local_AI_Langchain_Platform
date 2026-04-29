@@ -1,16 +1,16 @@
 # 10 — Improvement Roadmap
 
-> **Goal of this chapter:** a single consolidated view of the **70 improvement ideas** surfaced across chapters 1–9 (now **82** post Wave 7), scored for impact and effort, grouped by theme, and laid out in a phased roadmap. Every idea here is grounded in a 2025–2026 source — the citations are in each chapter; this doc focuses on *what to do when*.
+> **Goal of this chapter:** a single consolidated view of the **70 improvement ideas** surfaced across chapters 1–9 (now **85** post Wave 8 mid-wave), scored for impact and effort, grouped by theme, and laid out in a phased roadmap. Every idea here is grounded in a 2025–2026 source — the citations are in each chapter; this doc focuses on *what to do when*.
 
-> **Revised 2026-04-28** — Wave 5 shipped (12 commits: IMPROVE-29/31/33/34/35/36/51/52/53/54/55/56/57/63/67). Wave 6 shipped (12 commits, 8 table-rows: IMPROVE-71/72/8 + Tranche-C 5×telemetry + IMPROVE-73/46/74/61). Wave 7 shipped (8 commits + 1 test-fix + 2 doc commits: IMPROVE-NEW-4/11/12/13/14/16/17/18 promoted to IMPROVE-75/76/77/78/79/80/81/82, plus a deterministic-counter fix for the IMPROVE-36 parallel-wave speedup test). Wave 8 in deferred queue (see §10.5 Wave 8).
+> **Revised 2026-04-28** — Wave 5 shipped (12 commits: IMPROVE-29/31/33/34/35/36/51/52/53/54/55/56/57/63/67). Wave 6 shipped (12 commits, 8 table-rows: IMPROVE-71/72/8 + Tranche-C 5×telemetry + IMPROVE-73/46/74/61). Wave 7 shipped (8 commits + 1 test-fix + 2 doc commits: IMPROVE-NEW-4/11/12/13/14/16/17/18 promoted to IMPROVE-75/76/77/78/79/80/81/82, plus a deterministic-counter fix for the IMPROVE-36 parallel-wave speedup test). Wave 8 in progress (3 of 7 commits shipped: IMPROVE-83/84/85; see §10.5 Wave 8).
 
 ---
 
 ## 10.1 Summary
 
-- **82 improvements** flagged inline as `[IMPROVE-N]` in chapters 1–9 + the Wave 5/6/7 audits (NEW from Wave 6 audit: 71/72/73/74; NEW from Wave 7: 75/76/77/78/79/80/81/82).
+- **85 improvements** flagged inline as `[IMPROVE-N]` in chapters 1–9 + the Wave 5/6/7/8 audits (NEW from Wave 6 audit: 71/72/73/74; NEW from Wave 7: 75/76/77/78/79/80/81/82; NEW from Wave 8: 83/84/85, with 86/87/88 queued).
 - **10 themes** — security, architecture, observability, tracing, UX, memory & context, model & inference, background tasks, voice, and tools/MCP.
-- **7 waves** shipped (Waves 1-7); **1** standing in deferred queues (post-Wave-7 backlog → Wave 8).
+- **7 waves** fully shipped (Waves 1-7); **1** in progress (Wave 8: 3 of 7 commits shipped); future Wave 9 holds carry-overs from the Wave 7/8 deferred queues.
 
 All improvements are traceable back to a chapter + a 2025–2026 citation. This chapter is pure planning — *what* + *why this order*; *how* is in each origin chapter.
 
@@ -178,7 +178,7 @@ Smaller items that improve day-to-day use.
 
 ---
 
-## 10.4 The complete table (all 82)
+## 10.4 The complete table (all 85)
 
 Sortable if you paste into a spreadsheet. Chapter column links back to the originating doc.
 
@@ -266,6 +266,9 @@ Sortable if you paste into a spreadsheet. Chapter column links back to the origi
 | 80 | 11 | ✓ Telemetry event-name registry + emit_typed | ⋆⋆⋆ | 🔨🔨 | Observability |
 | 81 | 11 | ✓ Duplicate-route lint at startup | ⋆⋆ | 🔨 | Architecture |
 | 82 | 11 | ✓ /agents/* rejection telemetry | ⋆⋆ | 🔨 | Observability |
+| 83 | 11 | ✓ Streaming parallel-wave pre-pass (parity with sync) | ⋆⋆⋆ | 🔨🔨 | UX |
+| 84 | 11 | ✓ Migrate inter-node-context primitives to systems/executor | ⋆⋆ | 🔨 | Architecture |
+| 85 | 11 | ✓ /systems/* validation rejection telemetry (mirror IMPROVE-82) | ⋆⋆ | 🔨 | Observability |
 
 *Impact for [IMPROVE-59] is ⋆⋆⋆⋆⋆ if the app is ever distributed, ⋆⋆ if it stays local-only.
 
@@ -450,30 +453,56 @@ graduated to permanent IMPROVE-75/76/77/78/79/80/81/82 on shipping.
 Source-level comments retain the IMPROVE-NEW-* tags for grep stability
 with the commit history.
 
-### Wave 8 — Deferred (queued for next iteration)
+### Wave 8 — In progress (3 of 7 commits shipped 2026-04-28)
 
 **MCP items still demoted per Q3 (aspirational, post-Wave-5 reassessment confirms).**
 
-Carried-over NEW candidates from the Wave 7 deferred queue:
+Theme: close out the four Wave-7-spawned follow-ups + bundled
+telemetry/persistence polish + one forward-pull (graph-time DAG
+validation, NEW-6 refinement). Q1=B (refactor-share helper),
+Q2=B (full sweep, no shim), Q3=C (tiered warn/block for graph-time
+lint), Q4=A (filesystem watcher), Q5=B (mid + end-wave doc commits).
+
+#### Shipped so far
+
+| # | Tag | SHA | What landed | Tests |
+|---|---|---|---|---:|
+| 1 | [IMPROVE-83] | a11b485 | Streaming parallel-wave pre-pass (extract `_run_parallel_wave_or_fallback` shared helper; `astream_graph` parity with `execute_graph`) | +9 |
+| 2 | [IMPROVE-84] | b4c71dc | Migrate `_build_inter_node_context` + budget constant from agents.py to systems/executor.py (full sweep, no shim) | +3 |
+| 3 | [IMPROVE-85] | ec1465a | /systems/* validation rejection telemetry — `system.validation_rejected` event mirrors IMPROVE-82 | +5 |
+
+Net so far: +17 tests over Wave 8 (1275 → 1292). agents.py
+shrank a further 5.2% (1587 → 1505 LoC), bringing the
+Wave-7-anchor total reduction to 35.4% (2326 → 1505).
+
+#### Remaining queue (4 commits)
+
+- [IMPROVE-86] Per-byte progress for ``hf_hub_download``
+  (filesystem watcher) — the GGUF small-files gap from
+  IMPROVE-8. Q4=A: filesystem watcher (version-independent).
+- [IMPROVE-87] VRAM probe telemetry + memory_decay.json in
+  partner export ZIP (bundled, mirrors W7's IMPROVE-77 +
+  IMPROVE-79 spawned-followups).
+- [IMPROVE-88] Graph-time DAG validation — unreachable nodes,
+  dead-end nodes, orphaned llm_router edges. Q3=C: tiered
+  (warn for unreachable/dead-end, block at save for orphan
+  edges).
+- (doc) Wave 8 retrospective + Wave 9 deferred queue.
+
+#### Deferred to Wave 9
+
+Carried-over NEW candidates that didn't promote in Wave 8:
 - [IMPROVE-NEW-2] Unify token-budget primitive (waits for Tranche D)
 - [IMPROVE-NEW-5] Voice/optimization/weights → registry files
 - [IMPROVE-NEW-6] LangGraph-style graph-time validation
+  (FOLDED IN: IMPROVE-88 in Wave 8 covers a tightened scope).
 - [IMPROVE-NEW-7] HF accelerate offload manager probe
 - [IMPROVE-NEW-8] OpenAI / Anthropic SDK contract refresh
 - [IMPROVE-NEW-10] Per-feature smoke fixtures
-
-NEW candidates surfaced by Wave 7 work (eligible for Wave 8):
-- Per-byte progress for ``hf_hub_download`` (filesystem watcher)
-  — the GGUF small-files gap from IMPROVE-8. Originally W7-A6;
-  bumped to keep Wave 7 focused.
-- Migrate ``_build_inter_node_context`` + budget constant from
-  agents.py to systems/executor.py (or a sibling module). Today
-  the executor lazy-imports them.
-- Streaming variant of execute_graph parallel-wave pre-pass —
-  IMPROVE-36 only the sync path got it; now that both
-  executors share helpers, the streaming path can pick up
-  parallel mode in one place.
-- /systems/* validation rejection telemetry (mirror of IMPROVE-82).
+- Bulk emit_typed migration (74 callsites across 7 files)
+- Tile-based upscaling for latent/sdxl_x4 (IMPROVE-79 follow-up)
+- Per-subsystem Literal + overload for emit_typed action
+- Per-event Pydantic context schemas
 
 Wave 5 spawned follow-ups still deferred (organized into
 themed tranches):
@@ -655,4 +684,4 @@ Answer whichever are easy. The roadmap is shaped enough to make progress on Wave
 
 **Guide complete.** `docs/features/README.md` → `01-architecture.md` → `02-llm-infrastructure.md` → `03-chat.md` → `04-agents-tools.md` → `05-systems.md` → `06-image-generation.md` → `07-image-editor.md` → `08-partner.md` → `09-observability.md` → `10-improvements.md` *(this file)*.
 
-Every major feature of the Local AI Platform is now documented end-to-end, with **82** research-backed improvement ideas cross-referenced into one prioritized plan. Waves 1-7 fully shipped; Wave 8 in deferred queue.
+Every major feature of the Local AI Platform is now documented end-to-end, with **85** research-backed improvement ideas cross-referenced into one prioritized plan. Waves 1-7 fully shipped; Wave 8 in progress (3 of 7 commits shipped 2026-04-28).
