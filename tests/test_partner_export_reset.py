@@ -1150,7 +1150,13 @@ def test_export_bundle_writes_bundle_json_with_schema_version(
         meta = json.loads(zf.read("bundle.json"))
         assert meta["schema_version"] == BUNDLE_SCHEMA_VERSION
         assert meta["schema_version"] == 1  # explicit value pin
-        assert meta["platform"] == "Local AI Platform"
+        # [IMPROVE-116] ``platform`` may carry an ``@<sha>``
+        # suffix when running in a git repo. Pin the prefix
+        # only — the canonical-shape pins
+        # (test_bundle_metadata_platform_includes_git_revision_when_in_repo
+        # + test_bundle_metadata_platform_falls_back_when_not_in_repo)
+        # cover the two branches deterministically.
+        assert meta["platform"].startswith("Local AI Platform")
         assert "generated_at" in meta
         # ISO-8601 timestamp parses cleanly
         from datetime import datetime
@@ -1314,6 +1320,136 @@ def test_bundle_metadata_stays_at_schema_version_1(
         meta = json.loads(zf.read("bundle.json"))
         assert meta["schema_version"] == 1
         assert BUNDLE_SCHEMA_VERSION == 1
+
+
+# ── [IMPROVE-116] Bundle.json platform field with git revision ──
+
+
+def test_bundle_metadata_platform_includes_git_revision_when_in_repo(
+    tmp_partner_db, tmp_partner_data_dir, stub_engine, monkeypatch,
+):
+    """[IMPROVE-116] When ``_get_git_revision`` returns a non-None
+    short SHA, the platform field carries it as a suffix:
+    ``"Local AI Platform@<sha>"``. Mock the helper to return a
+    fixed value so the test doesn't depend on actual git state."""
+    from local_ai_platform.partner import export as export_mod
+    monkeypatch.setattr(
+        export_mod, "_get_git_revision", lambda: "a1b2c3d",
+    )
+    bundle = export_mod.build_export_bundle(stub_engine)
+    with zipfile.ZipFile(io.BytesIO(bundle), "r") as zf:
+        meta = json.loads(zf.read("bundle.json"))
+        assert meta["platform"] == "Local AI Platform@a1b2c3d"
+
+
+def test_bundle_metadata_platform_falls_back_when_not_in_repo(
+    tmp_partner_db, tmp_partner_data_dir, stub_engine, monkeypatch,
+):
+    """[IMPROVE-116] When ``_get_git_revision`` returns None
+    (subprocess fails / git not installed / not a repo), the
+    platform field is the bare literal "Local AI Platform"
+    without the @suffix. Per Q4=A: missing suffix is itself a
+    signal — distinguishes deployed-from-source from packaged
+    distribution."""
+    from local_ai_platform.partner import export as export_mod
+    monkeypatch.setattr(
+        export_mod, "_get_git_revision", lambda: None,
+    )
+    bundle = export_mod.build_export_bundle(stub_engine)
+    with zipfile.ZipFile(io.BytesIO(bundle), "r") as zf:
+        meta = json.loads(zf.read("bundle.json"))
+        # Bare literal — no @suffix, no @unknown placeholder.
+        assert meta["platform"] == "Local AI Platform"
+        assert "@" not in meta["platform"]
+
+
+def test_bundle_metadata_platform_resolves_at_call_time(
+    tmp_partner_db, tmp_partner_data_dir, stub_engine, monkeypatch,
+):
+    """[IMPROVE-116] _get_git_revision is called PER bundle export
+    (not once at import time), so two bundles generated at
+    different commits would carry different platform fields."""
+    from local_ai_platform.partner import export as export_mod
+    monkeypatch.setattr(
+        export_mod, "_get_git_revision", lambda: "before",
+    )
+    bundle_1 = export_mod.build_export_bundle(stub_engine)
+    monkeypatch.setattr(
+        export_mod, "_get_git_revision", lambda: "after",
+    )
+    bundle_2 = export_mod.build_export_bundle(stub_engine)
+    with zipfile.ZipFile(io.BytesIO(bundle_1), "r") as zf:
+        meta_1 = json.loads(zf.read("bundle.json"))
+    with zipfile.ZipFile(io.BytesIO(bundle_2), "r") as zf:
+        meta_2 = json.loads(zf.read("bundle.json"))
+    assert meta_1["platform"] == "Local AI Platform@before"
+    assert meta_2["platform"] == "Local AI Platform@after"
+
+
+def test_get_git_revision_handles_missing_git_binary():
+    """[IMPROVE-116] When the ``git`` binary is not on PATH (or
+    subprocess.run raises FileNotFoundError for any other
+    reason), _get_git_revision returns None — no exception
+    leaks out to the bundle export path."""
+    from unittest.mock import patch
+    from local_ai_platform.partner.export import _get_git_revision
+    with patch(
+        "local_ai_platform.partner.export.subprocess.run",
+        side_effect=FileNotFoundError("git not found"),
+    ):
+        assert _get_git_revision() is None
+
+
+def test_get_git_revision_handles_subprocess_timeout():
+    """[IMPROVE-116] When git rev-parse hangs (the rare
+    corrupt-repo case), the 2-second timeout fires and the
+    helper returns None instead of leaving the bundle export
+    blocked."""
+    import subprocess as _subprocess
+    from unittest.mock import patch
+    from local_ai_platform.partner.export import _get_git_revision
+    with patch(
+        "local_ai_platform.partner.export.subprocess.run",
+        side_effect=_subprocess.TimeoutExpired(cmd="git", timeout=2.0),
+    ):
+        assert _get_git_revision() is None
+
+
+def test_get_git_revision_handles_non_zero_returncode():
+    """[IMPROVE-116] When the cwd is not a git repo,
+    ``git rev-parse`` exits non-zero. The helper returns None
+    rather than capturing whatever stdout/stderr say."""
+    from unittest.mock import patch, Mock
+    from local_ai_platform.partner.export import _get_git_revision
+    mock_result = Mock()
+    mock_result.returncode = 128  # canonical "not a git repo" exit
+    mock_result.stdout = ""
+    with patch(
+        "local_ai_platform.partner.export.subprocess.run",
+        return_value=mock_result,
+    ):
+        assert _get_git_revision() is None
+
+
+def test_get_git_revision_returns_short_sha_format():
+    """[IMPROVE-116] On success, the helper returns the bare
+    short SHA string (no leading whitespace, no trailing
+    newline, no @prefix)."""
+    from unittest.mock import patch, Mock
+    from local_ai_platform.partner.export import _get_git_revision
+    mock_result = Mock()
+    mock_result.returncode = 0
+    # Real git rev-parse output has a trailing newline; the
+    # helper must strip it.
+    mock_result.stdout = "a1b2c3d\n"
+    with patch(
+        "local_ai_platform.partner.export.subprocess.run",
+        return_value=mock_result,
+    ):
+        sha = _get_git_revision()
+        assert sha == "a1b2c3d"
+        assert "\n" not in sha
+        assert "@" not in sha
 
 
 def test_restore_tolerates_unknown_provenance_fields(

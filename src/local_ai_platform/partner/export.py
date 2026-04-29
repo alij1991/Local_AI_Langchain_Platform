@@ -37,6 +37,7 @@ import io
 import json
 import logging
 import platform
+import subprocess
 import sys
 import zipfile
 from datetime import datetime, timezone
@@ -256,16 +257,79 @@ def _try_diffusers_version() -> str | None:
         return None
 
 
+def _get_git_revision() -> str | None:
+    """[IMPROVE-116] Return the short git SHA for the current
+    code version, or None when not in a git repo / git not
+    installed / subprocess fails.
+
+    Used by ``_write_bundle_metadata`` to enrich the ``platform``
+    field with the EXACT code version a bundle was generated
+    against — e.g. ``"Local AI Platform@a1b2c3d"``. Operators
+    receiving multiple bundles from the same install can spot
+    "this bundle was built on commit X" without spelunking
+    install timestamps.
+
+    The 2-second timeout protects against pathological cases
+    (network filesystems with slow stat / corrupt git state
+    causing rev-parse to hang). On any failure path the helper
+    returns None and the bundle's platform field falls back to
+    the literal "Local AI Platform" without the @suffix.
+
+    Per Q4=A in the Wave 13 plan: bare "Local AI Platform"
+    when not in a git repo (vs always-include-suffix-with-
+    @unknown-fallback). Rationale: a missing @suffix is itself
+    a signal — operators reading the bundle can tell at a glance
+    whether the install was deployed from source (suffix present)
+    or installed from a packaged distribution (suffix absent).
+    The "@unknown" alternative would make the two cases
+    indistinguishable.
+
+    Returns:
+        Short git SHA (typically 7 chars, but ``rev-parse
+        --short`` may return more for repos with extreme commit
+        density) on success; None otherwise.
+
+    Sources (2025-2026):
+      * Wave 12 [IMPROVE-112] commit (45b39fd) — the
+        ``platform`` field this commit enriches.
+      * Python ``subprocess.run`` ``timeout`` parameter docs
+        (Python 3.11):
+        https://docs.python.org/3.11/library/subprocess.html#subprocess.run
+      * git rev-parse --short docs (canonical 2025 reference):
+        https://git-scm.com/docs/git-rev-parse
+    """
+    try:
+        result = subprocess.run(
+            ["git", "rev-parse", "--short", "HEAD"],
+            capture_output=True,
+            text=True,
+            timeout=2.0,
+            check=False,
+        )
+        if result.returncode != 0:
+            # Not a git repo / detached state / permission denied.
+            return None
+        sha = result.stdout.strip()
+        if not sha:
+            return None
+        return sha
+    except (FileNotFoundError, subprocess.TimeoutExpired, OSError):
+        # FileNotFoundError: git binary not on PATH.
+        # TimeoutExpired: rev-parse hung (rare; corrupt git state).
+        # OSError: permission denied / forked-process failure.
+        return None
+
+
 def _write_bundle_metadata(zf: zipfile.ZipFile) -> None:
     """[IMPROVE-97] Write ``bundle.json`` with the schema version
     + provenance metadata.
 
-    Shape post-IMPROVE-112:
+    Shape post-IMPROVE-112 + IMPROVE-116:
 
       {
         "schema_version": 1,
         "generated_at": "2026-04-29T12:34:56.789012+00:00",
-        "platform": "Local AI Platform",
+        "platform": "Local AI Platform@a1b2c3d",
         "exporter": "partner.export.build_export_bundle",
         "install_uuid": "8f4e2c1a-...",
         "os_hint": "Windows-11",
@@ -285,11 +349,31 @@ def _write_bundle_metadata(zf: zipfile.ZipFile) -> None:
     per the IMPROVE-97 forward-compat contract. A future v=2
     bump only happens for breaking changes (key removal,
     type change), not field additions.
+
+    [IMPROVE-116] The ``platform`` field carries an
+    ``@<short_sha>`` suffix when the install is in a git repo,
+    so operators receiving multiple bundles from the same
+    install can spot the exact code version each bundle was
+    generated against. Falls back to the bare literal
+    ``"Local AI Platform"`` when not in a git repo — the
+    missing suffix is itself a signal (deployed-from-source
+    vs installed-from-packaged-distribution).
     """
+    # [IMPROVE-116] Compose the platform field with optional
+    # git-revision suffix. Reads at call time so a bundle
+    # generated mid-development reflects the dirty/clean
+    # state's HEAD; in CI / installed deployments it falls
+    # back to the bare literal.
+    git_revision = _get_git_revision()
+    if git_revision:
+        platform_field = f"Local AI Platform@{git_revision}"
+    else:
+        platform_field = "Local AI Platform"
+
     metadata = {
         "schema_version": BUNDLE_SCHEMA_VERSION,
         "generated_at": datetime.now(timezone.utc).isoformat(),
-        "platform": "Local AI Platform",
+        "platform": platform_field,
         "exporter": "partner.export.build_export_bundle",
         # [IMPROVE-112] Provenance fields — additive at v=1.
         "install_uuid": _get_install_uuid(),
