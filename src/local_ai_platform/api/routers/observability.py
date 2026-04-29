@@ -24,6 +24,8 @@ Endpoints (17):
   GET    /traces/{run_id}                        — fetch trace blob
   GET    /observability/recent                   — recent app_events
   GET    /observability/summary                  — error rate rollup
+  GET    /observability/timeseries               — time-bucketed counts
+  GET    /observability/rejections               — slim per-cause distribution
 
 Repository imports happen lazily inside handlers (the threads_repo
 pattern) so an environment without LangGraph checkpoint installed can
@@ -519,6 +521,114 @@ async def obs_timeseries(
     return {
         "buckets": buckets,
         "bucket_minutes": bucket_minutes,
+        "window_hours": window_hours,
+        "filters": {
+            "subsystem": subsystem,
+            "action": action,
+            "error_code": error_code,
+        },
+    }
+
+
+@router.get("/observability/rejections")
+async def obs_rejections(
+    window_hours: int = 24,
+    subsystem: str | None = None,
+    action: str | None = None,
+    error_code: str | None = None,
+):
+    """[IMPROVE-103] Slim per-cause rejection distribution.
+
+    Sibling of /observability/summary's ``rejections`` array
+    for dashboards that ONLY render the per-cause panel (no
+    items rollup, no time-series). Avoids the per-(subsystem,
+    action) rollup query that /summary always runs alongside —
+    a dashboard rendering only the rejection chart pays for
+    the full /summary today even though it discards ``items``
+    and ``window_hours`` math overlap.
+
+    Per the Wave 11 plan: same filter axes as
+    /observability/timeseries (subsystem / action / error_code)
+    AND-composed, so a dashboard can render "OOM rejections
+    over the last week" via:
+
+        GET /observability/rejections
+            ?window_hours=168
+            &error_code=cuda_oom
+
+    Compare to /observability/timeseries with
+    ``error_code=cuda_oom``: timeseries returns time-bucketed
+    counts (line chart); rejections returns the
+    per-(subsystem, action) breakdown (bar / pie chart).
+    Different shapes for different chart types.
+
+    Returns:
+        {
+          "rejections": [
+            {"subsystem": "system", "action": "validate",
+             "error_code": "SchemaInvalid", "count": 14},
+            {"subsystem": "image", "action": "infer",
+             "error_code": "cuda_oom", "count": 7},
+            ...
+          ],
+          "window_hours": 24,
+          "filters": {"subsystem": null, "action": null,
+                      "error_code": null}
+        }
+
+    NULL/empty error_codes are always excluded — only events
+    that *carried* a typed error_code (Wave 7+ rejection
+    events; OOM ladder codes; etc.) appear in the response.
+    Sort order matches /summary: count DESC, then subsystem,
+    action, error_code asc for stable rendering on ties.
+
+    ``window_hours`` clamped to [1, 8760] matches /summary +
+    /timeseries semantics. Empty result is ``[]``, not None or
+    404, so dashboards can render a clean empty state.
+    """
+    window_hours = max(1, min(int(window_hours), 24 * 365))
+    since = f"-{window_hours} hours"
+
+    # Build WHERE additively, mirroring /observability/timeseries.
+    # The error_code IS NOT NULL + != '' guard is always-on (the
+    # endpoint is rejection-only by definition); subsystem +
+    # action + error_code filters are opt-in.
+    where_parts: list[str] = [
+        "ts > datetime('now', ?)",
+        "error_code IS NOT NULL",
+        "error_code != ''",
+    ]
+    params: list[Any] = [since]
+    if subsystem:
+        where_parts.append("subsystem = ?")
+        params.append(subsystem)
+    if action:
+        where_parts.append("action = ?")
+        params.append(action)
+    if error_code:
+        where_parts.append("error_code = ?")
+        params.append(error_code)
+
+    where_clause = " AND ".join(where_parts)
+
+    sql = f"""
+        SELECT subsystem, action, error_code,
+               COUNT(*) AS count
+        FROM app_events
+        WHERE {where_clause}
+        GROUP BY subsystem, action, error_code
+        ORDER BY count DESC, subsystem, action, error_code
+    """
+
+    conn = get_conn()
+    try:
+        rows = conn.execute(sql, params).fetchall()
+        rejections = [dict(r) for r in rows]
+    finally:
+        conn.close()
+
+    return {
+        "rejections": rejections,
         "window_hours": window_hours,
         "filters": {
             "subsystem": subsystem,
