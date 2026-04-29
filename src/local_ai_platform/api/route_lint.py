@@ -118,3 +118,112 @@ def warn_on_route_shadowing(app) -> int:
     for issue in issues:
         logger.warning("[IMPROVE-72] Route shadowing detected: %s", issue.describe())
     return len(issues)
+
+
+# ── [IMPROVE-NEW-17] Duplicate-route detection ──────────────────────
+
+
+@dataclass(frozen=True)
+class DuplicateRouteIssue:
+    """Two ``APIRoute`` registrations with the SAME path AND at least
+    one shared HTTP method.
+
+    FastAPI's behaviour in this case is "the later registration wins"
+    — the earlier handler is silently overwritten. With 12 router
+    files mounted under a common prefix, this is easy to hit when
+    two contributors add a ``POST /foo`` independently.
+
+    [IMPROVE-72] catches the literal-after-param case (different
+    paths, same regex). This catches the literal-equals-literal
+    case (same path, multiple registrations).
+    """
+
+    path: str
+    methods: frozenset[str]
+    first_endpoint: str
+    second_endpoint: str
+
+    def describe(self) -> str:
+        verb_list = "/".join(sorted(self.methods)) or "ANY"
+        return (
+            f"{verb_list} {self.path} registered twice — first by "
+            f"{self.first_endpoint!r}, then overridden by "
+            f"{self.second_endpoint!r}. Only the later handler will run."
+        )
+
+
+def detect_duplicate_routes(app) -> list[DuplicateRouteIssue]:
+    """Return every ``(path, method)`` pair registered twice.
+
+    [IMPROVE-NEW-17] Sister to ``detect_route_shadowing``. The
+    shadowing detector covers parametric vs literal pairs that
+    differ in path; THIS detector covers identical-path pairs.
+
+    Iterates ``app.routes`` and groups by ``path``. For each group
+    with >1 ``APIRoute``, reports each method that appears in more
+    than one handler. ``methods`` is the set of duplicate methods
+    (in case two registrations share GET but only one has POST).
+
+    Routes without a path (``Mount`` etc.) are ignored.
+    """
+    try:
+        from fastapi.routing import APIRoute
+    except Exception:
+        return []
+
+    api_routes = [r for r in app.routes if isinstance(r, APIRoute)]
+    by_path: dict[str, list[APIRoute]] = {}
+    for r in api_routes:
+        by_path.setdefault(r.path, []).append(r)
+
+    issues: list[DuplicateRouteIssue] = []
+    for path, routes in by_path.items():
+        if len(routes) < 2:
+            continue
+        # For each pair of registrations, report the duplicate
+        # methods. Pairwise rather than a single combined report so
+        # a triplet (path, GET) → 3 handlers gets two issues
+        # (handlers 1+2, handlers 1+3) — clearer for triage.
+        for i, first in enumerate(routes):
+            for second in routes[i + 1:]:
+                shared = (first.methods or set()) & (
+                    second.methods or set()
+                )
+                if not shared:
+                    continue
+                first_name = (
+                    f"{first.endpoint.__module__}."
+                    f"{getattr(first.endpoint, '__qualname__', first.endpoint.__name__)}"
+                    if first.endpoint else "<unknown>"
+                )
+                second_name = (
+                    f"{second.endpoint.__module__}."
+                    f"{getattr(second.endpoint, '__qualname__', second.endpoint.__name__)}"
+                    if second.endpoint else "<unknown>"
+                )
+                issues.append(
+                    DuplicateRouteIssue(
+                        path=path,
+                        methods=frozenset(shared),
+                        first_endpoint=first_name,
+                        second_endpoint=second_name,
+                    )
+                )
+    return issues
+
+
+def warn_on_duplicate_routes(app) -> int:
+    """Run the duplicate-route lint and emit a WARNING per issue.
+    Returns the issue count for callers/tests that want to assert.
+
+    Same warn-not-raise discipline as ``warn_on_route_shadowing`` —
+    the local-only deployment profile prefers notification over
+    hard-fail.
+    """
+    issues = detect_duplicate_routes(app)
+    for issue in issues:
+        logger.warning(
+            "[IMPROVE-NEW-17] Duplicate route detected: %s",
+            issue.describe(),
+        )
+    return len(issues)

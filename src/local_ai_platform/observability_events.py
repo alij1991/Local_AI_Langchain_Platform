@@ -65,12 +65,17 @@ from .observability import emit as _emit
 # event lands. The grouping comments document the subsystem.
 
 # agent: orchestrator-level lifecycle (tool calls, fallbacks,
-# auto-resume after dangerous-tool interrupts).
+# auto-resume after dangerous-tool interrupts) plus
+# [IMPROVE-NEW-18] /agents/* validation rejections so operators can
+# see "30% of agent creates fail with invalid_tool" without log
+# scraping.
 _AGENT_ACTIONS = (
     "fallback",
+    "protected_delete_blocked",
     "tool_auto_resume",
     "tool_call",
     "tool_result",
+    "validation_rejected",
 )
 
 # editor: image-editor session ops (apply_edit, undo, redo,

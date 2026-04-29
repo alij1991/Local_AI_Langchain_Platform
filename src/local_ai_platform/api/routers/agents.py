@@ -99,6 +99,26 @@ def _validate_tool_ids(orchestrator: AgentOrchestrator, tool_ids: list[str]) -> 
 
     unknown = [tid for tid in tool_ids if tid not in known]
     if unknown:
+        # [IMPROVE-NEW-18] Surface the rejection as an
+        # ``agent.validation_rejected`` event so dashboards can
+        # answer "what % of agent creates fail with invalid_tool".
+        # Pre-IMPROVE-NEW-18 ops had to grep the api_server log to
+        # see this. Wrapped in try/except since the request still
+        # gets its 400 even if the emit fails.
+        try:
+            from local_ai_platform.observability_events import emit_typed
+            emit_typed(
+                "agent", "validation_rejected", status="error",
+                error_code="invalid_tool",
+                error_message=f"Unknown tool_ids: {unknown}",
+                context={
+                    "rejected_tool_ids": unknown,
+                    "submitted_tool_ids": list(tool_ids),
+                    "known_tool_count": len(known),
+                },
+            )
+        except Exception:
+            pass
         raise HTTPException(
             status_code=400,
             detail={
@@ -413,6 +433,18 @@ async def remove_agent(
     # Guard runs BEFORE the graceful-cleanup path so it fires even when
     # the orchestrator is alive.
     if name in PROTECTED_AGENTS:
+        # [IMPROVE-NEW-18] Surface the rejection so operators can
+        # see attempted destructive ops on default agents.
+        try:
+            from local_ai_platform.observability_events import emit_typed
+            emit_typed(
+                "agent", "protected_delete_blocked", status="error",
+                error_code="protected_agent",
+                error_message=f"Agent '{name}' is a default agent",
+                context={"agent_name": name},
+            )
+        except Exception:
+            pass
         raise HTTPException(
             status_code=400,
             detail={

@@ -291,10 +291,20 @@ async def lifespan(app: FastAPI):
     # path declared after a parametric catch-all on the same method —
     # the IMPROVE-53 / IMPROVE-54 trap. Warnings only; local-only
     # deployment prefers notification over hard-fail at boot.
+    #
+    # [IMPROVE-NEW-17] Duplicate-path detection. Sister to the
+    # shadowing lint — catches identical-path pairs (POST /foo
+    # registered by two routers) where FastAPI silently uses the
+    # later registration. With 12 router files mounted under a
+    # common prefix, easy to hit during merges.
     try:
-        from local_ai_platform.api.route_lint import warn_on_route_shadowing
+        from local_ai_platform.api.route_lint import (
+            warn_on_route_shadowing,
+            warn_on_duplicate_routes,
+        )
 
         warn_on_route_shadowing(app)
+        warn_on_duplicate_routes(app)
     except Exception as exc:
         logger.debug("[IMPROVE-72] route_lint pass failed: %s", exc)
 

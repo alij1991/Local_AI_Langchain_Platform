@@ -205,7 +205,11 @@ def test_emit_typed_propagates_status_and_error_fields(monkeypatch):
 
 
 _EMIT_LITERAL_PATTERN = re.compile(
-    r"""emit\(\s*["']([a-z_]+)["']\s*,\s*["']([a-z_]+)["']""",
+    # Matches both ``emit("subsys", "action", ...)`` and
+    # ``emit_typed("subsys", "action", ...)``. Word boundary keeps
+    # ``self.emit`` / ``recorder.subsystem_event`` etc. out — only
+    # the bare ``emit`` and ``emit_typed`` front doors count.
+    r"""\bemit(?:_typed)?\(\s*["']([a-z_]+)["']\s*,\s*["']([a-z_]+)["']""",
     re.MULTILINE,
 )
 

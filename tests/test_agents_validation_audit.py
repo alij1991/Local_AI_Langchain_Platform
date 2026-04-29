@@ -320,3 +320,152 @@ def test_agent_test_endpoint_wrong_message_type_returns_422():
         json={"message": ["a", "b"]},
     )
     assert response.status_code == 422
+
+
+# ── [IMPROVE-NEW-18] Rejection telemetry ─────────────────────────
+
+
+def test_invalid_tool_rejection_emits_validation_rejected_event(monkeypatch):
+    """Pre-IMPROVE-NEW-18 a 400 invalid_tool was visible only in the
+    api_server log. Now an ``agent.validation_rejected`` event lands
+    in app_events so dashboards can answer "% of agent creates
+    failing for invalid_tool"."""
+    captured: list[tuple] = []
+
+    from local_ai_platform import observability_events as oe
+
+    def fake_emit_typed(subsystem, action, status="ok", **kw):
+        captured.append((subsystem, action, status, kw))
+
+    monkeypatch.setattr(oe, "emit_typed", fake_emit_typed)
+    # The router does ``from ... import emit_typed`` at call time, so
+    # patching the module attribute is sufficient — no need to
+    # reach into routers/agents.py.
+
+    response = client.post(
+        "/agents",
+        json={
+            "name": "telemetry_probe_agent",
+            "model_name": "gemma3:1b",
+            "system_prompt": "test",
+            "provider": "ollama",
+            "tool_ids": ["definitely_not_a_real_tool_xyz"],
+        },
+    )
+    assert response.status_code == 400
+    rejections = [
+        c for c in captured
+        if c[0] == "agent" and c[1] == "validation_rejected"
+    ]
+    assert len(rejections) == 1
+    sub, action, status, kw = rejections[0]
+    assert status == "error"
+    assert kw["error_code"] == "invalid_tool"
+    assert kw["context"]["rejected_tool_ids"] == [
+        "definitely_not_a_real_tool_xyz",
+    ]
+
+
+def test_valid_tool_does_not_emit_rejection(monkeypatch):
+    """Happy path: a successful create fires no
+    ``validation_rejected`` event. Pin so a future refactor can't
+    accidentally start firing it on the success path."""
+    captured: list[tuple] = []
+
+    from local_ai_platform import observability_events as oe
+
+    def fake_emit_typed(subsystem, action, status="ok", **kw):
+        captured.append((subsystem, action, status, kw))
+
+    monkeypatch.setattr(oe, "emit_typed", fake_emit_typed)
+
+    # Empty tool_ids list — valid (default no tools).
+    response = client.post(
+        "/agents",
+        json={
+            "name": "telemetry_happy_agent",
+            "model_name": "gemma3:1b",
+            "system_prompt": "test",
+            "provider": "ollama",
+            "tool_ids": [],
+        },
+    )
+    # Cleanup
+    if response.status_code == 200:
+        client.delete("/agents/telemetry_happy_agent")
+    rejections = [
+        c for c in captured
+        if c[0] == "agent" and c[1] == "validation_rejected"
+    ]
+    assert rejections == []
+
+
+def test_protected_agent_delete_emits_blocked_event(monkeypatch):
+    """A blocked DELETE on ``assistant`` / ``chat`` fires
+    ``agent.protected_delete_blocked`` so attempted destructive ops
+    are visible in app_events even when the user never sees a log
+    line."""
+    captured: list[tuple] = []
+
+    from local_ai_platform import observability_events as oe
+
+    def fake_emit_typed(subsystem, action, status="ok", **kw):
+        captured.append((subsystem, action, status, kw))
+
+    monkeypatch.setattr(oe, "emit_typed", fake_emit_typed)
+
+    response = client.delete("/agents/assistant")
+    assert response.status_code == 400
+    blocked = [
+        c for c in captured
+        if c[0] == "agent" and c[1] == "protected_delete_blocked"
+    ]
+    assert len(blocked) == 1
+    sub, action, status, kw = blocked[0]
+    assert status == "error"
+    assert kw["context"]["agent_name"] == "assistant"
+
+
+def test_unknown_agent_delete_does_not_emit_protected_event(monkeypatch):
+    """DELETE on a non-existent agent that's NOT protected should NOT
+    fire the protected_delete_blocked event — only the protected list
+    triggers it."""
+    captured: list[tuple] = []
+
+    from local_ai_platform import observability_events as oe
+
+    def fake_emit_typed(subsystem, action, status="ok", **kw):
+        captured.append((subsystem, action, status, kw))
+
+    monkeypatch.setattr(oe, "emit_typed", fake_emit_typed)
+
+    client.delete("/agents/agent_that_does_not_exist_123")
+    blocked = [
+        c for c in captured
+        if c[0] == "agent" and c[1] == "protected_delete_blocked"
+    ]
+    assert blocked == []
+
+
+def test_validation_rejected_emit_failure_does_not_break_request(monkeypatch):
+    """Telemetry must NEVER escalate a 400 into a 500. Pin via an
+    emit_typed that raises — the request should still get its 400."""
+    from local_ai_platform import observability_events as oe
+
+    def boom_emit(*a, **kw):
+        raise RuntimeError("simulated observability outage")
+
+    monkeypatch.setattr(oe, "emit_typed", boom_emit)
+
+    response = client.post(
+        "/agents",
+        json={
+            "name": "noisy_telemetry_agent",
+            "model_name": "gemma3:1b",
+            "system_prompt": "test",
+            "provider": "ollama",
+            "tool_ids": ["definitely_not_a_real_tool_xyz"],
+        },
+    )
+    assert response.status_code == 400
+    assert response.json()["detail"]["error"]["code"] == "invalid_tool"

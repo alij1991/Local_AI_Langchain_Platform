@@ -265,3 +265,155 @@ def test_real_api_server_has_no_shadowing_issues():
 
     issues = detect_route_shadowing(api_server.app)
     assert issues == [], "\n".join(issue.describe() for issue in issues)
+
+
+# ── [IMPROVE-NEW-17] Duplicate-route detection ────────────────────
+
+
+from local_ai_platform.api.route_lint import (  # noqa: E402
+    DuplicateRouteIssue,
+    detect_duplicate_routes,
+    warn_on_duplicate_routes,
+)
+
+
+def test_duplicate_route_issue_describe_lists_methods_and_endpoints():
+    issue = DuplicateRouteIssue(
+        path="/foo",
+        methods=frozenset({"POST"}),
+        first_endpoint="mod_a.handler_a",
+        second_endpoint="mod_b.handler_b",
+    )
+    desc = issue.describe()
+    assert "POST" in desc
+    assert "/foo" in desc
+    assert "mod_a.handler_a" in desc
+    assert "mod_b.handler_b" in desc
+    assert "Only the later handler will run" in desc
+
+
+def test_detect_duplicate_routes_empty_app_returns_no_issues():
+    app = FastAPI()
+    assert detect_duplicate_routes(app) == []
+
+
+def test_detect_duplicate_routes_unique_paths_no_issues():
+    """Distinct paths registered once each — no duplicate."""
+    app = FastAPI()
+
+    @app.get("/a")
+    def get_a():
+        return {}
+
+    @app.post("/a")
+    def post_a():
+        return {}  # Same path, DIFFERENT method — not a duplicate.
+
+    @app.get("/b")
+    def get_b():
+        return {}
+
+    assert detect_duplicate_routes(app) == []
+
+
+def test_detect_duplicate_routes_flags_same_path_same_method():
+    """The classic case: two POST /agents handlers from different
+    routers — FastAPI silently uses the later one."""
+    app = FastAPI()
+
+    @app.post("/agents")
+    def first_handler():
+        return {"from": "first"}
+
+    @app.post("/agents")
+    def second_handler():
+        return {"from": "second"}
+
+    issues = detect_duplicate_routes(app)
+    assert len(issues) == 1
+    issue = issues[0]
+    assert issue.path == "/agents"
+    assert "POST" in issue.methods
+    assert "first_handler" in issue.first_endpoint
+    assert "second_handler" in issue.second_endpoint
+
+
+def test_detect_duplicate_routes_partial_method_overlap():
+    """Two registrations on the same path; the first has
+    {GET, POST}, the second has {POST, DELETE}. Only POST is the
+    actual duplicate; the issue reports POST only."""
+    app = FastAPI()
+
+    @app.api_route("/x", methods=["GET", "POST"])
+    def first():
+        return {}
+
+    @app.api_route("/x", methods=["POST", "DELETE"])
+    def second():
+        return {}
+
+    issues = detect_duplicate_routes(app)
+    assert len(issues) == 1
+    assert issues[0].methods == frozenset({"POST"})
+
+
+def test_detect_duplicate_routes_three_handlers_same_path_pairwise():
+    """Three handlers on the same path → 3 pairwise issues
+    (handler1+2, handler1+3, handler2+3)."""
+    app = FastAPI()
+
+    @app.post("/x")
+    def h1():
+        return {}
+
+    @app.post("/x")
+    def h2():
+        return {}
+
+    @app.post("/x")
+    def h3():
+        return {}
+
+    issues = detect_duplicate_routes(app)
+    assert len(issues) == 3
+
+
+def test_warn_on_duplicate_routes_returns_count():
+    app = FastAPI()
+    assert warn_on_duplicate_routes(app) == 0
+
+
+def test_warn_on_duplicate_routes_logs_warning_per_issue(caplog):
+    app = FastAPI()
+
+    @app.post("/dup")
+    def first_dup():
+        return {}
+
+    @app.post("/dup")
+    def second_dup():
+        return {}
+
+    with caplog.at_level(
+        logging.WARNING, logger="local_ai_platform.api.route_lint",
+    ):
+        count = warn_on_duplicate_routes(app)
+    assert count == 1
+    matches = [
+        r for r in caplog.records
+        if "[IMPROVE-NEW-17]" in r.getMessage()
+    ]
+    assert len(matches) == 1
+    assert "/dup" in matches[0].getMessage()
+
+
+def test_real_api_server_has_no_duplicate_routes():
+    """Regression pin: the live api_server.app has zero duplicate
+    routes today. Any future merge that double-registers a path
+    fails this test."""
+    import api_server
+
+    issues = detect_duplicate_routes(api_server.app)
+    assert issues == [], "\n".join(
+        issue.describe() for issue in issues
+    )
