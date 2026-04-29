@@ -124,12 +124,17 @@ def test_event_context_schemas_keys_are_registered_events():
 
 
 def test_image_vram_probe_schema_is_strict():
-    """[IMPROVE-87] The vram_probe event has a fixed shape — all
-    five keys (method/available_gb/required_gb/reason/ok) are
-    required. Pin the strict-shape contract."""
+    """[IMPROVE-87 + IMPROVE-93] The vram_probe event has a
+    fixed shape — six keys (method/available_gb/required_gb/
+    reason/ok/tile_mode) are all required. Pre-IMPROVE-93 the
+    schema had five keys; ``tile_mode`` was added as required
+    when [IMPROVE-93] introduced the tiled-mode probe path so
+    dashboards can chart "% of probes that ran in tiled mode"
+    via the existing per-event aggregation."""
     required, optional = _required_optional_keys(ImageVramProbeContext)
     assert required == {
         "method", "available_gb", "required_gb", "reason", "ok",
+        "tile_mode",
     }
     assert optional == frozenset()
 
@@ -180,13 +185,14 @@ def test_typeadapter_validates_image_vram_probe_strict():
     rejects unknown keys at runtime. Audit-time — never on the
     emit hot path. Pin the strict-mode behaviour."""
     adapter = TypeAdapter(ImageVramProbeContext)
-    # Valid example.
+    # Valid example. [IMPROVE-93] added tile_mode as required.
     valid = {
         "method": "sdxl_x4",
         "available_gb": 4.5,
         "required_gb": 6.0,
         "reason": "insufficient_vram",
         "ok": False,
+        "tile_mode": False,
     }
     adapter.validate_python(valid)  # no raise
     # Extra key — must fail.

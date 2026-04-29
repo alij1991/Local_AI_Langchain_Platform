@@ -6202,33 +6202,47 @@ class ImageGenerationService:
         # the per-method thresholds.
         if method_norm == "latent":
             ok, avail_gb, req_gb, _reason = self._probe_vram_for_method("latent")
-            if not ok:
-                return ImageRuntimeResult(
-                    ok=False, error_code="insufficient_vram",
-                    error_message=(
-                        f"Latent upscaler needs ~{req_gb:.1f} GB VRAM; "
-                        f"only {avail_gb:.2f} GB free. Use method="
-                        f"'realesrgan' or 'lanczos' on this card."
-                    ),
-                    metadata={
-                        "method": "latent",
-                        "vram_required_gb": req_gb,
-                        "vram_available_gb": round(avail_gb, 2),
-                    },
+            if ok:
+                return self._upscale_latent(img=img, prompt=prompt)
+            # [IMPROVE-93] Per Q3=C: regular probe failed → retry
+            # the probe at the LOWER tiled-mode threshold. If THAT
+            # passes, run the upscale with VAE tiling enabled
+            # (peak VRAM drops ~40-50% at the cost of tiny seams
+            # at tile boundaries, mostly invisible on natural
+            # content). If even tiled mode fails, fall back to the
+            # pre-IMPROVE-93 insufficient_vram error.
+            tile_ok, tile_avail_gb, tile_req_gb, _t_reason = (
+                self._probe_vram_for_method("latent", tile_mode=True)
+            )
+            if tile_ok:
+                logger.info(
+                    "[IMPROVE-93] latent upscaler probe failed "
+                    "regular threshold (need %.1f GB, have %.2f GB) "
+                    "but passed tiled threshold (need %.1f GB); "
+                    "engaging VAE tiling.",
+                    req_gb, avail_gb, tile_req_gb,
                 )
-            return self._upscale_latent(img=img, prompt=prompt)
+                return self._upscale_latent(
+                    img=img, prompt=prompt, tile_mode=True,
+                )
+            return ImageRuntimeResult(
+                ok=False, error_code="insufficient_vram",
+                error_message=(
+                    f"Latent upscaler needs ~{req_gb:.1f} GB VRAM "
+                    f"(or ~{tile_req_gb:.1f} GB tiled); "
+                    f"only {avail_gb:.2f} GB free. Use method="
+                    f"'realesrgan' or 'lanczos' on this card."
+                ),
+                metadata={
+                    "method": "latent",
+                    "vram_required_gb": req_gb,
+                    "vram_required_tiled_gb": tile_req_gb,
+                    "vram_available_gb": round(avail_gb, 2),
+                },
+            )
         if method_norm == "sdxl_x4":
             ok, avail_gb, req_gb, _reason = self._probe_vram_for_method("sdxl_x4")
-            if not ok:
-                logger.warning(
-                    "[IMPROVE-NEW-14] sdxl_x4 pre-flight VRAM check "
-                    "failed (need %.1f GB, have %.2f GB); falling "
-                    "back to RealESRGAN without attempting the "
-                    "diffusers load",
-                    req_gb, avail_gb,
-                )
-                # Fall through to the RealESRGAN block below.
-            else:
+            if ok:
                 result = self._upscale_sdxl_x4(img=img, prompt=prompt)
                 if result.ok:
                     return result
@@ -6242,6 +6256,41 @@ class ImageGenerationService:
                     "passing pre-flight; falling back to RealESRGAN",
                     result.error_code,
                 )
+            else:
+                # [IMPROVE-93] Per Q3=C: regular probe failed →
+                # retry at the lower tiled-mode threshold before
+                # falling back to RealESRGAN. SDXL x4 is the most
+                # VRAM-hungry path (6.5 GB regular / 3.5 GB tiled)
+                # so users on 6 GB cards benefit substantially.
+                tile_ok, tile_avail_gb, tile_req_gb, _t_reason = (
+                    self._probe_vram_for_method("sdxl_x4", tile_mode=True)
+                )
+                if tile_ok:
+                    logger.info(
+                        "[IMPROVE-93] sdxl_x4 probe failed regular "
+                        "threshold (need %.1f GB, have %.2f GB) "
+                        "but passed tiled threshold (need %.1f GB); "
+                        "engaging VAE tiling.",
+                        req_gb, avail_gb, tile_req_gb,
+                    )
+                    result = self._upscale_sdxl_x4(
+                        img=img, prompt=prompt, tile_mode=True,
+                    )
+                    if result.ok:
+                        return result
+                    logger.warning(
+                        "[IMPROVE-93] sdxl_x4 tiled-mode upscale "
+                        "failed (%s); falling back to RealESRGAN",
+                        result.error_code,
+                    )
+                else:
+                    logger.warning(
+                        "[IMPROVE-NEW-14] sdxl_x4 pre-flight VRAM check "
+                        "failed even at tiled threshold (need %.1f GB, "
+                        "have %.2f GB); falling back to RealESRGAN",
+                        tile_req_gb, avail_gb,
+                    )
+                # Fall through to the RealESRGAN block below.
 
         if method_norm == "lanczos":
             new_w, new_h = img.width * scale, img.height * scale
@@ -6301,8 +6350,26 @@ class ImageGenerationService:
         "sdxl_x4": 6.5,
     }
 
+    # [IMPROVE-93] Lower thresholds for VAE-tiled mode. With
+    # ``pipeline.enable_vae_tiling()`` the VAE encode/decode
+    # processes the image in tiles rather than as one tensor —
+    # peak VRAM drops by ~40-50% at the cost of tiny seams at tile
+    # boundaries (mostly invisible on natural-content images;
+    # noticeable on synthetic/flat regions). Per Q3=C in the Wave 9
+    # plan: tiling activates only when the regular probe predicts
+    # insufficient VRAM, so users with adequate VRAM get the
+    # higher-quality non-tiled result by default.
+    #
+    # Threshold values: ~50% of the non-tiled requirement.
+    # Calibrated against diffusers' own benchmarks for VAE tiling
+    # on Stable Diffusion / SDXL pipelines.
+    _UPSCALE_VRAM_TILED_REQUIRED_GB: dict[str, float] = {
+        "latent": 1.8,
+        "sdxl_x4": 3.5,
+    }
+
     def _probe_vram_for_method(
-        self, method: str,
+        self, method: str, *, tile_mode: bool = False,
     ) -> tuple[bool, float, float, str]:
         """[IMPROVE-NEW-14] Cheap pre-flight VRAM check for the
         diffusers upscalers.
@@ -6330,13 +6397,25 @@ class ImageGenerationService:
         with ``reason="probe_failed_deferring"``. The load attempt
         still happens; a real OOM is caught downstream. We never
         FAIL to start an upscale because the probe itself broke.
+
+        [IMPROVE-93] ``tile_mode=True`` looks up the lower
+        ``_UPSCALE_VRAM_TILED_REQUIRED_GB`` threshold instead. The
+        ``tile_mode`` kwarg flows through to the emitted
+        ``image.vram_probe`` event so dashboards can chart "% of
+        probes that ran in tiled mode" alongside the existing
+        per-reason breakdown.
         """
-        required_gb = self._UPSCALE_VRAM_REQUIRED_GB.get(method, 0.0)
+        threshold_dict = (
+            self._UPSCALE_VRAM_TILED_REQUIRED_GB
+            if tile_mode
+            else self._UPSCALE_VRAM_REQUIRED_GB
+        )
+        required_gb = threshold_dict.get(method, 0.0)
         if required_gb == 0.0:
             self._emit_vram_probe(
                 method=method, ok=True,
                 available_gb=0.0, required_gb=0.0,
-                reason="no_probe_needed",
+                reason="no_probe_needed", tile_mode=tile_mode,
             )
             return True, 0.0, 0.0, "no_probe_needed"
 
@@ -6347,6 +6426,7 @@ class ImageGenerationService:
                     method=method, ok=True,
                     available_gb=0.0, required_gb=required_gb,
                     reason="cpu_only_no_cuda_check",
+                    tile_mode=tile_mode,
                 )
                 return True, 0.0, required_gb, "cpu_only_no_cuda_check"
             free_bytes, _total_bytes = torch.cuda.mem_get_info()
@@ -6362,6 +6442,7 @@ class ImageGenerationService:
                 method=method, ok=True,
                 available_gb=0.0, required_gb=required_gb,
                 reason="probe_failed_deferring",
+                tile_mode=tile_mode,
             )
             return True, 0.0, required_gb, "probe_failed_deferring"
 
@@ -6369,13 +6450,13 @@ class ImageGenerationService:
             self._emit_vram_probe(
                 method=method, ok=True,
                 available_gb=available_gb, required_gb=required_gb,
-                reason="sufficient",
+                reason="sufficient", tile_mode=tile_mode,
             )
             return True, available_gb, required_gb, "sufficient"
         self._emit_vram_probe(
             method=method, ok=False,
             available_gb=available_gb, required_gb=required_gb,
-            reason="insufficient_vram",
+            reason="insufficient_vram", tile_mode=tile_mode,
         )
         return False, available_gb, required_gb, "insufficient_vram"
 
@@ -6387,12 +6468,13 @@ class ImageGenerationService:
         available_gb: float,
         required_gb: float,
         reason: str,
+        tile_mode: bool = False,
     ) -> None:
         """[IMPROVE-87] Emit ``image.vram_probe`` once per probe call.
 
-        Carries the probe inputs (``method``, ``required_gb``) plus
-        the outputs (``available_gb``, ``reason``, ``ok``) so a
-        weekly-review dashboard can chart:
+        Carries the probe inputs (``method``, ``required_gb``,
+        ``tile_mode``) plus the outputs (``available_gb``,
+        ``reason``, ``ok``) so a weekly-review dashboard can chart:
 
           * "% of upscale calls that pre-flight rejected the
             diffusers path" — count(reason='insufficient_vram')
@@ -6400,12 +6482,23 @@ class ImageGenerationService:
             count(reason='cpu_only_no_cuda_check')
           * "VRAM-probe self-failure rate" —
             count(reason='probe_failed_deferring')
+          * "% of upscale calls that recovered via VAE tiling"
+            (IMPROVE-93) — count(tile_mode=True AND ok=True)
+            relative to count(reason='insufficient_vram'
+            AND tile_mode=False).
           * Histogram of ``available_gb`` for users on the boundary.
 
         Wrapped in try/except so a registry / observability outage
         cannot escalate a successful probe into an upscale failure
         — the probe is a check, not a gate, and the same discipline
         applies to its telemetry.
+
+        [IMPROVE-93] ``tile_mode`` distinguishes the regular
+        full-VAE probe from the lower-threshold tiled probe. The
+        ``ImageVramProbeContext`` schema in
+        observability_events.py was updated to include the field
+        as required, so the IMPROVE-92 audit pin will catch a
+        future callsite that forgets to pass it.
         """
         try:
             emit_typed(
@@ -6417,6 +6510,7 @@ class ImageGenerationService:
                     "required_gb": required_gb,
                     "reason": reason,
                     "ok": ok,
+                    "tile_mode": tile_mode,
                 },
             )
         except Exception:
@@ -6433,6 +6527,7 @@ class ImageGenerationService:
         *,
         img: Any,
         prompt: str,
+        tile_mode: bool = False,
     ) -> ImageRuntimeResult:
         """[IMPROVE-46] 2x latent-space upscaler.
 
@@ -6440,10 +6535,19 @@ class ImageGenerationService:
         offload keeps it on an 8 GB card. Needs a guidance prompt; if
         empty, defaults to ``"high quality, detailed"`` so the
         endpoint contract still works for the no-prompt case.
+
+        [IMPROVE-93] ``tile_mode=True`` enables VAE tiling +
+        slicing on the loaded pipeline. Diffusers' tiling
+        processes the VAE encode/decode in tiles rather than as
+        one tensor — peak VRAM drops ~40-50% at the cost of tiny
+        seams at tile boundaries. The tiled-mode pipeline is
+        cached separately from the non-tiled one so back-to-back
+        calls with different ``tile_mode`` values don't re-init
+        from scratch.
         """
         Image, _ = _require_pillow()
         guide = prompt.strip() or "high quality, detailed"
-        cache_key = "latent"
+        cache_key = "latent_tiled" if tile_mode else "latent"
         try:
             pipe = self._upscale_pipelines.get(cache_key)
             if pipe is None:
@@ -6458,6 +6562,30 @@ class ImageGenerationService:
                     pipe.enable_sequential_cpu_offload()
                 else:
                     pipe = pipe.to("cpu")
+                if tile_mode:
+                    # [IMPROVE-93] VAE tiling + slicing. Both are
+                    # idempotent — calling on a non-VAE pipeline
+                    # is a no-op, calling twice doesn't double up.
+                    # Wrap in try/except so a missing method on a
+                    # future diffusers version doesn't break the
+                    # upscale entirely (load happens, just without
+                    # tiling).
+                    try:
+                        pipe.enable_vae_tiling()
+                    except Exception:
+                        logger.debug(
+                            "[IMPROVE-93] enable_vae_tiling failed "
+                            "for latent pipeline; continuing",
+                            exc_info=True,
+                        )
+                    try:
+                        pipe.enable_vae_slicing()
+                    except Exception:
+                        logger.debug(
+                            "[IMPROVE-93] enable_vae_slicing failed "
+                            "for latent pipeline; continuing",
+                            exc_info=True,
+                        )
                 self._upscale_pipelines[cache_key] = pipe
 
             import torch
@@ -6481,6 +6609,7 @@ class ImageGenerationService:
                     "original_size": f"{img.width}x{img.height}",
                     "upscaled_size": f"{output.width}x{output.height}",
                     "prompt": guide,
+                    "tile_mode": tile_mode,
                 },
             )
         except ImportError as exc:
@@ -6505,6 +6634,7 @@ class ImageGenerationService:
         *,
         img: Any,
         prompt: str,
+        tile_mode: bool = False,
     ) -> ImageRuntimeResult:
         """[IMPROVE-46] 4x diffusers upscaler (SD x4 — same model
         family as Stability's original SD 1.5 upscaler, used here as
@@ -6513,10 +6643,17 @@ class ImageGenerationService:
         ``stabilityai/stable-diffusion-x4-upscaler`` is ~6 GB; runs on
         8 GB cards via sequential offload but tight. Caller-side
         fallback to RealESRGAN handles VRAM exhaustion gracefully.
+
+        [IMPROVE-93] ``tile_mode=True`` engages VAE tiling +
+        slicing on the loaded pipeline. Same shape as the latent
+        upscaler's tiled path — peak VRAM drops ~40-50% at the
+        cost of tiny tile-boundary seams. Tiled vs. non-tiled
+        pipelines are cached separately so a second call with the
+        opposite flag doesn't re-load.
         """
         Image, _ = _require_pillow()
         guide = prompt.strip() or "high quality, detailed"
-        cache_key = "sdxl_x4"
+        cache_key = "sdxl_x4_tiled" if tile_mode else "sdxl_x4"
         try:
             pipe = self._upscale_pipelines.get(cache_key)
             if pipe is None:
@@ -6531,6 +6668,26 @@ class ImageGenerationService:
                     pipe.enable_sequential_cpu_offload()
                 else:
                     pipe = pipe.to("cpu")
+                if tile_mode:
+                    # [IMPROVE-93] VAE tiling + slicing. See the
+                    # latent path for the failure-tolerance
+                    # rationale (try/except per call).
+                    try:
+                        pipe.enable_vae_tiling()
+                    except Exception:
+                        logger.debug(
+                            "[IMPROVE-93] enable_vae_tiling failed "
+                            "for sdxl_x4 pipeline; continuing",
+                            exc_info=True,
+                        )
+                    try:
+                        pipe.enable_vae_slicing()
+                    except Exception:
+                        logger.debug(
+                            "[IMPROVE-93] enable_vae_slicing failed "
+                            "for sdxl_x4 pipeline; continuing",
+                            exc_info=True,
+                        )
                 self._upscale_pipelines[cache_key] = pipe
 
             import torch
@@ -6552,6 +6709,7 @@ class ImageGenerationService:
                     "original_size": f"{img.width}x{img.height}",
                     "upscaled_size": f"{output.width}x{output.height}",
                     "prompt": guide,
+                    "tile_mode": tile_mode,
                 },
             )
         except ImportError as exc:

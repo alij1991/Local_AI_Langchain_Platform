@@ -470,17 +470,24 @@ def test_probe_mem_get_info_failure_defers(monkeypatch):
 
 def test_upscale_latent_with_insufficient_vram_returns_error(monkeypatch, tmp_path):
     """End-to-end: caller asks for ``method='latent'`` but the
-    card has only 2 GB free. Expected outcome: result.ok=False,
-    error_code='insufficient_vram', metadata reports the numbers
-    so the UI can show a "needs 3.5 GB, you have 2.0 GB" message.
-    Critically, NO diffusers load is attempted — pin via a
-    diffusers stub that would record any access."""
+    card has only 1 GB free — below BOTH the regular 3.5 GB
+    threshold AND the IMPROVE-93 tiled 1.8 GB threshold. Expected
+    outcome: result.ok=False, error_code='insufficient_vram',
+    metadata reports both thresholds so the UI can show a
+    "needs 3.5 GB regular / 1.8 GB tiled, you have 1.0 GB"
+    message. Critically, NO diffusers load is attempted — pin
+    via a diffusers stub that would record any access.
+
+    [IMPROVE-93] note: pre-IMPROVE-93 this test used 2 GB which
+    failed the regular probe. With tiled-mode added, 2 GB now
+    PASSES the tiled probe and triggers a load. Adjusted the
+    free_gb to 1.0 to keep the "no load attempted" invariant."""
     s = _make_service()
     src = _write_png(tmp_path)
-    _patch_torch_with_vram(monkeypatch, free_gb=2.0)
+    _patch_torch_with_vram(monkeypatch, free_gb=1.0)
 
     # Diffusers stub that fails the test if accessed — the probe
-    # should reject before any load attempt.
+    # should reject before any load attempt at BOTH thresholds.
     import sys
     forbidden_diffusers = MagicMock()
     forbidden_diffusers.StableDiffusionLatentUpscalePipeline.from_pretrained.side_effect = AssertionError(
@@ -494,7 +501,10 @@ def test_upscale_latent_with_insufficient_vram_returns_error(monkeypatch, tmp_pa
     assert "3.5 GB" in result.error_message or "3.5" in result.error_message
     assert result.metadata["method"] == "latent"
     assert result.metadata["vram_required_gb"] == 3.5
-    assert abs(result.metadata["vram_available_gb"] - 2.0) < 0.1
+    # [IMPROVE-93] tiled threshold also reported in metadata so UIs
+    # can render a "regular vs. tiled" comparison without a 2nd query.
+    assert result.metadata["vram_required_tiled_gb"] == 1.8
+    assert abs(result.metadata["vram_available_gb"] - 1.0) < 0.1
 
 
 def test_upscale_sdxl_x4_with_insufficient_vram_falls_back_to_realesrgan(
@@ -557,6 +567,232 @@ def test_upscale_thresholds_documented_in_module():
         "latent": 3.5,
         "sdxl_x4": 6.5,
     }
+
+
+# ── [IMPROVE-93] Tile-based upscaling (VRAM-probe-driven) ──────
+
+
+def test_upscale_tiled_thresholds_documented_in_module():
+    """[IMPROVE-93] Pin the per-method tiled-mode thresholds.
+    These are ~50% of the regular thresholds — a deliberate
+    calibration against diffusers' VAE-tiling benchmarks."""
+    s = _make_service()
+    assert s._UPSCALE_VRAM_TILED_REQUIRED_GB == {
+        "latent": 1.8,
+        "sdxl_x4": 3.5,
+    }
+
+
+def test_latent_insufficient_regular_passes_tiled_engages_tiling(
+    monkeypatch, tmp_path,
+):
+    """[IMPROVE-93] Q3=C scenario: card has 2.0 GB free —
+    below the 3.5 GB regular threshold but above the 1.8 GB
+    tiled threshold. Expected: tiled-mode upscale runs (load
+    happens), pipeline calls ``enable_vae_tiling()`` +
+    ``enable_vae_slicing()``, result.ok=True with
+    ``tile_mode=True`` in metadata."""
+    s = _make_service()
+    src = _write_png(tmp_path)
+    _patch_torch_with_vram(monkeypatch, free_gb=2.0)
+
+    import sys
+    fake_pipe = MagicMock()
+    fake_pipe.return_value.images = [Image.new("RGB", (256, 256))]
+    fake_pipe.enable_sequential_cpu_offload = MagicMock()
+    fake_pipe.enable_vae_tiling = MagicMock()
+    fake_pipe.enable_vae_slicing = MagicMock()
+    fake_pipeline_class = MagicMock()
+    fake_pipeline_class.from_pretrained = MagicMock(return_value=fake_pipe)
+    fake_diffusers = MagicMock()
+    fake_diffusers.StableDiffusionLatentUpscalePipeline = fake_pipeline_class
+    monkeypatch.setitem(sys.modules, "diffusers", fake_diffusers)
+
+    result = s.upscale_image(image_path=src, prompt="x", method="latent")
+    assert result.ok is True
+    assert result.metadata["method"] == "latent"
+    assert result.metadata["tile_mode"] is True
+    # Pipeline was loaded once, then tiling + slicing engaged.
+    assert fake_pipeline_class.from_pretrained.call_count == 1
+    assert fake_pipe.enable_vae_tiling.call_count == 1
+    assert fake_pipe.enable_vae_slicing.call_count == 1
+
+
+def test_sdxl_x4_insufficient_regular_passes_tiled_engages_tiling(
+    monkeypatch, tmp_path,
+):
+    """[IMPROVE-93] Same as the latent variant but for SDXL x4 —
+    the card has 4.5 GB free (below 6.5 GB regular, above 3.5 GB
+    tiled). Tiled upscale runs; result reports ``tile_mode=True``."""
+    s = _make_service()
+    src = _write_png(tmp_path)
+    _patch_torch_with_vram(monkeypatch, free_gb=4.5)
+
+    import sys
+    fake_pipe = MagicMock()
+    fake_pipe.return_value.images = [Image.new("RGB", (256, 256))]
+    fake_pipe.enable_sequential_cpu_offload = MagicMock()
+    fake_pipe.enable_vae_tiling = MagicMock()
+    fake_pipe.enable_vae_slicing = MagicMock()
+    fake_pipeline_class = MagicMock()
+    fake_pipeline_class.from_pretrained = MagicMock(return_value=fake_pipe)
+    fake_diffusers = MagicMock()
+    fake_diffusers.StableDiffusionUpscalePipeline = fake_pipeline_class
+    monkeypatch.setitem(sys.modules, "diffusers", fake_diffusers)
+
+    result = s.upscale_image(image_path=src, prompt="x", method="sdxl_x4")
+    assert result.ok is True
+    assert result.metadata["method"] == "sdxl_x4"
+    assert result.metadata["tile_mode"] is True
+    assert fake_pipe.enable_vae_tiling.call_count == 1
+    assert fake_pipe.enable_vae_slicing.call_count == 1
+
+
+def test_sufficient_regular_vram_does_not_engage_tiling(
+    monkeypatch, tmp_path,
+):
+    """[IMPROVE-93] Negative pin: when regular probe passes,
+    tiling is NOT engaged. Pre-Q3=C semantic preserved — users
+    with adequate VRAM get the higher-quality non-tiled result.
+    """
+    s = _make_service()
+    src = _write_png(tmp_path)
+    _patch_torch_with_vram(monkeypatch, free_gb=10.0)  # plenty
+
+    import sys
+    fake_pipe = MagicMock()
+    fake_pipe.return_value.images = [Image.new("RGB", (256, 256))]
+    fake_pipe.enable_sequential_cpu_offload = MagicMock()
+    fake_pipe.enable_vae_tiling = MagicMock()
+    fake_pipe.enable_vae_slicing = MagicMock()
+    fake_pipeline_class = MagicMock()
+    fake_pipeline_class.from_pretrained = MagicMock(return_value=fake_pipe)
+    fake_diffusers = MagicMock()
+    fake_diffusers.StableDiffusionLatentUpscalePipeline = fake_pipeline_class
+    monkeypatch.setitem(sys.modules, "diffusers", fake_diffusers)
+
+    result = s.upscale_image(image_path=src, prompt="x", method="latent")
+    assert result.ok is True
+    assert result.metadata["tile_mode"] is False
+    # Tiling MUST NOT be engaged.
+    assert fake_pipe.enable_vae_tiling.call_count == 0
+    assert fake_pipe.enable_vae_slicing.call_count == 0
+
+
+def test_tiled_and_non_tiled_pipelines_cached_separately(
+    monkeypatch, tmp_path,
+):
+    """[IMPROVE-93] The tile_mode flag flips the cache key
+    (``"latent"`` vs. ``"latent_tiled"``) so back-to-back calls
+    with different flags don't re-init from scratch — but they
+    DO maintain separate pipeline instances. Pin the cache shape."""
+    s = _make_service()
+    src = _write_png(tmp_path)
+    _patch_torch_with_vram(monkeypatch, free_gb=2.0)  # forces tile
+
+    import sys
+    fake_pipe = MagicMock()
+    fake_pipe.return_value.images = [Image.new("RGB", (256, 256))]
+    fake_pipe.enable_sequential_cpu_offload = MagicMock()
+    fake_pipe.enable_vae_tiling = MagicMock()
+    fake_pipe.enable_vae_slicing = MagicMock()
+    fake_pipeline_class = MagicMock()
+    fake_pipeline_class.from_pretrained = MagicMock(return_value=fake_pipe)
+    fake_diffusers = MagicMock()
+    fake_diffusers.StableDiffusionLatentUpscalePipeline = fake_pipeline_class
+    monkeypatch.setitem(sys.modules, "diffusers", fake_diffusers)
+
+    s.upscale_image(image_path=src, prompt="x", method="latent")
+    # Tiled pipeline cached under "latent_tiled".
+    assert "latent_tiled" in s._upscale_pipelines
+    assert "latent" not in s._upscale_pipelines
+
+
+def test_tiled_mode_handles_missing_enable_vae_tiling_gracefully(
+    monkeypatch, tmp_path,
+):
+    """[IMPROVE-93] A future diffusers version that renames or
+    drops ``enable_vae_tiling`` MUST NOT break the upscale —
+    the load + inference still happen, just without the VRAM
+    benefit. Wrapped in try/except per call."""
+    s = _make_service()
+    src = _write_png(tmp_path)
+    _patch_torch_with_vram(monkeypatch, free_gb=2.0)
+
+    import sys
+    fake_pipe = MagicMock()
+    fake_pipe.return_value.images = [Image.new("RGB", (256, 256))]
+    fake_pipe.enable_sequential_cpu_offload = MagicMock()
+    # Both tiling methods raise — simulate a future diffusers
+    # API rename.
+    fake_pipe.enable_vae_tiling.side_effect = AttributeError("removed")
+    fake_pipe.enable_vae_slicing.side_effect = AttributeError("removed")
+    fake_pipeline_class = MagicMock()
+    fake_pipeline_class.from_pretrained = MagicMock(return_value=fake_pipe)
+    fake_diffusers = MagicMock()
+    fake_diffusers.StableDiffusionLatentUpscalePipeline = fake_pipeline_class
+    monkeypatch.setitem(sys.modules, "diffusers", fake_diffusers)
+
+    result = s.upscale_image(image_path=src, prompt="x", method="latent")
+    # Upscale still succeeds even though tiling raised.
+    assert result.ok is True
+    assert result.metadata["tile_mode"] is True
+
+
+def test_vram_probe_event_carries_tile_mode_field(monkeypatch):
+    """[IMPROVE-93] The image.vram_probe event now carries a
+    ``tile_mode`` field as required (per [IMPROVE-92] schema
+    update). The regular probe call passes ``tile_mode=False``;
+    the tiled retry passes ``tile_mode=True``. Pin both."""
+    s = _make_service()
+    _patch_torch_with_vram(monkeypatch, free_gb=2.0)
+    captured = _capture_vram_probe_emits(monkeypatch)
+
+    # Regular probe.
+    s._probe_vram_for_method("latent")
+    # Tiled probe.
+    s._probe_vram_for_method("latent", tile_mode=True)
+
+    probes = [c for c in captured if c[1] == "vram_probe"]
+    assert len(probes) == 2
+    regular_ctx = probes[0][3]
+    tiled_ctx = probes[1][3]
+    assert regular_ctx["tile_mode"] is False
+    assert tiled_ctx["tile_mode"] is True
+
+
+def test_upscale_image_emits_two_probes_when_tiled_engages(monkeypatch, tmp_path):
+    """[IMPROVE-93] When the regular probe fails and the tiled
+    probe passes, TWO ``image.vram_probe`` events fire — one
+    for each. Dashboards charting "tile-mode engagement rate"
+    can compute it as count(tile_mode=True ok=True) /
+    count(tile_mode=False reason=insufficient_vram)."""
+    s = _make_service()
+    src = _write_png(tmp_path)
+    _patch_torch_with_vram(monkeypatch, free_gb=2.0)
+    captured = _capture_vram_probe_emits(monkeypatch)
+
+    import sys
+    fake_pipe = MagicMock()
+    fake_pipe.return_value.images = [Image.new("RGB", (256, 256))]
+    fake_pipe.enable_sequential_cpu_offload = MagicMock()
+    fake_pipe.enable_vae_tiling = MagicMock()
+    fake_pipe.enable_vae_slicing = MagicMock()
+    fake_pipeline_class = MagicMock()
+    fake_pipeline_class.from_pretrained = MagicMock(return_value=fake_pipe)
+    fake_diffusers = MagicMock()
+    fake_diffusers.StableDiffusionLatentUpscalePipeline = fake_pipeline_class
+    monkeypatch.setitem(sys.modules, "diffusers", fake_diffusers)
+
+    s.upscale_image(image_path=src, prompt="x", method="latent")
+    probes = [c for c in captured if c[1] == "vram_probe"]
+    assert len(probes) == 2
+    # First probe: regular threshold, ok=False (insufficient).
+    assert probes[0][3]["tile_mode"] is False
+    assert probes[0][2] == "error"  # status
+    # Second probe: tiled threshold, ok=True (sufficient).
+    assert probes[1][3]["tile_mode"] is True
+    assert probes[1][2] == "ok"
 
 
 # ── [IMPROVE-87] VRAM probe telemetry ─────────────────────────────

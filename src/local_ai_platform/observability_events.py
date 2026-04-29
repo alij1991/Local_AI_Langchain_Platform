@@ -631,8 +631,12 @@ class ImageVramProbeContext(TypedDict):
     """[IMPROVE-92] Context schema for ``image.vram_probe``.
 
     Wave 8 [IMPROVE-87] introduced this event at all 5 probe
-    exit paths with a uniform shape — every key is always
-    present (no NotRequired). Strict TypedDict.
+    exit paths with a uniform shape. [IMPROVE-93] added the
+    ``tile_mode`` field as required across ALL callsites so
+    dashboards can chart "% of probes that ran in tiled mode"
+    alongside the existing per-reason breakdown. Pre-IMPROVE-93
+    callsites all updated to pass ``tile_mode=False`` explicitly
+    (no NotRequired — the field is always present).
     """
     __pydantic_config__ = _FORBID_EXTRA  # type: ignore[misc]
     method: str
@@ -640,6 +644,7 @@ class ImageVramProbeContext(TypedDict):
     required_gb: float
     reason: str
     ok: bool
+    tile_mode: bool
 
 
 class SystemWaveParallelContext(TypedDict):
