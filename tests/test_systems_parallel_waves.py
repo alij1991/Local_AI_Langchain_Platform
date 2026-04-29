@@ -22,8 +22,11 @@ siblings see the SAME pre-wave context — they don't see each
 other's output. Pipelining within a wave is intentionally
 traded for speed.
 
-Tests use a stubbed ``chat_with_agent`` with a small synthetic
-sleep so we can verify wall-clock time goes DOWN under parallel.
+Tests use a stubbed ``chat_with_agent`` instrumented with a
+threading.Lock + counter so we can verify "how many siblings
+overlapped" deterministically — independent of scheduling
+latency or threadpool fairness. Earlier wall-clock comparisons
+(``par_dur < seq_dur``) flaked under heavy CI load.
 
 Sources (2025-2026):
   * docs/features/05-systems.md:444-455 — internal proposal.
@@ -141,20 +144,44 @@ def test_parallel_waves_executes_diamond_concurrently():
     assert max_concurrent[0] >= 2
 
 
-def test_parallel_waves_speedup_over_sequential():
-    """End-to-end wall-clock check: 4-way fan-out under parallel
-    completes in roughly 1 unit of work, not 4. Threshold is
-    loose to absorb scheduling overhead — the shape is what
-    matters, not the exact ratio."""
-    orch_par = _make_orch()
-    orch_seq = _make_orch()
+def test_parallel_waves_runs_three_siblings_concurrently():
+    """3-way fan-out under ``parallel_waves`` puts all three sibling
+    nodes in flight at the same time; the sequential version of the
+    same DAG never has more than one in flight.
 
-    def _slow_chat(agent_name: str, prompt: str, **kw):
-        time.sleep(0.1)  # 100ms per node
-        return f"output of {agent_name}"
+    Replaces a wall-clock comparison (``par_dur < seq_dur``) that
+    flaked under full-sweep CI load — Python's GIL plus threadpool
+    fairness occasionally serialised the ``to_thread`` sleeps even
+    when ``asyncio.gather`` had dispatched all three. The shape we
+    actually care about ("siblings overlap when parallel is on, not
+    when it's off") is independent of scheduling latency, so we
+    measure it directly via a concurrency counter.
 
-    orch_par.chat_with_agent = _slow_chat
-    orch_seq.chat_with_agent = _slow_chat
+    Mechanism: each stub ``chat_with_agent`` increments a counter
+    inside a lock, sleeps 50ms (releases the GIL so peers can land
+    in the same critical section), then decrements. The lock is
+    short-held; the sleep is the visible part. Once
+    ``asyncio.gather`` schedules all three ``to_thread`` futures —
+    which it does synchronously before awaiting any — every
+    threadpool worker gets to its lock-acquire well within the
+    50ms window, so ``max_concurrent`` deterministically reaches
+    the wave's fan-out width.
+    """
+    def _make_chat_with_counter():
+        in_flight: set[str] = set()
+        lock = threading.Lock()
+        max_concurrent = [0]
+
+        def chat(agent_name: str, prompt: str, **kw):
+            with lock:
+                in_flight.add(agent_name)
+                max_concurrent[0] = max(max_concurrent[0], len(in_flight))
+            time.sleep(0.05)
+            with lock:
+                in_flight.discard(agent_name)
+            return f"output of {agent_name}"
+
+        return chat, max_concurrent
 
     definition_base = {
         "nodes": [
@@ -174,22 +201,31 @@ def test_parallel_waves_speedup_over_sequential():
         "start_node_id": "start_n",
     }
 
-    definition_par = {**definition_base, "parallel_waves": True}
-    definition_seq = dict(definition_base)
+    # Parallel: all three siblings should be in flight at once.
+    orch_par = _make_orch()
+    chat_par, max_par = _make_chat_with_counter()
+    orch_par.chat_with_agent = chat_par
+    asyncio.run(
+        orch_par.execute_system_graph(
+            {**definition_base, "parallel_waves": True}, "Test"
+        )
+    )
+    assert max_par[0] == 3, (
+        f"parallel mode: expected 3 siblings concurrent, "
+        f"got max={max_par[0]}"
+    )
 
-    t0 = time.monotonic()
-    asyncio.run(orch_par.execute_system_graph(definition_par, "Test"))
-    par_dur = time.monotonic() - t0
-
-    t0 = time.monotonic()
-    asyncio.run(orch_seq.execute_system_graph(definition_seq, "Test"))
-    seq_dur = time.monotonic() - t0
-
-    # Sequential = 4 × 0.1s ≈ 0.4s+. Parallel wave (3 siblings
-    # gathered) ≈ 0.1s + 0.1s = 0.2s. Allow generous slack.
-    assert par_dur < seq_dur, (
-        f"parallel ({par_dur:.3f}s) not faster than sequential "
-        f"({seq_dur:.3f}s)"
+    # Sequential: identical DAG, no parallel flag — never more than
+    # one node in flight.
+    orch_seq = _make_orch()
+    chat_seq, max_seq = _make_chat_with_counter()
+    orch_seq.chat_with_agent = chat_seq
+    asyncio.run(
+        orch_seq.execute_system_graph(dict(definition_base), "Test")
+    )
+    assert max_seq[0] == 1, (
+        f"sequential mode: expected 1 in flight at a time, "
+        f"got max={max_seq[0]}"
     )
 
 
