@@ -663,27 +663,45 @@ def _validate_decay_config_keys(data: dict[str, Any]) -> None:
     """[IMPROVE-98] Validate that ``data`` has only keys
     ``set_decay_config`` accepts, without actually calling it.
 
+    [IMPROVE-111] Delegates to
+    ``validate_kwargs_against_keys`` in
+    ``local_ai_platform.utils.validation``. The accepted keys
+    come from ``get_decay_config().keys()`` — the live config
+    dict that ``set_decay_config`` itself validates against
+    internally (see ``set_decay_config:220`` ``valid_keys =
+    set(_DECAY_CONFIG.keys())``). Two reasons NOT to use the
+    signature-based variant:
+
+      * ``set_decay_config(*, _persist: bool = True, **updates:
+        Any)`` uses ``**kwargs``, so
+        ``inspect.signature(set_decay_config).parameters`` is
+        ``{"_persist", "updates"}`` — useless for validating
+        actual config keys.
+      * The pre-IMPROVE-111 inlined logic was buggy in the
+        same way (rejected EVERYTHING as unknown including
+        legit keys); the existing test passed only because
+        the asserted substring ``"unknown decay config key"``
+        matches both legit + truly-unknown rejections. The
+        IMPROVE-111 refactor fixes the bug while preserving
+        the externally-visible error format.
+
     Used by the dry-run path so the preview surfaces the same
     "unknown key" error a real restore would, but without the
-    disk write. The reference parameter list is pulled from
-    ``set_decay_config`` via ``inspect`` so the two stay in sync
-    automatically — a future addition to set_decay_config's
-    signature lands here without any change.
+    disk write.
 
-    Raises ``ValueError`` if any key in ``data`` is not in the
-    accepted parameter list. Messages match the
-    ``set_decay_config`` raise shape for consistency.
+    Raises ``ValueError`` if any key in ``data`` is not in
+    ``get_decay_config().keys()``. Messages match the
+    pre-IMPROVE-111 wording (``"unknown decay config key(s):
+    ..."``) for backward compatibility with tests + dashboards.
     """
-    import inspect
-    from .memory import set_decay_config
-    sig = inspect.signature(set_decay_config)
-    accepted = set(sig.parameters.keys())
-    unknown = set(data.keys()) - accepted
-    if unknown:
-        raise ValueError(
-            f"unknown decay config key(s): {sorted(unknown)}; "
-            f"accepted: {sorted(accepted)}"
-        )
+    from .memory import get_decay_config
+    from local_ai_platform.utils.validation import (
+        validate_kwargs_against_keys,
+    )
+    validate_kwargs_against_keys(
+        data, get_decay_config().keys(),
+        label="decay config key",
+    )
 
 
 # [IMPROVE-105] Per-row identifier hints. The export bundle's JSONL
