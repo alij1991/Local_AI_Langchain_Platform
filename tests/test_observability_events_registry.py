@@ -403,3 +403,175 @@ def test_no_bare_emit_imports_in_src_after_bulk_migration():
             f"{p}: {line}" for p, line in offenders[:10]
         )
     )
+
+
+# ── [IMPROVE-91] Per-subsystem Literal + @overload pins ─────────
+
+
+# Sub-tuple: (Literal-type-name, KNOWN_EVENTS-key). The Literal
+# type's ``get_args`` MUST equal the KNOWN_EVENTS frozenset for
+# the same subsystem — derivation flows ``Literal -> tuple ->
+# frozenset`` so a drift means someone bypassed get_args.
+_LITERAL_KEY_PAIRS = [
+    ("AgentAction", "agent"),
+    ("ConfigAction", "config"),
+    ("EditorAction", "editor"),
+    ("ImageAction", "image"),
+    ("ImagesAction", "images"),
+    ("InstructEditAction", "instruct_edit"),
+    ("ModelAction", "model"),
+    ("PartnerAction", "partner"),
+    ("ProviderAction", "provider"),
+    ("SystemAction", "system"),
+    ("ToolAction", "tool"),
+]
+
+
+@pytest.mark.parametrize("literal_name,subsystem_key", _LITERAL_KEY_PAIRS)
+def test_per_subsystem_literal_args_match_known_events_frozenset(
+    literal_name, subsystem_key,
+):
+    """[IMPROVE-91] Each per-subsystem ``Literal`` type's
+    ``get_args()`` MUST match its corresponding ``KNOWN_EVENTS``
+    frozenset. Pin the source-of-truth contract: a drift means
+    the ``Literal -> tuple -> frozenset`` derivation chain has
+    been bypassed (e.g. someone added an entry to KNOWN_EVENTS
+    without updating the Literal, which would silently lose
+    mypy coverage for the new action).
+    """
+    from typing import get_args as _get_args
+    import local_ai_platform.observability_events as oe
+
+    literal_type = getattr(oe, literal_name)
+    literal_actions = frozenset(_get_args(literal_type))
+    registry_actions = oe.KNOWN_EVENTS[subsystem_key]
+    assert literal_actions == registry_actions, (
+        f"[IMPROVE-91] Drift: {literal_name} args differ from "
+        f"KNOWN_EVENTS[{subsystem_key!r}]. "
+        f"Only-in-Literal: {literal_actions - registry_actions}. "
+        f"Only-in-registry: {registry_actions - literal_actions}."
+    )
+
+
+def test_per_subsystem_literal_types_exist_for_every_subsystem():
+    """[IMPROVE-91] Every key in ``KNOWN_EVENTS`` must have a
+    corresponding ``<Subsystem>Action`` Literal type exported
+    from the module. Pinned so a future contributor adding a new
+    subsystem can't skip the per-subsystem Literal step.
+    """
+    import local_ai_platform.observability_events as oe
+
+    expected = {
+        # Map registry key to expected type name
+        "agent": "AgentAction",
+        "config": "ConfigAction",
+        "editor": "EditorAction",
+        "image": "ImageAction",
+        "images": "ImagesAction",
+        "instruct_edit": "InstructEditAction",
+        "model": "ModelAction",
+        "partner": "PartnerAction",
+        "provider": "ProviderAction",
+        "system": "SystemAction",
+        "tool": "ToolAction",
+    }
+    registry_keys = set(oe.KNOWN_EVENTS.keys())
+    expected_keys = set(expected.keys())
+    assert registry_keys == expected_keys, (
+        f"[IMPROVE-91] KNOWN_EVENTS keys diverged from the "
+        f"expected per-subsystem Literal mapping. "
+        f"Only-in-registry: {registry_keys - expected_keys}. "
+        f"Only-in-mapping: {expected_keys - registry_keys}."
+    )
+    for subsystem_key, type_name in expected.items():
+        assert hasattr(oe, type_name), (
+            f"[IMPROVE-91] Subsystem {subsystem_key!r} has a "
+            f"KNOWN_EVENTS entry but no {type_name} Literal "
+            f"exported from observability_events.py. Add "
+            f"``{type_name} = Literal[...]`` alongside the "
+            f"sibling types."
+        )
+
+
+def test_per_subsystem_overload_count_matches_subsystem_count():
+    """[IMPROVE-91] Each subsystem in ``KNOWN_EVENTS`` MUST have
+    exactly one ``@overload`` signature for ``emit_typed``. If a
+    new subsystem is added without an overload, mypy silently
+    drops to the impl signature (which accepts ``action: str``)
+    for that subsystem — the lint catch is lost.
+
+    This pin counts ``@overload``-decorated ``emit_typed`` defs
+    in the source by static parsing.
+    """
+    src = (
+        Path(__file__).parent.parent
+        / "src" / "local_ai_platform"
+        / "observability_events.py"
+    ).read_text(encoding="utf-8")
+    # Match the @overload + def emit_typed(... pattern. Each
+    # overload starts with "@overload\ndef emit_typed("
+    overload_pattern = re.compile(
+        r"^@overload\s*\ndef\s+emit_typed\s*\(",
+        re.MULTILINE,
+    )
+    overload_count = len(overload_pattern.findall(src))
+    import local_ai_platform.observability_events as oe
+    subsystem_count = len(oe.KNOWN_EVENTS)
+    assert overload_count == subsystem_count, (
+        f"[IMPROVE-91] Overload count ({overload_count}) doesn't "
+        f"match subsystem count ({subsystem_count}). Either an "
+        f"@overload was added without a corresponding KNOWN_EVENTS "
+        f"entry, or vice-versa. Adding a new subsystem requires "
+        f"three coordinated edits: (1) Literal type, (2) "
+        f"KNOWN_EVENTS entry, (3) @overload def."
+    )
+
+
+def test_emit_typed_typo_action_still_raises_at_runtime():
+    """[IMPROVE-91] Static type-checking via @overload doesn't
+    eliminate the runtime check — it adds a layer on top.
+    Dynamic callers (test fixtures using setattr, future
+    metaprogramming, modules deferred-loading the registry) can
+    still pass an unknown action and MUST get
+    ``UnknownEventNameError`` at runtime.
+
+    Pin the safety-net behaviour so a future "we have static
+    checks now, drop the runtime check" refactor can't slip
+    through.
+    """
+    from local_ai_platform.observability_events import (
+        emit_typed,
+        UnknownEventNameError,
+    )
+    with pytest.raises(UnknownEventNameError) as ei:
+        # Cast away static type-checking for the dynamic call.
+        # The runtime check MUST still fire.
+        emit_typed("agent", "tool_calll")  # type: ignore[arg-type]
+    msg = str(ei.value)
+    assert "agent.tool_calll" in msg
+    assert "tool_call" in msg  # registered actions listed for hint
+
+
+def test_emit_typed_overloads_alphabetised_by_subsystem_in_source():
+    """[IMPROVE-91] The 11 ``@overload`` signatures appear in
+    alphabetical order of subsystem name in the source file.
+    Pin the convention so a future addition lands at the right
+    place — keeps diffs reviewable.
+    """
+    src = (
+        Path(__file__).parent.parent
+        / "src" / "local_ai_platform"
+        / "observability_events.py"
+    ).read_text(encoding="utf-8")
+    # Each overload starts with @overload then has
+    # ``subsystem: Literal["X"]`` on the next line.
+    overload_subsystem_pattern = re.compile(
+        r"@overload\s*\ndef\s+emit_typed\s*\(\s*\n\s*subsystem:\s*Literal\[\"([a-z_]+)\"\]",
+        re.MULTILINE,
+    )
+    subsystems_in_order = overload_subsystem_pattern.findall(src)
+    assert subsystems_in_order == sorted(subsystems_in_order), (
+        f"[IMPROVE-91] @overload subsystems not alphabetised. "
+        f"Found order: {subsystems_in_order}. "
+        f"Expected: {sorted(subsystems_in_order)}."
+    )

@@ -4,14 +4,20 @@ Wave 6 added 8 new observability event types (``wave_parallel``,
 ``wave_parallel_fallback``, ``optimization_plan``,
 ``oom_ladder_start`` / ``oom_ladder_done`` / ``oom_stage_attempt``,
 ``routing_decision`` plus its SSE variant, enhancer fallback
-context). The codebase now has 36 unique ``(subsystem, action)``
-pairs in ``emit()`` calls, all bare strings. A typo in either
-field produces a row in ``app_events`` with a misspelled name —
-never caught at lint time, only by an operator noticing the
-wrong name in a dashboard query weeks later.
+context). The codebase grew to 51 unique ``(subsystem, action)``
+pairs after [IMPROVE-89]'s bulk migration. A typo in either
+field used to produce a row in ``app_events`` with a misspelled
+name — never caught at lint time, only by an operator noticing
+the wrong name in a dashboard query weeks later.
 
 This module is the single source of truth for the registered
-event names. Two surfaces:
+event names. Three surfaces:
+
+  * Per-subsystem ``Literal`` types (``AgentAction``,
+    ``ImageAction``, etc.) — the source of truth that mypy
+    pattern-matches against. Tuples + frozensets are DERIVED
+    from the Literals via ``typing.get_args`` so the registry
+    can never drift from the type aliases.
 
   * ``KNOWN_EVENT_NAMES`` — flat ``frozenset[str]`` of
     ``"subsystem.action"`` strings. Tests assert their callsites
@@ -19,82 +25,93 @@ event names. Two surfaces:
     ``test_registry_covers_every_emit_callsite_in_codebase``
     walks the source tree and fails CI on any unregistered emit.
 
-  * ``emit_typed(subsystem, action, ...)`` — typed front door.
-    ``subsystem`` is a ``Literal[...]`` so mypy catches misspelled
-    subsystem strings at lint time; ``action`` is validated at
-    runtime against the per-subsystem registry. Existing
-    ``emit()`` callsites keep working unchanged so this rolls in
-    incrementally — new code uses ``emit_typed``, old code
-    migrates opportunistically.
+  * ``emit_typed(subsystem, action, ...)`` — typed front door
+    with per-subsystem ``@overload`` signatures. mypy sees a
+    distinct overload per subsystem so ``emit_typed("agent",
+    "tool_calll", ...)`` (typo) fails at lint without ever
+    running. Runtime validation in the impl is preserved as a
+    safety net for dynamic callers (test fixtures, future
+    metaprogramming).
 
 Why a separate module rather than baking into observability.py:
 ``observability.py`` is imported very early (the config bootstrap
 uses it). Keeping the registry in its own file means future
-growth — per-event schemas, deprecation markers, OTel attribute
-mappings — can land here without thrashing the hot
-``observability.emit`` import path.
+growth — per-event schemas (IMPROVE-92), deprecation markers,
+OTel attribute mappings — can land here without thrashing the
+hot ``observability.emit`` import path.
 
-Why per-subsystem ``frozenset`` rather than one big ``Literal``
-of all action names: actions overlap in name across subsystems
-(``"load"`` exists for ``image`` AND ``instruct_edit``; they're
-different events with different context shapes). A flat union
-would lose that distinction, and a per-subsystem ``Literal`` +
-``overload`` set would add a lot of typing machinery for marginal
-benefit. The runtime check in ``emit_typed`` catches the
-misspelled-action case at first call.
+[IMPROVE-91] history note: pre-this-commit the action arg was
+typed as plain ``str`` because per-subsystem Literals + overload
+were rejected as "too much machinery for marginal benefit."
+After Wave 8's four real-world ``emit_typed`` callsites
+validated the pattern AND the [IMPROVE-89] keystone tightening
+revealed three pre-existing coverage gaps (digit-bearing actions,
+dotted actions, kwarg-shape calls), the cost-benefit flipped:
+mypy catching action typos at lint is now worth the ~130 LoC of
+overload signatures.
 
 Sources (2025-2026):
   * docs/features/09-observability.md — internal observability
     surface this module formalises.
   * Wave 6 IMPROVE-36/40/44/35 telemetry commits — the 8 new
     event names that motivated this registry.
+  * Wave 7 [IMPROVE-80] commit (25b851e) — ``emit_typed`` front
+    door this commit extends with per-subsystem overloads.
+  * Wave 9 [IMPROVE-89] commit — bulk migration that proved the
+    pattern across 100 callsites.
   * OpenTelemetry semantic conventions for GenAI (otel-genai
     2025-12 release): events similarly registered as constants
     in ``opentelemetry.semconv.gen_ai.events``.
+  * Python typing module + ``Literal`` + ``@overload`` patterns
+    (PEP 586 + PEP 484, plus 2025 typing-extensions notes):
+    https://docs.python.org/3/library/typing.html#typing.Literal
 """
 from __future__ import annotations
 
-from typing import Any, Literal
+from typing import Any, Literal, get_args, overload
 
 from .observability import emit as _emit
 
 
-# ── Per-subsystem name catalogues ──────────────────────────────
+# ── Per-subsystem Literal types ────────────────────────────────
 
-# Each tuple is sorted for stable diff in code review when a new
-# event lands. The grouping comments document the subsystem.
+# The Literal types are the SOURCE OF TRUTH. The action tuples +
+# the ``KNOWN_EVENTS`` dict + ``KNOWN_EVENT_NAMES`` frozenset are
+# derived. A new event lands here as a new entry in the relevant
+# Literal; tests + downstream tuples + overloads pick it up
+# automatically.
 
 # agent: orchestrator-level lifecycle (tool calls, fallbacks,
 # auto-resume after dangerous-tool interrupts) plus
 # [IMPROVE-NEW-18] /agents/* validation rejections so operators can
 # see "30% of agent creates fail with invalid_tool" without log
 # scraping.
-_AGENT_ACTIONS = (
+AgentAction = Literal[
     "fallback",
     "protected_delete_blocked",
     "tool_auto_resume",
     "tool_call",
     "tool_result",
     "validation_rejected",
-)
+]
 
 # config: settings/env bootstrap. Single ``load`` event today;
 # [IMPROVE-89] registered the subsystem during the bulk
 # emit_typed migration since the pre-existing kwarg-shape emit
 # in config.py used to fly under the keystone test's regex.
-_CONFIG_ACTIONS = (
+ConfigAction = Literal[
     "load",
-)
+]
 
 # editor: image-editor session ops (apply_edit, undo, redo,
 # blend, export). Wave 5 [IMPROVE-52/53/56/57] all wrote here.
-_EDITOR_ACTIONS = (
+EditorAction = Literal[
     "blend_with_previous",
     "export",
     "op",
     "redo",
     "undo",
-)
+]
 
 # image: image generation pipeline. Wave 5/6 added several
 # observability events (oom_ladder_*, optimization_plan).
@@ -105,7 +122,12 @@ _EDITOR_ACTIONS = (
 # dynamic-action and ignored by the keystone). [IMPROVE-89]
 # registered them after tightening the keystone regex revealed
 # they'd been firing without coverage.
-_IMAGE_ACTIONS = (
+# [IMPROVE-87] Pre-flight VRAM probe for the diffusers-based
+# upscalers (latent / sdxl_x4) carries method + available_gb +
+# required_gb + reason so dashboards can chart "% of upscale
+# calls that pre-flight rejected the diffusers path" without
+# grepping logs.
+ImageAction = Literal[
     "infer",
     "infer.start",
     "load",
@@ -116,24 +138,17 @@ _IMAGE_ACTIONS = (
     "optimization_plan",
     "plan",
     "postprocess",
-    # [IMPROVE-87] Pre-flight VRAM probe for the diffusers-based
-    # upscalers (latent / sdxl_x4). The probe fires once per
-    # ``upscale_image`` call when the method is one of the
-    # diffusers options. Carries method + available_gb + required_gb
-    # + reason so dashboards can chart "% of upscale calls that
-    # pre-flight rejected the diffusers path" without grepping
-    # logs. Mirror of the IMPROVE-79 commit's spawned-followup #2.
     "vram_probe",
     "warmup",
-)
+]
 
 # images (plural — one historical inconsistency from
 # [IMPROVE-39] / [IMPROVE-47] detection telemetry). Don't
 # normalise here; the event-name drift is real and a future
 # cleanup would touch every consumer query/dashboard.
-_IMAGES_ACTIONS = (
+ImagesAction = Literal[
     "detect_hints",
-)
+]
 
 # instruct_edit: editor model-load / inference pipeline
 # (separate subsystem from "editor" because the load is
@@ -141,11 +156,11 @@ _IMAGES_ACTIONS = (
 # spinner). ``run.start`` is the literal-string companion to
 # ``run``; [IMPROVE-89] surfaced it during keystone-regex
 # tightening.
-_INSTRUCT_EDIT_ACTIONS = (
+InstructEditAction = Literal[
     "load",
     "run",
     "run.start",
-)
+]
 
 # model: HF download lifecycle (snapshot + hf_hub_download).
 # Actions use a dotted shape (``download.start`` etc.) because
@@ -155,12 +170,12 @@ _INSTRUCT_EDIT_ACTIONS = (
 # here closes that gap; the regex was tightened in the same
 # commit to allow ``[a-z_]+(?:\.[a-z_]+)*`` action names so
 # future dotted actions are pinned too.
-_MODEL_ACTIONS = (
+ModelAction = Literal[
     "download.done",
     "download.error",
     "download.progress",
     "download.start",
-)
+]
 
 # partner: voice/persona partner. ``chat.start`` /
 # ``voice_init.start`` are literal-string companions to the
@@ -171,7 +186,7 @@ _MODEL_ACTIONS = (
 # firing without coverage (digit in ``mem0_init`` and dotted
 # names in the ``.start``/``.partial`` shapes both escaped the
 # old regex).
-_PARTNER_ACTIONS = (
+PartnerAction = Literal[
     "chat",
     "chat.start",
     "emotion_detect",
@@ -182,12 +197,12 @@ _PARTNER_ACTIONS = (
     "tts",
     "voice_init",
     "voice_init.start",
-)
+]
 
 # provider: LLM provider availability + routing.
-_PROVIDER_ACTIONS = (
+ProviderAction = Literal[
     "availability_probe",
-)
+]
 
 # system: DAG executor lifecycle. Wave 5/6 added
 # routing_decision (IMPROVE-35 SSE), wave_parallel +
@@ -195,36 +210,57 @@ _PROVIDER_ACTIONS = (
 # (IMPROVE-31). ``run.start`` is the literal-string companion to
 # ``run_done``; [IMPROVE-89] registered it after the keystone
 # regex tightening surfaced the gap.
-_SYSTEM_ACTIONS = (
+# [IMPROVE-85] Mirror of [IMPROVE-82]'s
+# ``agent.validation_rejected``. Pre-IMPROVE-85 the
+# /systems/* boundary fired ``system.validate`` with
+# ``status="error"`` for both Pydantic schema-invalid and
+# Kahn-cycle-detected rejections — that conflates "user posted
+# bad JSON" with "validation completed OK" because both share
+# the event name. Splitting the rejection case off into its own
+# action lets dashboards chart 400-rate separately from
+# total-system-runs without a SQL filter.
+SystemAction = Literal[
     "node_end",
     "node_start",
     "routing_decision",
     "run.start",
     "run_done",
     "validate",
-    # [IMPROVE-85] Mirror of [IMPROVE-82]'s
-    # ``agent.validation_rejected``. Pre-IMPROVE-85 the
-    # /systems/* boundary fired ``system.validate`` with
-    # ``status="error"`` for both Pydantic schema-invalid and
-    # Kahn-cycle-detected rejections — that conflates "user
-    # posted bad JSON" with "validation completed OK" because
-    # both share the event name. Splitting the rejection case
-    # off into its own action lets dashboards chart 400-rate
-    # separately from total-system-runs without a SQL filter.
     "validation_rejected",
     "wave_parallel",
     "wave_parallel_fallback",
-)
+]
 
 # tool: built-in tool execution. ``file_ops.path_rejected`` was
 # registered by [IMPROVE-89] — tools/file_ops.py and
 # tools/rag_tools.py both fire it from their workspace-sandbox
 # rejection paths, but the dotted action name didn't match the
 # pre-[IMPROVE-89] keystone regex.
-_TOOL_ACTIONS = (
+ToolAction = Literal[
     "calculator_eval",
     "file_ops.path_rejected",
-)
+]
+
+
+# ── Derived per-subsystem tuples ───────────────────────────────
+
+# Each tuple is derived from the corresponding Literal via
+# ``typing.get_args``. New events land in ONE place (the Literal)
+# and propagate everywhere automatically. Order matches the
+# Literal's declaration order (Python preserves it since 3.7+);
+# the ``frozenset`` cast in ``KNOWN_EVENTS`` strips ordering.
+
+_AGENT_ACTIONS: tuple[str, ...] = get_args(AgentAction)
+_CONFIG_ACTIONS: tuple[str, ...] = get_args(ConfigAction)
+_EDITOR_ACTIONS: tuple[str, ...] = get_args(EditorAction)
+_IMAGE_ACTIONS: tuple[str, ...] = get_args(ImageAction)
+_IMAGES_ACTIONS: tuple[str, ...] = get_args(ImagesAction)
+_INSTRUCT_EDIT_ACTIONS: tuple[str, ...] = get_args(InstructEditAction)
+_MODEL_ACTIONS: tuple[str, ...] = get_args(ModelAction)
+_PARTNER_ACTIONS: tuple[str, ...] = get_args(PartnerAction)
+_PROVIDER_ACTIONS: tuple[str, ...] = get_args(ProviderAction)
+_SYSTEM_ACTIONS: tuple[str, ...] = get_args(SystemAction)
+_TOOL_ACTIONS: tuple[str, ...] = get_args(ToolAction)
 
 
 # ── Frozen registry ────────────────────────────────────────────
@@ -255,15 +291,10 @@ KNOWN_EVENT_NAMES: frozenset[str] = frozenset(
 )
 
 
-# ── Literal type alias ─────────────────────────────────────────
+# ── Subsystem Literal alias ────────────────────────────────────
 
 # ``Literal`` of registered subsystem names. mypy catches a typo
-# in the subsystem arg of ``emit_typed`` at lint time. The
-# action arg is intentionally typed as plain ``str`` because per-
-# subsystem Literals would require ``overload`` + a redeclaration
-# per subsystem — significant typing machinery for marginal
-# payoff (the runtime check in ``emit_typed`` catches the
-# misspelled-action case at first call).
+# in the subsystem arg of ``emit_typed`` at lint time.
 SubsystemName = Literal[
     "agent",
     "config",
@@ -291,6 +322,176 @@ class UnknownEventNameError(ValueError):
     """
 
 
+# [IMPROVE-91] Per-subsystem ``@overload`` signatures so that
+# mypy / pyright catch a misspelled action AT LINT TIME — e.g.
+# ``emit_typed("agent", "tool_calll", ...)`` (typo: extra ``l``)
+# fails type-check without running. The runtime check below stays
+# as a safety net for dynamic callers (test fixtures using
+# ``setattr``, future metaprogramming).
+#
+# The 11 overloads are alphabetised by subsystem name. Each
+# mirrors the impl signature exactly: same kwargs, same defaults.
+# When a new subsystem is added, three coordinated edits are
+# required: (1) the new ``Literal`` type definition above, (2) a
+# new entry in ``KNOWN_EVENTS``, (3) a new ``@overload`` here. The
+# keystone test ``test_per_subsystem_overload_count_matches_known_events``
+# fails CI if (3) is missed.
+
+
+@overload
+def emit_typed(
+    subsystem: Literal["agent"],
+    action: AgentAction,
+    status: str = "ok",
+    *,
+    duration_ms: int | None = None,
+    error_code: str | None = None,
+    error_message: str | None = None,
+    context: dict[str, Any] | None = None,
+    perf: dict[str, Any] | None = None,
+) -> None: ...
+
+
+@overload
+def emit_typed(
+    subsystem: Literal["config"],
+    action: ConfigAction,
+    status: str = "ok",
+    *,
+    duration_ms: int | None = None,
+    error_code: str | None = None,
+    error_message: str | None = None,
+    context: dict[str, Any] | None = None,
+    perf: dict[str, Any] | None = None,
+) -> None: ...
+
+
+@overload
+def emit_typed(
+    subsystem: Literal["editor"],
+    action: EditorAction,
+    status: str = "ok",
+    *,
+    duration_ms: int | None = None,
+    error_code: str | None = None,
+    error_message: str | None = None,
+    context: dict[str, Any] | None = None,
+    perf: dict[str, Any] | None = None,
+) -> None: ...
+
+
+@overload
+def emit_typed(
+    subsystem: Literal["image"],
+    action: ImageAction,
+    status: str = "ok",
+    *,
+    duration_ms: int | None = None,
+    error_code: str | None = None,
+    error_message: str | None = None,
+    context: dict[str, Any] | None = None,
+    perf: dict[str, Any] | None = None,
+) -> None: ...
+
+
+@overload
+def emit_typed(
+    subsystem: Literal["images"],
+    action: ImagesAction,
+    status: str = "ok",
+    *,
+    duration_ms: int | None = None,
+    error_code: str | None = None,
+    error_message: str | None = None,
+    context: dict[str, Any] | None = None,
+    perf: dict[str, Any] | None = None,
+) -> None: ...
+
+
+@overload
+def emit_typed(
+    subsystem: Literal["instruct_edit"],
+    action: InstructEditAction,
+    status: str = "ok",
+    *,
+    duration_ms: int | None = None,
+    error_code: str | None = None,
+    error_message: str | None = None,
+    context: dict[str, Any] | None = None,
+    perf: dict[str, Any] | None = None,
+) -> None: ...
+
+
+@overload
+def emit_typed(
+    subsystem: Literal["model"],
+    action: ModelAction,
+    status: str = "ok",
+    *,
+    duration_ms: int | None = None,
+    error_code: str | None = None,
+    error_message: str | None = None,
+    context: dict[str, Any] | None = None,
+    perf: dict[str, Any] | None = None,
+) -> None: ...
+
+
+@overload
+def emit_typed(
+    subsystem: Literal["partner"],
+    action: PartnerAction,
+    status: str = "ok",
+    *,
+    duration_ms: int | None = None,
+    error_code: str | None = None,
+    error_message: str | None = None,
+    context: dict[str, Any] | None = None,
+    perf: dict[str, Any] | None = None,
+) -> None: ...
+
+
+@overload
+def emit_typed(
+    subsystem: Literal["provider"],
+    action: ProviderAction,
+    status: str = "ok",
+    *,
+    duration_ms: int | None = None,
+    error_code: str | None = None,
+    error_message: str | None = None,
+    context: dict[str, Any] | None = None,
+    perf: dict[str, Any] | None = None,
+) -> None: ...
+
+
+@overload
+def emit_typed(
+    subsystem: Literal["system"],
+    action: SystemAction,
+    status: str = "ok",
+    *,
+    duration_ms: int | None = None,
+    error_code: str | None = None,
+    error_message: str | None = None,
+    context: dict[str, Any] | None = None,
+    perf: dict[str, Any] | None = None,
+) -> None: ...
+
+
+@overload
+def emit_typed(
+    subsystem: Literal["tool"],
+    action: ToolAction,
+    status: str = "ok",
+    *,
+    duration_ms: int | None = None,
+    error_code: str | None = None,
+    error_message: str | None = None,
+    context: dict[str, Any] | None = None,
+    perf: dict[str, Any] | None = None,
+) -> None: ...
+
+
 def emit_typed(
     subsystem: SubsystemName,
     action: str,
@@ -302,21 +503,23 @@ def emit_typed(
     context: dict[str, Any] | None = None,
     perf: dict[str, Any] | None = None,
 ) -> None:
-    """[IMPROVE-NEW-16] Type-checked + runtime-validated wrapper
-    around ``observability.emit``.
+    """[IMPROVE-NEW-16 + IMPROVE-91] Type-checked + runtime-validated
+    wrapper around ``observability.emit``.
 
     Why:
       * mypy catches misspelled subsystem strings at lint time
         via the ``SubsystemName`` Literal.
-      * Runtime validation catches misspelled action strings — a
-        per-subsystem Literal would need ``overload``, too much
-        machinery for now. An unknown name raises
-        ``UnknownEventNameError`` so a CI grep-and-test catches it
-        before the wrong event lands in production app_events.
+      * mypy catches misspelled action strings at lint time via
+        the per-subsystem ``Literal`` types (e.g. ``AgentAction``)
+        in the ``@overload`` signatures above.
+      * Runtime validation catches dynamic-action typos that
+        bypass the static check — test fixtures using
+        ``setattr``, future metaprogramming, etc. An unknown
+        name raises ``UnknownEventNameError`` so a CI grep-and-
+        test catches it before the wrong event lands in
+        production app_events.
       * Behaviour-equivalent to ``emit`` for every kwarg the
-        wrapped function accepts. Use ``emit_typed`` for new
-        callsites; existing ``emit`` callsites can migrate
-        opportunistically — the keystone test
+        wrapped function accepts. The keystone test
         ``test_registry_covers_every_emit_callsite_in_codebase``
         ensures every event name is registered regardless of
         which front door called it.
