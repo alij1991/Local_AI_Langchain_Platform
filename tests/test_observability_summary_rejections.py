@@ -36,6 +36,15 @@ def client(monkeypatch, tmp_path):
     pollute the dev DB.
 
     Mirror of test_dag_lint.py's fixture — same pattern.
+
+    [IMPROVE-115] Truncate app_events AFTER TestClient startup
+    but BEFORE yielding so each test starts with a clean event
+    log. /summary's items rollup is a GROUP BY count — startup
+    events would otherwise appear as extra (subsystem, action)
+    tuples + skew the dim-axis fill_zero_dim assertions. The
+    IMPROVE-90 tests above are pattern-based (rejection
+    presence, group-by counts on inserted events), so the
+    truncation is harmless for them.
     """
     pytest.importorskip("fastapi")
     from fastapi.testclient import TestClient
@@ -50,6 +59,14 @@ def client(monkeypatch, tmp_path):
         # Make the active DB easily accessible so each test can
         # insert events directly without re-resolving DB_PATH.
         c._db_mod = db_mod
+        # [IMPROVE-115] Clean event log before each test (see
+        # docstring above for rationale).
+        conn = db_mod.get_conn()
+        try:
+            conn.execute("DELETE FROM app_events")
+            conn.commit()
+        finally:
+            conn.close()
         yield c
 
 
@@ -488,14 +505,157 @@ def test_summary_rejections_filtered_by_exact_error_code(client):
 
 
 def test_summary_filters_field_echoed_back(client):
-    """[IMPROVE-108] /summary now carries a ``filters`` echo (new
-    in this commit) so dashboards using the prefix filter can
-    render badges. The field has 2 always-present None keys
-    (error_code + error_code_prefix) when no filter is passed."""
+    """[IMPROVE-108+115] /summary now carries a ``filters`` echo
+    (new in IMPROVE-108) so dashboards using the prefix filter can
+    render badges. Post-IMPROVE-115 the dict carries 3 keys
+    (error_code, error_code_prefix, fill_zero_dim) — the latter
+    is False by default since fill_zero_dim is opt-in."""
     resp = client.get("/observability/summary")
     body = resp.json()
     assert "filters" in body
     assert body["filters"] == {
         "error_code": None,
         "error_code_prefix": None,
+        "fill_zero_dim": False,
     }
+
+
+# ── [IMPROVE-115] Dim-axis zero-fill ────────────────────────
+
+
+def test_summary_fill_zero_dim_default_off(client):
+    """[IMPROVE-115] Default behaviour: only fired (subsystem,
+    action) tuples appear in items. Pre-IMPROVE-115 contract
+    is preserved (additive, opt-in)."""
+    _insert_event(client._db_mod, subsystem="image", action="generate")
+    resp = client.get("/observability/summary")
+    body = resp.json()
+    # Only one item — the (image, generate) tuple we inserted.
+    assert len(body["items"]) == 1
+    assert body["items"][0]["subsystem"] == "image"
+    assert body["items"][0]["action"] == "generate"
+    assert body["filters"]["fill_zero_dim"] is False
+
+
+def test_summary_fill_zero_dim_true_pads_unfired_tuples(client):
+    """[IMPROVE-115] With fill_zero_dim=true, items contains
+    EVERY tuple in EVENT_CONTEXT_SCHEMAS — fired tuples plus
+    zero-rows for every unfired tuple."""
+    from local_ai_platform.observability_events import (
+        EVENT_CONTEXT_SCHEMAS,
+    )
+    _insert_event(client._db_mod, subsystem="image", action="generate")
+
+    resp = client.get("/observability/summary?fill_zero_dim=true")
+    body = resp.json()
+    # Total items = registered tuples (the fired one is in the
+    # registry too, so total = len(EVENT_CONTEXT_SCHEMAS)).
+    assert len(body["items"]) == len(EVENT_CONTEXT_SCHEMAS)
+    assert body["filters"]["fill_zero_dim"] is True
+
+
+def test_summary_fill_zero_dim_zero_rows_have_canonical_shape(client):
+    """[IMPROVE-115] Zero-padded rows have total=0, errors=0,
+    cancelled=0, avg_ms=null, max_ms=null. Pin the canonical
+    shape so dashboards can rely on the field set."""
+    resp = client.get("/observability/summary?fill_zero_dim=true")
+    body = resp.json()
+    # Find a zero-row (any row with total=0 — there'll be at
+    # least one since no events fired).
+    zero_rows = [r for r in body["items"] if r["total"] == 0]
+    assert zero_rows, "expected at least one zero-padded row"
+    sample = zero_rows[0]
+    assert sample["total"] == 0
+    assert sample["errors"] == 0
+    assert sample["cancelled"] == 0
+    assert sample["avg_ms"] is None
+    assert sample["max_ms"] is None
+    # Canonical key set — pin so a future addition lands as
+    # a deliberate +1.
+    assert set(sample.keys()) == {
+        "subsystem", "action", "total", "errors",
+        "cancelled", "avg_ms", "max_ms",
+    }
+
+
+def test_summary_fill_zero_dim_does_not_duplicate_fired_tuples(client):
+    """[IMPROVE-115] If a tuple fired AND is in the registry,
+    it appears EXACTLY ONCE (the fired version with real
+    counts; not a zero-row alongside)."""
+    _insert_event(client._db_mod, subsystem="image", action="generate")
+
+    resp = client.get("/observability/summary?fill_zero_dim=true")
+    items = resp.json()["items"]
+    matches = [r for r in items
+               if r["subsystem"] == "image" and r["action"] == "generate"]
+    # Exactly one row for (image, generate).
+    assert len(matches) == 1
+    # And it's the fired version (total=1, not 0).
+    assert matches[0]["total"] == 1
+
+
+def test_summary_fill_zero_dim_fired_rows_precede_zero_rows(client):
+    """[IMPROVE-115] Fired rows keep their SQL-derived order
+    at the head; zero-rows follow at the tail (sorted
+    alphabetically). Pin the deterministic ordering so chart
+    consumers can render a stable layout."""
+    _insert_event(client._db_mod, subsystem="image", action="generate")
+    _insert_event(client._db_mod, subsystem="image", action="generate",
+                  status="error", error_code="oom")
+
+    resp = client.get("/observability/summary?fill_zero_dim=true")
+    items = resp.json()["items"]
+    # First row is the fired one (total > 0).
+    assert items[0]["total"] > 0
+    # Last items have total=0 (zero-padded).
+    assert items[-1]["total"] == 0
+
+
+def test_summary_fill_zero_dim_zero_rows_alphabetical(client):
+    """[IMPROVE-115] Zero-rows are sorted alphabetically by
+    (subsystem, action) so output is deterministic across
+    test runs and Python dict iteration orders."""
+    resp = client.get("/observability/summary?fill_zero_dim=true")
+    items = resp.json()["items"]
+    zero_rows = [r for r in items if r["total"] == 0]
+    sorted_keys = sorted([(r["subsystem"], r["action"]) for r in zero_rows])
+    actual_keys = [(r["subsystem"], r["action"]) for r in zero_rows]
+    assert actual_keys == sorted_keys
+
+
+def test_summary_fill_zero_dim_does_not_affect_rejections(client):
+    """[IMPROVE-115] The dim-axis pad applies to ITEMS only —
+    rejections array stays unchanged. Pin the IMPROVE-108
+    "rejections is filter-scoped" contract under fill_zero_dim."""
+    _insert_event(client._db_mod, subsystem="image", action="generate",
+                  status="error", error_code="oom")
+
+    no_pad = client.get("/observability/summary").json()
+    with_pad = client.get(
+        "/observability/summary?fill_zero_dim=true"
+    ).json()
+    assert no_pad["rejections"] == with_pad["rejections"]
+
+
+def test_summary_fill_zero_dim_composes_with_error_code_prefix(client):
+    """[IMPROVE-115] fill_zero_dim is independent of the
+    rejection filters — passing both works and rejections
+    stays filter-scoped while items gets full-grid."""
+    _insert_event(client._db_mod, subsystem="image", action="generate",
+                  status="error", error_code="cuda_oom")
+    _insert_event(client._db_mod, subsystem="image", action="generate",
+                  status="error", error_code="schema_invalid")
+
+    resp = client.get(
+        "/observability/summary"
+        "?fill_zero_dim=true"
+        "&error_code_prefix=cuda"
+    )
+    body = resp.json()
+    # Items has the full grid (fill_zero_dim).
+    assert any(r["total"] == 0 for r in body["items"])
+    # Rejections is filter-scoped to cuda_*.
+    assert all(
+        r["error_code"].startswith("cuda")
+        for r in body["rejections"]
+    )

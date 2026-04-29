@@ -506,6 +506,7 @@ async def obs_summary(
     window_hours: int = 24,
     error_code: str | None = None,
     error_code_prefix: str | None = None,
+    fill_zero_dim: bool = False,
 ):
     """Error rate + avg/max duration per (subsystem, action).
 
@@ -531,6 +532,23 @@ async def obs_summary(
     activity). The two error filters compose with AND so
     ``?error_code_prefix=cuda_&error_code=cuda_oom`` is a
     well-defined (if degenerate) "exact match within prefix".
+
+    [IMPROVE-115] ``fill_zero_dim=true`` enumerates EVERY
+    registered (subsystem, action) tuple from
+    ``EVENT_CONTEXT_SCHEMAS`` (the post-[IMPROVE-107] 100%-
+    coverage registry, 66 tuples today) and zero-pads tuples
+    that did NOT fire in the window. Dim-axis mirror of
+    [IMPROVE-110]'s time-axis pad on /timeseries. Default-off
+    so the lean payload stays the default for dashboards that
+    only care about active tuples; chart consumers wanting the
+    full grid get one query.
+
+    Zero-padded rows have ``total=0``, ``errors=0``,
+    ``cancelled=0``, ``avg_ms=null``, ``max_ms=null``
+    (matching SQLite's AVG/MAX behaviour over an empty set).
+    The rejections array is NOT zero-padded — by definition
+    rejections are events that fired with a non-null
+    error_code, so a zero-row would be meaningless there.
     """
     window_hours = max(1, min(int(window_hours or 24), 24 * 365))
     conn = get_conn()
@@ -564,6 +582,38 @@ async def obs_summary(
         )
     finally:
         conn.close()
+
+    # [IMPROVE-115] Dim-axis zero-padding. Enumerate the post-
+    # [IMPROVE-107] 100%-coverage registry's 66 (subsystem,
+    # action) tuples and append zero-rows for tuples that
+    # didn't fire in the window. Fired rows keep their SQL-
+    # derived order (errors DESC, total DESC); zero-rows
+    # follow them sorted alphabetically by (subsystem, action)
+    # for deterministic output.
+    if fill_zero_dim:
+        # Local import to keep the dim-axis registry coupling
+        # explicit at the callsite (mirrors how /timeseries'
+        # SQLite recursive CTE is co-located with its endpoint).
+        from local_ai_platform.observability_events import (
+            EVENT_CONTEXT_SCHEMAS,
+        )
+        seen = {(item["subsystem"], item["action"]) for item in items}
+        zero_rows: list[dict[str, Any]] = []
+        for sub, act in EVENT_CONTEXT_SCHEMAS.keys():
+            if (sub, act) in seen:
+                continue
+            zero_rows.append({
+                "subsystem": sub,
+                "action": act,
+                "total": 0,
+                "errors": 0,
+                "cancelled": 0,
+                "avg_ms": None,
+                "max_ms": None,
+            })
+        zero_rows.sort(key=lambda r: (r["subsystem"], r["action"]))
+        items.extend(zero_rows)
+
     return {
         "items": items,
         "rejections": rejections,
@@ -572,9 +622,16 @@ async def obs_summary(
         # filters so dashboards can render a "showing: prefix=X"
         # badge without re-parsing the URL. Always-present so
         # consumers don't need a key-existence check.
+        # [IMPROVE-115] ``fill_zero_dim`` joins the echo so a
+        # dashboard rendering "Showing all registered events
+        # (zero-fill)" badge can read the flag without re-
+        # parsing the URL. Pin the 3-key shape so a future
+        # addition lands as a deliberate +1 (mirror of
+        # /timeseries' 5-key echo).
         "filters": {
             "error_code": error_code,
             "error_code_prefix": error_code_prefix,
+            "fill_zero_dim": fill_zero_dim,
         },
     }
 
