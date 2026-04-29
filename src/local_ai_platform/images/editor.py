@@ -28,6 +28,7 @@ from .compose_utils import (
     apply_mask_composite as _apply_mask_composite,
     compute_diff_metrics as _compute_diff_metrics,
     decode_mask_base64 as _decode_mask_base64,
+    weighted_blend as _weighted_blend,
     DIFF_THRESHOLD as _DIFF_THRESHOLD,
     METRICS_INPUT_MAX_SIDE as _METRICS_INPUT_MAX_SIDE,
     REGION_MAP_MAX_SIDE as _REGION_MAP_MAX_SIDE,
@@ -950,25 +951,16 @@ class ImageEditorService:
         }
 
         try:
-            # Lazy numpy import — the helper file already pays this
-            # cost via _compute_diff_metrics / _apply_mask_composite,
-            # so the module's import-time graph is unchanged.
-            import numpy as np
-
             cur_img = Image.open(current_path).convert("RGB")
             prev_img = Image.open(previous_path).convert("RGB")
-            # Resize previous to current's dims if they differ — an
-            # op that changed image size (rotate with expand=True,
-            # resize, crop) won't share dimensions with its input.
-            if prev_img.size != cur_img.size:
-                prev_img = prev_img.resize(cur_img.size, Image.LANCZOS)
-
-            cur_arr = np.asarray(cur_img, dtype=np.float32)
-            prev_arr = np.asarray(prev_img, dtype=np.float32)
-            f = float(blend)
-            out_arr = prev_arr * (1.0 - f) + cur_arr * f
-            out_arr = np.clip(out_arr, 0.0, 255.0).astype(np.uint8)
-            result = Image.fromarray(out_arr, mode="RGB")
+            # ``weighted_blend(a, b, w) = a*(1-w) + b*w`` and resizes
+            # ``a`` to match ``b`` — exactly the per-pixel arithmetic
+            # this method used inline pre-IMPROVE-NEW-11. Passing
+            # (prev, cur, blend) preserves the semantics: blend=0.0
+            # → all-prev (soft undo), blend=1.0 → all-cur (no-op).
+            # An op that changed image size (rotate with expand=True,
+            # resize, crop) is handled inside the helper.
+            result = _weighted_blend(prev_img, cur_img, float(blend))
         except FileNotFoundError as exc:
             emit("editor", "blend_with_previous", status="error",
                  error_code="FileMissing",

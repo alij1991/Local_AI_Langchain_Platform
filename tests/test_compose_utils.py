@@ -39,6 +39,7 @@ from local_ai_platform.images.compose_utils import (
     REGION_MAP_MAX_SIDE,
     weighted_blend,
 )
+from local_ai_platform.images import editor as _editor_mod
 
 
 def _b64_png(width: int = 64, height: int = 64, color: tuple = (255, 255, 255)) -> str:
@@ -209,9 +210,45 @@ def test_editor_aliases_resolve_to_compose_utils():
     ``_compute_diff_metrics`` / ``_apply_mask_composite`` /
     ``_decode_mask_base64`` names importable from editor.py so
     existing tests + downstream callers don't break. The aliases
-    must be the SAME function objects as the public versions."""
+    must be the SAME function objects as the public versions.
+
+    [IMPROVE-NEW-11] Adds ``_weighted_blend`` to the alias list:
+    ``editor.blend_with_previous`` now delegates to
+    ``compose_utils.weighted_blend`` instead of inline numpy. The
+    pin protects against a future refactor silently re-introducing
+    the inline duplicate.
+    """
     from local_ai_platform.images import editor
 
     assert editor._compute_diff_metrics is compute_diff_metrics
     assert editor._apply_mask_composite is apply_mask_composite
     assert editor._decode_mask_base64 is decode_mask_base64
+    assert editor._weighted_blend is weighted_blend
+
+
+def test_editor_module_no_longer_imports_numpy():
+    """[IMPROVE-NEW-11] After rewiring ``blend_with_previous`` to
+    ``compose_utils.weighted_blend``, ``editor.py`` has no remaining
+    numpy uses — every numpy-dependent path lives in compose_utils
+    or service. Pin so a future inline-numpy regression in editor
+    is caught at import time rather than at first call (the
+    alternative is a slow, runtime-only failure inside a try/except).
+
+    Cheap proxy check: read editor.py source and assert no
+    ``import numpy`` line. Module-source inspection is more robust
+    than ``hasattr(editor, 'np')`` because lazy imports inside
+    function bodies wouldn't expose ``np`` at module level.
+    """
+    import inspect
+    src = inspect.getsource(_editor_mod)
+    # ``numpy`` may legitimately appear in comments / docstrings
+    # explaining the historical inline math; what we forbid is an
+    # actual import statement.
+    for line in src.splitlines():
+        stripped = line.strip()
+        assert not stripped.startswith("import numpy"), (
+            f"editor.py reintroduced inline numpy: {line!r}"
+        )
+        assert not stripped.startswith("from numpy"), (
+            f"editor.py reintroduced inline numpy: {line!r}"
+        )
