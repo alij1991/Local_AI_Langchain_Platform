@@ -232,20 +232,26 @@ def _validate_system_or_400(name: str, definition: dict) -> None:
     [IMPROVE-37] Kahn cycle check runs SECOND, only when the shape
     is valid.
 
-    [IMPROVE-85] Both rejection branches emit
-    ``system.validation_rejected`` (typed front door) with
-    ``error_code`` either ``"SchemaInvalid"`` or
-    ``"CycleDetected"``. Mirror of IMPROVE-82's
-    ``agent.validation_rejected``. The success path keeps the
-    existing ``system.validate`` ``status="ok"`` event so
-    dashboards charting "validations completed" see no change;
-    rejections now have their own queryable event.
+    [IMPROVE-88] Orphan-llm_router-edge check runs THIRD (Q3=C
+    in the Wave 8 plan: tier 2 of graph-time DAG validation —
+    block at save). The other two graph-time checks (unreachable
+    nodes, dead-end nodes) are tier 1: warn-only, handled by
+    lifespan startup, never block a save.
 
-    Both raise ``HTTPException(400)`` with a structured body the
-    Flutter client can render directly. The ``error`` field
-    distinguishes the two failure modes
-    (``"schema_invalid"`` vs ``"cycle_detected"``) so the UI can
-    branch on it.
+    [IMPROVE-85] All three rejection branches emit
+    ``system.validation_rejected`` (typed front door) with
+    distinct ``error_code`` values: ``"SchemaInvalid"``,
+    ``"CycleDetected"``, or ``"OrphanLlmRouterEdge"``. Mirror of
+    IMPROVE-82's ``agent.validation_rejected``. The success path
+    keeps the existing ``system.validate`` ``status="ok"`` event
+    so dashboards charting "validations completed" see no change;
+    rejections have their own queryable event.
+
+    All three raise ``HTTPException(400)`` with a structured body
+    the Flutter client can render directly. The ``error`` field
+    distinguishes the failure modes (``"schema_invalid"`` vs
+    ``"cycle_detected"`` vs ``"orphan_llm_router_edge"``) so the
+    UI can branch on it.
     """
     # [IMPROVE-31] Schema check first. A definition that's both
     # schema-invalid AND cyclic will surface the schema error —
@@ -291,19 +297,9 @@ def _validate_system_or_400(name: str, definition: dict) -> None:
     # [IMPROVE-37] Cycle check second.
     try:
         check_no_cycles(definition)
-        emit(
-            "system",
-            "validate",
-            status="ok",
-            context={
-                "system_name": name,
-                "node_count": len(definition.get("nodes") or []),
-                "edge_count": len(definition.get("edges") or []),
-            },
-        )
     except SystemValidationError as exc:
         # [IMPROVE-85] Same migration for the cycle-rejection path.
-        # The ``system.validate`` success event above is unchanged;
+        # The ``system.validate`` success event below is unchanged;
         # only the rejection branches move to the typed front door.
         try:
             emit_typed(
@@ -330,6 +326,56 @@ def _validate_system_or_400(name: str, definition: dict) -> None:
                 "cyclic_nodes": exc.cyclic_nodes,
             },
         )
+
+    # [IMPROVE-88] Graph-time DAG-lint THIRD: orphan llm_router
+    # edges block at save (Q3=C tier 2). Unreachable + dead-end
+    # nodes are warn-only (handled by lifespan startup), not
+    # blockers — many DAGs have legitimate terminals.
+    try:
+        from local_ai_platform.systems.dag_lint import (
+            validate_orphaned_llm_router_edges_or_raise,
+        )
+        validate_orphaned_llm_router_edges_or_raise(
+            definition, system_name=name,
+        )
+    except SystemValidationError as exc:
+        try:
+            emit_typed(
+                "system",
+                "validation_rejected",
+                status="error",
+                error_code="OrphanLlmRouterEdge",
+                error_message=str(exc),
+                context={
+                    "system_name": name,
+                    "errors": exc.errors,
+                },
+            )
+        except Exception:
+            logger.exception(
+                "[IMPROVE-88] system.validation_rejected emit "
+                "failed; continuing with HTTPException",
+            )
+        raise HTTPException(
+            400,
+            {
+                "error": "orphan_llm_router_edge",
+                "message": str(exc),
+                "errors": exc.errors,
+            },
+        )
+
+    # All save-time checks passed.
+    emit(
+        "system",
+        "validate",
+        status="ok",
+        context={
+            "system_name": name,
+            "node_count": len(definition.get("nodes") or []),
+            "edge_count": len(definition.get("edges") or []),
+        },
+    )
 
 
 @router.get("/systems")

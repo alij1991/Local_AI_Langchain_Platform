@@ -308,6 +308,28 @@ async def lifespan(app: FastAPI):
     except Exception as exc:
         logger.debug("[IMPROVE-72] route_lint pass failed: %s", exc)
 
+    # [IMPROVE-88] Tier 1 graph-time DAG-lint: warn on unreachable
+    # + dead-end nodes across persisted systems. Tier 2 (orphan
+    # llm_router edges) is enforced at the /systems/* save path,
+    # not here. Skipped silently if the persistence layer isn't
+    # ready (matches the existing route-lint try/except shape).
+    try:
+        from local_ai_platform.systems.dag_lint import (
+            warn_on_dag_lint_issues,
+        )
+        from local_ai_platform.repositories.systems import (
+            list_systems as _list_systems,
+        )
+
+        items = _list_systems() or []
+        warn_on_dag_lint_issues(
+            (item.get("name", ""), item.get("definition") or {})
+            for item in items
+            if isinstance(item, dict)
+        )
+    except Exception as exc:
+        logger.debug("[IMPROVE-88] dag_lint pass failed: %s", exc)
+
     startup_ms = int((time.monotonic() - t0) * 1000)
     logger.info("Startup complete — %d agents loaded", agents_loaded)
     # [IMPROVE-5] One boot event per process. Shows up in
