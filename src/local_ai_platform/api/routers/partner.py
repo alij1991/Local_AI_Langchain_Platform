@@ -162,6 +162,39 @@ async def partner_archived_memories(limit: int = 50):
     return get_archived_memories(limit)
 
 
+@router.get("/partner/memory/decay")
+async def partner_get_memory_decay():
+    """[IMPROVE-61] Return the current memory-decay configuration.
+
+    Pre-IMPROVE-61 the Ebbinghaus formula's strength multiplier (24
+    hours per importance point), the archive threshold (0.5), and
+    the in-context skip threshold (also 0.5) were hardcoded. This
+    endpoint exposes them as user-settable values; the matching
+    POST endpoint updates individual fields.
+    """
+    from local_ai_platform.partner.memory import get_decay_config
+    return get_decay_config()
+
+
+@router.post("/partner/memory/decay")
+async def partner_set_memory_decay(body: dict[str, Any]):
+    """[IMPROVE-61] Update memory-decay parameters.
+
+    Body keys (all optional): ``enabled`` (bool),
+    ``base_strength_hours_per_importance`` (float > 0),
+    ``archive_threshold`` (float in [0, 1]), ``importance_floor``
+    (int >= 0), ``context_skip_threshold`` (float in [0, 1]).
+
+    Unknown keys → 400. Invalid values → 400. Returns the new full
+    config so the client can re-render its UI.
+    """
+    from local_ai_platform.partner.memory import set_decay_config
+    try:
+        return set_decay_config(**body)
+    except (ValueError, TypeError) as exc:
+        raise HTTPException(400, str(exc))
+
+
 # ── Chat (sync + SSE) ────────────────────────────────────────────
 
 

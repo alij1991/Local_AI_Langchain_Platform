@@ -26,6 +26,101 @@ logger = logging.getLogger(__name__)
 _mem0_instance = None
 _mem0_available: bool | None = None  # None = not checked yet
 
+
+# [IMPROVE-61] Memory-decay parameters. Pre-IMPROVE-61 the
+# Ebbinghaus formula's strength multiplier (24h per importance
+# point), the archive threshold (0.5), and the in-context skip
+# threshold (also 0.5) were hardcoded throughout this module. The
+# doc proposal at docs/features/08-partner.md:577-594 calls for
+# user-tunable decay so a "close-relationship" companion keeps
+# memories longer than a "work-focused" one.
+#
+# Mutable module-level dict so the partner engine + UserProfile can
+# update individual fields at runtime without re-importing the
+# whole module. ``set_decay_config`` validates types + ranges.
+# Default values reproduce pre-IMPROVE-61 behaviour byte-for-byte
+# so existing callers see no change unless they opt in.
+_DECAY_CONFIG: dict[str, Any] = {
+    # Master switch. False → retention always 1.0 (no decay applied
+    # anywhere). Useful for testing or for a "perfect-memory" mode.
+    "enabled": True,
+    # Strength multiplier in the Ebbinghaus formula:
+    # ``base_strength = importance * base_strength_hours_per_importance``.
+    # Higher → memories retain longer. 24h matches the original
+    # formula in _compute_retention's docstring.
+    "base_strength_hours_per_importance": 24.0,
+    # archive_decayed_memories(threshold=...) default. Memories with
+    # effective_importance < threshold get moved to the archive
+    # table (NEVER deleted).
+    "archive_threshold": 0.5,
+    # NEW: importance >= this is exempt from archiving regardless of
+    # decay. Lets a user mark "always remember my anniversary" via
+    # importance=10. Set to a value >10 to disable the floor.
+    "importance_floor": 8,
+    # format_memories_for_context skip threshold. Memories below
+    # this effective_importance are skipped when injecting into a
+    # turn's context (but stay in DB until archive runs). Pre-
+    # IMPROVE-61 hardcoded 0.5; tracked separately from
+    # archive_threshold so a user can show low-decay memories in
+    # context without them getting archived.
+    "context_skip_threshold": 0.5,
+}
+
+
+def get_decay_config() -> dict[str, Any]:
+    """[IMPROVE-61] Return a defensive copy of the current decay
+    config. Callers should treat the returned dict as immutable."""
+    return dict(_DECAY_CONFIG)
+
+
+def set_decay_config(**updates: Any) -> dict[str, Any]:
+    """[IMPROVE-61] Update individual decay fields. Returns the new
+    config as a defensive copy.
+
+    Validates per-field:
+      enabled                              → bool
+      base_strength_hours_per_importance   → float > 0
+      archive_threshold                    → float in [0, 1]
+      importance_floor                     → int >= 0
+      context_skip_threshold               → float in [0, 1]
+
+    Unknown keys raise ``ValueError`` so a typo doesn't silently
+    keep the old value while the caller thinks they updated it.
+    """
+    valid_keys = set(_DECAY_CONFIG.keys())
+    unknown = [k for k in updates.keys() if k not in valid_keys]
+    if unknown:
+        raise ValueError(
+            f"Unknown memory_decay keys: {unknown}. Valid: {sorted(valid_keys)}"
+        )
+
+    if "enabled" in updates:
+        if not isinstance(updates["enabled"], bool):
+            raise ValueError("enabled must be bool")
+    if "base_strength_hours_per_importance" in updates:
+        v = float(updates["base_strength_hours_per_importance"])
+        if v <= 0:
+            raise ValueError("base_strength_hours_per_importance must be > 0")
+        updates["base_strength_hours_per_importance"] = v
+    if "archive_threshold" in updates:
+        v = float(updates["archive_threshold"])
+        if not 0.0 <= v <= 1.0:
+            raise ValueError("archive_threshold must be in [0, 1]")
+        updates["archive_threshold"] = v
+    if "importance_floor" in updates:
+        v = int(updates["importance_floor"])
+        if v < 0:
+            raise ValueError("importance_floor must be >= 0")
+        updates["importance_floor"] = v
+    if "context_skip_threshold" in updates:
+        v = float(updates["context_skip_threshold"])
+        if not 0.0 <= v <= 1.0:
+            raise ValueError("context_skip_threshold must be in [0, 1]")
+        updates["context_skip_threshold"] = v
+
+    _DECAY_CONFIG.update(updates)
+    return dict(_DECAY_CONFIG)
+
 # [IMPROVE-62] If Mem0 init fails, cache the False for this long before
 # trying again. Previously _mem0_available=False stuck permanently, so
 # a transient issue (Ollama down at boot, race with ChromaDB, user
@@ -453,12 +548,17 @@ def _compute_retention(last_accessed: str | None, access_count: int,
     """Ebbinghaus forgetting curve: retention = e^(-t/S)
 
     S (strength) = base_strength * (1 + ln(1 + access_count))
-    base_strength = importance * 24 hours
+    base_strength = importance * base_strength_hours_per_importance
 
-    Examples:
+    [IMPROVE-61] Strength multiplier (24h default) is now a config
+    field; ``enabled=False`` short-circuits to retention=1.0.
+
+    Examples (default 24h multiplier):
     - Importance-5, accessed once: 50% after ~3.5 days
     - Importance-8, accessed 10x: 50% after ~45 days
     """
+    if not _DECAY_CONFIG["enabled"]:
+        return 1.0
     now = datetime.now(timezone.utc)
     ref_time_str = last_accessed or created_at
     try:
@@ -469,7 +569,10 @@ def _compute_retention(last_accessed: str | None, access_count: int,
         return 1.0
 
     t_hours = max(0, (now - ref_time).total_seconds() / 3600)
-    base_strength = max(1, base_importance) * 24.0
+    base_strength = (
+        max(1, base_importance)
+        * float(_DECAY_CONFIG["base_strength_hours_per_importance"])
+    )
     strength = base_strength * (1.0 + math.log(1.0 + max(0, access_count)))
     return math.exp(-t_hours / strength)
 
@@ -540,14 +643,22 @@ def delete_key_memory(memory_id: int) -> None:
 
 
 def format_memories_for_context(limit: int = 10) -> str:
-    """Format memories for context, touching each one (spaced repetition)."""
+    """Format memories for context, touching each one (spaced repetition).
+
+    [IMPROVE-61] Skip threshold lifted from the hardcoded 0.5 to
+    ``_DECAY_CONFIG['context_skip_threshold']`` so a low-decay user
+    can show more memories without having to alter the archive
+    threshold (which is a destructive op — moves the row to the
+    archive table).
+    """
     memories = get_key_memories(limit)
     if not memories:
         return ""
+    skip_threshold = float(_DECAY_CONFIG["context_skip_threshold"])
     lines = ["Key memories:"]
     for m in memories:
-        if m.get("effective_importance", 5) < 0.5:
-            continue  # Below decay threshold, skip
+        if m.get("effective_importance", 5) < skip_threshold:
+            continue  # Below configured decay threshold, skip
         try:
             touch_memory(m["id"])
         except Exception:
@@ -559,15 +670,33 @@ def format_memories_for_context(limit: int = 10) -> str:
 
 # ── Memory Archive (decayed memories) ───────────────────────────
 
-def archive_decayed_memories(threshold: float = 0.5) -> int:
+def archive_decayed_memories(threshold: float | None = None) -> int:
     """Move memories with effective_importance below threshold to archive.
-    Called during session summary creation. Never permanently deletes."""
+    Called during session summary creation. Never permanently deletes.
+
+    [IMPROVE-61] ``threshold=None`` reads ``_DECAY_CONFIG[
+    'archive_threshold']``; an explicit value (kept for back-compat
+    with callers that pass it) wins. Memories with
+    ``importance >= _DECAY_CONFIG['importance_floor']`` are exempt
+    from archiving regardless of decay — lets a user mark "always
+    remember our anniversary" via importance=10.
+    """
+    if threshold is None:
+        threshold = float(_DECAY_CONFIG["archive_threshold"])
+    importance_floor = int(_DECAY_CONFIG["importance_floor"])
     conn = _get_conn()
     try:
         rows = conn.execute("SELECT * FROM partner_key_memories").fetchall()
         archived_count = 0
+        floored_count = 0
         for r in rows:
             m = dict(r)
+            # [IMPROVE-61] Importance floor — never archive
+            # high-importance memories regardless of decay.
+            if int(m.get("importance") or 0) >= importance_floor:
+                if _effective_importance(m) < threshold:
+                    floored_count += 1
+                continue
             if _effective_importance(m) < threshold:
                 conn.execute(
                     "INSERT OR REPLACE INTO partner_memories_archive "
@@ -581,7 +710,10 @@ def archive_decayed_memories(threshold: float = 0.5) -> int:
                 archived_count += 1
         if archived_count > 0:
             conn.commit()
-            logger.info("Archived %d decayed memories (threshold=%.1f)", archived_count, threshold)
+            logger.info(
+                "Archived %d decayed memories (threshold=%.2f, importance_floor=%d, floored=%d)",
+                archived_count, threshold, importance_floor, floored_count,
+            )
         return archived_count
     finally:
         conn.close()
