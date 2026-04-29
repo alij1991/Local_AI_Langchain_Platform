@@ -683,3 +683,426 @@ def test_export_bundle_readme_documents_memory_decay_entry(
     # Cross-reference the IMPROVE-N tags so a future doc rebuild
     # still links to the right history.
     assert "IMPROVE-77" in readme or "IMPROVE-78" in readme
+
+
+# ── [IMPROVE-94] /partner/import — restore_from_bundle round-trip ─
+
+
+def _seed_full_state() -> None:
+    """Seed every table the bundle covers so an export/import
+    round-trip has data to move."""
+    _seed_facts(count=3)
+    _seed_key_memories(count=2)
+    _seed_messages(count=4)
+    _seed_journal(count=2)
+    _seed_knowledge_graph(count=3)
+    _seed_archived(count=2)
+
+
+def test_restore_from_bundle_round_trip_restores_facts(
+    tmp_partner_db, tmp_partner_data_dir, stub_engine,
+):
+    """[IMPROVE-94] Round-trip: build a bundle from seeded state,
+    clear the DB, restore from the bundle, verify rows reappear.
+    Pin the import path's most-common case (facts table)."""
+    from local_ai_platform.partner.export import (
+        build_export_bundle,
+        restore_from_bundle,
+    )
+    from local_ai_platform.partner.memory import _get_conn
+
+    _seed_facts(count=3)
+    bundle = build_export_bundle(stub_engine)
+    assert _table_count("partner_core_facts") == 3
+
+    # Clear and re-import.
+    conn = _get_conn()
+    try:
+        conn.execute("DELETE FROM partner_core_facts")
+        conn.commit()
+    finally:
+        conn.close()
+    assert _table_count("partner_core_facts") == 0
+
+    summary = restore_from_bundle(stub_engine, bundle)
+    # All 3 facts came back.
+    assert _table_count("partner_core_facts") == 3
+    assert summary["tables_restored"]["facts.jsonl"] == 3
+    assert summary["errors"] == []
+
+
+def test_restore_from_bundle_round_trip_all_tables(
+    tmp_partner_db, tmp_partner_data_dir, stub_engine,
+):
+    """[IMPROVE-94] All six bundled SQLite tables round-trip
+    cleanly. Pin every table individually so a future schema
+    addition that breaks one specific path surfaces here."""
+    from local_ai_platform.partner.export import (
+        build_export_bundle,
+        restore_from_bundle,
+    )
+    from local_ai_platform.partner.memory import _get_conn
+
+    _seed_full_state()
+    bundle = build_export_bundle(stub_engine)
+    pre_counts = {
+        t: _table_count(t) for t in (
+            "partner_core_facts", "partner_key_memories",
+            "partner_conversations", "partner_journal",
+            "partner_knowledge_graph", "partner_memories_archive",
+        )
+    }
+
+    # Clear all tables.
+    conn = _get_conn()
+    try:
+        for t in pre_counts:
+            conn.execute(f"DELETE FROM {t}")
+        conn.commit()
+    finally:
+        conn.close()
+
+    summary = restore_from_bundle(stub_engine, bundle)
+    # Every table back to its seeded count.
+    for t in pre_counts:
+        assert _table_count(t) == pre_counts[t], (
+            f"table {t} restored count mismatch"
+        )
+    assert summary["errors"] == []
+
+
+def test_restore_from_bundle_default_uses_insert_or_ignore(
+    tmp_partner_db, tmp_partner_data_dir, stub_engine,
+):
+    """[IMPROVE-94] Default ``overwrite=False`` uses INSERT OR
+    IGNORE — primary-key conflicts skip silently. Pin the merge
+    semantic so a backup imported into a partial state doesn't
+    duplicate rows."""
+    from local_ai_platform.partner.export import (
+        build_export_bundle,
+        restore_from_bundle,
+    )
+
+    _seed_facts(count=3)
+    bundle = build_export_bundle(stub_engine)
+    # Restore on TOP of existing state — same rows already present.
+    summary = restore_from_bundle(stub_engine, bundle)
+    # Counts unchanged (all 3 rows already existed; INSERT OR IGNORE
+    # skipped them).
+    assert _table_count("partner_core_facts") == 3
+    assert summary["errors"] == []
+
+
+def test_restore_from_bundle_overwrite_replaces_rows(
+    tmp_partner_db, tmp_partner_data_dir, stub_engine,
+):
+    """[IMPROVE-94] ``overwrite=True`` does a DELETE first, then
+    insert. Pin the wholesale-replace semantic for the
+    ``?overwrite=true`` query param."""
+    from local_ai_platform.partner.export import (
+        build_export_bundle,
+        restore_from_bundle,
+    )
+
+    _seed_facts(count=3)
+    bundle = build_export_bundle(stub_engine)
+    # Add a new fact NOT in the bundle — should be deleted on
+    # overwrite restore.
+    from local_ai_platform.partner import memory as partner_memory
+    partner_memory.set_fact("ephemeral", "should be deleted")
+    assert _table_count("partner_core_facts") == 4
+
+    summary = restore_from_bundle(
+        stub_engine, bundle, overwrite=True,
+    )
+    # Back to 3 — the ephemeral fact got wiped before the bundle's
+    # rows came back.
+    assert _table_count("partner_core_facts") == 3
+    assert summary["tables_restored"]["facts.jsonl"] == 3
+
+
+def test_restore_from_bundle_restores_profile_json(
+    tmp_partner_db, tmp_partner_data_dir, stub_engine,
+):
+    """[IMPROVE-94] ``profile.json`` from the bundle restores the
+    AI persona name + traits. Pin via a non-default name so the
+    test catches a no-op restore."""
+    from local_ai_platform.partner.export import (
+        build_export_bundle,
+        restore_from_bundle,
+    )
+    from local_ai_platform.partner.profile import (
+        PartnerProfile,
+        load_profile,
+    )
+
+    # Customise the engine's profile.
+    custom = PartnerProfile()
+    custom.name = "Atlas the Override"
+    stub_engine.profile = custom
+    bundle = build_export_bundle(stub_engine)
+
+    # Reset the engine's profile + persisted file.
+    stub_engine.profile = PartnerProfile()  # default name
+    summary = restore_from_bundle(stub_engine, bundle)
+    assert summary["profile_restored"] is True
+
+    # Engine state restored.
+    assert stub_engine.profile.name == "Atlas the Override"
+    # Persisted to disk too — load_profile() reads it back.
+    persisted = load_profile()
+    assert persisted.name == "Atlas the Override"
+
+
+def test_restore_from_bundle_restores_user_profile_json(
+    tmp_partner_db, tmp_partner_data_dir, stub_engine,
+):
+    """[IMPROVE-94] ``user_profile.json`` round-trip — pin a
+    custom BigFive value so a no-op restore is detectable."""
+    from local_ai_platform.partner.export import (
+        build_export_bundle,
+        restore_from_bundle,
+    )
+    from local_ai_platform.partner.user_profile import UserProfile
+
+    custom = UserProfile()
+    # Pick a deterministic value — ``name`` is a top-level field
+    # (BigFive lives inside ``personality``; using a top-level
+    # field here is a lighter test pin).
+    custom.name = "Imported User"
+    custom.nickname = "Backup-Restored"
+    stub_engine.user_profile = custom
+    bundle = build_export_bundle(stub_engine)
+
+    stub_engine.user_profile = UserProfile()
+    assert stub_engine.user_profile.name == ""
+
+    summary = restore_from_bundle(stub_engine, bundle)
+    assert summary["user_profile_restored"] is True
+    assert stub_engine.user_profile.name == "Imported User"
+    assert stub_engine.user_profile.nickname == "Backup-Restored"
+
+
+def test_restore_from_bundle_restores_memory_decay_json(
+    tmp_partner_db, tmp_partner_data_dir, stub_engine, monkeypatch,
+):
+    """[IMPROVE-94] ``memory_decay.json`` round-trips via
+    ``set_decay_config(**data)`` — the IMPROVE-77 helper that
+    validates types + persists. Pin a non-default value so a
+    silent skip surfaces here."""
+    from local_ai_platform.partner.export import (
+        build_export_bundle,
+        restore_from_bundle,
+    )
+    from local_ai_platform.partner import memory as partner_memory
+
+    # Redirect _DECAY_CONFIG_PATH so the test doesn't write to
+    # the dev install's data/partner/.
+    decay_path = tmp_partner_data_dir / "memory_decay.json"
+    monkeypatch.setattr(
+        partner_memory, "_DECAY_CONFIG_PATH", decay_path,
+    )
+
+    # Customise the decay config + persist. Valid keys per
+    # set_decay_config: enabled, base_strength_hours_per_importance,
+    # archive_threshold (float [0,1]), importance_floor (int >= 0),
+    # context_skip_threshold.
+    partner_memory.set_decay_config(
+        importance_floor=7,
+        archive_threshold=0.85,
+    )
+    bundle = build_export_bundle(stub_engine)
+
+    # Reset to a different non-default state.
+    partner_memory.set_decay_config(
+        importance_floor=2,
+        archive_threshold=0.10,
+    )
+    cfg_before = partner_memory.get_decay_config()
+    assert cfg_before["importance_floor"] == 2
+
+    summary = restore_from_bundle(stub_engine, bundle)
+    assert summary["memory_decay_restored"] is True
+
+    cfg_after = partner_memory.get_decay_config()
+    assert cfg_after["importance_floor"] == 7
+    assert abs(cfg_after["archive_threshold"] - 0.85) < 1e-6
+
+
+def test_restore_from_bundle_invalid_zip_returns_error_not_raises(
+    tmp_partner_db, tmp_partner_data_dir, stub_engine,
+):
+    """[IMPROVE-94] A non-ZIP upload (random bytes) must NOT
+    raise — the route handler maps the structured error to a 400.
+    Pin the no-raise semantic so a malicious upload can't 500
+    the server."""
+    from local_ai_platform.partner.export import restore_from_bundle
+
+    # Random bytes — not a valid ZIP archive.
+    summary = restore_from_bundle(stub_engine, b"not a zip file")
+    assert any("invalid_zip" in e for e in summary["errors"])
+    # Nothing got restored.
+    assert summary["profile_restored"] is False
+    assert summary["user_profile_restored"] is False
+    assert summary["memory_decay_restored"] is False
+    assert summary["tables_restored"] == {}
+
+
+def test_restore_from_bundle_partial_files_silently_succeeds(
+    tmp_partner_db, tmp_partner_data_dir, stub_engine,
+):
+    """[IMPROVE-94] A bundle missing some files (e.g. a hand-
+    rolled archive that only carries facts.jsonl) restores what
+    it can without erroring on the absent files. Pin the
+    forward-compat behaviour."""
+    import io
+    import json
+    import zipfile
+
+    from local_ai_platform.partner.export import restore_from_bundle
+
+    # Build a minimal bundle — only profile.json.
+    buffer = io.BytesIO()
+    with zipfile.ZipFile(buffer, "w", zipfile.ZIP_DEFLATED) as zf:
+        zf.writestr("profile.json", json.dumps({
+            "name": "Minimal Bundle",
+            "version": 1,
+        }))
+    bundle_bytes = buffer.getvalue()
+
+    summary = restore_from_bundle(stub_engine, bundle_bytes)
+    assert summary["profile_restored"] is True
+    assert summary["user_profile_restored"] is False
+    assert summary["memory_decay_restored"] is False
+    assert summary["tables_restored"] == {}
+    assert summary["errors"] == []
+
+
+def test_restore_from_bundle_corrupt_jsonl_line_logged_not_raised(
+    tmp_partner_db, tmp_partner_data_dir, stub_engine,
+):
+    """[IMPROVE-94] A single corrupt JSONL line (e.g. truncated
+    JSON) MUST NOT block the rest of the bundle. The error is
+    captured in ``summary['errors']`` and other rows still land.
+    Pin the partial-restore safety contract."""
+    import io
+    import zipfile
+
+    from local_ai_platform.partner.export import restore_from_bundle
+
+    buffer = io.BytesIO()
+    with zipfile.ZipFile(buffer, "w", zipfile.ZIP_DEFLATED) as zf:
+        # Two valid rows + one corrupt line + one more valid row.
+        zf.writestr("facts.jsonl", "\n".join([
+            '{"key": "k1", "value": "v1", "category": "general", "valid_from": "2026-01-01T00:00:00", "updated_at": "2026-01-01T00:00:00"}',
+            '{"key": "k2", "value": "v2", "category": "general", "valid_from": "2026-01-01T00:00:00", "updated_at": "2026-01-01T00:00:00"}',
+            '{this is not valid json',
+            '{"key": "k3", "value": "v3", "category": "general", "valid_from": "2026-01-01T00:00:00", "updated_at": "2026-01-01T00:00:00"}',
+        ]))
+    bundle_bytes = buffer.getvalue()
+
+    summary = restore_from_bundle(stub_engine, bundle_bytes)
+    # Three rows succeeded.
+    assert _table_count("partner_core_facts") == 3
+    # One error reported for the corrupt line.
+    assert len(summary["errors"]) == 1
+    assert "json parse" in summary["errors"][0].lower()
+
+
+# ── /partner/import endpoint via TestClient ────────────────────
+
+
+def test_partner_import_endpoint_round_trip(
+    tmp_partner_db, tmp_partner_data_dir, monkeypatch,
+):
+    """[IMPROVE-94] End-to-end via TestClient: GET /partner/export
+    produces a ZIP, POST /partner/import accepts it, summary
+    reports restoration."""
+    pytest.importorskip("fastapi")
+    from fastapi.testclient import TestClient
+
+    # Stub the partner engine accessor — the real one constructs
+    # a heavyweight PartnerEngine which is too expensive for tests.
+    from local_ai_platform.api.routers import partner as partner_router
+    from local_ai_platform.partner.profile import PartnerProfile
+    from local_ai_platform.partner.user_profile import UserProfile
+
+    eng = MagicMock()
+    eng.profile = PartnerProfile()
+    eng.profile.name = "TestPartner"
+    eng.user_profile = UserProfile()
+    monkeypatch.setattr(
+        partner_router, "get_partner_engine", lambda: eng,
+    )
+
+    _seed_facts(count=2)
+
+    import api_server
+    with TestClient(api_server.app) as client:
+        # Export.
+        export_resp = client.get("/partner/export")
+        assert export_resp.status_code == 200
+        bundle_bytes = export_resp.content
+
+        # Import the same bundle back.
+        import_resp = client.post(
+            "/partner/import",
+            files={"file": ("partner-export.zip", bundle_bytes, "application/zip")},
+        )
+
+    assert import_resp.status_code == 200
+    summary = import_resp.json()
+    assert summary["profile_restored"] is True
+    assert summary["user_profile_restored"] is True
+    assert summary["tables_restored"]["facts.jsonl"] == 2
+
+
+def test_partner_import_endpoint_empty_file_returns_400(
+    tmp_partner_db, monkeypatch,
+):
+    """[IMPROVE-94] An empty upload returns a structured 400 so
+    the UI can surface a helpful error."""
+    pytest.importorskip("fastapi")
+    from fastapi.testclient import TestClient
+
+    from local_ai_platform.api.routers import partner as partner_router
+    eng = MagicMock()
+    monkeypatch.setattr(
+        partner_router, "get_partner_engine", lambda: eng,
+    )
+
+    import api_server
+    with TestClient(api_server.app) as client:
+        resp = client.post(
+            "/partner/import",
+            files={"file": ("empty.zip", b"", "application/zip")},
+        )
+    assert resp.status_code == 400
+    assert "empty" in resp.json()["detail"].lower()
+
+
+def test_partner_import_endpoint_oversized_returns_413(
+    tmp_partner_db, monkeypatch,
+):
+    """[IMPROVE-94] Bundles >100 MB return 413 so a malicious
+    upload doesn't exhaust memory. Pin the size cap."""
+    pytest.importorskip("fastapi")
+    from fastapi.testclient import TestClient
+
+    from local_ai_platform.api.routers import partner as partner_router
+    eng = MagicMock()
+    monkeypatch.setattr(
+        partner_router, "get_partner_engine", lambda: eng,
+    )
+
+    # 101 MB of zeros — over the 100 MB cap.
+    oversized = b"\x00" * (101 * 1024 * 1024)
+
+    import api_server
+    with TestClient(api_server.app) as client:
+        resp = client.post(
+            "/partner/import",
+            files={"file": ("huge.zip", oversized, "application/zip")},
+        )
+    assert resp.status_code == 413
+    assert "100 MB cap" in resp.json()["detail"]

@@ -261,6 +261,206 @@ There is no automated re-import yet. To restore manually:
    `partner/memory.py:init_partner_tables`), then `INSERT` the rows
    from each `.jsonl` file.
 
-A `POST /partner/import` endpoint that automates this is on the
-backlog (see [IMPROVE-67] follow-ups).
+[IMPROVE-94] (Wave 9) The `POST /partner/import` endpoint is now
+available — see ``restore_from_bundle()`` below for the
+machinery and ``api/routers/partner.py::partner_import`` for the
+route. Defaults to "merge" semantics (INSERT OR IGNORE on
+SQLite); pass ``overwrite=true`` for full replacement.
 """
+
+
+def restore_from_bundle(
+    engine: Any,
+    zip_bytes: bytes,
+    *,
+    overwrite: bool = False,
+) -> dict[str, Any]:
+    """[IMPROVE-94] Inverse of ``build_export_bundle``.
+
+    Reads each file from the bundle and restores the
+    corresponding partner state:
+
+      * ``profile.json`` → ``PartnerProfile.from_dict`` +
+        ``save_profile`` + ``engine.profile`` swap.
+      * ``user_profile.json`` → ``UserProfile.from_dict`` +
+        ``save_user_profile`` + ``engine.user_profile`` swap.
+      * ``memory_decay.json`` → ``set_decay_config(**data)``
+        (the IMPROVE-77 helper validates types + ranges and
+        persists to disk).
+      * Each ``.jsonl`` table file → ``INSERT OR IGNORE`` for
+        each row (default; ``overwrite=True`` does a
+        ``DELETE`` first then ``INSERT``).
+
+    Returns a summary dict with per-component status + a list
+    of any errors encountered. Errors do NOT raise — partial
+    restores are intentional so a corrupt single file doesn't
+    block the rest of the bundle from landing. The caller
+    (route handler) inspects the summary and decides whether
+    to surface success or 4xx.
+
+    The bundle layout is checked but not strictly validated —
+    a future bundle from a newer schema with extra files is
+    accepted (those files just get skipped); a future bundle
+    missing files this layer expects would land a partial
+    restore (also fine).
+    """
+    summary: dict[str, Any] = {
+        "profile_restored": False,
+        "user_profile_restored": False,
+        "memory_decay_restored": False,
+        "tables_restored": {},
+        "errors": [],
+    }
+
+    try:
+        with zipfile.ZipFile(io.BytesIO(zip_bytes), "r") as zf:
+            names = set(zf.namelist())
+
+            # ── profile.json ─────────────────────────────────
+            if "profile.json" in names:
+                try:
+                    data = json.loads(zf.read("profile.json"))
+                    from .profile import PartnerProfile, save_profile
+                    new_profile = PartnerProfile.from_dict(data)
+                    save_profile(new_profile)
+                    engine.profile = new_profile
+                    summary["profile_restored"] = True
+                except Exception as exc:
+                    logger.warning(
+                        "[IMPROVE-94] profile.json restore failed: %s",
+                        exc,
+                    )
+                    summary["errors"].append(f"profile.json: {exc}")
+
+            # ── user_profile.json ────────────────────────────
+            if "user_profile.json" in names:
+                try:
+                    data = json.loads(zf.read("user_profile.json"))
+                    from .user_profile import (
+                        UserProfile,
+                        save_user_profile,
+                    )
+                    new_user_profile = UserProfile.from_dict(data)
+                    save_user_profile(new_user_profile)
+                    engine.user_profile = new_user_profile
+                    summary["user_profile_restored"] = True
+                except Exception as exc:
+                    logger.warning(
+                        "[IMPROVE-94] user_profile.json restore "
+                        "failed: %s", exc,
+                    )
+                    summary["errors"].append(
+                        f"user_profile.json: {exc}",
+                    )
+
+            # ── memory_decay.json ────────────────────────────
+            if "memory_decay.json" in names:
+                try:
+                    data = json.loads(zf.read("memory_decay.json"))
+                    from .memory import set_decay_config
+                    # set_decay_config validates types + ranges
+                    # and persists to disk. Unknown keys raise
+                    # ValueError per IMPROVE-77 contract.
+                    set_decay_config(**data)
+                    summary["memory_decay_restored"] = True
+                except Exception as exc:
+                    logger.warning(
+                        "[IMPROVE-94] memory_decay.json restore "
+                        "failed: %s", exc,
+                    )
+                    summary["errors"].append(
+                        f"memory_decay.json: {exc}",
+                    )
+
+            # ── SQLite tables (JSONL) ────────────────────────
+            for filename, table in _EXPORT_TABLES.items():
+                if filename not in names:
+                    continue
+                rows_imported, table_errors = _restore_table_jsonl(
+                    zf, filename, table, overwrite=overwrite,
+                )
+                summary["tables_restored"][filename] = rows_imported
+                summary["errors"].extend(table_errors)
+
+    except zipfile.BadZipFile as exc:
+        # Not a valid ZIP — surface as a structured error rather
+        # than a 500. The route handler maps this to a 400.
+        summary["errors"].append(f"invalid_zip: {exc}")
+
+    return summary
+
+
+def _restore_table_jsonl(
+    zf: zipfile.ZipFile,
+    filename: str,
+    table: str,
+    *,
+    overwrite: bool = False,
+) -> tuple[int, list[str]]:
+    """[IMPROVE-94] Read JSONL from the bundle + INSERT into
+    ``table``. Returns ``(rows_inserted, errors)``.
+
+    With ``overwrite=False`` (default): ``INSERT OR IGNORE`` —
+    primary-key conflicts skip without error, useful for
+    merging a backup into a partial state.
+
+    With ``overwrite=True``: ``DELETE FROM table`` first, then
+    insert. Replaces the table contents wholesale.
+
+    Init's ``init_partner_tables`` so a fresh DB without the
+    schema gets the tables created before the inserts run.
+    """
+    from .memory import _get_conn, init_partner_tables
+    init_partner_tables()
+
+    errors: list[str] = []
+    rows_inserted = 0
+
+    try:
+        text = zf.read(filename).decode("utf-8")
+    except Exception as exc:
+        errors.append(f"{filename}: read failed: {exc}")
+        return 0, errors
+
+    if not text.strip():
+        # Empty file — fresh-install case where the export had
+        # no rows. Nothing to do.
+        return 0, errors
+
+    conn = _get_conn()
+    try:
+        if overwrite:
+            conn.execute(f"DELETE FROM {table}")
+        for line_no, line in enumerate(text.splitlines(), start=1):
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                row = json.loads(line)
+            except Exception as exc:
+                errors.append(
+                    f"{filename}:line {line_no}: json parse: {exc}",
+                )
+                continue
+            try:
+                cols = list(row.keys())
+                placeholders = ",".join("?" for _ in cols)
+                col_list = ",".join(cols)
+                values = [row[c] for c in cols]
+                conn.execute(
+                    f"INSERT OR IGNORE INTO {table} "
+                    f"({col_list}) VALUES ({placeholders})",
+                    values,
+                )
+                rows_inserted += 1
+            except Exception as exc:
+                errors.append(
+                    f"{filename}:line {line_no}: insert: {exc}",
+                )
+        conn.commit()
+    except Exception as exc:
+        errors.append(f"{filename}: {exc}")
+    finally:
+        conn.close()
+
+    return rows_inserted, errors

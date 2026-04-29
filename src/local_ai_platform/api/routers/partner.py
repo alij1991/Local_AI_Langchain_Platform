@@ -60,7 +60,15 @@ import logging
 import time
 from typing import Any
 
-from fastapi import APIRouter, Depends, HTTPException, Request, WebSocket
+from fastapi import (
+    APIRouter,
+    Depends,
+    File,
+    HTTPException,
+    Request,
+    UploadFile,
+    WebSocket,
+)
 from fastapi.responses import Response, StreamingResponse
 
 from local_ai_platform.api.deps import (
@@ -428,6 +436,69 @@ async def partner_export(partner=Depends(get_partner_engine)):
             "X-Export-Bytes": str(len(bundle)),
         },
     )
+
+
+@router.post("/partner/import")
+async def partner_import(
+    file: UploadFile = File(...),
+    overwrite: bool = False,
+    partner=Depends(get_partner_engine),
+):
+    """[IMPROVE-94] Restore partner state from a `partner-export.zip`
+    bundle previously produced by ``GET /partner/export``.
+
+    Closes the round-trip on the IMPROVE-67 export feature. The
+    bundle's contents are restored in this order:
+
+      1. ``profile.json`` → ``engine.profile`` swap + persist
+      2. ``user_profile.json`` → ``engine.user_profile`` swap +
+         persist (also handles the per-IMPROVE-87 memory_decay
+         fields if the bundle came from a Wave-7+ install)
+      3. ``memory_decay.json`` → ``set_decay_config(**data)``
+         (the IMPROVE-77 helper validates types + ranges and
+         persists to ``data/partner/memory_decay.json``)
+      4. SQLite tables (jsonl files) → ``INSERT OR IGNORE`` per
+         row (default ``overwrite=False``); pass
+         ``?overwrite=true`` for full replacement.
+
+    Returns a JSON summary like::
+
+        {
+          "profile_restored": true,
+          "user_profile_restored": true,
+          "memory_decay_restored": true,
+          "tables_restored": {"facts.jsonl": 12, ...},
+          "errors": []
+        }
+
+    Errors do NOT raise — partial restores are intentional so a
+    corrupt single file doesn't block the rest of the bundle.
+    Inspect ``errors`` to see what failed; an HTTP 200 with a
+    non-empty errors list is a real outcome.
+
+    A 100 MB cap on the upload size keeps a malicious large
+    upload from exhausting memory. Bundles in practice are
+    sub-1MB (text JSON/JSONL files compress well in ZIP).
+
+    GDPR Article 20 (Right to data portability) maps to the
+    export+import pair — users can move their data between
+    instances of this app, or restore from a backup before a
+    factory reset.
+    """
+    zip_bytes = await file.read()
+    if not zip_bytes:
+        raise HTTPException(400, "empty file uploaded")
+    if len(zip_bytes) > 100 * 1024 * 1024:
+        raise HTTPException(
+            413, f"bundle exceeds 100 MB cap ({len(zip_bytes)} bytes)",
+        )
+
+    from local_ai_platform.partner.export import restore_from_bundle
+
+    summary = restore_from_bundle(
+        partner, zip_bytes, overwrite=overwrite,
+    )
+    return summary
 
 
 @router.delete("/partner/profile/{scope}")
