@@ -284,12 +284,31 @@ def test_registry_has_no_dead_entries():
     lands in a follow-up commit, that's intentional. Today every
     registered event corresponds to a callsite, so the audit is
     strict.
+
+    [IMPROVE-96] Recorder-driven events fire via
+    ``track_event(sub, act, ...)`` whose Recorder
+    ``__enter__``/``__exit__`` paths use f-string-built action
+    names (``f"{action}.start"`` and the bare ``action``). The
+    literal-emit scanner can't see those, so the AST walker
+    over track_event callsites complements it: for every
+    ``track_event("sub", "act", ...)`` callsite we count BOTH
+    ``sub.act`` AND ``sub.act.start`` as live. Without this
+    augmentation the freshly-registered ``chat.send`` /
+    ``editor.edit`` / ``image.generate`` / ``tool.invoke`` /
+    ``image.enhance_prompt`` / ``chat.enhance_prompt`` events
+    would all appear dead.
     """
     callsites = _scan_emit_callsites()
     callsite_pairs = {
         f"{subsystem}.{action}"
         for _path, subsystem, action in callsites
     }
+    # [IMPROVE-96] Augment with track_event callsites — these
+    # fire dynamic emits that the literal-string scanner misses.
+    track_event_callsites = _extract_track_event_callsites()
+    for _, subsystem, action in track_event_callsites:
+        callsite_pairs.add(f"{subsystem}.{action}")
+        callsite_pairs.add(f"{subsystem}.{action}.start")
     dead = KNOWN_EVENT_NAMES - callsite_pairs
     if dead:
         pytest.fail(
@@ -464,6 +483,7 @@ def test_per_subsystem_literal_types_exist_for_every_subsystem():
     expected = {
         # Map registry key to expected type name
         "agent": "AgentAction",
+        "chat": "ChatAction",
         "config": "ConfigAction",
         "editor": "EditorAction",
         "image": "ImageAction",
@@ -553,10 +573,12 @@ def test_emit_typed_typo_action_still_raises_at_runtime():
 
 
 def test_emit_typed_overloads_alphabetised_by_subsystem_in_source():
-    """[IMPROVE-91] The 11 ``@overload`` signatures appear in
+    """[IMPROVE-91] The 12 ``@overload`` signatures appear in
     alphabetical order of subsystem name in the source file.
     Pin the convention so a future addition lands at the right
-    place — keeps diffs reviewable.
+    place — keeps diffs reviewable. Bumped from 11 → 12 in
+    [IMPROVE-96] when the ``chat`` subsystem was added to register
+    the chat.send / chat.enhance_prompt Recorder events.
     """
     src = (
         Path(__file__).parent.parent
@@ -574,4 +596,179 @@ def test_emit_typed_overloads_alphabetised_by_subsystem_in_source():
         f"[IMPROVE-91] @overload subsystems not alphabetised. "
         f"Found order: {subsystems_in_order}. "
         f"Expected: {sorted(subsystems_in_order)}."
+    )
+
+
+# ── [IMPROVE-96] Recorder enumeration audit ────────────────────
+
+
+def _extract_track_event_callsites() -> list[
+    tuple[str, str, str]
+]:
+    """[IMPROVE-96] Walk every ``.py`` under
+    ``src/local_ai_platform`` and yield ``(file, subsystem,
+    action)`` for every ``track_event("subsystem", "action",
+    ...)`` callsite where the first two args are literal
+    strings.
+
+    The Recorder pattern in observability.py wraps the
+    track_event context manager around any block that wants
+    structured START + END telemetry. The Recorder's
+    ``__enter__`` fires ``emit(self.subsystem, f"{self.action}.start", ...)``
+    and ``__exit__`` fires ``emit(self.subsystem, self.action, ...)``
+    with one of four status variants (ok/error/cancelled/
+    override). Both emits use f-string-built action names whose
+    base values come from the ``self.subsystem`` and
+    ``self.action`` attributes — i.e. dynamic from the keystone
+    callsite test's perspective. The test
+    ``test_registry_covers_every_emit_callsite_in_codebase``
+    cannot match them because the action arg is an expression,
+    not a literal.
+
+    Walking ``track_event`` callsites recovers the (subsystem,
+    action) tuple statically and lets us assert each pair has
+    BOTH the base form AND the ``.start`` companion registered
+    in ``KNOWN_EVENT_NAMES``.
+
+    Uses Python's ``ast`` module rather than regex so multi-line
+    + nested-call shapes parse correctly. Mirrors the AST walker
+    pattern from [IMPROVE-92]'s schema audit
+    (``_extract_emit_typed_callsite_contexts``).
+    """
+    import ast
+    src_root = (
+        Path(__file__).parent.parent
+        / "src" / "local_ai_platform"
+    )
+    found: list[tuple[str, str, str]] = []
+    for py in src_root.rglob("*.py"):
+        # Don't scan observability.py — its docstring contains
+        # ``track_event("image", "generate", {...})`` example
+        # snippets that aren't real callsites. The AST walker
+        # naturally skips docstring contents (they're
+        # ast.Constant nodes inside ast.Expr, not ast.Call), but
+        # observability.py also has the literal track_event
+        # def + the contextmanager wrapper around it; safer to
+        # skip the file outright.
+        if py.name == "observability.py":
+            continue
+        try:
+            text = py.read_text(encoding="utf-8")
+        except UnicodeDecodeError:
+            text = py.read_text(encoding="latin-1")
+        try:
+            tree = ast.parse(text)
+        except SyntaxError:
+            continue
+        for node in ast.walk(tree):
+            if not isinstance(node, ast.Call):
+                continue
+            func = node.func
+            # Match track_event(...) calls (bare name, not
+            # self.track_event etc.).
+            if not isinstance(func, ast.Name) or func.id != "track_event":
+                continue
+            if len(node.args) < 2:
+                continue
+            sub_arg, act_arg = node.args[0], node.args[1]
+            if not (isinstance(sub_arg, ast.Constant)
+                    and isinstance(sub_arg.value, str)):
+                continue
+            if not (isinstance(act_arg, ast.Constant)
+                    and isinstance(act_arg.value, str)):
+                continue
+            found.append((str(py), sub_arg.value, act_arg.value))
+    return found
+
+
+def test_track_event_callsites_register_both_base_and_start_actions():
+    """[IMPROVE-96] The Recorder class (observability.py:Recorder)
+    fires TWO emits per ``track_event(sub, act, ...)`` block:
+
+      * ``emit(sub, f"{act}.start", status="start", ...)`` at
+        __enter__
+      * ``emit(sub, act, status=ok|error|cancelled|override, ...)``
+        at __exit__
+
+    Both action names use f-string interpolation of the
+    Recorder's instance attributes — the keystone test's
+    literal-string regex can't match either, so all
+    track_event-driven events have historically been INVISIBLE
+    to coverage. [IMPROVE-89]'s commit body explicitly noted
+    this gap and named "Recorder class enumeration test" as
+    follow-up work.
+
+    This audit walks every ``track_event("sub", "act", ...)``
+    callsite via AST and asserts both ``sub.act`` AND
+    ``sub.act.start`` are in ``KNOWN_EVENT_NAMES``. A future
+    ``track_event("foo", "bar", ...)`` typo lands here as a
+    test failure — the author either fixes the registry or
+    fixes the typo.
+
+    Failure messages name the file + the missing event names
+    so the fix is one grep.
+    """
+    callsites = _extract_track_event_callsites()
+    assert len(callsites) > 0, (
+        "[IMPROVE-96] AST walker found 0 track_event callsites. "
+        "Either the codebase removed all Recorder usage (in "
+        "which case this test should be deleted) or the walker "
+        "is broken."
+    )
+    failures: list[str] = []
+    seen_pairs: set[tuple[str, str]] = set()
+    for path, subsystem, action in callsites:
+        seen_pairs.add((subsystem, action))
+        base_name = f"{subsystem}.{action}"
+        start_name = f"{subsystem}.{action}.start"
+        if base_name not in KNOWN_EVENT_NAMES:
+            failures.append(
+                f"{path}: track_event({subsystem!r}, {action!r}) "
+                f"emits {base_name!r} at __exit__ but it's not "
+                f"in KNOWN_EVENT_NAMES."
+            )
+        if start_name not in KNOWN_EVENT_NAMES:
+            failures.append(
+                f"{path}: track_event({subsystem!r}, {action!r}) "
+                f"emits {start_name!r} at __enter__ but it's "
+                f"not in KNOWN_EVENT_NAMES."
+            )
+    if failures:
+        pytest.fail(
+            f"[IMPROVE-96] {len(failures)} track_event callsite "
+            f"emit(s) not registered in KNOWN_EVENT_NAMES:\n  "
+            + "\n  ".join(failures)
+        )
+
+
+def test_track_event_callsites_seen_today():
+    """[IMPROVE-96] Pin the baseline: today's track_event
+    callsite inventory. A future commit that ADDS a Recorder
+    callsite must update this set; a commit that REMOVES one
+    must trim it. This is belt-and-suspenders alongside the
+    register-both-base-and-start audit — the audit catches
+    missing registry entries; this catches the inverse (a
+    track_event callsite quietly added without dev awareness).
+    """
+    callsites = _extract_track_event_callsites()
+    seen_pairs = {
+        (subsystem, action) for (_, subsystem, action) in callsites
+    }
+    expected_pairs = {
+        ("chat", "enhance_prompt"),
+        ("chat", "send"),
+        ("editor", "edit"),
+        ("image", "enhance_prompt"),
+        ("image", "generate"),
+        ("partner", "chat"),
+        ("tool", "invoke"),
+    }
+    assert seen_pairs == expected_pairs, (
+        f"[IMPROVE-96] track_event callsite inventory drifted "
+        f"from the pinned baseline. "
+        f"Only-in-source: {seen_pairs - expected_pairs}. "
+        f"Only-in-baseline: {expected_pairs - seen_pairs}. "
+        f"Update both this test AND the per-subsystem Literal "
+        f"types in observability_events.py if the new callsite "
+        f"introduces a new subsystem or action."
     )

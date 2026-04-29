@@ -109,6 +109,22 @@ AgentAction = Literal[
     "validation_rejected",
 ]
 
+# chat: LLM chat boundary events fired via ``track_event`` in
+# api/routers/chat.py. ``send`` / ``send.start`` cover the main
+# chat completion path; ``enhance_prompt`` / ``enhance_prompt.start``
+# cover the prompt-enhancement preprocessing call. [IMPROVE-96]
+# registered the subsystem after the Recorder enumeration AST
+# walker surfaced these dynamic-action emits as unregistered
+# (the keystone callsite test only catches literal-string
+# emit/emit_typed calls; track_event's f-string-based emit chain
+# fell under the regex's blind spot).
+ChatAction = Literal[
+    "enhance_prompt",
+    "enhance_prompt.start",
+    "send",
+    "send.start",
+]
+
 # config: settings/env bootstrap. Single ``load`` event today;
 # [IMPROVE-89] registered the subsystem during the bulk
 # emit_typed migration since the pre-existing kwarg-shape emit
@@ -119,8 +135,14 @@ ConfigAction = Literal[
 
 # editor: image-editor session ops (apply_edit, undo, redo,
 # blend, export). Wave 5 [IMPROVE-52/53/56/57] all wrote here.
+# [IMPROVE-96] added ``edit`` / ``edit.start`` after the
+# Recorder enumeration AST walker surfaced the
+# ``track_event("editor", "edit", ...)`` callsite at
+# api/routers/editor.py:432 as unregistered.
 EditorAction = Literal[
     "blend_with_previous",
+    "edit",
+    "edit.start",
     "export",
     "op",
     "redo",
@@ -142,6 +164,10 @@ EditorAction = Literal[
 # calls that pre-flight rejected the diffusers path" without
 # grepping logs.
 ImageAction = Literal[
+    "enhance_prompt",
+    "enhance_prompt.start",
+    "generate",
+    "generate.start",
     "infer",
     "infer.start",
     "load",
@@ -249,10 +275,15 @@ SystemAction = Literal[
 # registered by [IMPROVE-89] — tools/file_ops.py and
 # tools/rag_tools.py both fire it from their workspace-sandbox
 # rejection paths, but the dotted action name didn't match the
-# pre-[IMPROVE-89] keystone regex.
+# pre-[IMPROVE-89] keystone regex. [IMPROVE-96] added ``invoke``
+# / ``invoke.start`` after the Recorder enumeration AST walker
+# surfaced the two ``track_event("tool", "invoke", ...)``
+# callsites in agents.py (the agent-loop tool dispatcher).
 ToolAction = Literal[
     "calculator_eval",
     "file_ops.path_rejected",
+    "invoke",
+    "invoke.start",
 ]
 
 
@@ -265,6 +296,7 @@ ToolAction = Literal[
 # the ``frozenset`` cast in ``KNOWN_EVENTS`` strips ordering.
 
 _AGENT_ACTIONS: tuple[str, ...] = get_args(AgentAction)
+_CHAT_ACTIONS: tuple[str, ...] = get_args(ChatAction)
 _CONFIG_ACTIONS: tuple[str, ...] = get_args(ConfigAction)
 _EDITOR_ACTIONS: tuple[str, ...] = get_args(EditorAction)
 _IMAGE_ACTIONS: tuple[str, ...] = get_args(ImageAction)
@@ -284,6 +316,7 @@ _TOOL_ACTIONS: tuple[str, ...] = get_args(ToolAction)
 # of its commit so the keystone test passes.
 KNOWN_EVENTS: dict[str, frozenset[str]] = {
     "agent": frozenset(_AGENT_ACTIONS),
+    "chat": frozenset(_CHAT_ACTIONS),
     "config": frozenset(_CONFIG_ACTIONS),
     "editor": frozenset(_EDITOR_ACTIONS),
     "image": frozenset(_IMAGE_ACTIONS),
@@ -311,6 +344,7 @@ KNOWN_EVENT_NAMES: frozenset[str] = frozenset(
 # in the subsystem arg of ``emit_typed`` at lint time.
 SubsystemName = Literal[
     "agent",
+    "chat",
     "config",
     "editor",
     "image",
@@ -356,6 +390,20 @@ class UnknownEventNameError(ValueError):
 def emit_typed(
     subsystem: Literal["agent"],
     action: AgentAction,
+    status: str = "ok",
+    *,
+    duration_ms: int | None = None,
+    error_code: str | None = None,
+    error_message: str | None = None,
+    context: dict[str, Any] | None = None,
+    perf: dict[str, Any] | None = None,
+) -> None: ...
+
+
+@overload
+def emit_typed(
+    subsystem: Literal["chat"],
+    action: ChatAction,
     status: str = "ok",
     *,
     duration_ms: int | None = None,
