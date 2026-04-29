@@ -388,18 +388,31 @@ def test_parallel_wave_node_error_is_recorded():
 # ── [IMPROVE-36 telemetry] Counter and event surfacing ────────────
 
 
-def _capture_emits():
-    """Collect ``emit(...)`` calls into a list. Returns (list, patcher);
-    caller passes patcher to ``monkeypatch.setattr``."""
+def _capture_emits(monkeypatch):
+    """Collect ``emit(...)`` calls into a list, patching the
+    function in BOTH the agents module (for the @-style imports)
+    and the systems.executor module (where the actual emit calls
+    now live post-IMPROVE-NEW-4 extraction). Returns just the
+    captured list — patching is done inside.
+
+    The double-patch is necessary because monkeypatch.setattr only
+    rebinds the named attribute on the target module; ``executor``
+    has its own ``from ..observability import emit`` so patching
+    only ``agents.emit`` (the pre-extraction shape) leaves the
+    executor's calls untouched.
+    """
     captured: list[tuple[str, str, dict, dict | None]] = []
     from local_ai_platform import agents as _agents_mod
+    from local_ai_platform.systems import executor as _executor_mod
 
     def fake_emit(subsystem, action, status="ok",
                   duration_ms=None, error_code=None, error_message=None,
                   context=None, perf=None):
         captured.append((subsystem, action, dict(context or {}), dict(perf) if perf else None))
 
-    return captured, _agents_mod, fake_emit
+    monkeypatch.setattr(_agents_mod, "emit", fake_emit)
+    monkeypatch.setattr(_executor_mod, "emit", fake_emit)
+    return captured
 
 
 def test_telemetry_parallel_wave_emits_event(monkeypatch):
@@ -408,8 +421,7 @@ def test_telemetry_parallel_wave_emits_event(monkeypatch):
     orch = _make_orch()
     orch.chat_with_agent = lambda a, p, **kw: f"out:{a}"
 
-    captured, agents_mod, fake_emit = _capture_emits()
-    monkeypatch.setattr(agents_mod, "emit", fake_emit)
+    captured = _capture_emits(monkeypatch)
 
     definition = {
         "nodes": [
@@ -441,8 +453,7 @@ def test_telemetry_run_done_perf_includes_counters(monkeypatch):
     orch = _make_orch()
     orch.chat_with_agent = lambda a, p, **kw: f"out:{a}"
 
-    captured, agents_mod, fake_emit = _capture_emits()
-    monkeypatch.setattr(agents_mod, "emit", fake_emit)
+    captured = _capture_emits(monkeypatch)
 
     definition = {
         "nodes": [
@@ -473,8 +484,7 @@ def test_telemetry_sequential_run_reports_zero_parallel(monkeypatch):
     orch = _make_orch()
     orch.chat_with_agent = lambda a, p, **kw: f"out:{a}"
 
-    captured, agents_mod, fake_emit = _capture_emits()
-    monkeypatch.setattr(agents_mod, "emit", fake_emit)
+    captured = _capture_emits(monkeypatch)
 
     definition = {
         "nodes": [
@@ -504,8 +514,7 @@ def test_telemetry_duplicate_agent_fallback_emits_event(monkeypatch):
     orch = _make_orch()
     orch.chat_with_agent = lambda a, p, **kw: f"out:{a}"
 
-    captured, agents_mod, fake_emit = _capture_emits()
-    monkeypatch.setattr(agents_mod, "emit", fake_emit)
+    captured = _capture_emits(monkeypatch)
 
     # Two nodes share the same agent — triggers safety fallback.
     definition = {

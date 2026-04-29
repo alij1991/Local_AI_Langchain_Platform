@@ -1455,117 +1455,13 @@ Guidelines:
         """[IMPROVE-35] Run ONE LLM classification call covering all
         ``llm_router`` sibling edges out of a source node.
 
-        Returns the chosen option string (an option name from the
-        union of edges' ``options`` arrays) or ``None`` when:
-
-          * No llm_router edges exist among the input.
-          * The router/config isn't available.
-          * The classification call fails or returns junk.
-
-        The caller fires only the edge whose ``target`` matches the
-        returned option. ``None`` means NO llm_router edges fire —
-        users wanting deadlock-resilience should add an
-        ``always`` fallback edge.
-
-        Doc rationale at docs/features/05-systems.md:425-437. The
-        single-call shape (vs per-edge classification) is the
-        important detail — three llm_router edges out of one node
-        cost one LLM round-trip, not three.
+        [IMPROVE-NEW-4] Body extracted to
+        ``systems.executor.classify_llm_router_edges``; this method
+        is a thin delegate so existing callers + tests keep working
+        through ``orch._classify_llm_router_edges(...)``.
         """
-        # Gather candidate options + the first non-empty instruction.
-        # Sibling edges typically share the same instruction; if they
-        # differ, we use the first one (predictable) and union the
-        # options.
-        instruction = ""
-        options: list[str] = []
-        relevant_targets: list[str] = []
-        for target, rule_type, _rule_notes, rule in edges:
-            if rule_type != "llm_router":
-                continue
-            if target in visited:
-                continue
-            if not instruction:
-                instruction = (
-                    rule.get("instruction") or "Pick the next branch."
-                )
-            edge_opts = rule.get("options") or []
-            if edge_opts:
-                options.extend(edge_opts)
-            else:
-                # No explicit options — use the edge's own target as
-                # the option name. The convention matches the doc's
-                # canonical example where ``options`` carries node
-                # names that line up with edge targets.
-                options.append(target)
-            relevant_targets.append(target)
-
-        if not relevant_targets:
-            return None
-
-        # Dedupe options preserving order (first occurrence wins).
-        options = list(dict.fromkeys(options))
-
-        # Refuse gracefully if the router isn't reachable. The DAG
-        # falls through with chosen_option=None; callers can add an
-        # always-edge fallback for resilience.
-        if self.router is None:
-            logger.info(
-                "[IMPROVE-35] llm_router skipped: no router on orchestrator",
-            )
-            return None
-
-        try:
-            from local_ai_platform.providers import (
-                ChatMessage, GenerationSettings,
-            )
-            model = f"ollama:{self.config.prompt_builder_model}"
-            options_block = "\n".join(f"- {o}" for o in options)
-            classify_prompt = (
-                "You are a routing decision agent for a multi-agent "
-                "workflow. Pick exactly ONE option for the branch that "
-                "should execute next.\n\n"
-                f"Source agent's output:\n\"\"\"\n{source_output}\n\"\"\"\n\n"
-                f"Decision criterion:\n{instruction}\n\n"
-                f"Options (pick exactly one):\n{options_block}\n\n"
-                "Reply with ONLY the chosen option's name. No quotes, no "
-                "explanation, no preamble."
-            )
-            response = self.router.chat(
-                model,
-                [ChatMessage(role="user", content=classify_prompt)],
-                GenerationSettings(temperature=0.2, max_tokens=64),
-            )
-            text = (response.content or "").strip()
-            # Strip qwen3/r1 thinking tags (same idiom as the prompt
-            # enhancer at ai_enhance.py:3437-3438).
-            text = re.sub(
-                r"<think>.*?</think>", "", text, flags=re.DOTALL,
-            ).strip()
-            text_lc = text.lower()
-
-            # Pick the FIRST option that appears as a substring. Most
-            # local models echo the option name verbatim; some wrap
-            # it in punctuation or a sentence.
-            for opt in options:
-                if opt.lower() in text_lc:
-                    logger.info(
-                        "[IMPROVE-35] llm_router chose %r from %s",
-                        opt, options,
-                    )
-                    return opt
-
-            logger.warning(
-                "[IMPROVE-35] llm_router output didn't match any option. "
-                "options=%s response=%r",
-                options, text[:120],
-            )
-            return None
-        except Exception as exc:
-            logger.warning(
-                "[IMPROVE-35] llm_router call failed (%s); no edges fire",
-                exc,
-            )
-            return None
+        from .systems.executor import classify_llm_router_edges
+        return classify_llm_router_edges(self, edges, source_output, visited)
 
     async def execute_system_graph(
         self,
@@ -1576,376 +1472,37 @@ Guidelines:
     ) -> dict[str, Any]:
         """Execute a system graph designed in the visual graph editor.
 
-        Supports edge routing rules:
-        - "always": always follow this edge
-        - "on_keyword_match": follow if output contains a keyword (from edge notes)
-        - "on_tool_result": follow if a tool was called (checks for tool markers)
-        - "manual_next": always follow (same as always, user controls via graph)
+        [IMPROVE-NEW-4] Body extracted to
+        ``systems.executor.execute_graph``; this method is a thin
+        delegate so existing callers + tests keep working through
+        ``orch.execute_system_graph(...)``.
 
-        ``run_id`` is optional — when callers don't pass one, a fresh
-        ``uuid4`` is minted as before. [IMPROVE-68] Commit 5/5 wraps
-        this method in a ``trace_run`` block at the route layer and
-        passes the same ``run_id`` to both, so the trace JSON file
-        on disk and the run_id in the response payload match — that's
-        what lets operators jump from /runs to the response and back.
+        Edge routing rules supported:
+        - "always" / "manual_next": always follow this edge
+        - "on_keyword_match": follow if output contains a keyword
+          (from edge notes)
+        - "on_tool_result": follow if a tool was called (checks
+          for tool markers)
+        - "llm_router" (IMPROVE-35): follow if the shared
+          classifier picks this edge's target
 
-        Returns timing data and tool call info in trace.
+        ``run_id`` is optional — when callers don't pass one, a
+        fresh ``uuid4`` is minted. [IMPROVE-68] The route layer
+        wraps this in a ``trace_run`` block and passes the same
+        ``run_id`` so the trace JSON file on disk matches the
+        response payload's run_id.
+
+        [IMPROVE-36] When ``system_definition.parallel_waves=True``,
+        sibling nodes in the same BFS wave run concurrently via
+        ``asyncio.to_thread``. Default False preserves pre-IMPROVE-36
+        sequential semantics.
         """
-        import time as _time
-
-        nodes = system_definition.get("nodes", [])
-        edges = system_definition.get("edges", [])
-        start_node_id = system_definition.get("start_node_id") or system_definition.get("startNodeId")
-
-        if not nodes:
-            return {"final_text": "System has no agent nodes.", "node_outputs": []}
-
-        # Build graph structures
-        node_map = {n["id"]: n for n in nodes}
-        # Edges with routing rules: {source: [(target, rule_type, notes, full_rule)]}
-        # [IMPROVE-35] Carry the full rule dict so the llm_router rule
-        # can read its ``options`` and ``instruction`` fields without
-        # another tuple expansion. Existing rule_type / rule_notes
-        # callers keep working since they unpack the first 3 elements.
-        edge_map: dict[str, list[tuple[str, str, str, dict[str, Any]]]] = {
-            n["id"]: [] for n in nodes
-        }
-        in_degree: dict[str, int] = {n["id"]: 0 for n in nodes}
-        for e in edges:
-            src, tgt = e.get("source"), e.get("target")
-            rule = e.get("rule", {}) if isinstance(e.get("rule"), dict) else {}
-            rule_type = rule.get("type", e.get("ruleType", "always"))
-            rule_notes = rule.get("notes", e.get("notes", ""))
-            if src in edge_map and tgt in node_map:
-                edge_map[src].append((tgt, rule_type, rule_notes, rule))
-                in_degree[tgt] = in_degree.get(tgt, 0) + 1
-
-        # Find start node
-        if start_node_id and start_node_id in node_map:
-            current_nodes = [start_node_id]
-        else:
-            current_nodes = [nid for nid, deg in in_degree.items() if deg == 0]
-            if not current_nodes:
-                current_nodes = [nodes[0]["id"]]
-
-        # Execute graph with routing
-        # [IMPROVE-68] Reuse caller-supplied run_id when given (the
-        # /systems/{name}/chat route mints one and passes it to BOTH
-        # ``trace_run`` and this executor so the on-disk trace JSON
-        # matches the response payload's run_id).
-        run_id = run_id or str(uuid.uuid4())
-        system_name = system_definition.get("name") or system_definition.get("id") or "unnamed"
-        total_start = _time.monotonic()
-        node_outputs: list[dict[str, Any]] = []
-        # [IMPROVE-33] Per-system budget override; defaults to
-        # ``_INTER_NODE_CONTEXT_BUDGET_TOKENS``. Letting users dial
-        # this up for big-context models (or down for cheap models)
-        # without redeploying.
-        context_budget = int(
-            system_definition.get("context_budget_tokens",
-                                  _INTER_NODE_CONTEXT_BUDGET_TOKENS),
+        from .systems.executor import execute_graph
+        return await execute_graph(
+            self, system_definition, user_input,
+            conversation_id=conversation_id,
+            run_id=run_id,
         )
-        visited: set[str] = set()
-        max_steps = len(nodes) * 2  # prevent infinite loops
-
-        emit("system", "run.start", status="start",
-             context={
-                 "run_id": run_id,
-                 "system_name": system_name,
-                 "conversation_id": conversation_id,
-                 "node_count": len(nodes),
-                 "edge_count": len(edges),
-             })
-
-        # [IMPROVE-36] Read parallel-waves flag once. Default False
-        # preserves the pre-IMPROVE-36 sequential semantics (token
-        # budget + per-node ordering). When on, sibling nodes in the
-        # same wave run concurrently via ``asyncio.to_thread`` over
-        # ``chat_with_agent``. Doc rationale at
-        # docs/features/05-systems.md:444-455.
-        parallel_waves = bool(system_definition.get("parallel_waves", False))
-
-        # [IMPROVE-36 telemetry] Per-run counters surfaced in the
-        # run_done perf dict so the weekly review can answer "how
-        # often does parallel mode actually engage" and "what's the
-        # fan-out". Increments happen INSIDE the parallel pre-pass
-        # below — both run only when the wave is safe to parallelize
-        # AND has more than one runnable node, matching the user's
-        # intuition for "did the speedup fire here".
-        parallel_waves_used = 0
-        concurrent_nodes_total = 0
-        parallel_waves_skipped = 0  # safety-fallback counter
-
-        step = 0
-        while current_nodes and step < max_steps:
-            step += 1
-            next_nodes: list[str] = []
-
-            # [IMPROVE-36] Pre-pass: when parallel_waves is on AND the
-            # wave is safe (no duplicate agents), run all runnable
-            # ``chat_with_agent`` calls concurrently and stash their
-            # outputs. The existing per-node loop below then reuses
-            # the stashed result instead of re-running the LLM call.
-            #
-            # "Safe" = no two nodes in the wave share the same agent.
-            # The doc warns about shared in-memory state on the same
-            # agent (``_smart_memories[agent]``); the conservative
-            # fallback to sequential mode keeps that case correct
-            # without requiring callers to reason about it.
-            #
-            # Sequential semantics still apply WITHIN a wave when
-            # parallel mode is off — node 2 in the same wave sees
-            # node 1's output via the rebuilt context block. Parallel
-            # mode intentionally TRADES that pipelining for speed:
-            # all siblings see the same pre-wave context.
-            preloaded_outputs: dict[str, tuple[str, int, Exception | None]] = {}
-            runnable_for_parallel = [
-                n for n in current_nodes
-                if n not in visited and n in node_map
-                and node_map[n].get("agent", "") in self.definitions
-            ]
-            if parallel_waves and len(runnable_for_parallel) > 1:
-                wave_agents = [
-                    node_map[n].get("agent", "") for n in runnable_for_parallel
-                ]
-                if len(wave_agents) == len(set(wave_agents)):
-                    # Wave is safe to parallelize.
-                    pre_wave_ctx = _build_inter_node_context(
-                        node_outputs, budget_tokens=context_budget,
-                    )
-
-                    async def _preload(_nid: str):
-                        _node_def = node_map[_nid]
-                        _agent = _node_def.get("agent", "")
-                        if pre_wave_ctx:
-                            _prompt = (
-                                f"{user_input}\n\nContext from prior agents:\n"
-                                f"{pre_wave_ctx}"
-                            )
-                        else:
-                            _prompt = user_input
-                        _t0 = _time.monotonic()
-                        try:
-                            _out = await asyncio.to_thread(
-                                self.chat_with_agent, _agent, _prompt,
-                            )
-                            return _nid, _out, int(
-                                (_time.monotonic() - _t0) * 1000,
-                            ), None
-                        except Exception as _exc:
-                            return _nid, "", int(
-                                (_time.monotonic() - _t0) * 1000,
-                            ), _exc
-
-                    _wave_t0 = _time.monotonic()
-                    results = await asyncio.gather(
-                        *[_preload(n) for n in runnable_for_parallel],
-                    )
-                    _wave_ms = int((_time.monotonic() - _wave_t0) * 1000)
-                    for _nid, _out, _dur, _exc in results:
-                        preloaded_outputs[_nid] = (_out, _dur, _exc)
-                    logger.info(
-                        "[IMPROVE-36] parallel wave: %d nodes ran "
-                        "concurrently", len(runnable_for_parallel),
-                    )
-                    # [IMPROVE-36 telemetry] Counter-bump + per-wave
-                    # event so /observability/summary can answer
-                    # "how often does this engage and at what
-                    # fan-out". Errors during the wave still fire the
-                    # event — it tracks the parallel decision, not
-                    # whether the agents themselves succeeded.
-                    parallel_waves_used += 1
-                    concurrent_nodes_total += len(runnable_for_parallel)
-                    _wave_errors = sum(
-                        1 for _, _, _, exc in results if exc is not None
-                    )
-                    emit(
-                        "system", "wave_parallel", status="ok",
-                        duration_ms=_wave_ms,
-                        context={
-                            "run_id": run_id,
-                            "system_name": system_name,
-                            "step": step,
-                            "node_count": len(runnable_for_parallel),
-                            "agents": wave_agents,
-                            "errors": _wave_errors,
-                        },
-                        perf={"node_count": len(runnable_for_parallel)},
-                    )
-                else:
-                    logger.info(
-                        "[IMPROVE-36] parallel_waves on but wave has "
-                        "duplicate agents (%s); falling back to "
-                        "sequential", wave_agents,
-                    )
-                    # [IMPROVE-36 telemetry] Track safety-fallbacks
-                    # too so a user wondering "why didn't parallel
-                    # engage" can grep for this in run logs.
-                    parallel_waves_skipped += 1
-                    emit(
-                        "system", "wave_parallel_fallback", status="ok",
-                        context={
-                            "run_id": run_id,
-                            "system_name": system_name,
-                            "step": step,
-                            "node_count": len(runnable_for_parallel),
-                            "agents": wave_agents,
-                            "reason": "duplicate_agents",
-                        },
-                    )
-
-            for nid in current_nodes:
-                if nid in visited:
-                    continue
-                visited.add(nid)
-
-                node_def = node_map.get(nid)
-                if not node_def:
-                    continue
-
-                agent_name = node_def.get("agent", "")
-                role = (node_def.get("config") or {}).get("role", node_def.get("role", ""))
-
-                if not agent_name or agent_name not in self.definitions:
-                    node_outputs.append({
-                        "node": nid, "agent": agent_name, "role": role,
-                        "text": f"(agent '{agent_name}' not found)", "status": "skipped",
-                        "duration_ms": 0,
-                    })
-                    emit("system", "node_end", status="skipped",
-                         duration_ms=0,
-                         context={"run_id": run_id, "system_name": system_name,
-                                  "node_id": nid, "agent": agent_name, "role": role,
-                                  "reason": "agent_not_found"})
-                    continue
-
-                # [IMPROVE-33] Build prompt with token-budgeted prior
-                # context — newest outputs win, older ones get elided
-                # with a marker so the agent knows truncation happened.
-                ctx_block = _build_inter_node_context(
-                    node_outputs, budget_tokens=context_budget,
-                )
-                if ctx_block:
-                    prompt = f"{user_input}\n\nContext from prior agents:\n{ctx_block}"
-                else:
-                    prompt = user_input
-
-                # Execute
-                node_start = _time.monotonic()
-                emit("system", "node_start", status="start",
-                     context={"run_id": run_id, "system_name": system_name,
-                              "node_id": nid, "agent": agent_name, "role": role,
-                              "step": step})
-                try:
-                    # [IMPROVE-36] Use preloaded output when this node
-                    # ran in parallel above. Otherwise call into
-                    # chat_with_agent normally (sequential path).
-                    if nid in preloaded_outputs:
-                        output, duration_ms, _preload_exc = preloaded_outputs[nid]
-                        if _preload_exc is not None:
-                            # Re-raise so the existing except handler
-                            # below records the error consistently
-                            # with the sequential code path.
-                            raise _preload_exc
-                    else:
-                        output = self.chat_with_agent(agent_name, prompt)
-                        duration_ms = int((_time.monotonic() - node_start) * 1000)
-                    node_outputs.append({
-                        "node": nid, "agent": agent_name, "role": role,
-                        "text": output, "status": "ok",
-                        "duration_ms": duration_ms,
-                    })
-                    emit("system", "node_end", status="ok",
-                         duration_ms=duration_ms,
-                         context={"run_id": run_id, "system_name": system_name,
-                                  "node_id": nid, "agent": agent_name, "role": role},
-                         perf={"output_length": len(output) if output else 0})
-                except Exception as exc:
-                    duration_ms = int((_time.monotonic() - node_start) * 1000)
-                    node_outputs.append({
-                        "node": nid, "agent": agent_name, "role": role,
-                        "text": str(exc), "status": "error",
-                        "duration_ms": duration_ms,
-                    })
-                    emit("system", "node_end", status="error",
-                         duration_ms=duration_ms,
-                         error_code=type(exc).__name__,
-                         error_message=str(exc),
-                         context={"run_id": run_id, "system_name": system_name,
-                                  "node_id": nid, "agent": agent_name, "role": role})
-                    output = str(exc)
-
-                # [IMPROVE-35] Evaluate edge routing — llm_router edges
-                # share ONE classification call per source node, so a
-                # 3-way conditional doesn't cost 3 LLM round-trips.
-                # Other rule types still evaluate independently.
-                chosen_option = self._classify_llm_router_edges(
-                    edge_map.get(nid, []), output, visited,
-                )
-                for target, rule_type, rule_notes, rule in edge_map.get(nid, []):
-                    if target in visited:
-                        continue
-
-                    should_follow = False
-                    if rule_type in ("always", "manual_next"):
-                        should_follow = True
-                    elif rule_type == "on_keyword_match":
-                        # Follow if output contains any keyword from the edge notes
-                        keywords = [k.strip().lower() for k in rule_notes.split(",") if k.strip()]
-                        output_lower = output.lower()
-                        should_follow = any(kw in output_lower for kw in keywords) if keywords else True
-                    elif rule_type == "on_tool_result":
-                        # Follow if output suggests a tool was used
-                        should_follow = any(marker in output for marker in ["Tool", "tool", "Result:", "```"])
-                    elif rule_type == "llm_router":
-                        # [IMPROVE-35] Edge fires iff its target matches
-                        # the LLM-classified option. ``chosen_option``
-                        # being None means the LLM failed (router
-                        # unavailable, classification failed) — in that
-                        # case NO llm_router edges fire so the user can
-                        # add an "always" fallback edge for resilience
-                        # rather than guessing wrong.
-                        should_follow = (
-                            chosen_option is not None
-                            and chosen_option == target
-                        )
-                    else:
-                        should_follow = True  # unknown rule = always follow
-
-                    if should_follow and target not in next_nodes:
-                        next_nodes.append(target)
-
-            current_nodes = next_nodes
-
-        total_ms = int((_time.monotonic() - total_start) * 1000)
-        final_text = node_outputs[-1]["text"] if node_outputs else "No output produced."
-
-        errors = sum(1 for n in node_outputs if n.get("status") == "error")
-        emit("system", "run_done", status="error" if errors else "ok",
-             duration_ms=total_ms,
-             context={"run_id": run_id, "system_name": system_name,
-                      "conversation_id": conversation_id},
-             perf={
-                 "nodes_executed": len(node_outputs),
-                 "error_count": errors,
-                 "final_text_length": len(final_text) if final_text else 0,
-                 "steps": step,
-                 # [IMPROVE-36 telemetry] Per-run aggregates of the
-                 # parallel-wave decision. Useful for the weekly review
-                 # but cheap to surface — three int fields.
-                 "parallel_waves_used": parallel_waves_used,
-                 "concurrent_nodes_total": concurrent_nodes_total,
-                 "parallel_waves_skipped": parallel_waves_skipped,
-             })
-
-        return {
-            "final_text": final_text,
-            "node_outputs": node_outputs,
-            "conversation_id": conversation_id,
-            "run_id": run_id,
-            "total_duration_ms": total_ms,
-            "nodes_executed": len(node_outputs),
-        }
 
     async def astream_system_graph(
         self,
@@ -1956,339 +1513,43 @@ Guidelines:
     ) -> AsyncGenerator[dict[str, Any], None]:
         """[IMPROVE-32] Streaming variant of ``execute_system_graph``.
 
-        Walks the same DAG with the same edge-routing semantics as the
-        sync executor (lines 1003-1197) — `visited` + `max_steps` cycle
-        guard, agent-name-not-found = ``status="skipped"``, accumulated
-        context concatenation, edge rules ``always`` / ``manual_next`` /
-        ``on_keyword_match`` / ``on_tool_result`` — but yields typed
-        events as nodes progress instead of returning the full result
-        at the end.
+        [IMPROVE-NEW-4] Body extracted to
+        ``systems.executor.astream_graph``; this method is a thin
+        delegate that re-yields the executor's events so existing
+        callers + tests keep working through
+        ``orch.astream_system_graph(...)``.
 
-        Per node it calls ``astream_chat_with_agent(agent, prompt)`` and
-        re-yields each token / tool_call / tool_result tagged with the
-        owning ``node`` id, so the SSE consumer can reconstruct
-        per-node sub-streams. Final event is ``{"type": "done", ...}``
-        carrying the same payload shape as the sync executor's return
-        dict — that's what ``/systems/{name}/chat/stream``'s end-frame
-        renders.
+        Walks the same DAG with the same edge-routing semantics as
+        the sync executor — ``visited`` + ``max_steps`` cycle
+        guard, agent-name-not-found = ``status="skipped"``,
+        budgeted context, edge rules ``always`` / ``manual_next``
+        / ``on_keyword_match`` / ``on_tool_result`` /
+        ``llm_router`` — but yields typed events as nodes progress
+        instead of returning the full result at the end.
 
-        The same ``emit("system", ...)`` calls as the sync path stay
-        intact so the active TraceRecorder ContextVar (set by
-        ``trace_run`` at the route layer per IMPROVE-68) records the
-        per-node timeline identically — operators on /runs see the
-        same events whether the system was invoked sync or streamed.
+        Per node it calls ``astream_chat_with_agent(agent, prompt)``
+        and re-yields each token / tool_call / tool_result tagged
+        with the owning ``node`` id. Final event is
+        ``{"type": "done", ...}`` carrying the same payload shape
+        as the sync executor's return dict.
+
+        The same ``emit("system", ...)`` calls as the sync path
+        stay intact so the active TraceRecorder ContextVar (set
+        by ``trace_run`` at the route layer per IMPROVE-68)
+        records the per-node timeline identically.
 
         Sources (2025-2026):
         - https://docs.langchain.com/oss/python/langgraph/streaming
         - https://docs.langchain.com/oss/python/langgraph/workflows-agents
-        - docs/features/05-systems.md §IMPROVE-32 (line 382)
+        - docs/features/05-systems.md §IMPROVE-32
         """
-        import time as _time
-
-        nodes = system_definition.get("nodes", [])
-        edges = system_definition.get("edges", [])
-        start_node_id = system_definition.get("start_node_id") or system_definition.get("startNodeId")
-
-        if not nodes:
-            yield {
-                "type": "done",
-                "final_text": "System has no agent nodes.",
-                "node_outputs": [],
-                "total_duration_ms": 0,
-                "nodes_executed": 0,
-                "run_id": run_id or str(uuid.uuid4()),
-                "conversation_id": conversation_id,
-            }
-            return
-
-        # Build graph structures (mirrors execute_system_graph:1037-1048).
-        # [IMPROVE-35] 4-tuple aligns with the sync executor so the
-        # llm_router rule_type can read its ``options`` /
-        # ``instruction`` from the full rule dict. Pre-IMPROVE-35
-        # streaming variant carried only 3 elements; the unpack at
-        # the edge-routing site (further below) was previously
-        # mismatched but never exercised in tests because they all
-        # stub ``astream_execute_system_graph`` itself.
-        node_map = {n["id"]: n for n in nodes}
-        edge_map: dict[str, list[tuple[str, str, str, dict[str, Any]]]] = {
-            n["id"]: [] for n in nodes
-        }
-        in_degree: dict[str, int] = {n["id"]: 0 for n in nodes}
-        for e in edges:
-            src, tgt = e.get("source"), e.get("target")
-            rule = e.get("rule", {}) if isinstance(e.get("rule"), dict) else {}
-            rule_type = rule.get("type", e.get("ruleType", "always"))
-            rule_notes = rule.get("notes", e.get("notes", ""))
-            if src in edge_map and tgt in node_map:
-                edge_map[src].append((tgt, rule_type, rule_notes, rule))
-                in_degree[tgt] = in_degree.get(tgt, 0) + 1
-
-        # Find start node (mirrors execute_system_graph:1051-1056)
-        if start_node_id and start_node_id in node_map:
-            current_nodes = [start_node_id]
-        else:
-            current_nodes = [nid for nid, deg in in_degree.items() if deg == 0]
-            if not current_nodes:
-                current_nodes = [nodes[0]["id"]]
-
-        run_id = run_id or str(uuid.uuid4())
-        system_name = system_definition.get("name") or system_definition.get("id") or "unnamed"
-        total_start = _time.monotonic()
-        node_outputs: list[dict[str, Any]] = []
-        # [IMPROVE-33] same budget contract as the sync executor.
-        context_budget = int(
-            system_definition.get("context_budget_tokens",
-                                  _INTER_NODE_CONTEXT_BUDGET_TOKENS),
-        )
-        visited: set[str] = set()
-        max_steps = len(nodes) * 2
-
-        emit("system", "run.start", status="start",
-             context={
-                 "run_id": run_id,
-                 "system_name": system_name,
-                 "conversation_id": conversation_id,
-                 "node_count": len(nodes),
-                 "edge_count": len(edges),
-                 "streaming": True,
-             })
-
-        step = 0
-        while current_nodes and step < max_steps:
-            step += 1
-            next_nodes: list[str] = []
-
-            for nid in current_nodes:
-                if nid in visited:
-                    continue
-                visited.add(nid)
-
-                node_def = node_map.get(nid)
-                if not node_def:
-                    continue
-
-                agent_name = node_def.get("agent", "")
-                role = (node_def.get("config") or {}).get("role", node_def.get("role", ""))
-
-                # Agent-name-not-found path mirrors the sync executor:
-                # record status="skipped" and continue. Stream consumers
-                # see a node_start + node_end pair so the UI can render
-                # the skip explicitly rather than dropping the node
-                # silently.
-                if not agent_name or agent_name not in self.definitions:
-                    yield {
-                        "type": "node_start",
-                        "node": nid, "agent": agent_name, "role": role,
-                    }
-                    skipped_text = f"(agent '{agent_name}' not found)"
-                    node_outputs.append({
-                        "node": nid, "agent": agent_name, "role": role,
-                        "text": skipped_text, "status": "skipped",
-                        "duration_ms": 0,
-                    })
-                    emit("system", "node_end", status="skipped",
-                         duration_ms=0,
-                         context={"run_id": run_id, "system_name": system_name,
-                                  "node_id": nid, "agent": agent_name, "role": role,
-                                  "reason": "agent_not_found"})
-                    yield {
-                        "type": "node_end",
-                        "node": nid, "agent": agent_name, "role": role,
-                        "text": skipped_text, "status": "skipped",
-                        "duration_ms": 0,
-                    }
-                    continue
-
-                # [IMPROVE-33] same budgeted context builder as sync.
-                ctx_block = _build_inter_node_context(
-                    node_outputs, budget_tokens=context_budget,
-                )
-                if ctx_block:
-                    prompt = f"{user_input}\n\nContext from prior agents:\n{ctx_block}"
-                else:
-                    prompt = user_input
-
-                node_start = _time.monotonic()
-                emit("system", "node_start", status="start",
-                     context={"run_id": run_id, "system_name": system_name,
-                              "node_id": nid, "agent": agent_name, "role": role,
-                              "step": step})
-                yield {
-                    "type": "node_start",
-                    "node": nid, "agent": agent_name, "role": role,
-                }
-
-                # Stream this node via astream_chat_with_agent. Tag each
-                # inner event with the owning node id so consumers can
-                # reconstruct per-node sub-streams. The agent's own
-                # ``done`` event is consumed here (not re-yielded) — the
-                # system-level ``done`` only fires after the whole DAG
-                # walk completes.
-                output = ""
-                node_status = "ok"
-                try:
-                    async for event in self.astream_chat_with_agent(
-                        agent_name, prompt,
-                    ):
-                        etype = event.get("type", "")
-                        if etype == "token":
-                            text = event.get("text", "")
-                            if text:
-                                output += text
-                                yield {
-                                    "type": "token",
-                                    "node": nid,
-                                    "text": text,
-                                }
-                        elif etype == "tool_call":
-                            yield {
-                                "type": "tool_call",
-                                "node": nid,
-                                "name": event.get("name", ""),
-                                "args": event.get("args", ""),
-                                "call_id": event.get("call_id", ""),
-                            }
-                        elif etype == "tool_result":
-                            yield {
-                                "type": "tool_result",
-                                "node": nid,
-                                "name": event.get("name", ""),
-                                "content": event.get("content", ""),
-                                "call_id": event.get("call_id", ""),
-                            }
-                        elif etype == "done":
-                            # Prefer the inner stream's ``content`` when
-                            # we collected nothing via tokens (path A
-                            # of astream_chat_with_agent yields tokens
-                            # naturally; path B may emit a synthetic
-                            # "No response returned." token. Either way,
-                            # ``content`` is the canonical full text).
-                            if not output:
-                                output = event.get("content", "") or ""
-                    duration_ms = int((_time.monotonic() - node_start) * 1000)
-                    node_outputs.append({
-                        "node": nid, "agent": agent_name, "role": role,
-                        "text": output, "status": "ok",
-                        "duration_ms": duration_ms,
-                    })
-                    emit("system", "node_end", status="ok",
-                         duration_ms=duration_ms,
-                         context={"run_id": run_id, "system_name": system_name,
-                                  "node_id": nid, "agent": agent_name, "role": role},
-                         perf={"output_length": len(output) if output else 0})
-                    # [IMPROVE-33] context block is rebuilt per-node
-                    # from node_outputs so we no longer maintain a
-                    # parallel accumulator string here.
-                except Exception as exc:
-                    duration_ms = int((_time.monotonic() - node_start) * 1000)
-                    node_status = "error"
-                    output = str(exc)
-                    node_outputs.append({
-                        "node": nid, "agent": agent_name, "role": role,
-                        "text": output, "status": "error",
-                        "duration_ms": duration_ms,
-                    })
-                    emit("system", "node_end", status="error",
-                         duration_ms=duration_ms,
-                         error_code=type(exc).__name__,
-                         error_message=str(exc),
-                         context={"run_id": run_id, "system_name": system_name,
-                                  "node_id": nid, "agent": agent_name, "role": role})
-
-                yield {
-                    "type": "node_end",
-                    "node": nid, "agent": agent_name, "role": role,
-                    "text": output, "status": node_status,
-                    "duration_ms": duration_ms,
-                }
-
-                # Edge routing — same rules as execute_system_graph
-                # (IMPROVE-35 added llm_router with shared classification).
-                chosen_option = self._classify_llm_router_edges(
-                    edge_map.get(nid, []), output, visited,
-                )
-
-                # [IMPROVE-35 telemetry] Surface the classifier
-                # decision in the SSE stream when at least one
-                # llm_router edge exists out of the current node, so
-                # Flutter can render "Router chose: writer" alongside
-                # the next-node activation. Emit BEFORE the per-edge
-                # iteration so the consumer sees the decision before
-                # the first next-node node_start.
-                _llm_router_targets = [
-                    tgt for tgt, rt, _, _ in edge_map.get(nid, [])
-                    if rt == "llm_router"
-                ]
-                if _llm_router_targets:
-                    yield {
-                        "type": "routing_decision",
-                        "node": nid,
-                        "chosen_option": chosen_option,
-                        "candidates": list(_llm_router_targets),
-                        "rule_count": len(_llm_router_targets),
-                    }
-                    emit(
-                        "system", "routing_decision", status="ok",
-                        context={
-                            "run_id": run_id,
-                            "system_name": system_name,
-                            "node_id": nid,
-                            "chosen_option": chosen_option,
-                            "candidates": list(_llm_router_targets),
-                            "rule_count": len(_llm_router_targets),
-                        },
-                    )
-
-                for target, rule_type, rule_notes, rule in edge_map.get(nid, []):
-                    if target in visited:
-                        continue
-                    should_follow = False
-                    if rule_type in ("always", "manual_next"):
-                        should_follow = True
-                    elif rule_type == "on_keyword_match":
-                        keywords = [k.strip().lower() for k in rule_notes.split(",") if k.strip()]
-                        output_lower = output.lower()
-                        should_follow = any(kw in output_lower for kw in keywords) if keywords else True
-                    elif rule_type == "on_tool_result":
-                        should_follow = any(marker in output for marker in ["Tool", "tool", "Result:", "```"])
-                    elif rule_type == "llm_router":
-                        should_follow = (
-                            chosen_option is not None
-                            and chosen_option == target
-                        )
-                    else:
-                        should_follow = True
-
-                    if should_follow and target not in next_nodes:
-                        next_nodes.append(target)
-
-            current_nodes = next_nodes
-
-        total_ms = int((_time.monotonic() - total_start) * 1000)
-        final_text = node_outputs[-1]["text"] if node_outputs else "No output produced."
-
-        errors = sum(1 for n in node_outputs if n.get("status") == "error")
-        emit("system", "run_done", status="error" if errors else "ok",
-             duration_ms=total_ms,
-             context={"run_id": run_id, "system_name": system_name,
-                      "conversation_id": conversation_id,
-                      "streaming": True},
-             perf={
-                 "nodes_executed": len(node_outputs),
-                 "error_count": errors,
-                 "final_text_length": len(final_text) if final_text else 0,
-                 "steps": step,
-             })
-
-        yield {
-            "type": "done",
-            "final_text": final_text,
-            "node_outputs": node_outputs,
-            "conversation_id": conversation_id,
-            "run_id": run_id,
-            "total_duration_ms": total_ms,
-            "nodes_executed": len(node_outputs),
-        }
+        from .systems.executor import astream_graph
+        async for event in astream_graph(
+            self, system_definition, user_input,
+            conversation_id=conversation_id,
+            run_id=run_id,
+        ):
+            yield event
 
     # ── Helpers ────────────────────────────────────────────────────
 
