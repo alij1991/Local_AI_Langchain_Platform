@@ -443,6 +443,7 @@ async def partner_import(
     file: UploadFile = File(...),
     overwrite: bool = False,
     scope: str | None = None,
+    verbose: bool = False,
     partner=Depends(get_partner_engine),
 ):
     """[IMPROVE-94] Restore partner state from a `partner-export.zip`
@@ -518,7 +519,8 @@ async def partner_import(
         raise HTTPException(400, str(exc))
 
     summary = restore_from_bundle(
-        partner, zip_bytes, overwrite=overwrite, scopes=scopes,
+        partner, zip_bytes,
+        overwrite=overwrite, scopes=scopes, verbose=verbose,
     )
     return summary
 
@@ -527,6 +529,7 @@ async def partner_import(
 async def partner_import_dry_run(
     file: UploadFile = File(...),
     scope: str | None = None,
+    verbose: bool = False,
     partner=Depends(get_partner_engine),
 ):
     """[IMPROVE-98] Pre-restore preview of a bundle WITHOUT
@@ -591,7 +594,8 @@ async def partner_import_dry_run(
         raise HTTPException(400, str(exc))
 
     summary = restore_from_bundle(
-        partner, zip_bytes, dry_run=True, scopes=scopes,
+        partner, zip_bytes,
+        dry_run=True, scopes=scopes, verbose=verbose,
     )
     return summary
 

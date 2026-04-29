@@ -408,6 +408,7 @@ def restore_from_bundle(
     overwrite: bool = False,
     dry_run: bool = False,
     scopes: list[str] | None = None,
+    verbose: bool = False,
 ) -> dict[str, Any]:
     """[IMPROVE-94] Inverse of ``build_export_bundle``.
 
@@ -460,6 +461,14 @@ def restore_from_bundle(
         "user_profile_restored": False,
         "memory_decay_restored": False,
         "tables_restored": {},
+        # [IMPROVE-105] Per-table diff with rows_seen / rows_inserted
+        # / rows_conflicted counts (always populated) + per-row
+        # identifiers (only populated when verbose=True). Lets
+        # dashboards render "12 rows newly inserted, 5 skipped due
+        # to PK conflict" without a second query. The
+        # ``tables_restored`` int is preserved for backward-compat
+        # with pre-IMPROVE-105 callers.
+        "tables_diff": {},
         "errors": [],
         # [IMPROVE-97] Schema version surfaced to the caller so
         # the route handler / dashboard can chart "% of restores
@@ -477,6 +486,10 @@ def restore_from_bundle(
         # without re-parsing its own URL. None when no filter was
         # passed (full restore).
         "scopes_requested": list(scopes) if scopes is not None else None,
+        # [IMPROVE-105] Echo the verbose flag so dashboards can
+        # check whether per-row identifier lists are populated
+        # without dereferencing them.
+        "verbose": verbose,
     }
 
     try:
@@ -621,12 +634,22 @@ def restore_from_bundle(
                 table_scope = _TABLE_FILE_TO_SCOPE[filename]
                 if not _in_scope(table_scope):
                     continue
-                rows_imported, table_errors = _restore_table_jsonl(
+                # [IMPROVE-105] Helper now returns a per-table
+                # diff dict instead of (int, errors). The
+                # tables_restored int is preserved for backward
+                # compat (matches the rows_inserted count from
+                # the new shape); tables_diff carries the full
+                # rows_seen / rows_inserted / rows_conflicted +
+                # optional verbose ID lists.
+                table_diff = _restore_table_jsonl(
                     zf, filename, table, overwrite=overwrite,
-                    dry_run=dry_run,
+                    dry_run=dry_run, verbose=verbose,
                 )
-                summary["tables_restored"][filename] = rows_imported
-                summary["errors"].extend(table_errors)
+                summary["tables_restored"][filename] = (
+                    table_diff["rows_inserted"]
+                )
+                summary["tables_diff"][filename] = table_diff
+                summary["errors"].extend(table_diff["errors"])
 
     except zipfile.BadZipFile as exc:
         # Not a valid ZIP — surface as a structured error rather
@@ -663,6 +686,39 @@ def _validate_decay_config_keys(data: dict[str, Any]) -> None:
         )
 
 
+# [IMPROVE-105] Per-row identifier hints. The export bundle's JSONL
+# rows don't carry a uniform PK column — partner_core_facts uses
+# ``key``, partner_conversations uses ``id``, partner_knowledge_graph
+# uses ``subject``+``predicate``+``object`` (no single PK). Walk this
+# tuple in order; first hit wins. Falls back to the line number when
+# none match. Documented + pinned by tests so a future schema change
+# surfaces here.
+_PK_HINT_KEYS: tuple[str, ...] = ("id", "key", "subject")
+
+
+def _row_identifier(row: dict, line_no: int) -> str:
+    """[IMPROVE-105] Pick a stable per-row identifier for verbose
+    diff output. Returns ``"key=value"`` for the first matching
+    hint key (id/key/subject) or ``"L<n>"`` (line number) when
+    none of the hints are present.
+
+    Used by ``_restore_table_jsonl`` when ``verbose=True`` to
+    populate per-row ID lists in the per-table diff. Errors
+    + edge cases (non-string values, missing dict, etc.) fall
+    through to the line-number form for safety — verbose mode
+    is best-effort.
+    """
+    if not isinstance(row, dict):
+        return f"L{line_no}"
+    for k in _PK_HINT_KEYS:
+        if k in row:
+            try:
+                return f"{k}={row[k]}"
+            except Exception:
+                continue
+    return f"L{line_no}"
+
+
 def _restore_table_jsonl(
     zf: zipfile.ZipFile,
     filename: str,
@@ -670,16 +726,40 @@ def _restore_table_jsonl(
     *,
     overwrite: bool = False,
     dry_run: bool = False,
-) -> tuple[int, list[str]]:
+    verbose: bool = False,
+) -> dict[str, Any]:
     """[IMPROVE-94] Read JSONL from the bundle + INSERT into
-    ``table``. Returns ``(rows_inserted, errors)``.
+    ``table``. Returns a per-table diff dict.
+
+    [IMPROVE-105] Return shape:
+
+        {
+          "rows_seen": int,            # JSONL non-empty lines
+          "rows_inserted": int,        # actually written
+          "rows_conflicted": int,      # PK conflicts skipped
+                                       # (always 0 in dry-run +
+                                       # 0 with overwrite=True)
+          "errors": list[str],
+          "rows_inserted_ids": list[str],   # only when verbose=True
+          "rows_conflicted_ids": list[str], # only when verbose=True
+        }
+
+    Pre-IMPROVE-105 the function returned ``(rows_inserted,
+    errors)`` where ``rows_inserted`` was actually rows
+    ATTEMPTED (the post-execute increment didn't account for
+    INSERT OR IGNORE silently dropping PK conflicts). The new
+    shape distinguishes attempted vs actually inserted via
+    SQLite's ``cursor.rowcount`` which returns 1 for inserts +
+    0 for IGNORED.
 
     With ``overwrite=False`` (default): ``INSERT OR IGNORE`` —
-    primary-key conflicts skip without error, useful for
-    merging a backup into a partial state.
+    primary-key conflicts skip without error. ``rows_conflicted``
+    counts these so the dashboard can render "12 rows newly
+    inserted, 5 skipped due to conflicts".
 
     With ``overwrite=True``: ``DELETE FROM table`` first, then
-    insert. Replaces the table contents wholesale.
+    insert. ``rows_conflicted`` is always 0 (no PK conflicts
+    after a wipe).
 
     Init's ``init_partner_tables`` so a fresh DB without the
     schema gets the tables created before the inserts run.
@@ -688,41 +768,58 @@ def _restore_table_jsonl(
     JSONL rows (counting valid + bad rows in the same shape the
     real restore would surface), but skip the SQLite writes
     entirely. The DB is not opened — no connection cost in the
-    preview path. Returns the rows_would_be_inserted count.
+    preview path. ``rows_inserted`` reflects "would attempt";
+    ``rows_conflicted`` is always 0 (PK conflicts can't be
+    detected without writing). When ``verbose=True`` the
+    dry-run still populates ``rows_inserted_ids`` so the
+    Flutter UI can preview ``id`` values.
     """
     if not dry_run:
         from .memory import _get_conn, init_partner_tables
         init_partner_tables()
 
-    errors: list[str] = []
-    rows_inserted = 0
+    diff: dict[str, Any] = {
+        "rows_seen": 0,
+        "rows_inserted": 0,
+        "rows_conflicted": 0,
+        "errors": [],
+        "rows_inserted_ids": [],
+        "rows_conflicted_ids": [],
+    }
 
     try:
         text = zf.read(filename).decode("utf-8")
     except Exception as exc:
-        errors.append(f"{filename}: read failed: {exc}")
-        return 0, errors
+        diff["errors"].append(f"{filename}: read failed: {exc}")
+        return diff
 
     if not text.strip():
         # Empty file — fresh-install case where the export had
         # no rows. Nothing to do.
-        return 0, errors
+        return diff
 
     if dry_run:
         # [IMPROVE-98] Dry-run: parse + count without DB writes.
         # Bad-row reporting matches the real-restore shape.
+        # [IMPROVE-105] PK conflicts can't be detected without
+        # writing — rows_conflicted stays 0.
         for line_no, line in enumerate(text.splitlines(), start=1):
             line = line.strip()
             if not line:
                 continue
+            diff["rows_seen"] += 1
             try:
-                json.loads(line)
-                rows_inserted += 1
+                row = json.loads(line)
+                diff["rows_inserted"] += 1
+                if verbose:
+                    diff["rows_inserted_ids"].append(
+                        _row_identifier(row, line_no),
+                    )
             except Exception as exc:
-                errors.append(
+                diff["errors"].append(
                     f"{filename}:line {line_no}: json parse: {exc}",
                 )
-        return rows_inserted, errors
+        return diff
 
     from .memory import _get_conn  # imported above only when not dry_run
 
@@ -734,10 +831,11 @@ def _restore_table_jsonl(
             line = line.strip()
             if not line:
                 continue
+            diff["rows_seen"] += 1
             try:
                 row = json.loads(line)
             except Exception as exc:
-                errors.append(
+                diff["errors"].append(
                     f"{filename}:line {line_no}: json parse: {exc}",
                 )
                 continue
@@ -746,20 +844,42 @@ def _restore_table_jsonl(
                 placeholders = ",".join("?" for _ in cols)
                 col_list = ",".join(cols)
                 values = [row[c] for c in cols]
-                conn.execute(
+                # [IMPROVE-105] cursor.rowcount returns 1 on
+                # successful INSERT, 0 when the IGNORE clause
+                # silently dropped a PK conflict. The pre-this-
+                # commit code didn't distinguish; the new
+                # rows_inserted vs rows_conflicted split surfaces
+                # the difference for dashboards.
+                cur = conn.execute(
                     f"INSERT OR IGNORE INTO {table} "
                     f"({col_list}) VALUES ({placeholders})",
                     values,
                 )
-                rows_inserted += 1
+                if cur.rowcount == 1:
+                    diff["rows_inserted"] += 1
+                    if verbose:
+                        diff["rows_inserted_ids"].append(
+                            _row_identifier(row, line_no),
+                        )
+                else:
+                    # rowcount == 0: PK conflict, IGNORE dropped
+                    # the row. (rowcount == -1 is the SQLite
+                    # default for unknown — never happens for
+                    # INSERT in practice but treat as conflict
+                    # to avoid double-counting.)
+                    diff["rows_conflicted"] += 1
+                    if verbose:
+                        diff["rows_conflicted_ids"].append(
+                            _row_identifier(row, line_no),
+                        )
             except Exception as exc:
-                errors.append(
+                diff["errors"].append(
                     f"{filename}:line {line_no}: insert: {exc}",
                 )
         conn.commit()
     except Exception as exc:
-        errors.append(f"{filename}: {exc}")
+        diff["errors"].append(f"{filename}: {exc}")
     finally:
         conn.close()
 
-    return rows_inserted, errors
+    return diff

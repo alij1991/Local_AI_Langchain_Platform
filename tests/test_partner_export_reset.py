@@ -1020,7 +1020,15 @@ def test_partner_import_endpoint_round_trip(
 ):
     """[IMPROVE-94] End-to-end via TestClient: GET /partner/export
     produces a ZIP, POST /partner/import accepts it, summary
-    reports restoration."""
+    reports restoration.
+
+    [IMPROVE-105] Clear the facts table between export and
+    import so the assertion exercises actual inserts (not
+    PK-conflict-IGNORE skips). Pre-IMPROVE-105 the counter
+    was misnamed — ``tables_restored`` reported attempts, not
+    actual inserts; the helper's new ``cursor.rowcount``-aware
+    counting flips that to actual inserts (correct semantic).
+    """
     pytest.importorskip("fastapi")
     from fastapi.testclient import TestClient
 
@@ -1029,6 +1037,7 @@ def test_partner_import_endpoint_round_trip(
     from local_ai_platform.api.routers import partner as partner_router
     from local_ai_platform.partner.profile import PartnerProfile
     from local_ai_platform.partner.user_profile import UserProfile
+    from local_ai_platform.partner.memory import _get_conn
 
     eng = MagicMock()
     eng.profile = PartnerProfile()
@@ -1046,6 +1055,16 @@ def test_partner_import_endpoint_round_trip(
         export_resp = client.get("/partner/export")
         assert export_resp.status_code == 200
         bundle_bytes = export_resp.content
+
+        # [IMPROVE-105] Clear the facts table so the import
+        # exercises actual inserts; otherwise INSERT OR IGNORE
+        # silently skips PK conflicts and rows_inserted=0.
+        conn = _get_conn()
+        try:
+            conn.execute("DELETE FROM partner_core_facts")
+            conn.commit()
+        finally:
+            conn.close()
 
         # Import the same bundle back.
         import_resp = client.post(
@@ -1957,3 +1976,390 @@ def test_partner_import_dry_run_endpoint_with_scope_filter(
     # No writes occurred even though the scope-matching tables
     # were "restored".
     assert _table_count("partner_core_facts") == pre_facts
+
+
+# ── [IMPROVE-105] Per-row diff in /partner/import summary ──────
+
+
+def test_row_identifier_uses_id_field_when_present():
+    """[IMPROVE-105] ``_row_identifier`` picks ``id`` first when
+    present in the row dict — matches partner_conversations and
+    partner_journal which use auto-increment id PKs."""
+    from local_ai_platform.partner.export import _row_identifier
+    assert _row_identifier({"id": 42, "key": "x"}, 1) == "id=42"
+    assert _row_identifier({"id": "abc-123"}, 7) == "id=abc-123"
+
+
+def test_row_identifier_uses_key_field_when_no_id():
+    """[IMPROVE-105] Falls back to ``key`` when no ``id`` —
+    matches partner_core_facts which uses ``key`` as PK."""
+    from local_ai_platform.partner.export import _row_identifier
+    assert _row_identifier({"key": "name", "value": "Alice"}, 3) == "key=name"
+
+
+def test_row_identifier_uses_subject_when_no_id_or_key():
+    """[IMPROVE-105] Falls back to ``subject`` when no ``id`` /
+    ``key`` — matches partner_knowledge_graph triple shape
+    (subject, predicate, object)."""
+    from local_ai_platform.partner.export import _row_identifier
+    assert _row_identifier(
+        {"subject": "user", "predicate": "likes", "object": "tea"}, 5,
+    ) == "subject=user"
+
+
+def test_row_identifier_falls_back_to_line_number():
+    """[IMPROVE-105] No id/key/subject in the row → line number
+    fallback ``L<n>``. Pin the safety net so verbose mode
+    never crashes on weird row shapes."""
+    from local_ai_platform.partner.export import _row_identifier
+    assert _row_identifier({"foo": "bar"}, 9) == "L9"
+    # Non-dict input also falls back (defensive).
+    assert _row_identifier(None, 12) == "L12"
+    assert _row_identifier("not a dict", 12) == "L12"
+
+
+def test_restore_summary_includes_tables_diff_field(
+    tmp_partner_db, tmp_partner_data_dir, stub_engine,
+):
+    """[IMPROVE-105] The summary always carries a ``tables_diff``
+    field — empty dict when no tables in scope; per-table diff
+    dict otherwise. Pin the contract so dashboards can rely on
+    the field's presence."""
+    from local_ai_platform.partner.export import (
+        build_export_bundle,
+        restore_from_bundle,
+    )
+
+    _seed_facts(count=2)
+    bundle = build_export_bundle(stub_engine)
+    summary = restore_from_bundle(stub_engine, bundle)
+    assert "tables_diff" in summary
+    assert isinstance(summary["tables_diff"], dict)
+
+
+def test_restore_tables_diff_has_three_count_fields(
+    tmp_partner_db, tmp_partner_data_dir, stub_engine,
+):
+    """[IMPROVE-105] Each per-table entry in ``tables_diff``
+    carries rows_seen / rows_inserted / rows_conflicted +
+    errors + the two ID lists. Pin the per-table dict shape."""
+    from local_ai_platform.partner.export import (
+        build_export_bundle,
+        restore_from_bundle,
+    )
+    from local_ai_platform.partner.memory import _get_conn
+
+    _seed_facts(count=3)
+    bundle = build_export_bundle(stub_engine)
+    # Clear so the diff exercises actual inserts.
+    conn = _get_conn()
+    try:
+        conn.execute("DELETE FROM partner_core_facts")
+        conn.commit()
+    finally:
+        conn.close()
+    summary = restore_from_bundle(stub_engine, bundle)
+    diff = summary["tables_diff"]["facts.jsonl"]
+    for k in (
+        "rows_seen", "rows_inserted", "rows_conflicted",
+        "errors", "rows_inserted_ids", "rows_conflicted_ids",
+    ):
+        assert k in diff, f"tables_diff missing field {k!r}"
+    assert diff["rows_seen"] == 3
+    assert diff["rows_inserted"] == 3
+    assert diff["rows_conflicted"] == 0
+    # verbose=False default → ID lists empty.
+    assert diff["rows_inserted_ids"] == []
+    assert diff["rows_conflicted_ids"] == []
+
+
+def test_restore_tables_diff_pk_conflicts_counted(
+    tmp_partner_db, tmp_partner_data_dir, stub_engine,
+):
+    """[IMPROVE-105] Importing a bundle on TOP of identical
+    existing rows surfaces all 3 as PK conflicts. ``rows_seen``
+    matches the bundle row count; ``rows_inserted`` is 0;
+    ``rows_conflicted`` is 3."""
+    from local_ai_platform.partner.export import (
+        build_export_bundle,
+        restore_from_bundle,
+    )
+
+    _seed_facts(count=3)
+    bundle = build_export_bundle(stub_engine)
+    # Don't clear — restore on top of identical rows.
+    summary = restore_from_bundle(stub_engine, bundle)
+    diff = summary["tables_diff"]["facts.jsonl"]
+    assert diff["rows_seen"] == 3
+    assert diff["rows_inserted"] == 0
+    assert diff["rows_conflicted"] == 3
+    # Also: tables_restored backward-compat int reflects the
+    # new (correct) actual-insert count.
+    assert summary["tables_restored"]["facts.jsonl"] == 0
+
+
+def test_restore_tables_diff_partial_conflicts_split(
+    tmp_partner_db, tmp_partner_data_dir, stub_engine,
+):
+    """[IMPROVE-105] Mixed case: bundle has 5 rows, 2 already
+    exist in the table → 3 inserted, 2 conflicted. Pin the
+    partial-overlap accounting that the dashboard renders as
+    "3 new, 2 skipped"."""
+    from local_ai_platform.partner.export import (
+        build_export_bundle,
+        restore_from_bundle,
+    )
+    from local_ai_platform.partner.memory import _get_conn
+
+    _seed_facts(count=5)
+    bundle = build_export_bundle(stub_engine)
+    # Delete 3 of the 5 rows so the import re-inserts those + the
+    # other 2 hit PK conflicts.
+    conn = _get_conn()
+    try:
+        conn.execute(
+            "DELETE FROM partner_core_facts "
+            "WHERE key IN (?, ?, ?)",
+            ("fact_0", "fact_1", "fact_2"),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+    summary = restore_from_bundle(stub_engine, bundle)
+    diff = summary["tables_diff"]["facts.jsonl"]
+    assert diff["rows_seen"] == 5
+    assert diff["rows_inserted"] == 3
+    assert diff["rows_conflicted"] == 2
+
+
+def test_restore_verbose_true_populates_per_row_ids(
+    tmp_partner_db, tmp_partner_data_dir, stub_engine,
+):
+    """[IMPROVE-105] With ``verbose=True`` the per-table diff
+    populates ``rows_inserted_ids`` (and ``rows_conflicted_ids``
+    when conflicts exist) with stable identifier strings. Pin
+    the verbose contract end-to-end."""
+    from local_ai_platform.partner.export import (
+        build_export_bundle,
+        restore_from_bundle,
+    )
+    from local_ai_platform.partner.memory import _get_conn
+
+    _seed_facts(count=3)
+    bundle = build_export_bundle(stub_engine)
+    conn = _get_conn()
+    try:
+        conn.execute("DELETE FROM partner_core_facts")
+        conn.commit()
+    finally:
+        conn.close()
+    summary = restore_from_bundle(
+        stub_engine, bundle, verbose=True,
+    )
+    diff = summary["tables_diff"]["facts.jsonl"]
+    # _seed_facts uses keys "fact_0" / "fact_1" / "fact_2".
+    assert sorted(diff["rows_inserted_ids"]) == [
+        "key=fact_0", "key=fact_1", "key=fact_2",
+    ]
+    assert diff["rows_conflicted_ids"] == []
+
+
+def test_restore_verbose_true_populates_conflict_ids(
+    tmp_partner_db, tmp_partner_data_dir, stub_engine,
+):
+    """[IMPROVE-105] With ``verbose=True`` and existing rows in
+    the table, the conflict identifiers populate. Pin the
+    "rows skipped: key=fact_0, key=fact_1" UI affordance."""
+    from local_ai_platform.partner.export import (
+        build_export_bundle,
+        restore_from_bundle,
+    )
+
+    _seed_facts(count=2)
+    bundle = build_export_bundle(stub_engine)
+    # Don't clear — restore on top of identical rows.
+    summary = restore_from_bundle(
+        stub_engine, bundle, verbose=True,
+    )
+    diff = summary["tables_diff"]["facts.jsonl"]
+    assert diff["rows_inserted_ids"] == []
+    assert sorted(diff["rows_conflicted_ids"]) == [
+        "key=fact_0", "key=fact_1",
+    ]
+
+
+def test_restore_verbose_false_default_keeps_id_lists_empty(
+    tmp_partner_db, tmp_partner_data_dir, stub_engine,
+):
+    """[IMPROVE-105] Default ``verbose=False`` produces empty
+    per-row ID lists — the count fields populate but the
+    detailed lists stay empty. Avoids large payloads on
+    high-row-count restores by default."""
+    from local_ai_platform.partner.export import (
+        build_export_bundle,
+        restore_from_bundle,
+    )
+    from local_ai_platform.partner.memory import _get_conn
+
+    _seed_facts(count=10)
+    bundle = build_export_bundle(stub_engine)
+    conn = _get_conn()
+    try:
+        conn.execute("DELETE FROM partner_core_facts")
+        conn.commit()
+    finally:
+        conn.close()
+    summary = restore_from_bundle(stub_engine, bundle)
+    diff = summary["tables_diff"]["facts.jsonl"]
+    assert diff["rows_inserted"] == 10
+    assert diff["rows_inserted_ids"] == []  # not populated
+    assert diff["rows_conflicted_ids"] == []
+
+
+def test_restore_dry_run_diff_shape_matches_real_restore(
+    tmp_partner_db, tmp_partner_data_dir, stub_engine,
+):
+    """[IMPROVE-105] Dry-run produces the same per-table diff
+    shape as a real restore. ``rows_conflicted`` is always 0
+    in dry-run (no DB query → can't detect conflicts) but the
+    field is still present so dashboard code can iterate
+    uniformly. Pin shape parity."""
+    from local_ai_platform.partner.export import (
+        build_export_bundle,
+        restore_from_bundle,
+    )
+
+    _seed_facts(count=3)
+    bundle = build_export_bundle(stub_engine)
+    summary = restore_from_bundle(
+        stub_engine, bundle, dry_run=True,
+    )
+    diff = summary["tables_diff"]["facts.jsonl"]
+    assert diff["rows_seen"] == 3
+    assert diff["rows_inserted"] == 3  # would-attempt
+    assert diff["rows_conflicted"] == 0  # always in dry-run
+    # Shape parity: keys identical to real-restore.
+    assert set(diff.keys()) == {
+        "rows_seen", "rows_inserted", "rows_conflicted",
+        "errors", "rows_inserted_ids", "rows_conflicted_ids",
+    }
+
+
+def test_restore_dry_run_verbose_populates_inserted_ids(
+    tmp_partner_db, tmp_partner_data_dir, stub_engine,
+):
+    """[IMPROVE-105] Dry-run with verbose=True populates
+    ``rows_inserted_ids`` so the Flutter UI can preview which
+    rows WOULD land before committing. ``rows_conflicted_ids``
+    stays empty (PK conflicts undetectable without DB)."""
+    from local_ai_platform.partner.export import (
+        build_export_bundle,
+        restore_from_bundle,
+    )
+
+    _seed_facts(count=2)
+    bundle = build_export_bundle(stub_engine)
+    summary = restore_from_bundle(
+        stub_engine, bundle, dry_run=True, verbose=True,
+    )
+    diff = summary["tables_diff"]["facts.jsonl"]
+    assert sorted(diff["rows_inserted_ids"]) == [
+        "key=fact_0", "key=fact_1",
+    ]
+    assert diff["rows_conflicted_ids"] == []
+
+
+def test_restore_summary_echoes_verbose_flag(
+    tmp_partner_db, tmp_partner_data_dir, stub_engine,
+):
+    """[IMPROVE-105] The summary echoes the ``verbose`` flag
+    so dashboard code can check whether per-row identifier
+    lists are populated without dereferencing them."""
+    from local_ai_platform.partner.export import (
+        build_export_bundle,
+        restore_from_bundle,
+    )
+
+    _seed_facts(count=1)
+    bundle = build_export_bundle(stub_engine)
+    s_default = restore_from_bundle(stub_engine, bundle)
+    s_verbose = restore_from_bundle(
+        stub_engine, bundle, verbose=True,
+    )
+    assert s_default["verbose"] is False
+    assert s_verbose["verbose"] is True
+
+
+def test_partner_import_endpoint_verbose_flag(
+    tmp_partner_db, tmp_partner_data_dir, stub_engine, monkeypatch,
+):
+    """[IMPROVE-105] End-to-end via TestClient:
+    POST /partner/import?verbose=true populates per-row IDs in
+    the response. Pin the URL-flag → summary plumbing."""
+    pytest.importorskip("fastapi")
+    from fastapi.testclient import TestClient
+    from local_ai_platform.api.routers import partner as partner_router
+    from local_ai_platform.partner.export import build_export_bundle
+    from local_ai_platform.partner.memory import _get_conn
+
+    monkeypatch.setattr(
+        partner_router, "get_partner_engine", lambda: stub_engine,
+    )
+
+    _seed_facts(count=2)
+    bundle = build_export_bundle(stub_engine)
+    conn = _get_conn()
+    try:
+        conn.execute("DELETE FROM partner_core_facts")
+        conn.commit()
+    finally:
+        conn.close()
+
+    import api_server
+    with TestClient(api_server.app) as client:
+        resp = client.post(
+            "/partner/import?verbose=true",
+            files={"file": ("export.zip", bundle, "application/zip")},
+        )
+    assert resp.status_code == 200
+    summary = resp.json()
+    assert summary["verbose"] is True
+    diff = summary["tables_diff"]["facts.jsonl"]
+    # _seed_facts uses keys "fact_0" / "fact_1".
+    assert sorted(diff["rows_inserted_ids"]) == [
+        "key=fact_0", "key=fact_1",
+    ]
+
+
+def test_partner_import_dry_run_endpoint_verbose_flag(
+    tmp_partner_db, tmp_partner_data_dir, stub_engine, monkeypatch,
+):
+    """[IMPROVE-105] /partner/import/dry-run accepts ?verbose=true
+    parity with /partner/import. Pin the dry-run + verbose
+    composition end-to-end."""
+    pytest.importorskip("fastapi")
+    from fastapi.testclient import TestClient
+    from local_ai_platform.api.routers import partner as partner_router
+    from local_ai_platform.partner.export import build_export_bundle
+
+    monkeypatch.setattr(
+        partner_router, "get_partner_engine", lambda: stub_engine,
+    )
+
+    _seed_facts(count=2)
+    bundle = build_export_bundle(stub_engine)
+
+    import api_server
+    with TestClient(api_server.app) as client:
+        resp = client.post(
+            "/partner/import/dry-run?verbose=true",
+            files={"file": ("export.zip", bundle, "application/zip")},
+        )
+    assert resp.status_code == 200
+    summary = resp.json()
+    assert summary["dry_run"] is True
+    assert summary["verbose"] is True
+    diff = summary["tables_diff"]["facts.jsonl"]
+    assert sorted(diff["rows_inserted_ids"]) == [
+        "key=fact_0", "key=fact_1",
+    ]
