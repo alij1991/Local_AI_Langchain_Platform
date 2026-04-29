@@ -956,6 +956,181 @@ class SystemRunDoneContext(TypedDict):
     streaming: NotRequired[bool]
 
 
+# ── [IMPROVE-101] Wave 11 batch: 10 high-traffic event schemas ─
+
+# Closes another ~19% of the IMPROVE-92 schema-coverage gap (18
+# → 28 of 54 events pinned, 52%). Tier-A picks per the Wave 11
+# plan: high-traffic events with stable shapes that surfaced
+# during Wave 10 work but weren't in the IMPROVE-95 mechanical
+# batch (download lifecycle, partner-engine chat, image-pipeline
+# inference, instruct-edit run, system-validate). Each schema's
+# docstring names the source file:line(s) so the audit failure
+# messages map straight to the callsite, matching IMPROVE-95's
+# convention. 8 distinct TypedDict classes cover 10 (sub, act)
+# tuples — partner.chat shares its shape with chat.start (the
+# Recorder companion event) and image.infer shares with
+# infer.start; both are the same _chat_ctx / _infer_ctx variable
+# spread at start + end emits.
+
+
+class ImageInferContext(TypedDict):
+    """[IMPROVE-101] Context schema for ``image.infer`` and
+    ``image.infer.start``.
+
+    Fires from images/service.py:10008 (start) and 10027 (end).
+    Both spread the same ``_infer_ctx`` dict assembled at
+    service.py:10000, so a single schema covers both events.
+    ``mode`` is one of "txt2img" / "img2img" / "inpaint";
+    ``device`` is the resolved preferred-device name. perf
+    payload carries width/height/steps/image_bytes — those land
+    on emit_typed's ``perf=`` arg, NOT in this context dict.
+    """
+    __pydantic_config__ = _FORBID_EXTRA  # type: ignore[misc]
+    model_id: str
+    model_source: str
+    device: str
+    mode: str
+    scheduler: str
+
+
+class InstructEditRunContext(TypedDict):
+    """[IMPROVE-101] Context schema for ``instruct_edit.run``.
+
+    Fires from 7 callsites in images/ai_enhance.py covering
+    kontext/nunchaku ok (2667), value/runtime errors (2679),
+    other exceptions (2689); cosxl ok (3214), value/runtime
+    errors (3223), other exceptions (3231); plus the terminal
+    UnknownModel branch (3239). All callsites spread
+    ``_ie_ctx`` from line 2169 — nine always-present keys.
+    ``backend`` is added by branch ("nunchaku" / "kontext" /
+    "cosxl") on every path EXCEPT the terminal UnknownModel
+    branch which fires the bare ctx, hence NotRequired.
+    ``gguf_quant_requested`` is always present per IMPROVE-49
+    but ``str | None`` to capture the env-default fallback.
+    """
+    __pydantic_config__ = _FORBID_EXTRA  # type: ignore[misc]
+    model: str
+    requested_steps: int
+    requested_guidance: float
+    has_negative_prompt: bool
+    true_cfg_scale: float
+    input_width: int
+    input_height: int
+    seed_set: bool
+    gguf_quant_requested: str | None
+    backend: NotRequired[str]
+
+
+class ModelDownloadDoneContext(TypedDict):
+    """[IMPROVE-101] Context schema for ``model.download.done``.
+
+    Fires from api/routers/models.py:836 (Ollama success path)
+    and 2303 (HuggingFace success path). Both carry the
+    provider + model_id pair; the HF callsite additionally
+    carries the GGUF filename + download_key so the
+    ``downloads_state`` map (keyed by download_key) can be
+    located post-completion. ``gguf_filename`` is nullable
+    (passed even when the download wasn't a GGUF file) to
+    match the start event's shape.
+    """
+    __pydantic_config__ = _FORBID_EXTRA  # type: ignore[misc]
+    provider: str
+    model_id: str
+    gguf_filename: NotRequired[str | None]
+    download_key: NotRequired[str]
+
+
+class ModelDownloadErrorContext(TypedDict):
+    """[IMPROVE-101] Context schema for ``model.download.error``.
+
+    Fires from api/routers/models.py:846 (Ollama error path) and
+    2315 (HuggingFace error path). Same shape as
+    ``model.download.done`` — the error_code/error_message land
+    on emit_typed's signature itself (not the context dict) so
+    the schema parallels the success-path shape exactly.
+    """
+    __pydantic_config__ = _FORBID_EXTRA  # type: ignore[misc]
+    provider: str
+    model_id: str
+    gguf_filename: NotRequired[str | None]
+    download_key: NotRequired[str]
+
+
+class ModelDownloadProgressContext(TypedDict):
+    """[IMPROVE-101] Context schema for ``model.download.progress``.
+
+    Fires from api/routers/models.py:816 (Ollama progress
+    bucket-emitter) only — HF progress is reported via the
+    sibling per-byte filesystem watcher (IMPROVE-86) and lands
+    on a different event surface. ``phase`` echoes Ollama's
+    free-form status string ("downloading" / "verifying" /
+    etc.); pin as ``str`` rather than Literal because the
+    upstream enum is not stable. perf payload (pct,
+    completed_bytes, total_bytes) lands on emit_typed's
+    ``perf=`` arg, NOT in this context dict.
+    """
+    __pydantic_config__ = _FORBID_EXTRA  # type: ignore[misc]
+    provider: str
+    model_id: str
+    phase: str
+
+
+class ModelDownloadStartContext(TypedDict):
+    """[IMPROVE-101] Context schema for ``model.download.start``.
+
+    Fires from api/routers/models.py:783 (Ollama pull start) and
+    2122 (HuggingFace snapshot_download start). HF callsite adds
+    gguf_filename / download_key / has_token; the Ollama path
+    omits all three because they don't apply (no GGUF selection,
+    no auth-token requirement). ``has_token`` reports whether a
+    HF token was resolved at the call site without leaking the
+    token value.
+    """
+    __pydantic_config__ = _FORBID_EXTRA  # type: ignore[misc]
+    provider: str
+    model_id: str
+    gguf_filename: NotRequired[str | None]
+    download_key: NotRequired[str]
+    has_token: NotRequired[bool]
+
+
+class PartnerChatContext(TypedDict):
+    """[IMPROVE-101] Context schema for ``partner.chat`` and
+    ``partner.chat.start``.
+
+    Fires from partner/engine.py:330 (start), 334 (error), 409
+    (ok). All three callsites spread the same ``_chat_ctx`` dict
+    assembled at engine.py:328 — three required keys cover the
+    union. The end-event reply_length / emotion fields land on
+    emit_typed's ``perf=`` arg, NOT in this context dict.
+    ``streaming`` is currently always False at the sole
+    assignment site; type left as ``bool`` because the streaming
+    sibling path (``astream_chat``) may grow a parallel
+    ``_chat_ctx`` later.
+    """
+    __pydantic_config__ = _FORBID_EXTRA  # type: ignore[misc]
+    model: str
+    streaming: bool
+    user_input_length: int
+
+
+class SystemValidateContext(TypedDict):
+    """[IMPROVE-101] Context schema for ``system.validate``.
+
+    Fires from api/routers/systems.py:368 on the success path
+    only — the rejection branches (269/304/342) fire the
+    sibling ``system.validation_rejected`` event per IMPROVE-85
+    so dashboards can chart 400-rate separately from
+    total-validation-runs without a SQL filter. ``node_count``
+    + ``edge_count`` mirror ``system.validation_rejected``'s
+    SchemaInvalid variant for cross-event correlation.
+    """
+    __pydantic_config__ = _FORBID_EXTRA  # type: ignore[misc]
+    system_name: str
+    node_count: int
+    edge_count: int
+
+
 # Map (subsystem, action) → TypedDict schema class. The audit
 # test ``test_emit_typed_callsite_keys_match_pinned_schema``
 # walks emit_typed callsites and validates each against the
@@ -966,18 +1141,28 @@ EVENT_CONTEXT_SCHEMAS: dict[tuple[str, str], type] = {
     ("agent", "tool_call"): AgentToolCallContext,
     ("agent", "validation_rejected"): AgentValidationRejectedContext,
     ("config", "load"): ConfigLoadContext,
+    ("image", "infer"): ImageInferContext,
+    ("image", "infer.start"): ImageInferContext,
     ("image", "oom_ladder_done"): ImageOomLadderDoneContext,
     ("image", "oom_ladder_start"): ImageOomLadderStartContext,
     ("image", "oom_stage_attempt"): ImageOomStageAttemptContext,
     ("image", "optimization_plan"): ImageOptimizationPlanContext,
     ("image", "vram_probe"): ImageVramProbeContext,
     ("image", "warmup"): ImageWarmupContext,
+    ("instruct_edit", "run"): InstructEditRunContext,
+    ("model", "download.done"): ModelDownloadDoneContext,
+    ("model", "download.error"): ModelDownloadErrorContext,
+    ("model", "download.progress"): ModelDownloadProgressContext,
+    ("model", "download.start"): ModelDownloadStartContext,
+    ("partner", "chat"): PartnerChatContext,
+    ("partner", "chat.start"): PartnerChatContext,
     ("partner", "mem0_init"): PartnerMem0InitContext,
     ("provider", "availability_probe"): ProviderAvailabilityProbeContext,
     ("system", "node_end"): SystemNodeEndContext,
     ("system", "node_start"): SystemNodeStartContext,
     ("system", "routing_decision"): SystemRoutingDecisionContext,
     ("system", "run_done"): SystemRunDoneContext,
+    ("system", "validate"): SystemValidateContext,
     ("system", "validation_rejected"): SystemValidationRejectedContext,
     ("system", "wave_parallel"): SystemWaveParallelContext,
     ("system", "wave_parallel_fallback"): SystemWaveParallelFallbackContext,

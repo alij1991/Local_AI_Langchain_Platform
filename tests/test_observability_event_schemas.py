@@ -59,18 +59,26 @@ from local_ai_platform.observability_events import (
     AgentToolCallContext,
     AgentValidationRejectedContext,
     ConfigLoadContext,
+    ImageInferContext,
     ImageOomLadderDoneContext,
     ImageOomLadderStartContext,
     ImageOomStageAttemptContext,
     ImageOptimizationPlanContext,
     ImageVramProbeContext,
     ImageWarmupContext,
+    InstructEditRunContext,
+    ModelDownloadDoneContext,
+    ModelDownloadErrorContext,
+    ModelDownloadProgressContext,
+    ModelDownloadStartContext,
+    PartnerChatContext,
     PartnerMem0InitContext,
     ProviderAvailabilityProbeContext,
     SystemNodeEndContext,
     SystemNodeStartContext,
     SystemRoutingDecisionContext,
     SystemRunDoneContext,
+    SystemValidateContext,
     SystemValidationRejectedContext,
     SystemWaveParallelContext,
     SystemWaveParallelFallbackContext,
@@ -316,6 +324,122 @@ def test_system_run_done_schema_streaming_optional():
     assert optional == {"streaming"}
 
 
+# ── [IMPROVE-101] Wave 11 batch: per-schema introspection (10) ──
+
+
+def test_image_infer_schema_strict():
+    """[IMPROVE-101] Both ``image.infer`` and ``image.infer.start``
+    spread the same ``_infer_ctx`` dict at images/service.py:10000,
+    so the schema covers both events with five required keys and
+    no optional. perf payload (width/height/steps/image_bytes)
+    lands on emit_typed's ``perf=`` arg, not the context dict."""
+    required, optional = _required_optional_keys(ImageInferContext)
+    assert required == {"model_id", "model_source", "device", "mode", "scheduler"}
+    assert optional == frozenset()
+
+
+def test_image_infer_and_start_share_same_schema():
+    """[IMPROVE-101] Pin the schema-sharing convention: a single
+    TypedDict class covers both the start and end events of the
+    image.infer pair because both callsites spread the same
+    ``_infer_ctx`` variable. A future commit splitting them apart
+    surfaces here as a regression."""
+    assert EVENT_CONTEXT_SCHEMAS[("image", "infer")] is ImageInferContext
+    assert EVENT_CONTEXT_SCHEMAS[("image", "infer.start")] is ImageInferContext
+
+
+def test_instruct_edit_run_schema_backend_optional():
+    """[IMPROVE-101] Nine required keys cover the always-present
+    ``_ie_ctx`` dict (ai_enhance.py:2169). ``backend`` is only on
+    the kontext/nunchaku/cosxl branches; the terminal
+    UnknownModel branch (3239) fires the bare ctx and omits it,
+    hence NotRequired. ``gguf_quant_requested`` is required (per
+    IMPROVE-49 always present) but typed as ``str | None`` for
+    the env-default fallback case."""
+    required, optional = _required_optional_keys(InstructEditRunContext)
+    assert required == {
+        "model", "requested_steps", "requested_guidance",
+        "has_negative_prompt", "true_cfg_scale",
+        "input_width", "input_height",
+        "seed_set", "gguf_quant_requested",
+    }
+    assert optional == {"backend"}
+
+
+def test_model_download_done_schema_provider_required():
+    """[IMPROVE-101] provider + model_id are always present
+    (Ollama and HF callsites both pass them). gguf_filename +
+    download_key are HF-only — NotRequired so the Ollama
+    callsite at models.py:836 type-checks under the same
+    schema."""
+    required, optional = _required_optional_keys(ModelDownloadDoneContext)
+    assert required == {"provider", "model_id"}
+    assert optional == {"gguf_filename", "download_key"}
+
+
+def test_model_download_error_schema_mirrors_done():
+    """[IMPROVE-101] error_code/error_message land on
+    emit_typed's signature itself (not the context dict), so
+    the error variant of model.download.* shares the same shape
+    as the done variant — same required/optional split."""
+    required, optional = _required_optional_keys(ModelDownloadErrorContext)
+    assert required == {"provider", "model_id"}
+    assert optional == {"gguf_filename", "download_key"}
+
+
+def test_model_download_progress_schema_three_required_keys():
+    """[IMPROVE-101] Ollama-only event (HF progress fires through
+    the IMPROVE-86 filesystem watcher on a different surface).
+    ``phase`` echoes Ollama's free-form status string and is
+    typed ``str`` rather than Literal because the upstream
+    enum is not stable."""
+    required, optional = _required_optional_keys(ModelDownloadProgressContext)
+    assert required == {"provider", "model_id", "phase"}
+    assert optional == frozenset()
+
+
+def test_model_download_start_schema_three_optional_keys():
+    """[IMPROVE-101] Same provider + model_id required pair as
+    download.done; HF callsite (models.py:2122) adds three
+    extras — gguf_filename / download_key / has_token — that
+    Ollama (783) doesn't carry. ``has_token`` reports whether
+    a HF token was resolved, not its value."""
+    required, optional = _required_optional_keys(ModelDownloadStartContext)
+    assert required == {"provider", "model_id"}
+    assert optional == {"gguf_filename", "download_key", "has_token"}
+
+
+def test_partner_chat_schema_three_required_keys():
+    """[IMPROVE-101] Both ``partner.chat`` and
+    ``partner.chat.start`` spread the same ``_chat_ctx`` dict
+    at partner/engine.py:328. Three required keys; the
+    end-event reply_length / emotion fields land on
+    emit_typed's ``perf=`` arg, not this context dict."""
+    required, optional = _required_optional_keys(PartnerChatContext)
+    assert required == {"model", "streaming", "user_input_length"}
+    assert optional == frozenset()
+
+
+def test_partner_chat_and_start_share_same_schema():
+    """[IMPROVE-101] Pin the schema-sharing convention: one
+    TypedDict class for both partner.chat and partner.chat.start
+    because both callsites spread the same ``_chat_ctx`` variable
+    (engine.py:328 → 330/334/409). A future commit splitting them
+    apart surfaces as a regression here."""
+    assert EVENT_CONTEXT_SCHEMAS[("partner", "chat")] is PartnerChatContext
+    assert EVENT_CONTEXT_SCHEMAS[("partner", "chat.start")] is PartnerChatContext
+
+
+def test_system_validate_schema_three_required_keys():
+    """[IMPROVE-101] Success-path only event (rejection branches
+    fire the sibling system.validation_rejected per IMPROVE-85).
+    Three required keys mirror the SchemaInvalid variant of
+    system.validation_rejected for cross-event correlation."""
+    required, optional = _required_optional_keys(SystemValidateContext)
+    assert required == {"system_name", "node_count", "edge_count"}
+    assert optional == frozenset()
+
+
 # ── Pydantic TypeAdapter validation (audit-time) ───────────────
 
 
@@ -427,6 +551,16 @@ def _extract_emit_typed_callsite_contexts() -> list[
                 # Variable / computed context — can't statically
                 # extract keys. Skip.
                 continue
+            # [IMPROVE-101] Spread-syntax dicts (``{**ctx, "x": 1}``)
+            # carry unknown keys that aren't statically
+            # introspectable — Python's AST represents the spread
+            # as a None key. Skip the callsite entirely rather
+            # than false-flag on the visible literal keys, matching
+            # the variable-context skip above. The audit
+            # philosophy: best-effort static analysis, never
+            # false-positive.
+            if any(k is None for k in ctx_node.keys):
+                continue
             # Extract the literal-string keys. Non-string keys
             # (e.g. computed expressions) are skipped, which means
             # the audit is best-effort but doesn't false-flag.
@@ -495,14 +629,15 @@ def test_pinned_schema_count_grows_or_stays():
     "events without schemas are skipped" semantics means a
     deletion goes unnoticed.
 
-    Today: 18 pinned schemas (6 from [IMPROVE-92] + 12 from
-    [IMPROVE-95]'s Wave 10 batch). If a future commit needs to
-    delete one (e.g. event renamed), update this baseline AND
-    update ``EVENT_CONTEXT_SCHEMAS`` in the same commit so the
-    intent is explicit in code review.
+    Today: 28 pinned schemas (6 from [IMPROVE-92] + 12 from
+    [IMPROVE-95]'s Wave 10 batch + 10 from [IMPROVE-101]'s
+    Wave 11 Tier-A batch). If a future commit needs to delete
+    one (e.g. event renamed), update this baseline AND update
+    ``EVENT_CONTEXT_SCHEMAS`` in the same commit so the intent
+    is explicit in code review.
     """
     pinned_count = len(EVENT_CONTEXT_SCHEMAS)
-    minimum_pinned = 18  # baseline as of [IMPROVE-95]
+    minimum_pinned = 28  # baseline as of [IMPROVE-101]
     assert pinned_count >= minimum_pinned, (
         f"[IMPROVE-92] Pinned schema count dropped below the "
         f"baseline ({pinned_count} < {minimum_pinned}). "
