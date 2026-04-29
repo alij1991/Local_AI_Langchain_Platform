@@ -56,6 +56,81 @@ _EXPORT_TABLES: dict[str, str] = {
     "knowledge_graph.jsonl": "partner_knowledge_graph",
 }
 
+# [IMPROVE-104] Canonical scope names for differential restore via
+# ``?scope=facts,key_memories`` (CSV) on POST /partner/import +
+# /partner/import/dry-run. Per Q2=A in the Wave 11 plan: CSV
+# vocabulary mirrors GitHub API scope conventions.
+#
+# 9 scopes total: 3 JSON files (profile, user_profile, memory_decay)
+# + 6 SQLite tables (the jsonl filenames with the ``.jsonl`` suffix
+# stripped). The first two overlap with ``reset.py:RESET_SCOPES``;
+# memory_decay is unique to the export bundle (reset.py keeps decay
+# config across resets per IMPROVE-77's persistence contract).
+#
+# Adding a new bundle component requires updating BOTH this constant
+# AND the relevant restore branch in ``restore_from_bundle`` — the
+# unknown-scope rejection in ``_parse_scopes`` makes drift visible at
+# CI time.
+RESTORE_SCOPES: frozenset[str] = frozenset({
+    "profile",
+    "user_profile",
+    "memory_decay",
+    "facts",
+    "key_memories",
+    "archived",
+    "journal",
+    "messages",
+    "knowledge_graph",
+})
+
+# Reverse map: bundle filename → scope name. Used by
+# ``restore_from_bundle`` to skip non-matching tables when the
+# caller passes a scope filter. Derived from ``_EXPORT_TABLES``
+# at import time so the maps can never drift.
+_TABLE_FILE_TO_SCOPE: dict[str, str] = {
+    fn: fn[: -len(".jsonl")] for fn in _EXPORT_TABLES
+}
+
+
+def _parse_scopes(scope_csv: str | None) -> list[str] | None:
+    """[IMPROVE-104] Parse a comma-separated ``?scope=`` value into
+    a list of canonical scope names.
+
+    Returns:
+      * ``None`` when the input is None or empty (= no filter, full
+        restore — backward-compatible default).
+      * ``list[str]`` when the input is a non-empty CSV; whitespace
+        around tokens is stripped per Postel ("be liberal in what
+        you accept"). Empty tokens are ignored (e.g. trailing comma).
+
+    Raises:
+      ``ValueError`` with the offending unknown scope(s) if any
+      token doesn't match ``RESTORE_SCOPES``. The route handler
+      catches this and maps to a 400.
+    """
+    if scope_csv is None or not scope_csv.strip():
+        return None
+    parts = [p.strip() for p in scope_csv.split(",")]
+    parts = [p for p in parts if p]  # drop empties from trailing/leading commas
+    if not parts:
+        # All tokens were whitespace — treat as no filter.
+        return None
+    unknown = [p for p in parts if p not in RESTORE_SCOPES]
+    if unknown:
+        raise ValueError(
+            f"unknown scope(s): {sorted(set(unknown))}; "
+            f"valid scopes: {sorted(RESTORE_SCOPES)}"
+        )
+    # De-duplicate while preserving first-seen order so the
+    # ``scopes_requested`` echo is stable.
+    seen: set[str] = set()
+    result: list[str] = []
+    for p in parts:
+        if p not in seen:
+            seen.add(p)
+            result.append(p)
+    return result
+
 # [IMPROVE-97] Bundle schema version. Per Q2=C in the Wave 10
 # plan, the rollout is asymmetric:
 #   * EXPORT (build_export_bundle) ALWAYS writes the current
@@ -332,6 +407,7 @@ def restore_from_bundle(
     *,
     overwrite: bool = False,
     dry_run: bool = False,
+    scopes: list[str] | None = None,
 ) -> dict[str, Any]:
     """[IMPROVE-94] Inverse of ``build_export_bundle``.
 
@@ -349,6 +425,16 @@ def restore_from_bundle(
         each row (default; ``overwrite=True`` does a
         ``DELETE`` first then ``INSERT``).
 
+    [IMPROVE-104] ``scopes`` filters which components to
+    restore. ``None`` (default) restores every component the
+    bundle carries (backward-compatible). A non-empty list
+    restores ONLY components whose scope name is in the list;
+    everything else is skipped. Valid scopes are in
+    ``RESTORE_SCOPES``. The route handler converts the
+    ``?scope=facts,key_memories`` CSV to a list via
+    ``_parse_scopes``; bypass that helper at your peril (no
+    validation here in the helper itself).
+
     Returns a summary dict with per-component status + a list
     of any errors encountered. Errors do NOT raise — partial
     restores are intentional so a corrupt single file doesn't
@@ -362,6 +448,13 @@ def restore_from_bundle(
     missing files this layer expects would land a partial
     restore (also fine).
     """
+    # [IMPROVE-104] Closure helper: when scopes is None (default),
+    # every component is in-scope; otherwise only those listed.
+    # Inlined as a local closure rather than module-level so the
+    # signature stays compact.
+    def _in_scope(name: str) -> bool:
+        return scopes is None or name in scopes
+
     summary: dict[str, Any] = {
         "profile_restored": False,
         "user_profile_restored": False,
@@ -379,6 +472,11 @@ def restore_from_bundle(
         # so the caller (route handler / Flutter UI) can render
         # a confirmation step before committing.
         "dry_run": dry_run,
+        # [IMPROVE-104] Echo the requested scopes so the dashboard
+        # can render a "restored: facts, key_memories" badge
+        # without re-parsing its own URL. None when no filter was
+        # passed (full restore).
+        "scopes_requested": list(scopes) if scopes is not None else None,
     }
 
     try:
@@ -429,7 +527,8 @@ def restore_from_bundle(
                     )
 
             # ── profile.json ─────────────────────────────────
-            if "profile.json" in names:
+            # [IMPROVE-104] Skip when ?scope= excludes "profile".
+            if "profile.json" in names and _in_scope("profile"):
                 try:
                     data = json.loads(zf.read("profile.json"))
                     from .profile import PartnerProfile, save_profile
@@ -451,7 +550,8 @@ def restore_from_bundle(
                     summary["errors"].append(f"profile.json: {exc}")
 
             # ── user_profile.json ────────────────────────────
-            if "user_profile.json" in names:
+            # [IMPROVE-104] Skip when ?scope= excludes "user_profile".
+            if "user_profile.json" in names and _in_scope("user_profile"):
                 try:
                     data = json.loads(zf.read("user_profile.json"))
                     from .user_profile import (
@@ -476,7 +576,11 @@ def restore_from_bundle(
                     )
 
             # ── memory_decay.json ────────────────────────────
-            if "memory_decay.json" in names:
+            # [IMPROVE-104] Skip when ?scope= excludes "memory_decay".
+            if (
+                "memory_decay.json" in names
+                and _in_scope("memory_decay")
+            ):
                 try:
                     data = json.loads(zf.read("memory_decay.json"))
                     from .memory import set_decay_config
@@ -507,8 +611,15 @@ def restore_from_bundle(
                     )
 
             # ── SQLite tables (JSONL) ────────────────────────
+            # [IMPROVE-104] Skip tables whose scope name (filename
+            # without the .jsonl suffix) isn't in the requested
+            # scope list. Tables not in the bundle are also
+            # skipped (legacy bundles may omit some).
             for filename, table in _EXPORT_TABLES.items():
                 if filename not in names:
+                    continue
+                table_scope = _TABLE_FILE_TO_SCOPE[filename]
+                if not _in_scope(table_scope):
                     continue
                 rows_imported, table_errors = _restore_table_jsonl(
                     zf, filename, table, overwrite=overwrite,

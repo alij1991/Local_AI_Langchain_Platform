@@ -442,6 +442,7 @@ async def partner_export(partner=Depends(get_partner_engine)):
 async def partner_import(
     file: UploadFile = File(...),
     overwrite: bool = False,
+    scope: str | None = None,
     partner=Depends(get_partner_engine),
 ):
     """[IMPROVE-94] Restore partner state from a `partner-export.zip`
@@ -461,6 +462,15 @@ async def partner_import(
          row (default ``overwrite=False``); pass
          ``?overwrite=true`` for full replacement.
 
+    [IMPROVE-104] ``?scope=facts,key_memories`` (CSV) restores
+    ONLY the listed components and skips the rest — useful when
+    the user wants to restore a subset of the bundle without
+    overwriting other state. Per Q2=A in the Wave 11 plan: CSV
+    vocabulary mirrors GitHub API. Valid scopes are listed in
+    ``RESTORE_SCOPES``; an unknown scope returns 400 with the
+    valid list. Default (no ``scope``) restores everything
+    (backward-compatible).
+
     Returns a JSON summary like::
 
         {
@@ -468,7 +478,8 @@ async def partner_import(
           "user_profile_restored": true,
           "memory_decay_restored": true,
           "tables_restored": {"facts.jsonl": 12, ...},
-          "errors": []
+          "errors": [],
+          "scopes_requested": null   // or ["facts", "key_memories"]
         }
 
     Errors do NOT raise — partial restores are intentional so a
@@ -493,10 +504,21 @@ async def partner_import(
             413, f"bundle exceeds 100 MB cap ({len(zip_bytes)} bytes)",
         )
 
-    from local_ai_platform.partner.export import restore_from_bundle
+    from local_ai_platform.partner.export import (
+        _parse_scopes,
+        restore_from_bundle,
+    )
+
+    # [IMPROVE-104] Validate scope upfront so a typo'd scope
+    # surfaces as a clean 400 rather than silently restoring
+    # nothing.
+    try:
+        scopes = _parse_scopes(scope)
+    except ValueError as exc:
+        raise HTTPException(400, str(exc))
 
     summary = restore_from_bundle(
-        partner, zip_bytes, overwrite=overwrite,
+        partner, zip_bytes, overwrite=overwrite, scopes=scopes,
     )
     return summary
 
@@ -504,6 +526,7 @@ async def partner_import(
 @router.post("/partner/import/dry-run")
 async def partner_import_dry_run(
     file: UploadFile = File(...),
+    scope: str | None = None,
     partner=Depends(get_partner_engine),
 ):
     """[IMPROVE-98] Pre-restore preview of a bundle WITHOUT
@@ -525,8 +548,15 @@ async def partner_import_dry_run(
     The summary's ``dry_run`` field is True so the caller can
     distinguish "preview" from "real restore" responses. All
     other fields (profile_restored / tables_restored /
-    schema_version / errors) match the real restore output —
-    same shape errors, same row counts, same version surfaced.
+    schema_version / errors / scopes_requested) match the
+    real restore output — same shape errors, same row counts,
+    same version surfaced.
+
+    [IMPROVE-104] ``?scope=facts,key_memories`` (CSV) preview
+    only the listed components — same vocabulary as
+    /partner/import. Useful for Flutter UI: dry-run with
+    scope filter shows "if you click restore, here's what
+    WOULD land for these tables" before the real call.
 
     Per Q3=A in the Wave 10 plan: separate route (cleaner than
     a query-param flag on the existing endpoint). The size cap
@@ -548,10 +578,20 @@ async def partner_import_dry_run(
             413, f"bundle exceeds 100 MB cap ({len(zip_bytes)} bytes)",
         )
 
-    from local_ai_platform.partner.export import restore_from_bundle
+    from local_ai_platform.partner.export import (
+        _parse_scopes,
+        restore_from_bundle,
+    )
+
+    # [IMPROVE-104] Validate scope before reading the bundle so
+    # a typo'd scope surfaces as 400, parity with /partner/import.
+    try:
+        scopes = _parse_scopes(scope)
+    except ValueError as exc:
+        raise HTTPException(400, str(exc))
 
     summary = restore_from_bundle(
-        partner, zip_bytes, dry_run=True,
+        partner, zip_bytes, dry_run=True, scopes=scopes,
     )
     return summary
 

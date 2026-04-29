@@ -1578,3 +1578,382 @@ def test_partner_import_dry_run_endpoint_oversized_returns_413(
         )
     assert resp.status_code == 413
     assert "100 MB cap" in resp.json()["detail"]
+
+
+# ── [IMPROVE-104] Differential restore (?scope= filter) ────────
+
+
+def test_parse_scopes_none_returns_none():
+    """[IMPROVE-104] No filter (None or empty string) returns None
+    so ``restore_from_bundle`` falls back to the full-restore
+    default. Backward-compatible with pre-IMPROVE-104 callers."""
+    from local_ai_platform.partner.export import _parse_scopes
+    assert _parse_scopes(None) is None
+    assert _parse_scopes("") is None
+    assert _parse_scopes("   ") is None
+
+
+def test_parse_scopes_csv_returns_list():
+    """[IMPROVE-104] CSV input returns a list of canonical scope
+    names. Whitespace around tokens is stripped."""
+    from local_ai_platform.partner.export import _parse_scopes
+    assert _parse_scopes("facts") == ["facts"]
+    assert _parse_scopes("facts,key_memories") == [
+        "facts", "key_memories",
+    ]
+    assert _parse_scopes("facts, key_memories,  archived ") == [
+        "facts", "key_memories", "archived",
+    ]
+
+
+def test_parse_scopes_deduplicates_preserving_order():
+    """[IMPROVE-104] A CSV with duplicate scope names dedupes to
+    first-seen order so the ``scopes_requested`` echo is stable.
+    Defensive: a future client passing scope=facts,facts shouldn't
+    surprise the dashboard with two echo entries."""
+    from local_ai_platform.partner.export import _parse_scopes
+    assert _parse_scopes("facts,facts,key_memories") == [
+        "facts", "key_memories",
+    ]
+
+
+def test_parse_scopes_drops_empty_tokens():
+    """[IMPROVE-104] Trailing/leading commas and empty tokens
+    (``facts,,key_memories``) are dropped silently. Postel
+    principle — be liberal in what you accept."""
+    from local_ai_platform.partner.export import _parse_scopes
+    assert _parse_scopes(",facts,,key_memories,") == [
+        "facts", "key_memories",
+    ]
+
+
+def test_parse_scopes_unknown_raises_value_error():
+    """[IMPROVE-104] Unknown scope tokens raise ValueError with
+    the offending name + the valid scope list. Route handler
+    catches this and returns 400."""
+    from local_ai_platform.partner.export import _parse_scopes
+    with pytest.raises(ValueError) as ei:
+        _parse_scopes("facts,bogus,key_memories")
+    msg = str(ei.value)
+    assert "bogus" in msg
+    # Valid list mentioned so the user knows what to fix.
+    assert "facts" in msg
+
+
+def test_restore_scopes_constant_matches_implementation():
+    """[IMPROVE-104] The RESTORE_SCOPES frozenset must contain
+    exactly the 9 components ``restore_from_bundle`` knows how
+    to filter (3 JSON files + 6 SQLite tables). Pin the
+    inventory so a future component addition without updating
+    RESTORE_SCOPES surfaces here."""
+    from local_ai_platform.partner.export import RESTORE_SCOPES
+    expected = {
+        "profile", "user_profile", "memory_decay",
+        "facts", "key_memories", "archived",
+        "journal", "messages", "knowledge_graph",
+    }
+    assert RESTORE_SCOPES == expected
+
+
+def test_restore_scope_facts_only_skips_other_tables(
+    tmp_partner_db, tmp_partner_data_dir, stub_engine,
+):
+    """[IMPROVE-104] ``scopes=["facts"]`` restores ONLY the facts
+    table; the other 5 tables in the bundle are skipped (their
+    summary entry never appears). Pin the differential restore
+    pay-off."""
+    from local_ai_platform.partner.export import (
+        build_export_bundle,
+        restore_from_bundle,
+    )
+    from local_ai_platform.partner.memory import _get_conn
+
+    _seed_full_state()
+    bundle = build_export_bundle(stub_engine)
+
+    # Clear ALL tables.
+    conn = _get_conn()
+    try:
+        for t in (
+            "partner_core_facts", "partner_key_memories",
+            "partner_conversations", "partner_journal",
+            "partner_knowledge_graph", "partner_memories_archive",
+        ):
+            conn.execute(f"DELETE FROM {t}")
+        conn.commit()
+    finally:
+        conn.close()
+
+    summary = restore_from_bundle(
+        stub_engine, bundle, scopes=["facts"],
+    )
+    # Only facts table restored.
+    assert summary["tables_restored"] == {"facts.jsonl": 3}
+    assert _table_count("partner_core_facts") == 3
+    # Other tables stayed empty.
+    assert _table_count("partner_key_memories") == 0
+    assert _table_count("partner_conversations") == 0
+    assert _table_count("partner_journal") == 0
+
+
+def test_restore_scope_csv_multiple_tables(
+    tmp_partner_db, tmp_partner_data_dir, stub_engine,
+):
+    """[IMPROVE-104] ``scopes=["facts", "key_memories"]`` restores
+    BOTH listed tables — the order doesn't matter; the bundle's
+    iteration order does. Pin two-scope composition."""
+    from local_ai_platform.partner.export import (
+        build_export_bundle,
+        restore_from_bundle,
+    )
+    from local_ai_platform.partner.memory import _get_conn
+
+    _seed_full_state()
+    bundle = build_export_bundle(stub_engine)
+
+    conn = _get_conn()
+    try:
+        for t in (
+            "partner_core_facts", "partner_key_memories",
+            "partner_conversations",
+        ):
+            conn.execute(f"DELETE FROM {t}")
+        conn.commit()
+    finally:
+        conn.close()
+
+    summary = restore_from_bundle(
+        stub_engine, bundle, scopes=["facts", "key_memories"],
+    )
+    assert "facts.jsonl" in summary["tables_restored"]
+    assert "key_memories.jsonl" in summary["tables_restored"]
+    # Messages NOT restored.
+    assert "messages.jsonl" not in summary["tables_restored"]
+    assert _table_count("partner_core_facts") == 3
+    assert _table_count("partner_key_memories") == 2
+    assert _table_count("partner_conversations") == 0
+
+
+def test_restore_scope_profile_skips_tables_and_user_profile(
+    tmp_partner_db, tmp_partner_data_dir, stub_engine,
+):
+    """[IMPROVE-104] ``scopes=["profile"]`` restores ONLY the
+    profile.json (engine.profile swap + persist) — user_profile
+    + memory_decay + tables are all skipped."""
+    from local_ai_platform.partner.export import (
+        build_export_bundle,
+        restore_from_bundle,
+    )
+    from local_ai_platform.partner.profile import PartnerProfile
+    from local_ai_platform.partner.memory import _get_conn
+
+    # Seed everything + give the engine a recognisable profile name.
+    _seed_full_state()
+    stub_engine.profile = PartnerProfile()
+    stub_engine.profile.name = "OriginalName"
+    bundle = build_export_bundle(stub_engine)
+
+    # Mutate engine state so the restore is observable.
+    stub_engine.profile.name = "BeforeRestore"
+    # Clear tables to confirm they don't get re-populated.
+    conn = _get_conn()
+    try:
+        conn.execute("DELETE FROM partner_core_facts")
+        conn.commit()
+    finally:
+        conn.close()
+
+    summary = restore_from_bundle(
+        stub_engine, bundle, scopes=["profile"],
+    )
+    # Profile got restored to the bundled value.
+    assert summary["profile_restored"] is True
+    assert stub_engine.profile.name == "OriginalName"
+    # User-profile + memory_decay NOT restored.
+    assert summary["user_profile_restored"] is False
+    assert summary["memory_decay_restored"] is False
+    # Tables NOT restored.
+    assert summary["tables_restored"] == {}
+    assert _table_count("partner_core_facts") == 0
+
+
+def test_restore_scopes_requested_echoed_in_summary(
+    tmp_partner_db, tmp_partner_data_dir, stub_engine,
+):
+    """[IMPROVE-104] The summary echoes the scopes list so the
+    dashboard can render a "restored: facts, key_memories"
+    badge without re-parsing its own URL."""
+    from local_ai_platform.partner.export import (
+        build_export_bundle,
+        restore_from_bundle,
+    )
+
+    _seed_full_state()
+    bundle = build_export_bundle(stub_engine)
+
+    summary = restore_from_bundle(
+        stub_engine, bundle,
+        scopes=["facts", "messages"],
+    )
+    assert summary["scopes_requested"] == ["facts", "messages"]
+
+
+def test_restore_scopes_default_none_echoed_as_none(
+    tmp_partner_db, tmp_partner_data_dir, stub_engine,
+):
+    """[IMPROVE-104] When no scopes are passed, ``scopes_requested``
+    in the summary is None (not [] or 'all') so a dashboard can
+    distinguish "filtered" from "full restore"."""
+    from local_ai_platform.partner.export import (
+        build_export_bundle,
+        restore_from_bundle,
+    )
+
+    _seed_facts(count=1)
+    bundle = build_export_bundle(stub_engine)
+    summary = restore_from_bundle(stub_engine, bundle)
+    assert summary["scopes_requested"] is None
+
+
+def test_restore_dry_run_with_scope_still_skips_writes(
+    tmp_partner_db, tmp_partner_data_dir, stub_engine,
+):
+    """[IMPROVE-104] dry_run + scopes compose: only the listed
+    components get parsed/validated, AND no writes happen.
+    Pin the union of the two flag's contracts."""
+    from local_ai_platform.partner.export import (
+        build_export_bundle,
+        restore_from_bundle,
+    )
+    from local_ai_platform.partner.memory import _get_conn
+
+    _seed_full_state()
+    bundle = build_export_bundle(stub_engine)
+
+    pre_facts = _table_count("partner_core_facts")
+    pre_messages = _table_count("partner_conversations")
+
+    summary = restore_from_bundle(
+        stub_engine, bundle,
+        scopes=["facts"], dry_run=True,
+    )
+    assert summary["dry_run"] is True
+    assert summary["scopes_requested"] == ["facts"]
+    # facts.jsonl reports the would-write count.
+    assert summary["tables_restored"]["facts.jsonl"] == 3
+    # No writes happened — counts unchanged.
+    assert _table_count("partner_core_facts") == pre_facts
+    # Other tables NOT in scope, NOT counted, NOT written.
+    assert "messages.jsonl" not in summary["tables_restored"]
+    assert _table_count("partner_conversations") == pre_messages
+
+
+def test_partner_import_endpoint_with_scope_filter(
+    tmp_partner_db, tmp_partner_data_dir, stub_engine, monkeypatch,
+):
+    """[IMPROVE-104] End-to-end via TestClient:
+    POST /partner/import?scope=facts restores only the facts
+    table. Mirror of test_partner_import_endpoint_round_trip
+    with the scope filter applied."""
+    pytest.importorskip("fastapi")
+    from fastapi.testclient import TestClient
+    from local_ai_platform.api.routers import partner as partner_router
+    from local_ai_platform.partner.export import build_export_bundle
+    from local_ai_platform.partner.memory import _get_conn
+
+    monkeypatch.setattr(
+        partner_router, "get_partner_engine", lambda: stub_engine,
+    )
+
+    _seed_facts(count=2)
+    _seed_messages(count=4)
+    bundle = build_export_bundle(stub_engine)
+
+    # Clear the tables so the scope effect is observable.
+    conn = _get_conn()
+    try:
+        conn.execute("DELETE FROM partner_core_facts")
+        conn.execute("DELETE FROM partner_conversations")
+        conn.commit()
+    finally:
+        conn.close()
+
+    import api_server
+    with TestClient(api_server.app) as client:
+        resp = client.post(
+            "/partner/import?scope=facts",
+            files={"file": ("export.zip", bundle, "application/zip")},
+        )
+    assert resp.status_code == 200
+    summary = resp.json()
+    assert summary["scopes_requested"] == ["facts"]
+    assert summary["tables_restored"] == {"facts.jsonl": 2}
+    # facts back; messages still empty.
+    assert _table_count("partner_core_facts") == 2
+    assert _table_count("partner_conversations") == 0
+
+
+def test_partner_import_endpoint_unknown_scope_returns_400(
+    tmp_partner_db, monkeypatch,
+):
+    """[IMPROVE-104] An unknown scope token returns 400 with an
+    actionable error message. Pin the validation contract so
+    a typo'd scope doesn't silently restore nothing."""
+    pytest.importorskip("fastapi")
+    from fastapi.testclient import TestClient
+    from local_ai_platform.api.routers import partner as partner_router
+
+    eng = MagicMock()
+    monkeypatch.setattr(
+        partner_router, "get_partner_engine", lambda: eng,
+    )
+
+    import api_server
+    with TestClient(api_server.app) as client:
+        resp = client.post(
+            "/partner/import?scope=facts,bogus",
+            files={"file": (
+                "export.zip", b"PK\x03\x04 dummy",
+                "application/zip",
+            )},
+        )
+    assert resp.status_code == 400
+    detail = resp.json()["detail"]
+    assert "bogus" in detail
+
+
+def test_partner_import_dry_run_endpoint_with_scope_filter(
+    tmp_partner_db, tmp_partner_data_dir, stub_engine, monkeypatch,
+):
+    """[IMPROVE-104] /partner/import/dry-run accepts ?scope=
+    parity with /partner/import. Pin the dry-run + scope
+    composition end-to-end."""
+    pytest.importorskip("fastapi")
+    from fastapi.testclient import TestClient
+    from local_ai_platform.api.routers import partner as partner_router
+    from local_ai_platform.partner.export import build_export_bundle
+
+    monkeypatch.setattr(
+        partner_router, "get_partner_engine", lambda: stub_engine,
+    )
+
+    _seed_full_state()
+    bundle = build_export_bundle(stub_engine)
+    pre_facts = _table_count("partner_core_facts")
+
+    import api_server
+    with TestClient(api_server.app) as client:
+        resp = client.post(
+            "/partner/import/dry-run?scope=facts,key_memories",
+            files={"file": ("export.zip", bundle, "application/zip")},
+        )
+    assert resp.status_code == 200
+    summary = resp.json()
+    assert summary["dry_run"] is True
+    assert summary["scopes_requested"] == ["facts", "key_memories"]
+    assert "facts.jsonl" in summary["tables_restored"]
+    assert "key_memories.jsonl" in summary["tables_restored"]
+    assert "messages.jsonl" not in summary["tables_restored"]
+    # No writes occurred even though the scope-matching tables
+    # were "restored".
+    assert _table_count("partner_core_facts") == pre_facts
