@@ -336,3 +336,97 @@ def test_timeseries_respects_explicit_window_hours(client):
     )
     total = sum(b["count"] for b in resp.json()["buckets"])
     assert total == 1
+
+
+# ── [IMPROVE-108] /observability/timeseries ?error_code_prefix= ─
+
+
+def test_timeseries_filters_by_error_code_prefix(client):
+    """[IMPROVE-108] Q4=A pay-off: ``?error_code_prefix=Schema``
+    counts ALL Schema*-coded events on one chart without
+    enumerating every variant. Mirror of the /rejections prefix
+    contract — same helper underneath."""
+    db_mod = client._db_mod
+    _insert_event(
+        db_mod, subsystem="system", action="iso_prefix_ts",
+        status="error", error_code="SchemaInvalid",
+    )
+    _insert_event(
+        db_mod, subsystem="system", action="iso_prefix_ts",
+        status="error", error_code="SchemaMissingField",
+    )
+    _insert_event(
+        db_mod, subsystem="system", action="iso_prefix_ts",
+        status="error", error_code="cuda_oom",  # NOT Schema*
+    )
+    resp = client.get(
+        "/observability/timeseries"
+        "?subsystem=system&action=iso_prefix_ts"
+        "&error_code_prefix=Schema",
+    )
+    total = sum(b["count"] for b in resp.json()["buckets"])
+    assert total == 2  # only the two Schema* events
+
+
+def test_timeseries_prefix_composes_with_exact_error_code(client):
+    """[IMPROVE-108] error_code + error_code_prefix compose with
+    AND (degenerate but well-defined: exact match within
+    prefix). A request for both narrows to a single code."""
+    db_mod = client._db_mod
+    _insert_event(
+        db_mod, subsystem="system", action="iso_prefix_ec_combo",
+        status="error", error_code="SchemaInvalid",
+    )
+    _insert_event(
+        db_mod, subsystem="system", action="iso_prefix_ec_combo",
+        status="error", error_code="SchemaMissingField",
+    )
+    resp = client.get(
+        "/observability/timeseries"
+        "?subsystem=system&action=iso_prefix_ec_combo"
+        "&error_code_prefix=Schema&error_code=SchemaInvalid",
+    )
+    total = sum(b["count"] for b in resp.json()["buckets"])
+    assert total == 1
+
+
+def test_timeseries_prefix_filter_echoed_back(client):
+    """[IMPROVE-108] error_code_prefix is echoed back in the
+    filters dict so dashboards can render badges without
+    re-parsing the URL. The filters dict gains a 4th key
+    (subsystem / action / error_code / error_code_prefix)."""
+    resp = client.get(
+        "/observability/timeseries?error_code_prefix=cuda_",
+    )
+    body = resp.json()
+    assert body["filters"]["error_code_prefix"] == "cuda_"
+    # Pin the 4-key shape so a future addition (e.g.
+    # status_prefix) lands as a deliberate +1 not a silent
+    # mutation of the existing four.
+    assert set(body["filters"].keys()) == {
+        "subsystem", "action", "error_code", "error_code_prefix",
+    }
+
+
+def test_timeseries_prefix_escapes_underscore_literal(client):
+    """[IMPROVE-108] User passes ``?error_code_prefix=cuda_``;
+    must match LITERAL ``cuda_*`` codes (cuda_oom etc.) NOT
+    ``cudaXoom`` style codes that LIKE ``cuda_%`` would also
+    catch without the escape. Pin the literal-match semantic
+    via ``_escape_like_pattern`` shared with /rejections."""
+    db_mod = client._db_mod
+    _insert_event(
+        db_mod, subsystem="image", action="iso_prefix_under_ts",
+        status="error", error_code="cuda_oom",
+    )
+    _insert_event(
+        db_mod, subsystem="image", action="iso_prefix_under_ts",
+        status="error", error_code="cudaXoom",
+    )
+    resp = client.get(
+        "/observability/timeseries"
+        "?subsystem=image&action=iso_prefix_under_ts"
+        "&error_code_prefix=cuda_",
+    )
+    total = sum(b["count"] for b in resp.json()["buckets"])
+    assert total == 1  # only cuda_oom (literal underscore)

@@ -339,8 +339,132 @@ async def obs_recent(
     return {"items": items, "count": len(items)}
 
 
+# ── [IMPROVE-108] Observability query helpers ─────────────────
+
+# These two helpers + ``_rollup_rejections`` are shared between
+# /observability/summary's rejections array, /observability/
+# timeseries' filter contract, and the /observability/rejections
+# endpoint. Extracting them removes the ~6-line WHERE-build
+# duplication that crept in over IMPROVE-90 / IMPROVE-99 /
+# IMPROVE-103 — and lets the new ``?error_code_prefix=`` filter
+# land in ONE place instead of three (the typo class that
+# IMPROVE-99's exact-match-only contract was supposed to prevent
+# but couldn't because each endpoint owned its own filter
+# building).
+
+
+def _escape_like_pattern(s: str) -> str:
+    """Escape SQLite LIKE special characters so a user-supplied
+    string can safely be used as a literal LIKE pattern under
+    ``ESCAPE '\\'``. The three meta-chars are backslash, ``%``,
+    and ``_``; backslash is escaped FIRST otherwise we'd
+    double-escape the escape itself.
+
+    Example:
+        ``_escape_like_pattern("foo_bar")`` → ``"foo\\_bar"``
+        — searched as literal ``foo_bar`` (not "foo<any>bar").
+
+    Used by ``?error_code_prefix=`` filters so an operator
+    typing ``error_code_prefix=cuda_`` matches ``cuda_oom``
+    + ``cuda_unknown`` but not (e.g.) ``cudaXoom`` if such a
+    code existed.
+
+    Sources (2025-2026):
+      * SQLite LIKE operator + ESCAPE clause docs (still 2025
+        canonical reference — semantics unchanged):
+        https://www.sqlite.org/lang_expr.html#like
+    """
+    return s.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+
+
+def _build_error_code_filter(
+    error_code: str | None,
+    error_code_prefix: str | None,
+) -> tuple[list[str], list[Any]]:
+    """Return ``(where_clauses, params)`` for the optional
+    error_code + error_code_prefix filters. Caller appends each
+    list to its own where_parts / params lists.
+
+    Both filters compose: passing both ANDs them (degenerate but
+    well-defined — exact match within prefix). Empty/None inputs
+    add no clauses (the most common dashboard pattern: filter
+    one axis, leave the other open).
+
+    The prefix filter uses ``LIKE ? ESCAPE '\\'`` with the user
+    string fed through ``_escape_like_pattern`` + a single
+    trailing ``%`` so a prefix of ``cuda_`` literally matches
+    error_codes starting with ``cuda_`` (the literal underscore,
+    not the LIKE wildcard).
+    """
+    clauses: list[str] = []
+    params: list[Any] = []
+    if error_code:
+        clauses.append("error_code = ?")
+        params.append(error_code)
+    if error_code_prefix:
+        clauses.append("error_code LIKE ? ESCAPE '\\'")
+        params.append(_escape_like_pattern(error_code_prefix) + "%")
+    return clauses, params
+
+
+def _rollup_rejections(
+    conn: Any,
+    since: str,
+    *,
+    subsystem: str | None = None,
+    action: str | None = None,
+    error_code: str | None = None,
+    error_code_prefix: str | None = None,
+) -> list[dict[str, Any]]:
+    """Execute the per-(subsystem, action, error_code) rejection
+    rollup with always-on rejection guards (NULL exclusion +
+    empty-string exclusion) plus optional filters. Used by both
+    /observability/summary's rejections array AND
+    /observability/rejections so a fix to one query updates the
+    other automatically.
+
+    ``since`` is a SQLite datetime modifier like ``"-24 hours"``.
+
+    Returns rows as plain dicts sorted ``count DESC`` then
+    alphabetical for stable rendering on ties. Empty result is
+    ``[]``, never None.
+    """
+    where_parts: list[str] = [
+        "ts > datetime('now', ?)",
+        "error_code IS NOT NULL",
+        "error_code != ''",
+    ]
+    params: list[Any] = [since]
+    if subsystem:
+        where_parts.append("subsystem = ?")
+        params.append(subsystem)
+    if action:
+        where_parts.append("action = ?")
+        params.append(action)
+    err_clauses, err_params = _build_error_code_filter(
+        error_code, error_code_prefix,
+    )
+    where_parts.extend(err_clauses)
+    params.extend(err_params)
+
+    sql = f"""
+        SELECT subsystem, action, error_code,
+               COUNT(*) AS count
+        FROM app_events
+        WHERE {' AND '.join(where_parts)}
+        GROUP BY subsystem, action, error_code
+        ORDER BY count DESC, subsystem, action, error_code
+    """
+    rows = conn.execute(sql, params).fetchall()
+    return [dict(r) for r in rows]
+
+
 @router.get("/observability/summary")
-async def obs_summary(window_hours: int = 24):
+async def obs_summary(
+    window_hours: int = 24,
+    error_code: str | None = None,
+    error_code_prefix: str | None = None,
+):
     """Error rate + avg/max duration per (subsystem, action).
 
     Call with ?window_hours=168 for weekly rollup.
@@ -356,6 +480,15 @@ async def obs_summary(window_hours: int = 24):
     into rejection causes. Pre-IMPROVE-90 the only way to get the
     split was a separate SQL query; surfacing it here removes the
     join and lets dashboards render a single chart.
+
+    [IMPROVE-108] ``error_code`` and ``error_code_prefix`` filter
+    the REJECTIONS array only — the per-(subsystem, action)
+    rollup in ``items`` is unfiltered (changing its semantics
+    would be a breaking change for existing dashboard
+    consumers; ``items`` always reflects the full window's
+    activity). The two error filters compose with AND so
+    ``?error_code_prefix=cuda_&error_code=cuda_oom`` is a
+    well-defined (if degenerate) "exact match within prefix".
     """
     window_hours = max(1, min(int(window_hours or 24), 24 * 365))
     conn = get_conn()
@@ -377,31 +510,30 @@ async def obs_summary(window_hours: int = 24):
             (since,),
         ).fetchall()
         items = [dict(r) for r in rows]
-        # [IMPROVE-90] Per-error_code rollup. Filters NULL/empty
-        # error_code so only events that *carried* a typed code
-        # (Wave 7+ rejection events; image OOM ladder error
-        # codes; etc.) appear. Sorted by count DESC so the most
-        # frequent rejection rises to the top of the list.
-        rejection_rows = conn.execute(
-            """
-            SELECT subsystem, action, error_code,
-                   COUNT(*) AS count
-            FROM app_events
-            WHERE ts > datetime('now', ?)
-              AND error_code IS NOT NULL
-              AND error_code != ''
-            GROUP BY subsystem, action, error_code
-            ORDER BY count DESC, subsystem, action, error_code
-            """,
-            (since,),
-        ).fetchall()
-        rejections = [dict(r) for r in rejection_rows]
+        # [IMPROVE-108] Delegate to the shared helper so the
+        # rejections rollup query is identical to the standalone
+        # /observability/rejections endpoint. Pre-IMPROVE-108
+        # both queries were inline — small drift surface that
+        # the helper extracts.
+        rejections = _rollup_rejections(
+            conn, since,
+            error_code=error_code,
+            error_code_prefix=error_code_prefix,
+        )
     finally:
         conn.close()
     return {
         "items": items,
         "rejections": rejections,
         "window_hours": window_hours,
+        # [IMPROVE-108] ``filters`` echoes the per-rejection
+        # filters so dashboards can render a "showing: prefix=X"
+        # badge without re-parsing the URL. Always-present so
+        # consumers don't need a key-existence check.
+        "filters": {
+            "error_code": error_code,
+            "error_code_prefix": error_code_prefix,
+        },
     }
 
 
@@ -412,6 +544,7 @@ async def obs_timeseries(
     subsystem: str | None = None,
     action: str | None = None,
     error_code: str | None = None,
+    error_code_prefix: str | None = None,
 ):
     """[IMPROVE-99] Time-series of event counts in fixed buckets.
 
@@ -425,10 +558,22 @@ async def obs_timeseries(
             &bucket_minutes=15
             &error_code=SchemaInvalid
 
-    All filters are optional + AND-composed. The
-    ``error_code`` filter is exact-match (not LIKE) — pin a
-    typo'd code at the dashboard layer rather than swallowing
-    it via prefix matching.
+    All filters are optional + AND-composed.
+
+    [IMPROVE-108] ``?error_code_prefix=`` filters error codes by
+    LIKE prefix — useful for grouping a family of related codes
+    on one chart without enumerating every variant. A "rejection
+    rate over time for ALL OOM* codes" chart:
+
+        GET /observability/timeseries
+            ?error_code_prefix=cuda_
+
+    The prefix filter and exact-match ``?error_code=`` filter
+    compose with AND (degenerate but well-defined).
+    Backslash / ``%`` / ``_`` in the prefix are escaped via
+    ``LIKE ? ESCAPE '\\'`` so a prefix of ``cuda_`` matches
+    error codes starting with the LITERAL ``cuda_`` (not
+    ``cuda<any>``).
 
     Buckets are aligned to UTC clock boundaries via SQLite's
     Unix-epoch arithmetic (cast ``ts`` to seconds, integer-
@@ -453,7 +598,8 @@ async def obs_timeseries(
           "bucket_minutes": 15,
           "window_hours": 24,
           "filters": {"subsystem": null, "action": null,
-                      "error_code": "SchemaInvalid"}
+                      "error_code": "SchemaInvalid",
+                      "error_code_prefix": null}
         }
 
     Empty buckets (no events in that window) are NOT padded —
@@ -481,12 +627,14 @@ async def obs_timeseries(
     if action:
         where_parts.append("action = ?")
         params.append(action)
-    if error_code:
-        # Empty string filter MUST NOT match NULL error_codes
-        # (defensive coding). The simple ``= ?`` SQL handles
-        # this — NULL never equals anything in SQL.
-        where_parts.append("error_code = ?")
-        params.append(error_code)
+    # [IMPROVE-108] error_code + error_code_prefix come from the
+    # shared helper so /timeseries + /rejections + /summary all
+    # have identical filter semantics.
+    err_clauses, err_params = _build_error_code_filter(
+        error_code, error_code_prefix,
+    )
+    where_parts.extend(err_clauses)
+    params.extend(err_params)
 
     where_clause = " AND ".join(where_parts)
 
@@ -526,6 +674,7 @@ async def obs_timeseries(
             "subsystem": subsystem,
             "action": action,
             "error_code": error_code,
+            "error_code_prefix": error_code_prefix,
         },
     }
 
@@ -536,6 +685,7 @@ async def obs_rejections(
     subsystem: str | None = None,
     action: str | None = None,
     error_code: str | None = None,
+    error_code_prefix: str | None = None,
 ):
     """[IMPROVE-103] Slim per-cause rejection distribution.
 
@@ -556,11 +706,23 @@ async def obs_rejections(
             ?window_hours=168
             &error_code=cuda_oom
 
+    [IMPROVE-108] ``?error_code_prefix=`` filters error codes by
+    LIKE prefix — useful for grouping a family of related codes
+    on one chart without enumerating every variant. A "rejection
+    distribution for ALL Schema* codes":
+
+        GET /observability/rejections
+            ?error_code_prefix=Schema
+
     Compare to /observability/timeseries with
     ``error_code=cuda_oom``: timeseries returns time-bucketed
     counts (line chart); rejections returns the
     per-(subsystem, action) breakdown (bar / pie chart).
-    Different shapes for different chart types.
+    Different shapes for different chart types. Both endpoints
+    + /summary share the same ``error_code`` /
+    ``error_code_prefix`` filter semantics via the shared
+    ``_rollup_rejections`` + ``_build_error_code_filter``
+    helpers (also IMPROVE-108).
 
     Returns:
         {
@@ -573,7 +735,8 @@ async def obs_rejections(
           ],
           "window_hours": 24,
           "filters": {"subsystem": null, "action": null,
-                      "error_code": null}
+                      "error_code": null,
+                      "error_code_prefix": null}
         }
 
     NULL/empty error_codes are always excluded — only events
@@ -589,41 +752,19 @@ async def obs_rejections(
     window_hours = max(1, min(int(window_hours), 24 * 365))
     since = f"-{window_hours} hours"
 
-    # Build WHERE additively, mirroring /observability/timeseries.
-    # The error_code IS NOT NULL + != '' guard is always-on (the
-    # endpoint is rejection-only by definition); subsystem +
-    # action + error_code filters are opt-in.
-    where_parts: list[str] = [
-        "ts > datetime('now', ?)",
-        "error_code IS NOT NULL",
-        "error_code != ''",
-    ]
-    params: list[Any] = [since]
-    if subsystem:
-        where_parts.append("subsystem = ?")
-        params.append(subsystem)
-    if action:
-        where_parts.append("action = ?")
-        params.append(action)
-    if error_code:
-        where_parts.append("error_code = ?")
-        params.append(error_code)
-
-    where_clause = " AND ".join(where_parts)
-
-    sql = f"""
-        SELECT subsystem, action, error_code,
-               COUNT(*) AS count
-        FROM app_events
-        WHERE {where_clause}
-        GROUP BY subsystem, action, error_code
-        ORDER BY count DESC, subsystem, action, error_code
-    """
-
     conn = get_conn()
     try:
-        rows = conn.execute(sql, params).fetchall()
-        rejections = [dict(r) for r in rows]
+        # [IMPROVE-108] Delegate to the shared helper. Pre-this-
+        # commit the WHERE-build was inlined here AND in
+        # /summary's rejections sub-query — the helper merges
+        # the two so a fix lands once.
+        rejections = _rollup_rejections(
+            conn, since,
+            subsystem=subsystem,
+            action=action,
+            error_code=error_code,
+            error_code_prefix=error_code_prefix,
+        )
     finally:
         conn.close()
 
@@ -634,5 +775,6 @@ async def obs_rejections(
             "subsystem": subsystem,
             "action": action,
             "error_code": error_code,
+            "error_code_prefix": error_code_prefix,
         },
     }

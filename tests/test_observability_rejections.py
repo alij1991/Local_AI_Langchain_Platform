@@ -107,7 +107,12 @@ def test_rejections_response_shape(client):
 def test_rejections_filters_echoed_back(client):
     """[IMPROVE-103] Filters are echoed back unchanged so the
     dashboard can render a "showing: subsystem=X, error_code=Y"
-    badge without re-parsing its own URL."""
+    badge without re-parsing its own URL.
+
+    [IMPROVE-108] Now also echoes ``error_code_prefix`` so
+    dashboards using the LIKE-prefix filter render
+    "showing: prefix=Schema*" badges without re-parsing.
+    """
     resp = client.get(
         "/observability/rejections"
         "?subsystem=system&action=validate&error_code=SchemaInvalid"
@@ -118,18 +123,25 @@ def test_rejections_filters_echoed_back(client):
         "subsystem": "system",
         "action": "validate",
         "error_code": "SchemaInvalid",
+        "error_code_prefix": None,
     }
 
 
 def test_rejections_filters_default_to_none(client):
-    """[IMPROVE-103] When no filters are passed, all three
-    filter slots are explicit None (not missing) — the
-    dashboard's URL-rendering code can rely on the keys
-    existing."""
+    """[IMPROVE-103] When no filters are passed, all four filter
+    slots are explicit None (not missing) — the dashboard's
+    URL-rendering code can rely on the keys existing.
+
+    [IMPROVE-108] ``error_code_prefix`` joined the filter set so
+    the dict now has 4 always-present None keys.
+    """
     resp = client.get("/observability/rejections")
     assert resp.status_code == 200
     assert resp.json()["filters"] == {
-        "subsystem": None, "action": None, "error_code": None,
+        "subsystem": None,
+        "action": None,
+        "error_code": None,
+        "error_code_prefix": None,
     }
 
 
@@ -397,3 +409,182 @@ def test_rejections_window_hours_clamped_to_max_year(client):
     resp = client.get("/observability/rejections?window_hours=99999")
     assert resp.status_code == 200
     assert resp.json()["window_hours"] == 8760
+
+
+# ── [IMPROVE-108] _escape_like_pattern + _build_error_code_filter unit tests ─
+
+
+def test_escape_like_pattern_handles_underscore():
+    """[IMPROVE-108] ``_`` is a SQLite LIKE wildcard matching ANY
+    single char. The escape helper must produce ``\\_`` so a
+    literal underscore in user input matches an underscore in
+    the column (not "any char"). Pin the contract — without this
+    a prefix of ``cuda_`` would also match e.g. ``cudaXoom``."""
+    from local_ai_platform.api.routers.observability import _escape_like_pattern
+    assert _escape_like_pattern("cuda_") == "cuda\\_"
+    assert _escape_like_pattern("a_b_c") == "a\\_b\\_c"
+
+
+def test_escape_like_pattern_handles_percent():
+    """[IMPROVE-108] ``%`` matches ANY substring. Escaping it
+    keeps user-supplied prefixes literal — a prefix of ``50%``
+    only matches codes starting with the literal ``50%`` string."""
+    from local_ai_platform.api.routers.observability import _escape_like_pattern
+    assert _escape_like_pattern("50%") == "50\\%"
+
+
+def test_escape_like_pattern_escapes_backslash_first():
+    """[IMPROVE-108] Backslash MUST be escaped before ``%`` and
+    ``_`` otherwise we'd double-escape the escape char itself.
+    Pin the order so a user-supplied prefix containing a literal
+    backslash matches that backslash, not "anything followed by
+    underscore"."""
+    from local_ai_platform.api.routers.observability import _escape_like_pattern
+    # ``a\b`` should escape to ``a\\b`` (each backslash doubled).
+    assert _escape_like_pattern("a\\b") == "a\\\\b"
+    # Combined with other meta-chars: order matters.
+    assert _escape_like_pattern("a\\_b") == "a\\\\\\_b"
+
+
+def test_build_error_code_filter_returns_empty_for_no_filters():
+    """[IMPROVE-108] No filters ≡ "no constraint": both lists
+    empty so the caller's WHERE-build doesn't gain a clause."""
+    from local_ai_platform.api.routers.observability import _build_error_code_filter
+    clauses, params = _build_error_code_filter(None, None)
+    assert clauses == []
+    assert params == []
+
+
+def test_build_error_code_filter_returns_exact_match_only():
+    """[IMPROVE-108] error_code without prefix → single ``= ?``
+    clause; mirrors the IMPROVE-99 contract."""
+    from local_ai_platform.api.routers.observability import _build_error_code_filter
+    clauses, params = _build_error_code_filter("SchemaInvalid", None)
+    assert clauses == ["error_code = ?"]
+    assert params == ["SchemaInvalid"]
+
+
+def test_build_error_code_filter_returns_prefix_match_only():
+    """[IMPROVE-108] error_code_prefix without exact → single
+    ``LIKE ? ESCAPE '\\'`` clause + escaped pattern with
+    trailing ``%``."""
+    from local_ai_platform.api.routers.observability import _build_error_code_filter
+    clauses, params = _build_error_code_filter(None, "cuda_")
+    assert clauses == ["error_code LIKE ? ESCAPE '\\'"]
+    # The escaped pattern: ``cuda\_%`` — literal ``cuda_``
+    # followed by LIKE wildcard.
+    assert params == ["cuda\\_%"]
+
+
+def test_build_error_code_filter_composes_both():
+    """[IMPROVE-108] Both filters compose with AND (degenerate but
+    well-defined: exact match within prefix). Caller pastes both
+    clauses + both params; the resulting SQL is well-defined."""
+    from local_ai_platform.api.routers.observability import _build_error_code_filter
+    clauses, params = _build_error_code_filter("SchemaInvalid", "Schema")
+    assert clauses == [
+        "error_code = ?",
+        "error_code LIKE ? ESCAPE '\\'",
+    ]
+    assert params == ["SchemaInvalid", "Schema%"]
+
+
+# ── [IMPROVE-108] /observability/rejections ?error_code_prefix= ─
+
+
+def test_rejections_filters_by_error_code_prefix(client):
+    """[IMPROVE-108] ``?error_code_prefix=Schema`` matches all
+    error_codes starting with ``Schema``. Pin the LIKE-with-%
+    semantic: SchemaInvalid + SchemaMissingField + SchemaTypeMismatch
+    all match; OOM* codes do NOT."""
+    _insert_event(client._db_mod, subsystem="system",
+                  action="iso_prefix", status="error",
+                  error_code="SchemaInvalid")
+    _insert_event(client._db_mod, subsystem="system",
+                  action="iso_prefix", status="error",
+                  error_code="SchemaMissingField")
+    _insert_event(client._db_mod, subsystem="system",
+                  action="iso_prefix", status="error",
+                  error_code="cuda_oom")  # NOT a Schema*
+    resp = client.get(
+        "/observability/rejections"
+        "?subsystem=system&action=iso_prefix&error_code_prefix=Schema"
+    )
+    assert resp.status_code == 200
+    rows = resp.json()["rejections"]
+    codes = {r["error_code"] for r in rows}
+    assert codes == {"SchemaInvalid", "SchemaMissingField"}
+
+
+def test_rejections_prefix_does_not_match_distinct_root(client):
+    """[IMPROVE-108] ``?error_code_prefix=cuda`` doesn't match
+    "system_oom" or "SchemaInvalid" — the prefix is a left-anchored
+    string match."""
+    _insert_event(client._db_mod, subsystem="image",
+                  action="iso_prefix_cuda", status="error",
+                  error_code="cuda_oom")
+    _insert_event(client._db_mod, subsystem="image",
+                  action="iso_prefix_cuda", status="error",
+                  error_code="system_oom")
+    resp = client.get(
+        "/observability/rejections"
+        "?subsystem=image&action=iso_prefix_cuda&error_code_prefix=cuda"
+    )
+    assert resp.status_code == 200
+    rows = resp.json()["rejections"]
+    assert len(rows) == 1
+    assert rows[0]["error_code"] == "cuda_oom"
+
+
+def test_rejections_prefix_escapes_underscore_literal(client):
+    """[IMPROVE-108] A user passing ``?error_code_prefix=cuda_``
+    wants codes starting with the LITERAL ``cuda_`` (e.g.
+    ``cuda_oom``, ``cuda_unknown``). Without the escape, ``_`` is
+    a LIKE wildcard matching ANY single char — ``cudaXoom`` would
+    also match. Pin the literal-match semantic."""
+    _insert_event(client._db_mod, subsystem="image",
+                  action="iso_prefix_under", status="error",
+                  error_code="cuda_oom")
+    _insert_event(client._db_mod, subsystem="image",
+                  action="iso_prefix_under", status="error",
+                  error_code="cudaXoom")  # NOT a cuda_* under literal match
+    resp = client.get(
+        "/observability/rejections"
+        "?subsystem=image&action=iso_prefix_under&error_code_prefix=cuda_"
+    )
+    assert resp.status_code == 200
+    rows = resp.json()["rejections"]
+    assert len(rows) == 1
+    assert rows[0]["error_code"] == "cuda_oom"
+
+
+def test_rejections_prefix_composes_with_subsystem_filter(client):
+    """[IMPROVE-108] Prefix + subsystem AND-compose. A request
+    for ``?subsystem=system&error_code_prefix=Schema`` returns
+    only system-emitted Schema* events."""
+    _insert_event(client._db_mod, subsystem="system",
+                  action="iso_prefix_compose", status="error",
+                  error_code="SchemaInvalid")
+    _insert_event(client._db_mod, subsystem="agent",
+                  action="iso_prefix_compose", status="error",
+                  error_code="SchemaInvalid")  # different subsystem
+    resp = client.get(
+        "/observability/rejections"
+        "?subsystem=system&action=iso_prefix_compose"
+        "&error_code_prefix=Schema"
+    )
+    assert resp.status_code == 200
+    rows = resp.json()["rejections"]
+    assert len(rows) == 1
+    assert rows[0]["subsystem"] == "system"
+
+
+def test_rejections_prefix_filter_echoed_back(client):
+    """[IMPROVE-108] error_code_prefix is echoed back in the
+    filters dict so dashboards can render badges without
+    re-parsing the URL."""
+    resp = client.get(
+        "/observability/rejections?error_code_prefix=Schema"
+    )
+    assert resp.status_code == 200
+    assert resp.json()["filters"]["error_code_prefix"] == "Schema"

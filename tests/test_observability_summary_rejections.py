@@ -426,3 +426,76 @@ def test_summary_window_hours_field_remains(client):
     resp = client.get("/observability/summary?window_hours=48")
     body = resp.json()
     assert body["window_hours"] == 48
+
+
+# ── [IMPROVE-108] ?error_code_prefix= filter on rejections sub-query ─
+
+
+def test_summary_rejections_filtered_by_error_code_prefix(client):
+    """[IMPROVE-108] ``?error_code_prefix=Schema`` filters the
+    rejections array to only Schema*-coded events. The items
+    rollup remains UNFILTERED — that's the deliberate semantic
+    choice (changing items would break existing dashboards that
+    rely on full-window per-(subsystem, action) counts)."""
+    _insert_event(
+        client._db_mod, subsystem="system", action="validate",
+        status="error", error_code="SchemaInvalid",
+    )
+    _insert_event(
+        client._db_mod, subsystem="system", action="validate",
+        status="error", error_code="SchemaMissingField",
+    )
+    _insert_event(
+        client._db_mod, subsystem="image", action="infer",
+        status="error", error_code="cuda_oom",
+    )
+
+    resp = client.get(
+        "/observability/summary?error_code_prefix=Schema",
+    )
+    body = resp.json()
+
+    # rejections array filtered to Schema* only
+    rej_codes = {r["error_code"] for r in body["rejections"]}
+    assert rej_codes == {"SchemaInvalid", "SchemaMissingField"}
+
+    # items array UNFILTERED (per IMPROVE-108 contract).
+    # The cuda_oom event is still in items with errors=1.
+    image_infer = [
+        i for i in body["items"]
+        if i["subsystem"] == "image" and i["action"] == "infer"
+    ]
+    assert len(image_infer) == 1
+    assert image_infer[0]["errors"] == 1
+
+
+def test_summary_rejections_filtered_by_exact_error_code(client):
+    """[IMPROVE-108] ``?error_code=SchemaInvalid`` filters the
+    rejections array to one exact code."""
+    _insert_event(
+        client._db_mod, subsystem="system", action="validate",
+        status="error", error_code="SchemaInvalid",
+    )
+    _insert_event(
+        client._db_mod, subsystem="system", action="validate",
+        status="error", error_code="SchemaMissingField",
+    )
+    resp = client.get(
+        "/observability/summary?error_code=SchemaInvalid",
+    )
+    rej_codes = {r["error_code"] for r in resp.json()["rejections"]}
+    assert rej_codes == {"SchemaInvalid"}
+
+
+def test_summary_filters_field_echoed_back(client):
+    """[IMPROVE-108] /summary now carries a ``filters`` echo (new
+    in this commit) so dashboards using the prefix filter can
+    render badges. The field has 2 always-present None keys
+    (error_code + error_code_prefix) when no filter is passed."""
+    resp = client.get("/observability/summary")
+    body = resp.json()
+    assert "filters" in body
+    assert body["filters"] == {
+        "error_code": None,
+        "error_code_prefix": None,
+    }
