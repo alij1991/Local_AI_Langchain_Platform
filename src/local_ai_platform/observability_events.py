@@ -144,6 +144,16 @@ _SYSTEM_ACTIONS = (
     "routing_decision",
     "run_done",
     "validate",
+    # [IMPROVE-85] Mirror of [IMPROVE-82]'s
+    # ``agent.validation_rejected``. Pre-IMPROVE-85 the
+    # /systems/* boundary fired ``system.validate`` with
+    # ``status="error"`` for both Pydantic schema-invalid and
+    # Kahn-cycle-detected rejections — that conflates "user
+    # posted bad JSON" with "validation completed OK" because
+    # both share the event name. Splitting the rejection case
+    # off into its own action lets dashboards chart 400-rate
+    # separately from total-system-runs without a SQL filter.
+    "validation_rejected",
     "wave_parallel",
     "wave_parallel_fallback",
 )

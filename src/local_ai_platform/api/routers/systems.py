@@ -56,6 +56,7 @@ from local_ai_platform.api.deps import (
     get_router_or_none,
 )
 from local_ai_platform.observability import emit
+from local_ai_platform.observability_events import emit_typed
 from local_ai_platform.providers import ProviderRouter
 from local_ai_platform.tracing import (
     TraceRecorder,
@@ -226,12 +227,19 @@ def _validate_system_or_400(name: str, definition: dict) -> None:
     runs FIRST — fields-out-of-shape (missing ``id``, orphan edges,
     duplicate node ids, unknown ``start_node_id``) tell the user
     exactly what to fix before they need to think about graph
-    topology. Emits ``system.validate`` with ``error_code=
-    "SchemaInvalid"`` on schema failure.
+    topology.
 
     [IMPROVE-37] Kahn cycle check runs SECOND, only when the shape
-    is valid. Emits ``system.validate`` with ``error_code=
-    "CycleDetected"`` on cycles.
+    is valid.
+
+    [IMPROVE-85] Both rejection branches emit
+    ``system.validation_rejected`` (typed front door) with
+    ``error_code`` either ``"SchemaInvalid"`` or
+    ``"CycleDetected"``. Mirror of IMPROVE-82's
+    ``agent.validation_rejected``. The success path keeps the
+    existing ``system.validate`` ``status="ok"`` event so
+    dashboards charting "validations completed" see no change;
+    rejections now have their own queryable event.
 
     Both raise ``HTTPException(400)`` with a structured body the
     Flutter client can render directly. The ``error`` field
@@ -245,19 +253,32 @@ def _validate_system_or_400(name: str, definition: dict) -> None:
     try:
         validate_definition_schema(definition)
     except SystemValidationError as exc:
-        emit(
-            "system",
-            "validate",
-            status="error",
-            error_code="SchemaInvalid",
-            error_message=str(exc),
-            context={
-                "system_name": name,
-                "errors": exc.errors,
-                "node_count": len((definition or {}).get("nodes") or []),
-                "edge_count": len((definition or {}).get("edges") or []),
-            },
-        )
+        # [IMPROVE-85] Migrate from bare emit("system", "validate",
+        # status="error", ...) to the typed front door with the
+        # split ``validation_rejected`` event. Mirror of IMPROVE-82
+        # for /agents/*. Wrapped in try/except so an observability
+        # outage cannot escalate the 400 into a 500 — a sub-second
+        # write to app_events is not worth bricking the user's
+        # request flow.
+        try:
+            emit_typed(
+                "system",
+                "validation_rejected",
+                status="error",
+                error_code="SchemaInvalid",
+                error_message=str(exc),
+                context={
+                    "system_name": name,
+                    "errors": exc.errors,
+                    "node_count": len((definition or {}).get("nodes") or []),
+                    "edge_count": len((definition or {}).get("edges") or []),
+                },
+            )
+        except Exception:
+            logger.exception(
+                "[IMPROVE-85] system.validation_rejected emit "
+                "failed; continuing with HTTPException",
+            )
         raise HTTPException(
             400,
             {
@@ -281,14 +302,26 @@ def _validate_system_or_400(name: str, definition: dict) -> None:
             },
         )
     except SystemValidationError as exc:
-        emit(
-            "system",
-            "validate",
-            status="error",
-            error_code="CycleDetected",
-            error_message=str(exc),
-            context={"system_name": name, "cyclic_nodes": exc.cyclic_nodes},
-        )
+        # [IMPROVE-85] Same migration for the cycle-rejection path.
+        # The ``system.validate`` success event above is unchanged;
+        # only the rejection branches move to the typed front door.
+        try:
+            emit_typed(
+                "system",
+                "validation_rejected",
+                status="error",
+                error_code="CycleDetected",
+                error_message=str(exc),
+                context={
+                    "system_name": name,
+                    "cyclic_nodes": exc.cyclic_nodes,
+                },
+            )
+        except Exception:
+            logger.exception(
+                "[IMPROVE-85] system.validation_rejected emit "
+                "failed; continuing with HTTPException",
+            )
         raise HTTPException(
             400,
             {
