@@ -358,3 +358,202 @@ def test_endpoint_lanczos_method(tmp_path, monkeypatch):
     body = res.json()
     assert body["metadata"]["method"] == "lanczos"
     assert body["metadata"]["upscaled_size"] == "40x40"
+
+
+# ── [IMPROVE-NEW-14] Pre-flight VRAM probe ─────────────────────
+
+
+def _patch_torch_with_vram(monkeypatch, *,
+                            cuda_available: bool = True,
+                            free_gb: float = 8.0,
+                            total_gb: float = 8.0):
+    """Drop a fake torch into ``sys.modules`` with controllable
+    cuda.is_available + cuda.mem_get_info readings. Returns the
+    fake_torch so per-test tweaks (e.g. mem_get_info raising) can
+    be layered on top."""
+    import sys
+    fake_torch = MagicMock()
+    fake_torch.cuda.is_available.return_value = cuda_available
+    free_bytes = int(free_gb * (1024 ** 3))
+    total_bytes = int(total_gb * (1024 ** 3))
+    fake_torch.cuda.mem_get_info.return_value = (free_bytes, total_bytes)
+    fake_torch.float16 = "float16"
+    fake_torch.float32 = "float32"
+    monkeypatch.setitem(sys.modules, "torch", fake_torch)
+    return fake_torch
+
+
+def test_probe_unknown_method_returns_no_probe_needed():
+    """``realesrgan`` / ``lanczos`` aren't in the VRAM threshold
+    table; the probe says ``ok=True`` with reason
+    ``"no_probe_needed"`` so the existing load-time check stays
+    the fall-back. New methods added without a threshold entry
+    keep working."""
+    s = _make_service()
+    ok, avail, req, reason = s._probe_vram_for_method("realesrgan")
+    assert ok is True
+    assert req == 0.0
+    assert reason == "no_probe_needed"
+
+
+def test_probe_no_cuda_defers_to_load_time(monkeypatch):
+    """No CUDA available → ``ok=True`` with the
+    ``"cpu_only_no_cuda_check"`` reason. Diffusers pipelines DO
+    support CPU mode; load + inference will be slow but won't OOM
+    a non-existent GPU. The probe is a GPU-VRAM check
+    specifically."""
+    s = _make_service()
+    _patch_torch_with_vram(monkeypatch, cuda_available=False)
+    ok, avail, req, reason = s._probe_vram_for_method("sdxl_x4")
+    assert ok is True
+    assert reason == "cpu_only_no_cuda_check"
+    assert req == 6.5  # threshold still reported
+
+
+def test_probe_sufficient_vram_returns_ok(monkeypatch):
+    """8 GB free vs 6.5 GB needed for sdxl_x4 → ok=True with
+    reason 'sufficient'."""
+    s = _make_service()
+    _patch_torch_with_vram(monkeypatch, free_gb=8.0)
+    ok, avail, req, reason = s._probe_vram_for_method("sdxl_x4")
+    assert ok is True
+    assert reason == "sufficient"
+    assert avail >= req
+
+
+def test_probe_insufficient_vram_returns_not_ok(monkeypatch):
+    """2 GB free vs 6.5 GB needed → ok=False, reason
+    'insufficient_vram'."""
+    s = _make_service()
+    _patch_torch_with_vram(monkeypatch, free_gb=2.0)
+    ok, avail, req, reason = s._probe_vram_for_method("sdxl_x4")
+    assert ok is False
+    assert reason == "insufficient_vram"
+    assert avail < req
+    assert abs(avail - 2.0) < 0.1
+
+
+def test_probe_latent_threshold_lower_than_sdxl_x4(monkeypatch):
+    """The latent upscaler footprint is documented at ~3 GB and
+    sdxl_x4 at ~6 GB. Pin that the probe thresholds reflect that
+    ordering — a card that fits sdxl_x4 must also fit latent."""
+    s = _make_service()
+    _patch_torch_with_vram(monkeypatch, free_gb=4.0)
+    ok_latent, _, req_latent, _ = s._probe_vram_for_method("latent")
+    ok_sdxl, _, req_sdxl, _ = s._probe_vram_for_method("sdxl_x4")
+    # 4 GB fits latent (3.5 GB needed) but not sdxl_x4 (6.5 needed).
+    assert ok_latent is True
+    assert ok_sdxl is False
+    assert req_latent < req_sdxl
+
+
+def test_probe_mem_get_info_failure_defers(monkeypatch):
+    """A rare ``mem_get_info`` exception (some CUDA-fork
+    misconfiguration) doesn't gate the upscale — defer to the
+    existing load-time OOM-catch. Pin the safety net so a future
+    refactor can't accidentally turn the probe into a hard gate."""
+    import sys
+    fake_torch = MagicMock()
+    fake_torch.cuda.is_available.return_value = True
+
+    def raise_oserror(*a, **kw):
+        raise OSError("CUDA driver hiccup")
+
+    fake_torch.cuda.mem_get_info.side_effect = raise_oserror
+    monkeypatch.setitem(sys.modules, "torch", fake_torch)
+
+    s = _make_service()
+    ok, avail, req, reason = s._probe_vram_for_method("sdxl_x4")
+    assert ok is True
+    assert reason == "probe_failed_deferring"
+
+
+def test_upscale_latent_with_insufficient_vram_returns_error(monkeypatch, tmp_path):
+    """End-to-end: caller asks for ``method='latent'`` but the
+    card has only 2 GB free. Expected outcome: result.ok=False,
+    error_code='insufficient_vram', metadata reports the numbers
+    so the UI can show a "needs 3.5 GB, you have 2.0 GB" message.
+    Critically, NO diffusers load is attempted — pin via a
+    diffusers stub that would record any access."""
+    s = _make_service()
+    src = _write_png(tmp_path)
+    _patch_torch_with_vram(monkeypatch, free_gb=2.0)
+
+    # Diffusers stub that fails the test if accessed — the probe
+    # should reject before any load attempt.
+    import sys
+    forbidden_diffusers = MagicMock()
+    forbidden_diffusers.StableDiffusionLatentUpscalePipeline.from_pretrained.side_effect = AssertionError(
+        "Probe should have rejected before load_pretrained"
+    )
+    monkeypatch.setitem(sys.modules, "diffusers", forbidden_diffusers)
+
+    result = s.upscale_image(image_path=src, method="latent")
+    assert result.ok is False
+    assert result.error_code == "insufficient_vram"
+    assert "3.5 GB" in result.error_message or "3.5" in result.error_message
+    assert result.metadata["method"] == "latent"
+    assert result.metadata["vram_required_gb"] == 3.5
+    assert abs(result.metadata["vram_available_gb"] - 2.0) < 0.1
+
+
+def test_upscale_sdxl_x4_with_insufficient_vram_falls_back_to_realesrgan(
+    monkeypatch, tmp_path,
+):
+    """End-to-end: SDXL x4 with insufficient VRAM falls back to
+    RealESRGAN/LANCZOS WITHOUT touching diffusers. Pin via a
+    diffusers stub that would record any access — the diffusers
+    load was the expensive path we're trying to avoid."""
+    s = _make_service()
+    src = _write_png(tmp_path)
+    _patch_torch_with_vram(monkeypatch, free_gb=2.0)
+
+    import sys
+    forbidden_diffusers = MagicMock()
+    forbidden_diffusers.StableDiffusionUpscalePipeline.from_pretrained.side_effect = AssertionError(
+        "Probe should have rejected before load_pretrained"
+    )
+    monkeypatch.setitem(sys.modules, "diffusers", forbidden_diffusers)
+
+    result = s.upscale_image(image_path=src, scale=4, method="sdxl_x4")
+    # Falls through to RealESRGAN (or LANCZOS in test env without
+    # the model file) — caller still gets a successful upscale.
+    assert result.ok is True
+    assert result.metadata["method"] in {"realesrgan", "lanczos"}
+
+
+def test_upscale_sdxl_x4_with_sufficient_vram_attempts_load(monkeypatch, tmp_path):
+    """Mirror of the above: when VRAM is sufficient, the diffusers
+    load IS attempted. Pin so a future refactor that always
+    fell back wouldn't silently break the diffusers path."""
+    s = _make_service()
+    src = _write_png(tmp_path)
+    _patch_torch_with_vram(monkeypatch, free_gb=10.0)  # plenty
+
+    import sys
+    fake_pipe = MagicMock()
+    fake_pipe.return_value.images = [Image.new("RGB", (256, 256))]
+    fake_pipe.enable_sequential_cpu_offload = MagicMock()
+    fake_pipeline_class = MagicMock()
+    fake_pipeline_class.from_pretrained = MagicMock(return_value=fake_pipe)
+    fake_diffusers = MagicMock()
+    fake_diffusers.StableDiffusionUpscalePipeline = fake_pipeline_class
+    monkeypatch.setitem(sys.modules, "diffusers", fake_diffusers)
+
+    result = s.upscale_image(
+        image_path=src, prompt="x", method="sdxl_x4",
+    )
+    # Load was attempted (probe passed).
+    assert fake_pipeline_class.from_pretrained.call_count == 1
+    assert result.ok is True
+    assert result.metadata["method"] == "sdxl_x4"
+
+
+def test_upscale_thresholds_documented_in_module():
+    """Pin the per-method threshold values so a future tweak is
+    visible in code review."""
+    s = _make_service()
+    assert s._UPSCALE_VRAM_REQUIRED_GB == {
+        "latent": 3.5,
+        "sdxl_x4": 6.5,
+    }

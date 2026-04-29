@@ -6193,17 +6193,55 @@ class ImageGenerationService:
             )
 
         # [IMPROVE-46] Diffusers-based upscalers — opt-in via method=.
+        # [IMPROVE-NEW-14] Pre-flight VRAM probe before each diffusers
+        # path so a card that obviously can't fit the pipeline avoids
+        # the ~30s HF-snapshot download + load attempt + OOM-catch
+        # cycle. The probe is a check, not a gate — when CUDA isn't
+        # available or the probe fails we defer to the existing
+        # load-time OOM handler. See ``_probe_vram_for_method`` for
+        # the per-method thresholds.
         if method_norm == "latent":
+            ok, avail_gb, req_gb, _reason = self._probe_vram_for_method("latent")
+            if not ok:
+                return ImageRuntimeResult(
+                    ok=False, error_code="insufficient_vram",
+                    error_message=(
+                        f"Latent upscaler needs ~{req_gb:.1f} GB VRAM; "
+                        f"only {avail_gb:.2f} GB free. Use method="
+                        f"'realesrgan' or 'lanczos' on this card."
+                    ),
+                    metadata={
+                        "method": "latent",
+                        "vram_required_gb": req_gb,
+                        "vram_available_gb": round(avail_gb, 2),
+                    },
+                )
             return self._upscale_latent(img=img, prompt=prompt)
         if method_norm == "sdxl_x4":
-            result = self._upscale_sdxl_x4(img=img, prompt=prompt)
-            if result.ok:
-                return result
-            # SDXL x4 OOM / load-fail → fall through to RealESRGAN
-            logger.warning(
-                "[IMPROVE-46] sdxl_x4 upscale failed (%s); falling back "
-                "to RealESRGAN", result.error_code,
-            )
+            ok, avail_gb, req_gb, _reason = self._probe_vram_for_method("sdxl_x4")
+            if not ok:
+                logger.warning(
+                    "[IMPROVE-NEW-14] sdxl_x4 pre-flight VRAM check "
+                    "failed (need %.1f GB, have %.2f GB); falling "
+                    "back to RealESRGAN without attempting the "
+                    "diffusers load",
+                    req_gb, avail_gb,
+                )
+                # Fall through to the RealESRGAN block below.
+            else:
+                result = self._upscale_sdxl_x4(img=img, prompt=prompt)
+                if result.ok:
+                    return result
+                # SDXL x4 OOM / load-fail → fall through to RealESRGAN.
+                # Probe passed but load still blew up — VRAM headroom
+                # reading is approximate; an in-flight allocation
+                # could have eaten the buffer between the probe and
+                # the load. Fall through is the safety net.
+                logger.warning(
+                    "[IMPROVE-46] sdxl_x4 upscale failed (%s) despite "
+                    "passing pre-flight; falling back to RealESRGAN",
+                    result.error_code,
+                )
 
         if method_norm == "lanczos":
             new_w, new_h = img.width * scale, img.height * scale
@@ -6249,6 +6287,72 @@ class ImageGenerationService:
             ok=True, image_bytes=buf.getvalue(),
             metadata={"method": "lanczos", "scale": scale, "original_size": f"{img.width}x{img.height}", "upscaled_size": f"{new_w}x{new_h}"},
         )
+
+    # [IMPROVE-NEW-14] Per-method VRAM thresholds for the pre-flight
+    # probe. Conservative numbers — slightly above the 3 GB / 6 GB
+    # documented footprints to leave room for the activation tensor
+    # buffer at typical input resolutions (512x512 → 1024x1024 or
+    # 2048x2048) and for the WDDM 1.14 GB display overhead on
+    # Windows that the user can't reduce. A card right at the
+    # threshold tries the load and the existing OOM-catch path
+    # handles the rare case where headroom is overestimated.
+    _UPSCALE_VRAM_REQUIRED_GB: dict[str, float] = {
+        "latent": 3.5,
+        "sdxl_x4": 6.5,
+    }
+
+    def _probe_vram_for_method(
+        self, method: str,
+    ) -> tuple[bool, float, float, str]:
+        """[IMPROVE-NEW-14] Cheap pre-flight VRAM check for the
+        diffusers upscalers.
+
+        Returns ``(ok, available_gb, required_gb, reason)``:
+
+          * ``ok=True`` — proceed with the load. ``reason`` is one
+            of ``"sufficient"`` / ``"cpu_only_no_cuda_check"`` /
+            ``"no_probe_needed"`` / ``"probe_failed_deferring"``.
+          * ``ok=False`` — caller should skip the load.
+            ``reason="insufficient_vram"``.
+
+        Methods without a registered footprint return ``ok=True`` so
+        adding a new method to ``upscale_image`` doesn't require
+        editing this probe — the existing load-time OOM-catch is
+        the fall-back. ``"realesrgan"`` and ``"lanczos"`` both fall
+        through this path.
+
+        No CUDA → ``ok=True``: the diffusers pipelines DO support
+        CPU mode; load + inference will be very slow but won't OOM
+        a non-existent GPU. The probe is a GPU-VRAM check
+        specifically.
+
+        Probe failure (rare ``mem_get_info`` exception) → ``ok=True``
+        with ``reason="probe_failed_deferring"``. The load attempt
+        still happens; a real OOM is caught downstream. We never
+        FAIL to start an upscale because the probe itself broke.
+        """
+        required_gb = self._UPSCALE_VRAM_REQUIRED_GB.get(method, 0.0)
+        if required_gb == 0.0:
+            return True, 0.0, 0.0, "no_probe_needed"
+
+        try:
+            import torch
+            if not torch.cuda.is_available():
+                return True, 0.0, required_gb, "cpu_only_no_cuda_check"
+            free_bytes, _total_bytes = torch.cuda.mem_get_info()
+            available_gb = free_bytes / (1024 ** 3)
+        except Exception as exc:
+            # torch missing entirely → load will hit ImportError.
+            # mem_get_info crashing → defer to load-time check.
+            logger.debug(
+                "[IMPROVE-NEW-14] VRAM probe failed (%s); deferring "
+                "to load-time OOM handler", exc,
+            )
+            return True, 0.0, required_gb, "probe_failed_deferring"
+
+        if available_gb >= required_gb:
+            return True, available_gb, required_gb, "sufficient"
+        return False, available_gb, required_gb, "insufficient_vram"
 
     def _upscale_latent(
         self,
