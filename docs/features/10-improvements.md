@@ -1,16 +1,16 @@
 # 10 — Improvement Roadmap
 
-> **Goal of this chapter:** a single consolidated view of the **70 improvement ideas** surfaced across chapters 1–9 (now **91** post Wave 9 mid-wave), scored for impact and effort, grouped by theme, and laid out in a phased roadmap. Every idea here is grounded in a 2025–2026 source — the citations are in each chapter; this doc focuses on *what to do when*.
+> **Goal of this chapter:** a single consolidated view of the **70 improvement ideas** surfaced across chapters 1–9 (now **94** post Wave 9), scored for impact and effort, grouped by theme, and laid out in a phased roadmap. Every idea here is grounded in a 2025–2026 source — the citations are in each chapter; this doc focuses on *what to do when*.
 
-> **Revised 2026-04-28** — Wave 5 shipped (12 commits: IMPROVE-29/31/33/34/35/36/51/52/53/54/55/56/57/63/67). Wave 6 shipped (12 commits, 8 table-rows: IMPROVE-71/72/8 + Tranche-C 5×telemetry + IMPROVE-73/46/74/61). Wave 7 shipped (8 commits + 1 test-fix + 2 doc commits: IMPROVE-NEW-4/11/12/13/14/16/17/18 promoted to IMPROVE-75/76/77/78/79/80/81/82, plus a deterministic-counter fix for the IMPROVE-36 parallel-wave speedup test). Wave 8 shipped (6 numbered + 2 doc commits: IMPROVE-83/84/85/86/87/88 — streaming parallel-wave parity, inter-node-context migration, /systems/* rejection telemetry mirror, per-byte hf_hub_download progress, VRAM-probe telemetry + decay-export bundle, graph-time DAG validation). Wave 9 in progress (3 of 7 commits shipped: IMPROVE-89/90/91 — bulk emit_typed migration, per-rejection counter in /observability/summary, per-subsystem Literal + @overload for emit_typed action).
+> **Revised 2026-04-28** — Wave 5 shipped (12 commits: IMPROVE-29/31/33/34/35/36/51/52/53/54/55/56/57/63/67). Wave 6 shipped (12 commits, 8 table-rows: IMPROVE-71/72/8 + Tranche-C 5×telemetry + IMPROVE-73/46/74/61). Wave 7 shipped (8 commits + 1 test-fix + 2 doc commits: IMPROVE-NEW-4/11/12/13/14/16/17/18 promoted to IMPROVE-75/76/77/78/79/80/81/82, plus a deterministic-counter fix for the IMPROVE-36 parallel-wave speedup test). Wave 8 shipped (6 numbered + 2 doc commits: IMPROVE-83/84/85/86/87/88 — streaming parallel-wave parity, inter-node-context migration, /systems/* rejection telemetry mirror, per-byte hf_hub_download progress, VRAM-probe telemetry + decay-export bundle, graph-time DAG validation). Wave 9 shipped (6 numbered + 2 doc commits: IMPROVE-89/90/91/92/93/94 — bulk emit_typed migration + close keystone gaps, per-rejection counter in /observability/summary, per-subsystem Literal + @overload for emit_typed action, per-event TypedDict context schemas, VRAM-probe-driven tile-based upscaling, POST /partner/import endpoint). Wave 10 in deferred queue.
 
 ---
 
 ## 10.1 Summary
 
-- **91 improvements** flagged inline as `[IMPROVE-N]` in chapters 1–9 + the Wave 5/6/7/8/9 audits (NEW from Wave 6 audit: 71/72/73/74; NEW from Wave 7: 75/76/77/78/79/80/81/82; NEW from Wave 8: 83/84/85/86/87/88; NEW from Wave 9: 89/90/91).
+- **94 improvements** flagged inline as `[IMPROVE-N]` in chapters 1–9 + the Wave 5/6/7/8/9 audits (NEW from Wave 6 audit: 71/72/73/74; NEW from Wave 7: 75/76/77/78/79/80/81/82; NEW from Wave 8: 83/84/85/86/87/88; NEW from Wave 9: 89/90/91/92/93/94).
 - **10 themes** — security, architecture, observability, tracing, UX, memory & context, model & inference, background tasks, voice, and tools/MCP.
-- **8 waves fully shipped** (Waves 1-8); **Wave 9 in progress** (3 of 7 commits shipped at mid-wave; the remaining 4 land in the second half).
+- **9 waves** shipped (Waves 1-9); **1** standing in deferred queues (post-Wave-9 backlog → Wave 10).
 
 All improvements are traceable back to a chapter + a 2025–2026 citation. This chapter is pure planning — *what* + *why this order*; *how* is in each origin chapter.
 
@@ -178,7 +178,7 @@ Smaller items that improve day-to-day use.
 
 ---
 
-## 10.4 The complete table (all 91)
+## 10.4 The complete table (all 94)
 
 Sortable if you paste into a spreadsheet. Chapter column links back to the originating doc.
 
@@ -275,10 +275,13 @@ Sortable if you paste into a spreadsheet. Chapter column links back to the origi
 | 89 | 13 | ✓ Bulk emit_typed migration + close keystone coverage gaps | ⋆⋆⋆ | 🔨🔨 | Observability |
 | 90 | 13 | ✓ Per-rejection counter in /observability/summary (error_code split) | ⋆⋆ | 🔨 | Observability |
 | 91 | 13 | ✓ Per-subsystem Literal + @overload for emit_typed action | ⋆⋆ | 🔨 | Observability |
+| 92 | 13 | ✓ Per-event TypedDict context schemas (audit-time pydantic) | ⋆⋆⋆ | 🔨🔨 | Observability |
+| 93 | 13 | ✓ VRAM-probe-driven tile-based upscaling (latent / sdxl_x4) | ⋆⋆⋆ | 🔨🔨 | AI/ML |
+| 94 | 13 | ✓ POST /partner/import endpoint (round-trip the export bundle) | ⋆⋆ | 🔨 | UX |
 
 *Impact for [IMPROVE-59] is ⋆⋆⋆⋆⋆ if the app is ever distributed, ⋆⋆ if it stays local-only.
 
-**Legend:** A ``✓`` prefix marks items that have shipped. See §10.6 for the Wave 5 / 6 / 7 / 8 retrospective; Wave 9's mid-wave shipped items are detailed in §10.5.
+**Legend:** A ``✓`` prefix marks items that have shipped. See §10.6 for the Wave 5 / 6 / 7 / 8 / 9 retrospective.
 
 ---
 
@@ -486,40 +489,34 @@ watcher), Q5=B (mid + end-wave doc commits).
 Net: +66 tests over Wave 8 (1275 → 1341). 8 commits including
 the two doc commits; 6 numbered IMPROVE-N items.
 
-### Wave 9 — In progress (3 of 7 commits shipped, mid-wave 2026-04-28)
+### Wave 9 — Closure of W7 typed-observability story + new image/persistence (✓ shipped 2026-04-28)
 
 Theme: close out the W7 emit_typed/registry story (bulk
-migration + per-subsystem Literal + per-event Pydantic
+migration + per-subsystem Literal + per-event TypedDict
 schemas), surface the W8 ``error_code`` split in
 ``/observability/summary``, and complete the W7-era image-
-upscale + partner-export loops in the second half of the wave.
-Q1=A (all 77 callsites in one commit), Q2=C (TypedDict for
-static + Pydantic only at audit time), Q3=C (VRAM-probe-driven
-tile activation), Q4=B (mid + end-wave doc commits, mirror
-Waves 7 + 8), Q5=B (full 7-numbered-item slate).
-
-#### Shipped so far
+upscale + partner-export loops. Q1=A (all 77 callsites in one
+commit — actually 100 callsites), Q2=C (TypedDict for static +
+pydantic only at audit time), Q3=C (VRAM-probe-driven tile
+activation), Q4=B (mid + end-wave doc commits, mirror Waves 7
++ 8), Q5=B (full 7-numbered-item slate — all 6 numbered items +
+2 doc commits = 8 commits).
 
 | # | Tag | SHA | What landed | Tests |
 |---|---|---|---|---:|
 | 1 | [IMPROVE-89] | 76b9841 | Bulk emit_typed migration + close keystone coverage gaps — ~100 callsites across 14 files; registry adds 14 previously-unregistered events (digit-bearing + dotted action-name gaps); regex tightened from `[a-z_]+` to `[a-z_][a-z0-9_]*(?:\.[a-z_][a-z0-9_]*)*` so future dotted/digit actions are pinned | +1 |
 | 2 | [IMPROVE-90] | 898e0d5 | Per-rejection counter in /observability/summary — additive `rejections` array groups by (subsystem, action, error_code); surfaces W7-IMPROVE-82 + W8-IMPROVE-85/87/88's typed error_codes for dashboards without two round trips | +12 |
 | 3 | [IMPROVE-91] | 578d1d0 | Per-subsystem Literal + @overload for emit_typed action — 11 per-subsystem Literals (AgentAction etc.) become source of truth via `typing.get_args` derivation; 11 @overload signatures so mypy catches action typos at lint | +15 |
+| 4 | (doc)        | 0d2e466 | Wave 9 mid-wave status — IMPROVE-89/90/91 shipped (per Q4=B mid + end-wave doc cadence) | 0 |
+| 5 | [IMPROVE-92] | 3c29667 | Per-event TypedDict context schemas — 6 schemas pinned (validation_rejected ×2, vram_probe, mem0_init, wave_parallel ×2); pydantic ``TypeAdapter`` validates at audit-time only, never on the emit hot path; AST-walking audit catches typo'd context keys | +11 |
+| 6 | [IMPROVE-93] | 3ddf117 | VRAM-probe-driven tile-based upscaling (latent + sdxl_x4) — when the regular VRAM probe fails, retry at the lower tiled threshold and engage `enable_vae_tiling`/`enable_vae_slicing`. ImageVramProbeContext gains `tile_mode` field | +8 |
+| 7 | [IMPROVE-94] | 41e1913 | POST /partner/import endpoint — closes IMPROVE-67 round-trip; restores profile/user_profile/memory_decay JSON + 6 SQLite tables via `INSERT OR IGNORE` (default) or `?overwrite=true`; partial-restore safety contract | +13 |
+| 8 | (doc)        | this    | Wave 9 retrospective + Wave 10 deferred queue | 0 |
 
-Net so far: +28 tests over Wave 9 mid-point (1341 → 1369).
+Net: +60 tests over Wave 9 (1341 → 1401). 8 commits including
+the two doc commits; 6 numbered IMPROVE-N items.
 
-#### Remaining queue (4 commits to land)
-
-  * (doc) Wave 9 mid-wave status (this commit)
-  * [IMPROVE-92] Per-event Pydantic context schemas (TypedDict
-    + audit-time Pydantic per Q2=C)
-  * [IMPROVE-93] Tile-based upscaling for latent/sdxl_x4 —
-    VRAM-probe-driven activation per Q3=C
-  * [IMPROVE-94] POST /partner/import endpoint — closes the
-    round-trip on W8's export bundle
-  * (doc) Wave 9 retrospective + Wave 10 deferred queue
-
-#### Deferred to Wave 10
+### Wave 10 — Deferred (queued for next iteration)
 
 Carried-over NEW candidates that didn't promote in Wave 9:
 - [IMPROVE-NEW-2] Unify token-budget primitive (waits for Tranche D)
@@ -532,6 +529,11 @@ Carried-over NEW candidates that didn't promote in Wave 9:
 - [IMPROVE-NEW-10] Per-feature smoke fixtures
 
 NEW candidates surfaced by Wave 9 work (eligible for Wave 10):
+- Pin remaining 48 event context schemas (IMPROVE-92 follow-up).
+  Each is a small TypedDict + entry in ``EVENT_CONTEXT_SCHEMAS``.
+  Bulk work better suited to incremental commits as shapes
+  settle. The audit framework + 6 high-value events landed in
+  Wave 9 — opportunistic adds.
 - Sibling endpoint ``GET /observability/rejections`` slimming
   the IMPROVE-90 payload for dashboards that only want the
   per-cause panel.
@@ -546,12 +548,22 @@ NEW candidates surfaced by Wave 9 work (eligible for Wave 10):
   ``f"{action}.start"``/``f"{action}.end"`` pattern in
   observability.py is invisible to the keystone test by
   design; an enumerate-and-pin test could close that gap.
+- Tile-size calibration per input resolution (IMPROVE-93
+  follow-up): default tile_size from diffusers is fine for
+  typical 1K outputs but >4K inputs may need smaller tiles.
+- Differential restore: ``import?scope=facts`` semantic to
+  restore JUST a subset of the bundle. (IMPROVE-94 spawned.)
+- Pre-restore preview: ``POST /partner/import/dry-run`` returns
+  the summary that WOULD result without writing.
+- Bundle versioning: ``"schema_version": 1`` field in the
+  README + a check in restore_from_bundle.
 
 Themed tranches (still queued):
 - Tranche A — Flutter editor v2 (~3d): recently-closed panel,
   preset gallery, mask brush UI, blend slider, metrics overlay.
   Now also includes decay-preset slider (IMPROVE-78) +
-  graph-time DAG-lint visualisation (IMPROVE-88).
+  graph-time DAG-lint visualisation (IMPROVE-88) +
+  tile-mode badge for upscale results (IMPROVE-93).
 - Tranche B — Voice persistence (~1d): persist voice_id/gender,
   pre-rendered samples, per-emotion voice variants.
 - Tranche D — System DAG enrichments (~3d): LLM-summarized
@@ -561,9 +573,9 @@ Themed tranches (still queued):
   metric, per-step metrics caching, cropped-patch optimization.
 - Tranche F — Real-world evals (~2d): real-LLM enhancer eval
   suite at tests/eval/edit_prompt_enhancer.py.
-- Tranche G — Persistence + import (~1d): preset sharing/JSON
-  export, preset versioning. (POST /partner/import is being
-  pulled into Wave 9 as IMPROVE-94.)
+- Tranche G — Persistence + import (~0.5d remaining after W9):
+  preset sharing/JSON export, preset versioning. (POST
+  /partner/import shipped Wave 9 as IMPROVE-94.)
 
 Original carry-overs (still demoted):
 - [IMPROVE-21] Sandbox MCP servers *(if Q1 stays local)*
@@ -580,16 +592,17 @@ Original carry-overs (still demoted):
 
 ---
 
-## 10.6 Wave 5 + Wave 6 + Wave 7 + Wave 8 retrospective
+## 10.6 Wave 5 + Wave 6 + Wave 7 + Wave 8 + Wave 9 retrospective
 
 > **Status as of 2026-04-28:** Wave 5 fully shipped (12 commits, +216
 > tests). Wave 6 fully shipped (12 commits, +118 tests across 8
 > table-rows; Tranche C compresses 5 sub-commits into row 4).
 > Wave 7 fully shipped (8 numbered + 1 test-fix + 2 doc commits =
 > 11 total, +66 tests). Wave 8 fully shipped (6 numbered + 2 doc
-> commits = 8 total, +66 tests). Tier 1 baseline grew 875 → 1341
-> passes over Waves 5-8. All 4 xfailed agent tests resolved
-> post-IMPROVE-71.
+> commits = 8 total, +66 tests). Wave 9 fully shipped (6 numbered
+> + 2 doc commits = 8 total, +60 tests). Tier 1 baseline grew
+> 875 → 1401 passes over Waves 5-9. All 4 xfailed agent tests
+> resolved post-IMPROVE-71.
 
 ### Wave 5 (✓ shipped)
 
@@ -652,9 +665,25 @@ the test-fix and the two doc commits; 8 numbered IMPROVE-N items.
 | 5 | [IMPROVE-86] | c5f24ff | Per-byte progress for `hf_hub_download` via filesystem watcher (closes IMPROVE-8 GGUF small-files gap; per Q4=A version-independent watcher) | +9 |
 | 6 | [IMPROVE-87] | a545164 | VRAM probe telemetry (`image.vram_probe`) + `memory_decay.json` in partner export ZIP (bundled W7 follow-ups from IMPROVE-77/79) | +10 |
 | 7 | [IMPROVE-88] | e79fdb8 | Graph-time DAG validation — unreachable/dead-end (warn) + orphan llm_router edges (block at save) per Q3=C tiered enforcement | +30 |
-| 8 | (doc)        | this    | Wave 8 retrospective + Wave 9 deferred queue | 0 |
+| 8 | (doc)        | b49264c | Wave 8 retrospective + Wave 9 deferred queue | 0 |
 
 Net: +66 tests over Wave 8 (1275 → 1341). 8 commits including
+the two doc commits; 6 numbered IMPROVE-N items.
+
+### Wave 9 (✓ shipped)
+
+| # | Tag | SHA | What landed | Tests |
+|---|---|---|---|---:|
+| 1 | [IMPROVE-89] | 76b9841 | Bulk emit_typed migration + close keystone coverage gaps — ~100 callsites across 14 files; registry adds 14 previously-unregistered events; regex tightened from `[a-z_]+` to `[a-z_][a-z0-9_]*(?:\.[a-z_][a-z0-9_]*)*` so digit-bearing + dotted action names are pinned (per Q1=A all-in-one) | +1 |
+| 2 | [IMPROVE-90] | 898e0d5 | Per-rejection counter in /observability/summary — additive `rejections` array groups by (subsystem, action, error_code); surfaces W7-IMPROVE-82 + W8-IMPROVE-85/87/88's typed error_codes | +12 |
+| 3 | [IMPROVE-91] | 578d1d0 | Per-subsystem Literal + @overload for emit_typed action — 11 per-subsystem Literals (AgentAction etc.) become source of truth via `typing.get_args` derivation; 11 @overload signatures so mypy catches action typos at lint | +15 |
+| 4 | (doc)        | 0d2e466 | Wave 9 mid-wave status — IMPROVE-89/90/91 shipped (per Q4=B mid + end-wave doc cadence) | 0 |
+| 5 | [IMPROVE-92] | 3c29667 | Per-event TypedDict context schemas (per Q2=C TypedDict + audit-time pydantic) — 6 schemas pinned; pydantic ``TypeAdapter`` validates at audit-time only, never on the emit hot path; AST-walking audit catches typo'd context keys | +11 |
+| 6 | [IMPROVE-93] | 3ddf117 | VRAM-probe-driven tile-based upscaling (per Q3=C VRAM-probe-driven activation) — when the regular VRAM probe fails, retry at the lower tiled threshold and engage `enable_vae_tiling`/`enable_vae_slicing`. ImageVramProbeContext gains `tile_mode` field | +8 |
+| 7 | [IMPROVE-94] | 41e1913 | POST /partner/import endpoint — closes IMPROVE-67 round-trip; restores profile/user_profile/memory_decay JSON + 6 SQLite tables via `INSERT OR IGNORE` (default) or `?overwrite=true`; partial-restore safety contract | +13 |
+| 8 | (doc)        | this    | Wave 9 retrospective + Wave 10 deferred queue | 0 |
+
+Net: +60 tests over Wave 9 (1341 → 1401). 8 commits including
 the two doc commits; 6 numbered IMPROVE-N items.
 
 ### Wave 7 architectural impact
@@ -728,11 +757,69 @@ the two doc commits; 6 numbered IMPROVE-N items.
     74 remaining bare-emit() callsites is the natural Wave 9
     follow-up.
 
+### Wave 9 architectural impact
+
+  * Bulk emit_typed migration ([IMPROVE-89]) closed the
+    typed-front-door story: every literal-string emit() in
+    src/local_ai_platform now goes through emit_typed (~100
+    callsites across 14 files). The new pin
+    ``test_no_bare_emit_imports_in_src_after_bulk_migration``
+    makes a future revert that imports bare ``emit`` fail CI
+    immediately. The keystone regex tightening (``[a-z_]+`` →
+    ``[a-z_][a-z0-9_]*(?:\.[a-z_][a-z0-9_]*)*``) also surfaced
+    THREE pre-existing coverage gaps the loose regex was hiding:
+    digit-bearing actions (``mem0_init``), dotted actions
+    (``download.start``, ``file_ops.path_rejected``,
+    ``run.start``), and kwarg-shape calls (``config.load``).
+    Fourteen events that had been silently firing without
+    coverage are now registered.
+  * Per-subsystem Literal + @overload for ``emit_typed``
+    ([IMPROVE-91]) inverted the source-of-truth relationship:
+    11 per-subsystem ``Literal`` types are now THE source, and
+    the ``_XXX_ACTIONS`` tuples + ``KNOWN_EVENTS`` frozensets
+    are derived via ``typing.get_args``. Drift is structurally
+    impossible. mypy / pyright catch typo'd actions at lint
+    time without ever running the call.
+  * Per-event TypedDict context schemas ([IMPROVE-92]) added
+    the third layer of the typed contract: name (registry +
+    Literal), action (per-subsystem Literal + @overload), and
+    now SHAPE (TypedDict with ``__pydantic_config__ =
+    ConfigDict(extra="forbid")``). Six high-value events are
+    pinned today; the audit framework + AST-walking pin
+    enforces every callsite for an event WITH a schema. Future
+    schema additions are opportunistic.
+  * VRAM-probe-driven tile-based upscaling ([IMPROVE-93])
+    extended the IMPROVE-79 probe with a ``tile_mode`` kwarg +
+    a lower-threshold dict (~50% of regular). Users on 4-6 GB
+    cards now get a successful upscale via VAE tiling where
+    they previously rejected. The ``image.vram_probe`` schema
+    gained ``tile_mode`` as a required field so dashboards can
+    chart "% of probes that recovered via tiling" alongside
+    the existing per-reason breakdown.
+  * Per-rejection counter in /observability/summary
+    ([IMPROVE-90]) closed the W8 dashboarding gap: the
+    additive ``rejections`` array now surfaces the
+    ``error_code`` distribution that IMPROVE-82, -85, -87,
+    -88 all populate. One-line dashboard queries replace the
+    two-round-trip + join that operators had to write.
+  * POST /partner/import ([IMPROVE-94]) closed the W5
+    [IMPROVE-67] round-trip. Users can now back up partner
+    state, reset, and restore — completing the GDPR-Article-20
+    portability story. The implementation reuses the IMPROVE-77
+    set_decay_config helper for the memory_decay restore, and
+    the safety contract (partial restores allowed, errors in
+    a list, no 500) keeps a corrupt single file from blocking
+    the rest of the bundle.
+  * Tier 1 baseline 1341 → 1401 over Wave 9 (+60 tests). The
+    keystone observability tests now span 14 keystone +
+    11 schema = 25 audit pins protecting the typed contract
+    front to back.
+
 ### Where to start today
 
-Wave 1-8 is shipped — pick up an item from §10.5 Wave 9 (the
+Wave 1-9 is shipped — pick up an item from §10.5 Wave 10 (the
 deferred queue: IMPROVE-NEW-* candidates 2/5/7/8/10 + the
-Wave-8-spawned items + themed tranches A/B/D/E/F/G).
+Wave-9-spawned items + themed tranches A/B/D/E/F/G).
 
 ---
 
@@ -782,12 +869,12 @@ Answer whichever are easy. The roadmap is shaped enough to make progress on Wave
 ## 10.8 Where to go from here
 
 - **Read chapter 1 → 9 if you haven't.** This chapter is the index; the others have the details.
-- **Continue Wave 9 second-half** — see §10.5 Wave 9 (4 commits remaining: IMPROVE-92 per-event Pydantic context schemas, IMPROVE-93 tile-based upscaling, IMPROVE-94 /partner/import, plus the end-wave doc commit).
-- **Keep `[IMPROVE-N]` references alive.** When you fix one, grep `docs/features/` for that ID and cross out. If you add new ones in future work, number them IMPROVE-92+ (1-91 are taken; the IMPROVE-NEW-* tags graduate to permanent numbers on acceptance) and note them in the originating chapter.
+- **Pick a Wave 10 item and ship it** — see §10.5 Wave 10 (NEW candidates IMPROVE-NEW-2/5/7/8/10 + Wave-9-spawned items + themed tranches A/B/D/E/F/G + carry-overs).
+- **Keep `[IMPROVE-N]` references alive.** When you fix one, grep `docs/features/` for that ID and cross out. If you add new ones in future work, number them IMPROVE-95+ (1-94 are taken; the IMPROVE-NEW-* tags graduate to permanent numbers on acceptance) and note them in the originating chapter.
 - **The `MEMORY.md` in `~/.claude/projects/...` contains the feedback rule** that improvement suggestions should cite 2025–2026 sources. Every item here has citations in its origin chapter.
 
 ---
 
 **Guide complete.** `docs/features/README.md` → `01-architecture.md` → `02-llm-infrastructure.md` → `03-chat.md` → `04-agents-tools.md` → `05-systems.md` → `06-image-generation.md` → `07-image-editor.md` → `08-partner.md` → `09-observability.md` → `10-improvements.md` *(this file)*.
 
-Every major feature of the Local AI Platform is now documented end-to-end, with **91** research-backed improvement ideas cross-referenced into one prioritized plan. Waves 1-8 fully shipped; Wave 9 in progress (3 of 7 commits shipped at mid-wave).
+Every major feature of the Local AI Platform is now documented end-to-end, with **94** research-backed improvement ideas cross-referenced into one prioritized plan. Waves 1-9 fully shipped; Wave 10 in deferred queue.
