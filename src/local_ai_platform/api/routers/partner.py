@@ -187,10 +187,50 @@ async def partner_set_memory_decay(body: dict[str, Any]):
 
     Unknown keys → 400. Invalid values → 400. Returns the new full
     config so the client can re-render its UI.
+
+    [IMPROVE-NEW-12] The accepted update is persisted to
+    ``data/partner/memory_decay.json`` so it survives a server
+    restart.
     """
     from local_ai_platform.partner.memory import set_decay_config
     try:
         return set_decay_config(**body)
+    except (ValueError, TypeError) as exc:
+        raise HTTPException(400, str(exc))
+
+
+@router.get("/partner/memory/decay/presets")
+async def partner_get_memory_decay_presets():
+    """[IMPROVE-NEW-13] Return the three named decay presets the
+    frontend uses to render a "memory persistence" picker
+    (Low / Balanced / High). Each value is a full decay config
+    dict — same shape as ``GET /partner/memory/decay`` returns.
+
+    Backend ships the values so we can tune them without a Flutter
+    release; the UI just renders ``Object.keys(presets)`` and
+    POSTs the chosen name to ``/partner/memory/decay/preset``.
+    """
+    from local_ai_platform.partner.memory import get_decay_presets
+    return get_decay_presets()
+
+
+@router.post("/partner/memory/decay/preset")
+async def partner_apply_memory_decay_preset(body: dict[str, Any]):
+    """[IMPROVE-NEW-13] Apply a named decay preset.
+
+    Body: ``{"name": "low" | "balanced" | "high"}``. Returns the
+    full applied config so the client can re-render. Persistence
+    semantics match ``POST /partner/memory/decay``.
+
+    Unknown name → 400 with the list of valid names. Missing
+    ``name`` → 400.
+    """
+    from local_ai_platform.partner.memory import apply_decay_preset
+    name = body.get("name")
+    if not isinstance(name, str) or not name.strip():
+        raise HTTPException(400, "Body must include a non-empty 'name' string.")
+    try:
+        return apply_decay_preset(name)
     except (ValueError, TypeError) as exc:
         raise HTTPException(400, str(exc))
 

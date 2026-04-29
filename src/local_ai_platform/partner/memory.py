@@ -16,6 +16,7 @@ import logging
 import math
 import time
 from datetime import datetime, timezone
+from pathlib import Path
 from typing import Any
 
 from ..config import get_settings
@@ -66,6 +67,127 @@ _DECAY_CONFIG: dict[str, Any] = {
     "context_skip_threshold": 0.5,
 }
 
+# [IMPROVE-NEW-12] Persistence path. Sibling of the existing
+# ``data/partner/profile.json`` (PartnerProfile) and
+# ``user_profile.json`` (UserProfile), kept in its own file so a
+# user's decay tuning survives ``reset_profile`` / export-import
+# without dragging the AI persona along. Test fixtures
+# ``monkeypatch.setattr`` this path to a tmp dir so tests don't
+# clobber the real disk file.
+_DECAY_CONFIG_PATH = Path("data/partner/memory_decay.json")
+
+# [IMPROVE-NEW-13] Three named decay presets exposed at
+# ``GET /partner/memory/decay/presets``. The frontend renders
+# these as a "memory persistence" picker (Low / Balanced / High)
+# so non-technical users don't have to learn the five tunable
+# fields. Backend ships the values so we can evolve them without
+# a Flutter release.
+#
+# Naming convention: "high persistence" = memories last LONGER
+# (low decay rate). Inverted from the per-field "decay strength"
+# fields below — the UX label is more important than the
+# mathematical inverse.
+DECAY_PRESETS: dict[str, dict[str, Any]] = {
+    # Long-lasting memory: companion / close-relationship mode.
+    # 3x base strength, low archive threshold, low importance
+    # floor (more memories protected), low context skip (more
+    # memories surface in context).
+    "high": {
+        "enabled": True,
+        "base_strength_hours_per_importance": 72.0,
+        "archive_threshold": 0.2,
+        "importance_floor": 5,
+        "context_skip_threshold": 0.3,
+    },
+    # Pre-IMPROVE-61 defaults; matches the hardcoded behaviour
+    # before the config dataclass landed. Kept identical so a
+    # "reset to balanced" produces the historical numbers
+    # byte-for-byte.
+    "balanced": {
+        "enabled": True,
+        "base_strength_hours_per_importance": 24.0,
+        "archive_threshold": 0.5,
+        "importance_floor": 8,
+        "context_skip_threshold": 0.5,
+    },
+    # Fast forgetting: work / task-focused mode. Half the
+    # default base strength, high archive threshold (archive
+    # earlier), high importance floor (only top-importance
+    # memories protected), high context skip (less memories
+    # land in context).
+    "low": {
+        "enabled": True,
+        "base_strength_hours_per_importance": 12.0,
+        "archive_threshold": 0.7,
+        "importance_floor": 9,
+        "context_skip_threshold": 0.6,
+    },
+}
+
+
+def _persist_decay_config() -> None:
+    """[IMPROVE-NEW-12] Write ``_DECAY_CONFIG`` to
+    ``_DECAY_CONFIG_PATH``. Best-effort: a write failure (disk
+    full, permission denied) logs a warning but doesn't raise —
+    the in-memory update has already taken effect, so the user's
+    runtime tweak still works for the current session. The cost of
+    a write failure is "won't survive restart"; the cost of a
+    raised exception is "the runtime tweak fails entirely". The
+    former is the lesser harm.
+    """
+    try:
+        _DECAY_CONFIG_PATH.parent.mkdir(parents=True, exist_ok=True)
+        _DECAY_CONFIG_PATH.write_text(
+            json.dumps(_DECAY_CONFIG, indent=2)
+        )
+    except OSError as exc:
+        logger.warning(
+            "[IMPROVE-NEW-12] Could not persist decay config to %s: %s",
+            _DECAY_CONFIG_PATH, exc,
+        )
+
+
+def _load_decay_config_from_disk() -> None:
+    """[IMPROVE-NEW-12] Restore persisted decay config at module
+    init. Called once on import. Best-effort:
+      * missing file → silent (first-run / never-customised case)
+      * corrupt JSON → warn + use defaults
+      * keys unknown to current version → silently ignored
+        (forward compat: a future field added in a newer build then
+        downgraded shouldn't crash the old build)
+      * values invalid per ``set_decay_config`` ranges → warn +
+        use defaults (corrupt state, not just stale)
+
+    The call to ``set_decay_config`` here passes ``_persist=False``
+    to avoid a load-then-write round-trip on every server start.
+    """
+    if not _DECAY_CONFIG_PATH.exists():
+        return
+    try:
+        data = json.loads(_DECAY_CONFIG_PATH.read_text())
+    except (OSError, json.JSONDecodeError) as exc:
+        logger.warning(
+            "[IMPROVE-NEW-12] Could not load decay config from %s "
+            "(using defaults): %s", _DECAY_CONFIG_PATH, exc,
+        )
+        return
+    if not isinstance(data, dict):
+        logger.warning(
+            "[IMPROVE-NEW-12] Decay config at %s is not a dict "
+            "(using defaults)", _DECAY_CONFIG_PATH,
+        )
+        return
+    valid = {k: v for k, v in data.items() if k in _DECAY_CONFIG}
+    if not valid:
+        return
+    try:
+        set_decay_config(_persist=False, **valid)
+    except ValueError as exc:
+        logger.warning(
+            "[IMPROVE-NEW-12] Persisted decay config invalid (%s); "
+            "using defaults", exc,
+        )
+
 
 def get_decay_config() -> dict[str, Any]:
     """[IMPROVE-61] Return a defensive copy of the current decay
@@ -73,7 +195,7 @@ def get_decay_config() -> dict[str, Any]:
     return dict(_DECAY_CONFIG)
 
 
-def set_decay_config(**updates: Any) -> dict[str, Any]:
+def set_decay_config(*, _persist: bool = True, **updates: Any) -> dict[str, Any]:
     """[IMPROVE-61] Update individual decay fields. Returns the new
     config as a defensive copy.
 
@@ -86,6 +208,14 @@ def set_decay_config(**updates: Any) -> dict[str, Any]:
 
     Unknown keys raise ``ValueError`` so a typo doesn't silently
     keep the old value while the caller thinks they updated it.
+
+    [IMPROVE-NEW-12] After validation passes, the new config
+    persists to disk via ``_persist_decay_config()`` so it survives
+    a server restart. Pass ``_persist=False`` to skip the write —
+    used by the loader (avoids a load-then-write loop) and by
+    test fixtures that don't want disk side-effects. The flag is
+    keyword-only and underscore-prefixed because it's plumbing,
+    not part of the user-facing config surface.
     """
     valid_keys = set(_DECAY_CONFIG.keys())
     unknown = [k for k in updates.keys() if k not in valid_keys]
@@ -119,7 +249,46 @@ def set_decay_config(**updates: Any) -> dict[str, Any]:
         updates["context_skip_threshold"] = v
 
     _DECAY_CONFIG.update(updates)
+    if _persist:
+        _persist_decay_config()
     return dict(_DECAY_CONFIG)
+
+
+def get_decay_presets() -> dict[str, dict[str, Any]]:
+    """[IMPROVE-NEW-13] Return defensive copies of the three named
+    decay presets. The frontend uses this to render a
+    "memory persistence" preset picker — typically Low / Balanced /
+    High. Backend ships the dicts so the values can evolve without
+    a Flutter release.
+    """
+    return {name: dict(values) for name, values in DECAY_PRESETS.items()}
+
+
+def apply_decay_preset(name: str) -> dict[str, Any]:
+    """[IMPROVE-NEW-13] Apply a named decay preset.
+
+    Equivalent to ``set_decay_config(**DECAY_PRESETS[name])`` but
+    raises a clear ``ValueError`` for unknown names so the caller
+    sees ``"Unknown decay preset: 'foo'. Valid: ['balanced', 'high',
+    'low']"`` rather than the raw KeyError.
+
+    The applied config persists to disk via the standard
+    set_decay_config write path.
+    """
+    if name not in DECAY_PRESETS:
+        raise ValueError(
+            f"Unknown decay preset: {name!r}. "
+            f"Valid: {sorted(DECAY_PRESETS.keys())}"
+        )
+    return set_decay_config(**DECAY_PRESETS[name])
+
+
+# [IMPROVE-NEW-12] Autoload on module import so a server restart
+# preserves the user's tuning without requiring callers to remember
+# to call this explicitly. Best-effort: any failure logs a warning
+# and falls back to the hardcoded defaults already in
+# ``_DECAY_CONFIG``. See the function's docstring for the cases.
+_load_decay_config_from_disk()
 
 # [IMPROVE-62] If Mem0 init fails, cache the False for this long before
 # trying again. Previously _mem0_available=False stuck permanently, so
