@@ -1,0 +1,65 @@
+[
+  {
+    "id": "af_heart",
+    "display_name": "Heart",
+    "gender": "female",
+    "language": "en-US",
+    "description": "Warm, natural — the default"
+  },
+  {
+    "id": "af_sky",
+    "display_name": "Sky",
+    "gender": "female",
+    "language": "en-US",
+    "description": "Bright, friendly"
+  },
+  {
+    "id": "af_bella",
+    "display_name": "Bella",
+    "gender": "female",
+    "language": "en-US",
+    "description": "Smooth, professional"
+  },
+  {
+    "id": "af_nicole",
+    "display_name": "Nicole",
+    "gender": "female",
+    "language": "en-US",
+    "description": "Calm, measured"
+  },
+  {
+    "id": "af_sarah",
+    "display_name": "Sarah",
+    "gender": "female",
+    "language": "en-US",
+    "description": "Energetic, youthful"
+  },
+  {
+    "id": "am_adam",
+    "display_name": "Adam",
+    "gender": "male",
+    "language": "en-US",
+    "description": "Warm, natural — the default"
+  },
+  {
+    "id": "am_michael",
+    "display_name": "Michael",
+    "gender": "male",
+    "language": "en-US",
+    "description": "Deep, authoritative"
+  },
+  {
+    "id": "bf_emma",
+    "display_name": "Emma",
+    "gender": "female",
+    "language": "en-GB",
+    "description": "British, refined"
+  },
+  {
+    "id": "bf_isabella",
+    "display_name": "Isabella",
+    "gender": "female",
+    "language": "en-GB",
+    "description": "British, melodic"
+  }
+]

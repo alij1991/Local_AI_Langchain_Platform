@@ -29,6 +29,7 @@ from . import memory
 from ..http_client import get_sync_client
 from ..observability import track_event
 from ..observability_events import emit_typed
+from ..registries import load_voice_catalog as _load_voice_catalog_at_import
 from ..safety import (
     Severity,
     compose_safe_response,
@@ -1162,26 +1163,18 @@ class PartnerEngine:
     # ID prefixes: ``af_`` = American female, ``am_`` = American
     # male, ``bf_`` = British female (matches Kokoro's upstream
     # convention).
-    _VOICE_CATALOG: list[dict[str, str]] = [
-        {"id": "af_heart",    "display_name": "Heart",    "gender": "female",
-         "language": "en-US", "description": "Warm, natural — the default"},
-        {"id": "af_sky",      "display_name": "Sky",      "gender": "female",
-         "language": "en-US", "description": "Bright, friendly"},
-        {"id": "af_bella",    "display_name": "Bella",    "gender": "female",
-         "language": "en-US", "description": "Smooth, professional"},
-        {"id": "af_nicole",   "display_name": "Nicole",   "gender": "female",
-         "language": "en-US", "description": "Calm, measured"},
-        {"id": "af_sarah",    "display_name": "Sarah",    "gender": "female",
-         "language": "en-US", "description": "Energetic, youthful"},
-        {"id": "am_adam",     "display_name": "Adam",     "gender": "male",
-         "language": "en-US", "description": "Warm, natural — the default"},
-        {"id": "am_michael",  "display_name": "Michael",  "gender": "male",
-         "language": "en-US", "description": "Deep, authoritative"},
-        {"id": "bf_emma",     "display_name": "Emma",     "gender": "female",
-         "language": "en-GB", "description": "British, refined"},
-        {"id": "bf_isabella", "display_name": "Isabella", "gender": "female",
-         "language": "en-GB", "description": "British, melodic"},
-    ]
+    #
+    # [IMPROVE-125] The catalog source-of-truth lives in
+    # ``data/registries/voices.json`` post-Wave-14. This class-level
+    # constant loads at module-import time via the registries
+    # loader. Adding a voice = JSON edit + module re-import (no
+    # Python edit required). Pre-IMPROVE-125 the catalog was an
+    # inline literal here; the migration preserved the shape exactly
+    # so existing callers (get_voice_catalog, set_voice_id,
+    # synthesize_voice_sample) keep their contract.
+    _VOICE_CATALOG: list[dict[str, str]] = (
+        _load_voice_catalog_at_import()
+    )
 
     # Sample text for the voice-preview endpoint. Short enough to
     # keep generation under ~100 ms on Kokoro, long enough to give

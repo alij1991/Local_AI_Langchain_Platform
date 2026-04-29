@@ -455,28 +455,21 @@ def _upscale_realesrgan(image: Image.Image, scale: int = 4, anime: bool = False)
 _instruct_pipes: dict[str, Any] = {}
 _kontext_lock = threading.Lock()
 _cosxl_lock = threading.Lock()
-# Available instruction-edit models — ranked by quality (best first)
-INSTRUCT_MODELS = {
-    "kontext": {
-        "name": "FLUX Kontext (best quality)",
-        "description": "State-of-the-art editing via FLUX.1 Kontext. Q4 GGUF quantized, ~7GB. First use downloads model.",
-        "default_guidance": 2.5,
-        "default_steps": 24,
-    },
-    "nunchaku": {
-        "name": "Nunchaku Kontext (fast INT4)",
-        "description": "FLUX.1 Kontext with SVDQuant INT4. Real 4-bit compute — ~3-7× faster than GGUF. ~7GB download.",
-        "default_guidance": 2.5,
-        "default_steps": 24,
-    },
-    "cosxl": {
-        "name": "CosXL Edit (SDXL quality)",
-        "description": "SDXL-based instruction editing. Good quality, faster than Kontext. ~6.5GB.",
-        "default_guidance": 7.0,
-        "default_image_guidance": 1.5,
-        "default_steps": 20,
-    },
-}
+# Available instruction-edit models — ranked by quality (best first).
+#
+# [IMPROVE-125] The catalog source-of-truth lives in
+# ``data/registries/instruct_models.json`` post-Wave-14. This module-
+# level constant loads at module-import time via the registries
+# loader. Adding a model = JSON edit + module re-import (no Python
+# edit required). Pre-IMPROVE-125 the catalog was an inline literal
+# here; the migration preserved the shape exactly so existing
+# callers (instruct_edit, AI_OPERATIONS["instruct_edit"]
+# ["model_options"], the unknown-model error message) keep their
+# contract.
+from local_ai_platform.registries import (
+    load_instruct_models as _load_instruct_models_at_import,
+)
+INSTRUCT_MODELS = _load_instruct_models_at_import()
 
 
 def _get_hf_token() -> str | None:
