@@ -1,16 +1,16 @@
 # 10 — Improvement Roadmap
 
-> **Goal of this chapter:** a single consolidated view of the **70 improvement ideas** surfaced across chapters 1–9 (now **97** post Wave 10 mid-wave), scored for impact and effort, grouped by theme, and laid out in a phased roadmap. Every idea here is grounded in a 2025–2026 source — the citations are in each chapter; this doc focuses on *what to do when*.
+> **Goal of this chapter:** a single consolidated view of the **70 improvement ideas** surfaced across chapters 1–9 (now **100** post Wave 10), scored for impact and effort, grouped by theme, and laid out in a phased roadmap. Every idea here is grounded in a 2025–2026 source — the citations are in each chapter; this doc focuses on *what to do when*.
 
-> **Revised 2026-04-29** — Wave 5 shipped (12 commits: IMPROVE-29/31/33/34/35/36/51/52/53/54/55/56/57/63/67). Wave 6 shipped (12 commits, 8 table-rows: IMPROVE-71/72/8 + Tranche-C 5×telemetry + IMPROVE-73/46/74/61). Wave 7 shipped (8 commits + 1 test-fix + 2 doc commits: IMPROVE-NEW-4/11/12/13/14/16/17/18 promoted to IMPROVE-75/76/77/78/79/80/81/82, plus a deterministic-counter fix for the IMPROVE-36 parallel-wave speedup test). Wave 8 shipped (6 numbered + 2 doc commits: IMPROVE-83/84/85/86/87/88 — streaming parallel-wave parity, inter-node-context migration, /systems/* rejection telemetry mirror, per-byte hf_hub_download progress, VRAM-probe telemetry + decay-export bundle, graph-time DAG validation). Wave 9 shipped (6 numbered + 2 doc commits: IMPROVE-89/90/91/92/93/94 — bulk emit_typed migration + close keystone gaps, per-rejection counter in /observability/summary, per-subsystem Literal + @overload for emit_typed action, per-event TypedDict context schemas, VRAM-probe-driven tile-based upscaling, POST /partner/import endpoint). Wave 10 in progress (3 of 6 numbered commits shipped at mid-wave: IMPROVE-95/96/97 — top-12 event context schemas, Recorder enumeration test + 6 missing event registrations, asymmetric bundle versioning).
+> **Revised 2026-04-29** — Wave 5 shipped (12 commits: IMPROVE-29/31/33/34/35/36/51/52/53/54/55/56/57/63/67). Wave 6 shipped (12 commits, 8 table-rows: IMPROVE-71/72/8 + Tranche-C 5×telemetry + IMPROVE-73/46/74/61). Wave 7 shipped (8 commits + 1 test-fix + 2 doc commits: IMPROVE-NEW-4/11/12/13/14/16/17/18 promoted to IMPROVE-75/76/77/78/79/80/81/82, plus a deterministic-counter fix for the IMPROVE-36 parallel-wave speedup test). Wave 8 shipped (6 numbered + 2 doc commits: IMPROVE-83/84/85/86/87/88 — streaming parallel-wave parity, inter-node-context migration, /systems/* rejection telemetry mirror, per-byte hf_hub_download progress, VRAM-probe telemetry + decay-export bundle, graph-time DAG validation). Wave 9 shipped (6 numbered + 2 doc commits: IMPROVE-89/90/91/92/93/94 — bulk emit_typed migration + close keystone gaps, per-rejection counter in /observability/summary, per-subsystem Literal + @overload for emit_typed action, per-event TypedDict context schemas, VRAM-probe-driven tile-based upscaling, POST /partner/import endpoint). Wave 10 shipped (6 numbered + 2 doc commits: IMPROVE-95/96/97/98/99/100 — top-12 event context schemas, Recorder enumeration test + 6 missing event registrations, asymmetric bundle versioning, POST /partner/import/dry-run, GET /observability/timeseries with ?error_code= filter, tile-size calibration per input resolution). Wave 11 in deferred queue.
 
 ---
 
 ## 10.1 Summary
 
-- **97 improvements** flagged inline as `[IMPROVE-N]` in chapters 1–9 + the Wave 5/6/7/8/9/10 audits (NEW from Wave 6 audit: 71/72/73/74; NEW from Wave 7: 75/76/77/78/79/80/81/82; NEW from Wave 8: 83/84/85/86/87/88; NEW from Wave 9: 89/90/91/92/93/94; NEW from Wave 10 mid-wave: 95/96/97).
+- **100 improvements** flagged inline as `[IMPROVE-N]` in chapters 1–9 + the Wave 5/6/7/8/9/10 audits (NEW from Wave 6 audit: 71/72/73/74; NEW from Wave 7: 75/76/77/78/79/80/81/82; NEW from Wave 8: 83/84/85/86/87/88; NEW from Wave 9: 89/90/91/92/93/94; NEW from Wave 10: 95/96/97/98/99/100).
 - **10 themes** — security, architecture, observability, tracing, UX, memory & context, model & inference, background tasks, voice, and tools/MCP.
-- **9 waves** fully shipped (Waves 1-9); Wave 10 in progress (3 of 6 commits shipped at mid-wave 2026-04-29).
+- **10 waves** shipped (Waves 1-10); **1** standing in deferred queues (post-Wave-10 backlog → Wave 11).
 
 All improvements are traceable back to a chapter + a 2025–2026 citation. This chapter is pure planning — *what* + *why this order*; *how* is in each origin chapter.
 
@@ -178,7 +178,7 @@ Smaller items that improve day-to-day use.
 
 ---
 
-## 10.4 The complete table (all 97)
+## 10.4 The complete table (all 100)
 
 Sortable if you paste into a spreadsheet. Chapter column links back to the originating doc.
 
@@ -281,10 +281,13 @@ Sortable if you paste into a spreadsheet. Chapter column links back to the origi
 | 95 | 14 | ✓ Pin top-12 event context schemas (Wave 10 batch — IMPROVE-92 follow-up) | ⋆⋆⋆ | 🔨🔨 | Observability |
 | 96 | 14 | ✓ Recorder class enumeration test + register 6 missing events | ⋆⋆ | 🔨 | Observability |
 | 97 | 14 | ✓ Bundle versioning (schema_version, asymmetric) | ⋆⋆ | 🔨 | UX |
+| 98 | 14 | ✓ POST /partner/import/dry-run (pre-restore preview) | ⋆⋆ | 🔨 | UX |
+| 99 | 14 | ✓ GET /observability/timeseries with ?error_code= filter | ⋆⋆ | 🔨 | Observability |
+| 100 | 14 | ✓ Tile-size calibration per input resolution (IMPROVE-93 follow-up) | ⋆ | 🔨 | AI/ML |
 
 *Impact for [IMPROVE-59] is ⋆⋆⋆⋆⋆ if the app is ever distributed, ⋆⋆ if it stays local-only.
 
-**Legend:** A ``✓`` prefix marks items that have shipped. See §10.6 for the Wave 5 / 6 / 7 / 8 / 9 retrospective; Wave 10 mid-wave items (95/96/97) are in §10.5.
+**Legend:** A ``✓`` prefix marks items that have shipped. See §10.6 for the Wave 5 / 6 / 7 / 8 / 9 / 10 retrospective.
 
 ---
 
@@ -519,55 +522,58 @@ activation), Q4=B (mid + end-wave doc commits, mirror Waves 7
 Net: +60 tests over Wave 9 (1341 → 1401). 8 commits including
 the two doc commits; 6 numbered IMPROVE-N items.
 
-### Wave 10 — Close Wave 9 follow-up loop (in progress, 3 of 6 commits shipped at mid-wave 2026-04-29)
+### Wave 10 — Close Wave 9 follow-up loop (✓ shipped 2026-04-29)
 
 Theme: schema coverage + persistence robustness + observability
-monitoring depth. Picks up the Wave 9 spawned follow-ups across
-three big surfaces — pin more context schemas, register the
-last unregistered events (Recorder gap), and harden /partner/import
+monitoring depth. Picked up the Wave 9 spawned follow-ups across
+three surfaces — pin more context schemas, register the last
+unregistered events (Recorder gap), and harden /partner/import
 with versioning + dry-run + per-error_code time-series. Q1=A
 (all 12 schemas in one commit — mechanical, reviewable in one
 pass), Q2=C (asymmetric bundle versioning: write v=1, accept
 v=missing or v=1), Q3=A (new POST /partner/import/dry-run
 route — cleaner than ?dry_run=true on the existing endpoint),
-Q4=A (?error_code=... filter on existing /observability/timeseries
+Q4=A (?error_code=... filter on (newly-created) /observability/timeseries
 — composable with existing filters), Q5=B (6 numbered + 2 doc
 = 8 commits, matches Wave 8/9 cadence), Q6=A (AST walker for
 Recorder enumeration — consistent with [IMPROVE-92] schema audit
 pattern), Q7=A (mid + end-wave doc commits, mirror Wave 8/9
 cadence).
 
-Shipped so far:
-
 | # | Tag | SHA | What landed | Tests |
 |---|---|---|---|---:|
 | 1 | [IMPROVE-95] | 3dd032a | Pin top-12 event context schemas — agent.tool_call, config.load, image.{warmup, optimization_plan, oom_ladder_*, oom_stage_attempt}, provider.availability_probe, system.{node_start, node_end, run_done, routing_decision}. Coverage 6→18 of 54 events (33%). | +12 |
-| 2 | [IMPROVE-96] | b31c259 | Recorder class enumeration test (AST walker over track_event callsites) — surfaced 6 historically-unregistered events via the dynamic-action gap, registered them: tool.invoke, image.{enhance_prompt, generate}, editor.edit, plus the entire NEW chat subsystem (chat.send + chat.enhance_prompt). | +2 (top-level) |
+| 2 | [IMPROVE-96] | b31c259 | Recorder class enumeration test (AST walker over track_event callsites) — surfaced 6 historically-unregistered events via the dynamic-action gap, registered them: tool.invoke, image.{enhance_prompt, generate}, editor.edit, plus the entire NEW chat subsystem (chat.send + chat.enhance_prompt). | +2 |
 | 3 | [IMPROVE-97] | 7cb4d9c | Bundle versioning — asymmetric per Q2=C. ``BUNDLE_SCHEMA_VERSION = 1`` + bundle.json file landing first in ZIP. Restore accepts v=missing (legacy) AND v=1; rejects v>1, non-integer, negative. | +9 |
-| 4 | (doc)        | this    | Wave 10 mid-wave status — IMPROVE-95/96/97 shipped (per Q7=A mid + end-wave doc cadence) | 0 |
+| 4 | (doc)        | 70652d8 | Wave 10 mid-wave status — IMPROVE-95/96/97 shipped (per Q7=A mid + end-wave doc cadence) | 0 |
+| 5 | [IMPROVE-98] | a05fb46 | POST /partner/import/dry-run — pre-restore preview. ``restore_from_bundle`` gains ``dry_run`` kwarg threaded through every persistence step (no save_profile, no SQLite INSERT, no engine swap). Mirrors production endpoint contract (100MB cap, 400 on empty). | +10 |
+| 6 | [IMPROVE-99] | 0816973 | GET /observability/timeseries with ``?error_code=`` filter — investigation surfaced the endpoint did NOT actually exist (IMPROVE-90's commit body referenced an aspirational endpoint). Created from scratch with subsystem/action/error_code filters AND-composed; Unix-epoch arithmetic for clock-aligned 15-min buckets; bucket_minutes clamped 1-60. | +14 |
+| 7 | [IMPROVE-100] | b3fd739 | Tile-size calibration per input resolution — IMPROVE-93 follow-up. Three bands keyed on OUTPUT max dim: ≤4K=default, 4K-8K=384, >8K=256. ``enable_vae_tiling(tile_sample_min_size=N)`` with TypeError fallback for older diffusers. Surfaced in result metadata. | +9 |
+| 8 | (doc)        | this    | Wave 10 retrospective + Wave 11 deferred queue | 0 |
 
-Remaining queue (~3.5d):
-- IMPROVE-98 (next): POST /partner/import/dry-run — refactor
-  restore_from_bundle to accept ``dry_run=True`` flag (skip
-  writes), expose new endpoint that returns the same summary
-  shape without committing.
-- IMPROVE-99: ?error_code= filter on /observability/timeseries
-  — composable with existing filters; SQL adds a WHERE clause
-  conditional on the param.
-- IMPROVE-100: Tile-size calibration per input resolution —
-  IMPROVE-93 follow-up; per-tier table (≤1K, 1-4K, >4K) with
-  diffusers tile_size hints.
-- (doc): Wave 10 retrospective + Wave 11 deferred queue.
+Net: +56 tests over Wave 10 (1401 → 1457? actual final 1458 due
+to one parametrize boost). 8 commits including the two doc
+commits; 6 numbered IMPROVE-N items.
 
-Deferred to Wave 11 (carried-over NEW candidates that didn't
-promote in Wave 10):
+### Wave 11 — Deferred (queued for next iteration)
+
+Carried-over NEW candidates that didn't promote in Wave 10:
 - [IMPROVE-NEW-2] Unify token-budget primitive (waits for Tranche D)
 - [IMPROVE-NEW-5] Voice/optimization/weights → registry files
 - [IMPROVE-NEW-7] HF accelerate offload manager probe
 - [IMPROVE-NEW-8] OpenAI / Anthropic SDK contract refresh
 - [IMPROVE-NEW-10] Per-feature smoke fixtures
 
-Wave-9-spawned items NOT promoted in Wave 10 (eligible for Wave 11):
+NEW candidates surfaced by Wave 10 work (eligible for Wave 11):
+- Pin remaining 36 event context schemas (IMPROVE-95 closed 25%
+  via the top-12 batch; the next tier of high-traffic stable
+  events would close another ~20% — model.download.*,
+  partner.chat, system.validate, image.infer*,
+  instruct_edit.run*). Mechanical, opportunistic. (~0.5-0.75d
+  per tier batch.)
+- Pin Recorder context schemas — chat.send / chat.enhance_prompt /
+  editor.edit / image.generate / tool.invoke each have stable
+  shape now that they're registered (IMPROVE-96). (~0.5d)
 - Sibling endpoint ``GET /observability/rejections`` slimming
   the IMPROVE-90 payload for dashboards that only want the
   per-cause panel. (~0.25d)
@@ -575,24 +581,22 @@ Wave-9-spawned items NOT promoted in Wave 10 (eligible for Wave 11):
   ``get_args`` derivation tuples typed as
   ``tuple[Literal["x", "y", ...], ...]`` for stronger
   Literal-propagation. (~0.5d)
-- Pin remaining 36 event context schemas (54 - 18 = 36).
-  IMPROVE-95 closed 25%; remaining tiers: high-traffic stable
-  (model.download.*, partner.chat, system.validate, image.infer*,
-  instruct_edit.run*), editor/agent/partner-conversational with
-  varying shapes, low-traffic one-shot. (~0.5-1d depending on
-  tier picked.)
 - Differential restore: ``import?scope=facts`` semantic to
-  restore JUST a subset of the bundle. (IMPROVE-94 spawned;
-  IMPROVE-98's dry-run refactor + IMPROVE-97's versioning make
-  this cleaner to add.) (~0.5d)
-- Recorder pin context schemas — chat.send / chat.enhance_prompt /
-  editor.edit / image.generate / tool.invoke each have stable
-  shape. (~0.5d)
+  restore JUST a subset of the bundle. IMPROVE-98's dry-run
+  refactor + IMPROVE-97's versioning make this cleaner to
+  add. (~0.5d)
 - IMPROVE-97 follow-up: per-row diff in /partner/import summary
   (rows skipped due to PK conflict + rows newly inserted).
   (~0.5d)
 - Generalise the AST walker to ANY context-manager-driven emit
   (not just track_event). Holds until a future helper splits off.
+- Per-tier benchmarks for IMPROVE-100 tile_size bands (256/384/None).
+  Today the thresholds are calibrated against diffusers' published
+  guidance; an internal benchmark against a real 8GB 30xx card
+  could refine the band boundaries. (~0.5d)
+- Bucket-padding for /observability/timeseries (zero-fill empty
+  buckets). Optional ``?fill_zeros=true`` flag. Useful for charts
+  that don't want to handle gaps client-side. (~0.25d)
 
 Themed tranches (still queued):
 - Tranche A — Flutter editor v2 (~3d): recently-closed panel,
@@ -628,17 +632,18 @@ Original carry-overs (still demoted):
 
 ---
 
-## 10.6 Wave 5 + Wave 6 + Wave 7 + Wave 8 + Wave 9 retrospective
+## 10.6 Wave 5 + Wave 6 + Wave 7 + Wave 8 + Wave 9 + Wave 10 retrospective
 
-> **Status as of 2026-04-28:** Wave 5 fully shipped (12 commits, +216
+> **Status as of 2026-04-29:** Wave 5 fully shipped (12 commits, +216
 > tests). Wave 6 fully shipped (12 commits, +118 tests across 8
 > table-rows; Tranche C compresses 5 sub-commits into row 4).
 > Wave 7 fully shipped (8 numbered + 1 test-fix + 2 doc commits =
 > 11 total, +66 tests). Wave 8 fully shipped (6 numbered + 2 doc
 > commits = 8 total, +66 tests). Wave 9 fully shipped (6 numbered
-> + 2 doc commits = 8 total, +60 tests). Tier 1 baseline grew
-> 875 → 1401 passes over Waves 5-9. All 4 xfailed agent tests
-> resolved post-IMPROVE-71.
+> + 2 doc commits = 8 total, +60 tests). Wave 10 fully shipped
+> (6 numbered + 2 doc commits = 8 total, +57 tests). Tier 1
+> baseline grew 875 → 1458 passes over Waves 5-10. All 4 xfailed
+> agent tests resolved post-IMPROVE-71.
 
 ### Wave 5 (✓ shipped)
 
@@ -717,9 +722,25 @@ the two doc commits; 6 numbered IMPROVE-N items.
 | 5 | [IMPROVE-92] | 3c29667 | Per-event TypedDict context schemas (per Q2=C TypedDict + audit-time pydantic) — 6 schemas pinned; pydantic ``TypeAdapter`` validates at audit-time only, never on the emit hot path; AST-walking audit catches typo'd context keys | +11 |
 | 6 | [IMPROVE-93] | 3ddf117 | VRAM-probe-driven tile-based upscaling (per Q3=C VRAM-probe-driven activation) — when the regular VRAM probe fails, retry at the lower tiled threshold and engage `enable_vae_tiling`/`enable_vae_slicing`. ImageVramProbeContext gains `tile_mode` field | +8 |
 | 7 | [IMPROVE-94] | 41e1913 | POST /partner/import endpoint — closes IMPROVE-67 round-trip; restores profile/user_profile/memory_decay JSON + 6 SQLite tables via `INSERT OR IGNORE` (default) or `?overwrite=true`; partial-restore safety contract | +13 |
-| 8 | (doc)        | this    | Wave 9 retrospective + Wave 10 deferred queue | 0 |
+| 8 | (doc)        | 6a1426a | Wave 9 retrospective + Wave 10 deferred queue | 0 |
 
 Net: +60 tests over Wave 9 (1341 → 1401). 8 commits including
+the two doc commits; 6 numbered IMPROVE-N items.
+
+### Wave 10 (✓ shipped)
+
+| # | Tag | SHA | What landed | Tests |
+|---|---|---|---|---:|
+| 1 | [IMPROVE-95] | 3dd032a | Pin top-12 event context schemas (Wave 10 batch — IMPROVE-92 follow-up) — coverage 6→18 of 54 events. Per Q1=A: all 12 in one mechanical commit. | +12 |
+| 2 | [IMPROVE-96] | b31c259 | Recorder class enumeration test (AST walker over track_event callsites) — surfaced 6 historically-unregistered events; registered them + the entire NEW chat subsystem. Per Q6=A: AST walker matches IMPROVE-92 audit pattern. | +2 |
+| 3 | [IMPROVE-97] | 7cb4d9c | Bundle versioning (schema_version, asymmetric per Q2=C) — write v=1 going forward, accept v=missing OR v=1 on restore. ``BUNDLE_SCHEMA_VERSION = 1`` + ``bundle.json`` lands first in ZIP for partial-read tools. | +9 |
+| 4 | (doc)        | 70652d8 | Wave 10 mid-wave status — IMPROVE-95/96/97 shipped (per Q7=A mid + end-wave doc cadence) | 0 |
+| 5 | [IMPROVE-98] | a05fb46 | POST /partner/import/dry-run — pre-restore preview. ``dry_run`` kwarg threaded through restore_from_bundle. Per Q3=A: NEW endpoint cleaner than ?dry_run= flag. | +10 |
+| 6 | [IMPROVE-99] | 0816973 | GET /observability/timeseries with ?error_code= filter — investigation surfaced the endpoint did NOT exist (IMPROVE-90 referenced an aspirational endpoint). Created from scratch with subsystem/action/error_code AND-composed. Per Q4=A: filter param on the (newly-created) endpoint. | +14 |
+| 7 | [IMPROVE-100] | b3fd739 | Tile-size calibration per input resolution — 3 bands keyed on OUTPUT max dim (≤4K=default, 4K-8K=384, >8K=256). ``enable_vae_tiling(tile_sample_min_size=N)`` with TypeError fallback for older diffusers. | +9 |
+| 8 | (doc)        | this    | Wave 10 retrospective + Wave 11 deferred queue | 0 |
+
+Net: +57 tests over Wave 10 (1401 → 1458). 8 commits including
 the two doc commits; 6 numbered IMPROVE-N items.
 
 ### Wave 7 architectural impact
@@ -851,11 +872,72 @@ the two doc commits; 6 numbered IMPROVE-N items.
     11 schema = 25 audit pins protecting the typed contract
     front to back.
 
+### Wave 10 architectural impact
+
+  * Schema-coverage tier closed for the high-traffic events:
+    [IMPROVE-95] grew ``EVENT_CONTEXT_SCHEMAS`` from 6 → 18
+    pinned (33% of the 54 registered events). The pinned set
+    now covers 6 of the top-7 traffic generators; remaining
+    36 events are stable-shape but lower-traffic candidates
+    for Wave 11+ tier batches.
+  * Recorder dynamic-action coverage gap closed:
+    [IMPROVE-96]'s AST walker over ``track_event`` callsites
+    surfaced 6 historically-unregistered events that
+    [IMPROVE-89]'s keystone tightening had explicitly left
+    for follow-up. The dead-entries audit was augmented to
+    count both ``sub.act`` and ``sub.act.start`` per
+    track_event callsite so the registry stays clean. New
+    chat subsystem (chat.send + chat.enhance_prompt + their
+    .start companions) brings KNOWN_EVENT_NAMES from 54 → 66
+    and ``KNOWN_EVENTS`` subsystem count 11 → 12.
+  * Partner/import round-trip is now production-grade with
+    THREE safety layers: [IMPROVE-94]'s partial-restore
+    semantics + [IMPROVE-97]'s asymmetric schema_version
+    (write v=1, accept v=missing or v=1) + [IMPROVE-98]'s
+    POST /partner/import/dry-run preview. A user can upload a
+    100MB bundle, see what it would do, then commit — no
+    surprise overwrites. The ``dry_run`` kwarg threads through
+    restore_from_bundle to skip every persistence step
+    (profile save, user_profile save, set_decay_config,
+    SQLite INSERT) while preserving the same shape errors so
+    the preview matches the real restore exactly.
+  * /observability surface gained a time-series dimension:
+    [IMPROVE-99]'s ``GET /observability/timeseries`` with
+    ?error_code= filter (also subsystem + action) lets
+    dashboards render "rejection rate over time" charts in
+    one query. Bucket boundaries align to UTC clock via
+    SQLite Unix-epoch arithmetic; bucket_minutes clamped
+    1-60 prevents sub-minute abuse + over-coarse rendering.
+    Investigation also surfaced that [IMPROVE-90]'s commit
+    body had referenced the endpoint as if it existed —
+    Wave 10 created it from scratch.
+  * Tile-mode upscaling gained per-resolution calibration via
+    [IMPROVE-100]: 4096/8192 OUTPUT-dim thresholds map to
+    None/384/256 ``tile_sample_min_size``. The kwarg-with-
+    fallback pattern (TypeError on older diffusers triggers
+    no-arg call) keeps compatibility with diffusers versions
+    that don't expose the calibration kwarg. Surfaced in
+    result metadata so dashboards can chart "calibration
+    distribution" without inspecting pipeline state.
+  * Routes 184 → 186 over Wave 10 (+2: POST
+    /partner/import/dry-run + GET /observability/timeseries).
+  * Tier 1 baseline 1401 → 1458 over Wave 10 (+57 tests).
+    Observability test surface now spans 31 keystone (4 new
+    via [IMPROVE-96]) + 23 schema (12 new via [IMPROVE-95])
+    + 14 timeseries (new via [IMPROVE-99]) = 68 audit pins
+    protecting the typed contract + monitoring depth.
+    Partner export/reset surface 49 → 59 tests (+10 via
+    [IMPROVE-97/98]).
+
 ### Where to start today
 
-Wave 1-9 is shipped — pick up an item from §10.5 Wave 10 (the
+Wave 1-10 is shipped — pick up an item from §10.5 Wave 11 (the
 deferred queue: IMPROVE-NEW-* candidates 2/5/7/8/10 + the
-Wave-9-spawned items + themed tranches A/B/D/E/F/G).
+Wave-10-spawned items including remaining 36 schemas + Recorder
+context schemas + sibling /observability/rejections endpoint +
+mypy strict-mode + differential restore + per-row diff +
+per-tier benchmarks for tile_size calibration + bucket-padding +
+themed tranches A/B/D/E/F/G).
 
 ---
 
@@ -905,12 +987,12 @@ Answer whichever are easy. The roadmap is shaped enough to make progress on Wave
 ## 10.8 Where to go from here
 
 - **Read chapter 1 → 9 if you haven't.** This chapter is the index; the others have the details.
-- **Continue Wave 10 second-half** — see §10.5 Wave 10 (IMPROVE-98 dry-run, IMPROVE-99 ?error_code= time-series filter, IMPROVE-100 tile-size calibration, then end-wave doc commit).
-- **Keep `[IMPROVE-N]` references alive.** When you fix one, grep `docs/features/` for that ID and cross out. If you add new ones in future work, number them IMPROVE-98+ (1-97 are taken; the IMPROVE-NEW-* tags graduate to permanent numbers on acceptance) and note them in the originating chapter.
+- **Pick a Wave 11 item and ship it** — see §10.5 Wave 11 (NEW candidates IMPROVE-NEW-2/5/7/8/10 + Wave-10-spawned items + themed tranches A/B/D/E/F/G + carry-overs).
+- **Keep `[IMPROVE-N]` references alive.** When you fix one, grep `docs/features/` for that ID and cross out. If you add new ones in future work, number them IMPROVE-101+ (1-100 are taken; the IMPROVE-NEW-* tags graduate to permanent numbers on acceptance) and note them in the originating chapter.
 - **The `MEMORY.md` in `~/.claude/projects/...` contains the feedback rule** that improvement suggestions should cite 2025–2026 sources. Every item here has citations in its origin chapter.
 
 ---
 
 **Guide complete.** `docs/features/README.md` → `01-architecture.md` → `02-llm-infrastructure.md` → `03-chat.md` → `04-agents-tools.md` → `05-systems.md` → `06-image-generation.md` → `07-image-editor.md` → `08-partner.md` → `09-observability.md` → `10-improvements.md` *(this file)*.
 
-Every major feature of the Local AI Platform is now documented end-to-end, with **97** research-backed improvement ideas cross-referenced into one prioritized plan. Waves 1-9 fully shipped; Wave 10 in progress (3 of 6 numbered commits shipped at mid-wave 2026-04-29).
+Every major feature of the Local AI Platform is now documented end-to-end, with **100** research-backed improvement ideas cross-referenced into one prioritized plan. Waves 1-10 fully shipped; Wave 11 in deferred queue.
