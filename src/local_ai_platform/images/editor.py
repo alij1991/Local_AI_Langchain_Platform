@@ -19,44 +19,23 @@ from PIL import Image
 
 from . import processors, ai_enhance
 from ..observability import emit
+# [IMPROVE-74] Image-compose primitives (compute_diff_metrics,
+# apply_mask_composite, decode_mask_base64, weighted_blend) live in
+# their own module so future image-gen post-processing can call them
+# without importing all of editor.py. Aliased back to the original
+# private names below for backward compat with existing tests.
+from .compose_utils import (
+    apply_mask_composite as _apply_mask_composite,
+    compute_diff_metrics as _compute_diff_metrics,
+    decode_mask_base64 as _decode_mask_base64,
+    DIFF_THRESHOLD as _DIFF_THRESHOLD,
+    METRICS_INPUT_MAX_SIDE as _METRICS_INPUT_MAX_SIDE,
+    REGION_MAP_MAX_SIDE as _REGION_MAP_MAX_SIDE,
+)
 
 logger = logging.getLogger(__name__)
 
 EDITOR_DATA_DIR = Path("data/images/editor")
-
-
-# ── [IMPROVE-56] Diff metrics for /editor/{sid}/compare ──────────
-#
-# All numpy / skimage imports are lazy inside ``_compute_diff_metrics``
-# so this module stays cheap to import at app startup. Diff-metrics
-# compute is opt-in via ``?metrics=true`` on the route, so the cost
-# only lands when the caller actually wants it.
-#
-# Resize policy: both inputs are downscaled to max-side 1024 BEFORE any
-# per-pixel math. Avoids OOM on 8K images (4K × 4K × 3 bytes = ~50MB
-# per channel × 3 = 150MB just for one input). Metrics computed on the
-# downscaled view are still meaningful for "did anything change?" — and
-# at 1024 px an SSIM window of 7 still has plenty of variance to score
-# against. The region-map output is downscaled further to max-side
-# 256 so the base64 payload stays small enough for an SSE/JSON channel.
-
-# Threshold matches the doc proposal (07-image-editor.md:449). 8/255
-# is roughly "perceptually one JND on midtones" — Catmull-Rom + ITU
-# BT.601 quantisation noise sits around 4-6 already, so 8 keeps the
-# region map from lighting up on pure encoder jitter.
-_DIFF_THRESHOLD = 8
-
-# Internal resize cap before computing metrics. Any image larger than
-# this on its longest side is shrunk via LANCZOS. Higher → more memory
-# + CPU; lower → SSIM windows lose detail. 1024 is the sweet spot per
-# the perception-quality literature (Wang 2004 SSIM paper validated at
-# similar resolutions).
-_METRICS_INPUT_MAX_SIDE = 1024
-
-# Region map preview shrinks further so the base64 payload fits a
-# typical SSE event budget (<32KB after b64 expansion). 256 px keeps
-# enough detail for the Flutter overlay to be useful.
-_REGION_MAP_MAX_SIDE = 256
 
 
 def _editor_archive_root() -> Path:
@@ -74,252 +53,10 @@ def _editor_archive_root() -> Path:
     return EDITOR_DATA_DIR / "_archive"
 
 
-def _compute_diff_metrics(path_a: str, path_b: str) -> dict[str, Any]:
-    """[IMPROVE-56] Compute per-pair difference metrics for two
-    images.
-
-    Returns a dict with::
-
-        {
-          "mean_pixel_diff": {"r": float, "g": float, "b": float},
-          "changed_pixels_pct": float,
-          "histogram_delta": {"r": float, "g": float, "b": float},
-          "ssim": float | None,
-          "region_map_base64": str,
-          "width": int,
-          "height": int,
-          "aligned": bool,
-        }
-
-    ``aligned`` is False when the source images had different sizes
-    (B is then resized to A's dimensions for comparison). All
-    metrics are computed on the post-alignment, post-downscale view.
-
-    ``ssim`` is None on any compute failure — degenerate inputs
-    (1×1, mismatched channel counts) shouldn't be able to escalate
-    a metrics request into an HTTP 500.
-
-    All heavy deps (numpy, skimage) are imported lazily here so
-    importing ``editor.py`` at app startup stays cheap.
-    """
-    import base64
-    import io
-
-    import numpy as np
-
-    img_a = Image.open(path_a).convert("RGB")
-    img_b = Image.open(path_b).convert("RGB")
-
-    orig_size_a = img_a.size  # (W, H)
-    orig_size_b = img_b.size
-    aligned = orig_size_a == orig_size_b
-
-    # Step 1: align B to A's dimensions if they differ. The realistic
-    # use-case for unaligned inputs is "user applied an edit that
-    # changed the image dimensions" (crop, resize op) — resizing B
-    # to match A's grid is the only way to compute pixel-aligned
-    # metrics. The ``aligned`` flag lets the UI annotate the result.
-    if not aligned:
-        img_b = img_b.resize(orig_size_a, Image.LANCZOS)
-
-    # Step 2: clamp both to max-side 1024 to bound memory + CPU.
-    # See ``_METRICS_INPUT_MAX_SIDE`` rationale above.
-    w, h = img_a.size
-    max_side = max(w, h)
-    if max_side > _METRICS_INPUT_MAX_SIDE:
-        scale = _METRICS_INPUT_MAX_SIDE / max_side
-        new_size = (max(1, int(w * scale)), max(1, int(h * scale)))
-        img_a = img_a.resize(new_size, Image.LANCZOS)
-        img_b = img_b.resize(new_size, Image.LANCZOS)
-
-    arr_a = np.asarray(img_a, dtype=np.uint8)
-    arr_b = np.asarray(img_b, dtype=np.uint8)
-    out_w, out_h = img_a.size
-
-    # ── mean_pixel_diff (per-channel) ────────────────────────────
-    # int16 cast prevents uint8 overflow on the subtraction.
-    diff = np.abs(arr_a.astype(np.int16) - arr_b.astype(np.int16))
-    mean_per_channel = diff.mean(axis=(0, 1))
-    mean_pixel_diff = {
-        "r": float(mean_per_channel[0]),
-        "g": float(mean_per_channel[1]),
-        "b": float(mean_per_channel[2]),
-    }
-
-    # ── changed_pixels_pct ──────────────────────────────────────
-    # A pixel "changed" if ANY channel exceeds the threshold. Using
-    # max-channel rather than mean-channel matches what a user means
-    # by "this region changed" — a pure-blue → pure-red swap shows
-    # as max=255 even though the mean over RGB is 170.
-    max_channel_diff = diff.max(axis=2)
-    changed_mask = max_channel_diff > _DIFF_THRESHOLD
-    changed_pixels_pct = float(changed_mask.sum() / changed_mask.size)
-
-    # ── histogram_delta (per-channel) ───────────────────────────
-    # L1 distance between 256-bin histograms, normalized so the
-    # max-possible (completely disjoint distributions) maps to 1.0.
-    # Total L1 distance for two distributions of size N has max 2N
-    # (each bin off by N at worst), so divide by 2N.
-    total_pixels = arr_a.shape[0] * arr_a.shape[1]
-    hist_delta: dict[str, float] = {}
-    for idx, name in enumerate(("r", "g", "b")):
-        hist_a = np.bincount(arr_a[..., idx].flatten(), minlength=256).astype(np.float64)
-        hist_b = np.bincount(arr_b[..., idx].flatten(), minlength=256).astype(np.float64)
-        l1 = float(np.abs(hist_a - hist_b).sum())
-        hist_delta[name] = l1 / (2.0 * total_pixels) if total_pixels else 0.0
-
-    # ── SSIM ─────────────────────────────────────────────────────
-    # skimage's structural_similarity needs at least win_size pixels
-    # on each side; default win_size=7 means inputs <7×7 fail. Wrap
-    # in try/except so degenerate inputs return None instead of 500.
-    ssim_val: float | None
-    try:
-        from skimage.metrics import structural_similarity as _ssim
-        ssim_val = float(_ssim(
-            arr_a, arr_b,
-            channel_axis=2,
-            data_range=255,
-        ))
-    except Exception as exc:
-        logger.debug(
-            "[IMPROVE-56] ssim compute failed (%s); returning None", exc,
-        )
-        ssim_val = None
-
-    # ── region_map_base64 ────────────────────────────────────────
-    # Build a small visual: desaturated A as background, red overlay
-    # where the diff exceeds the threshold. Flutter drops this
-    # straight into ``Image.memory(base64Decode(...))``.
-    gray = arr_a.mean(axis=2)
-    bg = (gray * 0.5).clip(0, 255).astype(np.uint8)
-    overlay = np.stack([bg, bg, bg], axis=2)
-    overlay[changed_mask] = (255, 0, 0)
-    region_img = Image.fromarray(overlay, mode="RGB")
-    region_max = max(region_img.size)
-    if region_max > _REGION_MAP_MAX_SIDE:
-        rscale = _REGION_MAP_MAX_SIDE / region_max
-        rsize = (
-            max(1, int(region_img.size[0] * rscale)),
-            max(1, int(region_img.size[1] * rscale)),
-        )
-        region_img = region_img.resize(rsize, Image.LANCZOS)
-    buf = io.BytesIO()
-    region_img.save(buf, format="PNG", optimize=True)
-    b64_payload = base64.b64encode(buf.getvalue()).decode("ascii")
-    region_map_base64 = f"data:image/png;base64,{b64_payload}"
-
-    return {
-        "mean_pixel_diff": mean_pixel_diff,
-        "changed_pixels_pct": changed_pixels_pct,
-        "histogram_delta": hist_delta,
-        "ssim": ssim_val,
-        "region_map_base64": region_map_base64,
-        "width": out_w,
-        "height": out_h,
-        "aligned": aligned,
-    }
-
-
-# ── [IMPROVE-57] Mask-composite post-processing ──────────────────
-#
-# Doc rationale (07-image-editor.md:460-471): Kontext / Nunchaku /
-# CosXL all edit the whole image per instruction. To localize an
-# edit ("just change the sky") today the user has to hope the model
-# respects "everything else unchanged" in the prompt — unreliable.
-# This helper does the simple post-processing that fixes the worst
-# 90% of the problem: blend the model's whole-image output back
-# with the source using a user-drawn mask.
-#
-# Convention matches Photoshop layer masks: white = "apply edited",
-# black = "keep source". Mask is grayscale; values blend linearly.
-# Feathering = Gaussian blur on the mask, sigma in pixels, so a
-# hard 0/1 cutoff becomes a soft gradient.
-#
-# Generic across all editor ops, not Kontext-only — the math doesn't
-# care which model produced ``edited``. Doc framing is "Kontext-
-# family" because that's the user-pain motivation, but a future
-# "mask my classical sharpen" use-case works identically.
-
-
-def _decode_mask_base64(mask_b64: str) -> bytes:
-    """Decode a base64 mask payload, accepting both bare base64 and
-    the ``data:image/<fmt>;base64,...`` data-URL form.
-
-    Pulled out so the helper has a clean re-use point and the test
-    suite can pin the prefix-stripping behaviour without going
-    through the full composite pipeline.
-    """
-    import base64
-
-    if "," in mask_b64 and mask_b64.lstrip().startswith("data:"):
-        mask_b64 = mask_b64.split(",", 1)[1]
-    return base64.b64decode(mask_b64)
-
-
-def _apply_mask_composite(
-    source: "Image.Image",
-    edited: "Image.Image",
-    mask_b64: str,
-    feather_px: int = 4,
-) -> "Image.Image":
-    """[IMPROVE-57] Blend ``edited`` back onto ``source`` using the
-    user-drawn mask.
-
-    ``mask_b64`` is base64-encoded image bytes (with or without the
-    ``data:image/...;base64,`` data-URL prefix). White = "apply
-    edited", black = "keep source", grays = linear blend.
-
-    The mask is converted to grayscale, resized to ``edited.size``,
-    then Gaussian-blurred with ``sigma=feather_px`` so hard mask
-    edges fade smoothly. ``feather_px=0`` skips the blur for callers
-    who want a sharp boundary.
-
-    ``source`` is also resized to ``edited.size`` if dims differ —
-    instruct_edit can return slightly different dimensions than its
-    input (e.g. snapping to multiples of 64), which would otherwise
-    break the per-pixel blend.
-
-    Returns an RGB PIL Image. Raises on corrupt input — callers in
-    apply_edit catch the exception and fall back to the unmasked
-    edit so a malformed mask can't escalate into a 500.
-    """
-    import io
-
-    import numpy as np
-    from PIL import ImageFilter
-
-    raw = _decode_mask_base64(mask_b64)
-    mask_img = Image.open(io.BytesIO(raw)).convert("L")
-
-    target_size = edited.size
-    if mask_img.size != target_size:
-        mask_img = mask_img.resize(target_size, Image.LANCZOS)
-
-    # ``feather_px=0`` skips the blur entirely — saves a Gaussian
-    # convolution when the caller wants a sharp boundary (rare but
-    # legitimate, e.g. a pre-feathered mask coming from another
-    # tool).
-    if feather_px and feather_px > 0:
-        mask_img = mask_img.filter(ImageFilter.GaussianBlur(radius=float(feather_px)))
-
-    src_img = source
-    if src_img.size != target_size:
-        src_img = src_img.resize(target_size, Image.LANCZOS)
-    if src_img.mode != "RGB":
-        src_img = src_img.convert("RGB")
-
-    edited_rgb = edited if edited.mode == "RGB" else edited.convert("RGB")
-
-    src_arr = np.asarray(src_img, dtype=np.float32)
-    edt_arr = np.asarray(edited_rgb, dtype=np.float32)
-    # mask normalized to [0, 1]; broadcast along the channel axis so
-    # one mask blends all 3 RGB channels identically.
-    mask_arr = np.asarray(mask_img, dtype=np.float32) / 255.0
-    mask_arr = mask_arr[..., None]  # (H, W, 1)
-
-    out_arr = mask_arr * edt_arr + (1.0 - mask_arr) * src_arr
-    out_arr = np.clip(out_arr, 0.0, 255.0).astype(np.uint8)
-    return Image.fromarray(out_arr, mode="RGB")
+# [IMPROVE-74] _compute_diff_metrics, _decode_mask_base64,
+# _apply_mask_composite were extracted to images/compose_utils.py.
+# Aliases above (in the imports block) keep backward compat with
+# tests that import the underscore-prefixed names from this module.
 
 
 @dataclass
