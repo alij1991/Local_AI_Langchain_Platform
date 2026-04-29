@@ -2155,13 +2155,34 @@ def _hf_download_worker(
             )
             # snapshot_download's ignore_patterns for *.gguf would exclude
             # ALL gguf files.  So we download the specific one separately.
+            #
+            # [IMPROVE-86] Wrap the single-file fetch in
+            # ``HfHubDownloadWatcher`` so the row's
+            # ``bytes_downloaded`` / ``progress`` fields update in
+            # real time. ``hf_hub_download`` does not accept
+            # ``tqdm_class`` (the Wave 6 IMPROVE-8 path), so the
+            # watcher polls the cache dir's
+            # ``models--<repo>/blobs/*.incomplete`` files for size
+            # growth. Closes IMPROVE-8's "GGUF small-files gap"
+            # follow-up.
             from huggingface_hub import hf_hub_download
-            hf_hub_download(
+
+            from local_ai_platform.api.hf_progress_watcher import (
+                HfHubDownloadWatcher,
+            )
+
+            with HfHubDownloadWatcher(
+                row=downloads_state[download_key],
                 repo_id=model_id,
                 filename=gguf_filename,
                 token=token or None,
-                resume_download=True,
-            )
+            ):
+                hf_hub_download(
+                    repo_id=model_id,
+                    filename=gguf_filename,
+                    token=token or None,
+                    resume_download=True,
+                )
         else:
             # ── Full pipeline download ────────────────────────────
             # Detect repos with multiple alternative weight variants

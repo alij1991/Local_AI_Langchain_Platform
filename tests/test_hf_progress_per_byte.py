@@ -20,6 +20,7 @@ Tests cover:
 """
 from __future__ import annotations
 
+import threading
 import time
 from typing import Any
 
@@ -309,3 +310,281 @@ def test_legacy_endpoint_omits_bytes_when_legacy_row():
             assert "bytes_total" not in ours[0]
     finally:
         state.pop(key, None)
+
+
+# ── [IMPROVE-86] Filesystem watcher for hf_hub_download ──────────
+
+
+def test_repo_id_to_cache_dir_name_uses_double_dash():
+    """The HF cache layout names directories ``models--ns--repo`` with
+    each ``/`` mapped to ``--``. Pin so a future refactor of the
+    helper can't silently drift from the convention."""
+    from local_ai_platform.api.hf_progress_watcher import (
+        _repo_id_to_cache_dir_name,
+    )
+    assert _repo_id_to_cache_dir_name("city96/FLUX.1-Kontext-dev-gguf") == (
+        "models--city96--FLUX.1-Kontext-dev-gguf"
+    )
+    # Single-segment repo id — no ``/`` to replace, but still gets
+    # the prefix.
+    assert _repo_id_to_cache_dir_name("bert-base-uncased") == (
+        "models--bert-base-uncased"
+    )
+
+
+def test_sum_incomplete_bytes_returns_zero_when_dir_missing(tmp_path):
+    """Watcher boots before the download starts → blobs/ doesn't
+    exist yet. ``_sum_incomplete_bytes`` must return 0, not raise."""
+    from local_ai_platform.api.hf_progress_watcher import (
+        _sum_incomplete_bytes,
+    )
+    nonexistent = tmp_path / "models--ns--repo" / "blobs"
+    assert _sum_incomplete_bytes(nonexistent) == 0
+
+
+def test_sum_incomplete_bytes_filters_non_incomplete_files(tmp_path):
+    """Only ``*.incomplete`` files count — finalised blobs (post-rename)
+    must NOT contribute. A future regression that summed all files
+    would over-count by 2x once the download completes."""
+    from local_ai_platform.api.hf_progress_watcher import (
+        _sum_incomplete_bytes,
+    )
+    blobs_dir = tmp_path / "blobs"
+    blobs_dir.mkdir()
+
+    (blobs_dir / "abc123.incomplete").write_bytes(b"x" * 500)
+    (blobs_dir / "def456.incomplete").write_bytes(b"y" * 200)
+    # Finalised blob (no .incomplete suffix) — should be ignored.
+    (blobs_dir / "abc123").write_bytes(b"x" * 1000)
+
+    assert _sum_incomplete_bytes(blobs_dir) == 700
+
+
+def test_watcher_writes_bytes_downloaded_during_growth(monkeypatch, tmp_path):
+    """The watcher thread polls the blobs dir and writes byte counts
+    into the row. Simulate a download: pre-create an .incomplete
+    file, start the watcher, grow the file, then verify the row
+    reflects the growth."""
+    from local_ai_platform.api import hf_progress_watcher as hpw
+
+    # Force the cache to our tmp dir via monkeypatch on the constants
+    # module (which the watcher imports lazily inside _get_blobs_dir).
+    fake_cache = tmp_path / "hub"
+    fake_cache.mkdir()
+    monkeypatch.setattr(
+        "huggingface_hub.constants.HF_HUB_CACHE", str(fake_cache),
+    )
+
+    repo_id = "ns/repo"
+    blobs_dir = fake_cache / "models--ns--repo" / "blobs"
+    blobs_dir.mkdir(parents=True)
+    incomplete = blobs_dir / "abc.incomplete"
+    incomplete.write_bytes(b"x" * 100)
+
+    # Skip the model_info lookup (no network in tests). Patch to
+    # return a fixed total.
+    monkeypatch.setattr(hpw, "_lookup_target_size", lambda *_a, **_k: 1000)
+
+    row: dict[str, Any] = {}
+    watcher = hpw.HfHubDownloadWatcher(
+        row=row,
+        repo_id=repo_id,
+        filename="model.gguf",
+        poll_interval=0.02,
+    )
+    watcher.__enter__()
+    try:
+        # Initial entry sets bytes_total + current_file before any
+        # poll fires.
+        assert row["bytes_total"] == 1000
+        assert row["current_file"] == "model.gguf"
+
+        # Let the watcher poll once.
+        time.sleep(0.05)
+        assert row["bytes_downloaded"] == 100
+        assert abs(row["progress"] - 0.1) < 0.01
+
+        # Grow the file → next poll picks up the new size.
+        incomplete.write_bytes(b"x" * 500)
+        time.sleep(0.05)
+        assert row["bytes_downloaded"] == 500
+        assert abs(row["progress"] - 0.5) < 0.01
+    finally:
+        watcher.__exit__(None, None, None)
+
+
+def test_watcher_finalises_to_total_on_stop_when_blob_renamed(
+    monkeypatch, tmp_path,
+):
+    """When hf_hub_download completes, the .incomplete file is
+    renamed (suffix stripped). The watcher's stop-time poll
+    detects 0 .incomplete bytes but the target_size is known —
+    surface the full size so the row's ``progress`` lands at 1.0
+    instead of dropping back to 0."""
+    from local_ai_platform.api import hf_progress_watcher as hpw
+
+    fake_cache = tmp_path / "hub"
+    fake_cache.mkdir()
+    monkeypatch.setattr(
+        "huggingface_hub.constants.HF_HUB_CACHE", str(fake_cache),
+    )
+
+    blobs_dir = fake_cache / "models--ns--repo" / "blobs"
+    blobs_dir.mkdir(parents=True)
+    incomplete = blobs_dir / "abc.incomplete"
+    incomplete.write_bytes(b"x" * 1000)
+
+    monkeypatch.setattr(hpw, "_lookup_target_size", lambda *_a, **_k: 1000)
+
+    row: dict[str, Any] = {}
+    with hpw.HfHubDownloadWatcher(
+        row=row, repo_id="ns/repo", filename="model.gguf",
+        poll_interval=0.02,
+    ):
+        time.sleep(0.05)
+        # Simulate hf_hub_download finishing: rename .incomplete to
+        # the final blob name (no suffix).
+        finalised = blobs_dir / "abc"
+        incomplete.rename(finalised)
+
+    # After exit the on_stop poll should have rounded up to the
+    # full size.
+    assert row["bytes_downloaded"] == 1000
+    assert abs(row["progress"] - 1.0) < 0.001
+
+
+def test_watcher_with_no_total_size_omits_progress(monkeypatch, tmp_path):
+    """When ``_lookup_target_size`` returns None (gated repo,
+    network outage, missing siblings), the watcher must not write
+    ``progress`` (division-by-zero guard) but still surfaces
+    ``bytes_downloaded``. Consumers fall back to the binary
+    indicator."""
+    from local_ai_platform.api import hf_progress_watcher as hpw
+
+    fake_cache = tmp_path / "hub"
+    fake_cache.mkdir()
+    monkeypatch.setattr(
+        "huggingface_hub.constants.HF_HUB_CACHE", str(fake_cache),
+    )
+
+    blobs_dir = fake_cache / "models--ns--repo" / "blobs"
+    blobs_dir.mkdir(parents=True)
+    (blobs_dir / "abc.incomplete").write_bytes(b"x" * 250)
+
+    monkeypatch.setattr(hpw, "_lookup_target_size", lambda *_a, **_k: None)
+
+    row: dict[str, Any] = {}
+    with hpw.HfHubDownloadWatcher(
+        row=row, repo_id="ns/repo", filename="model.gguf",
+        poll_interval=0.02,
+    ):
+        time.sleep(0.05)
+        assert row.get("bytes_downloaded") == 250
+        # Total unknown → progress unset.
+        assert "progress" not in row
+        assert "bytes_total" not in row
+        # current_file still surfaced — known up-front from the
+        # constructor argument.
+        assert row["current_file"] == "model.gguf"
+
+
+def test_watcher_lookup_failure_does_not_raise_inside_context(
+    monkeypatch, tmp_path,
+):
+    """If the model_info call itself raises (network down,
+    unauthorised), the watcher should swallow the exception and
+    operate as if total is unknown — never block the actual
+    download."""
+    from local_ai_platform.api import hf_progress_watcher as hpw
+
+    fake_cache = tmp_path / "hub"
+    fake_cache.mkdir()
+    monkeypatch.setattr(
+        "huggingface_hub.constants.HF_HUB_CACHE", str(fake_cache),
+    )
+
+    def boom(*a, **kw):
+        raise RuntimeError("network unreachable")
+
+    monkeypatch.setattr(
+        "huggingface_hub.HfApi.model_info", boom,
+    )
+
+    row: dict[str, Any] = {}
+    # The context manager body must run without exception.
+    with hpw.HfHubDownloadWatcher(
+        row=row, repo_id="ns/repo", filename="model.gguf",
+        poll_interval=0.02,
+    ):
+        time.sleep(0.03)
+    # current_file always surfaces; bytes_total stays absent because
+    # the lookup failed.
+    assert row.get("current_file") == "model.gguf"
+    assert "bytes_total" not in row
+
+
+def test_watcher_thread_is_daemon_and_joinable():
+    """The watcher's polling thread must be a daemon so a process
+    exit during a download doesn't leak the thread, AND it must
+    be joinable on stop within the documented 1s budget so the
+    worker doesn't hang on shutdown."""
+    from local_ai_platform.api.hf_progress_watcher import (
+        HfHubDownloadWatcher,
+    )
+
+    row: dict[str, Any] = {}
+    watcher = HfHubDownloadWatcher(
+        row=row, repo_id="ns/repo", filename="x",
+        poll_interval=0.02,
+    )
+    # Force-skip the model_info lookup.
+    watcher._target_size = None
+
+    # Manually start the thread without touching huggingface_hub
+    # constants — _run handles the missing dir gracefully.
+    watcher._thread = threading.Thread(
+        target=watcher._run, daemon=True,
+    )
+    watcher._thread.start()
+    assert watcher._thread.is_alive()
+    assert watcher._thread.daemon is True
+
+    t0 = time.monotonic()
+    watcher.stop()
+    elapsed = time.monotonic() - t0
+    assert elapsed < 1.5, f"stop() blocked for {elapsed:.2f}s"
+    assert watcher._thread is None or not watcher._thread.is_alive()
+
+
+def test_watcher_lookup_target_size_returns_lfs_size_when_top_size_missing(
+    monkeypatch,
+):
+    """``model_info`` shape variation: some siblings expose only
+    ``lfs.size`` rather than top-level ``size``. The lookup helper
+    falls back to that field. Pin both shapes."""
+    from local_ai_platform.api import hf_progress_watcher as hpw
+
+    class _FakeLfs:
+        size = 7777
+
+    class _FakeSibling:
+        rfilename = "model.gguf"
+        size = None
+        lfs = _FakeLfs()
+
+    class _FakeInfo:
+        siblings = [_FakeSibling()]
+
+    class _FakeApi:
+        def model_info(self, *a, **kw):
+            return _FakeInfo()
+
+    monkeypatch.setattr(hpw, "HfApi", _FakeApi, raising=False)
+    # Re-import to pick up the patched HfApi via the existing import
+    # path inside the helper.
+    monkeypatch.setattr(
+        "huggingface_hub.HfApi", _FakeApi,
+    )
+
+    size = hpw._lookup_target_size("ns/repo", "model.gguf", token=None)
+    assert size == 7777
