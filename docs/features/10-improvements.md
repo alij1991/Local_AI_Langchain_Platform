@@ -1,16 +1,16 @@
 # 10 — Improvement Roadmap
 
-> **Goal of this chapter:** a single consolidated view of the **70 improvement ideas** surfaced across chapters 1–9 (now **74** post Wave 6 audit), scored for impact and effort, grouped by theme, and laid out in a phased roadmap. Every idea here is grounded in a 2025–2026 source — the citations are in each chapter; this doc focuses on *what to do when*.
+> **Goal of this chapter:** a single consolidated view of the **70 improvement ideas** surfaced across chapters 1–9 (now **82** post Wave 7), scored for impact and effort, grouped by theme, and laid out in a phased roadmap. Every idea here is grounded in a 2025–2026 source — the citations are in each chapter; this doc focuses on *what to do when*.
 
-> **Revised 2026-04-28** — Wave 5 shipped (12 commits: IMPROVE-29/31/33/34/35/36/51/52/53/54/55/56/57/63/67). Wave 6 shipped (12 commits, 8 table-rows: IMPROVE-71/72/8 + Tranche-C 5×telemetry + IMPROVE-73/46/74/61). Wave 7 in progress (see §10.5 Wave 7). Four new IMPROVE-71/72/73/74 candidates surfaced during the post-Wave-5 audit (see §10.6); IMPROVE-NEW-11 entered Wave 7 as the first numbered post-74 candidate.
+> **Revised 2026-04-28** — Wave 5 shipped (12 commits: IMPROVE-29/31/33/34/35/36/51/52/53/54/55/56/57/63/67). Wave 6 shipped (12 commits, 8 table-rows: IMPROVE-71/72/8 + Tranche-C 5×telemetry + IMPROVE-73/46/74/61). Wave 7 shipped (8 commits + 1 test-fix + 2 doc commits: IMPROVE-NEW-4/11/12/13/14/16/17/18 promoted to IMPROVE-75/76/77/78/79/80/81/82, plus a deterministic-counter fix for the IMPROVE-36 parallel-wave speedup test). Wave 8 in deferred queue (see §10.5 Wave 8).
 
 ---
 
 ## 10.1 Summary
 
-- **74 improvements** flagged inline as `[IMPROVE-N]` in chapters 1–9 + the post-Wave-5 audit (NEW: 71/72/73/74).
+- **82 improvements** flagged inline as `[IMPROVE-N]` in chapters 1–9 + the Wave 5/6/7 audits (NEW from Wave 6 audit: 71/72/73/74; NEW from Wave 7: 75/76/77/78/79/80/81/82).
 - **10 themes** — security, architecture, observability, tracing, UX, memory & context, model & inference, background tasks, voice, and tools/MCP.
-- **6 waves** shipped (Waves 1-6); Wave 7 in progress; **1** standing in deferred queues (post-Wave-7 backlog).
+- **7 waves** shipped (Waves 1-7); **1** standing in deferred queues (post-Wave-7 backlog → Wave 8).
 
 All improvements are traceable back to a chapter + a 2025–2026 citation. This chapter is pure planning — *what* + *why this order*; *how* is in each origin chapter.
 
@@ -178,7 +178,7 @@ Smaller items that improve day-to-day use.
 
 ---
 
-## 10.4 The complete table (all 70)
+## 10.4 The complete table (all 82)
 
 Sortable if you paste into a spreadsheet. Chapter column links back to the originating doc.
 
@@ -258,10 +258,18 @@ Sortable if you paste into a spreadsheet. Chapter column links back to the origi
 | 72 | 10 | ✓ Route-order shadowing lint at startup | ⋆⋆⋆ | 🔨 | Architecture |
 | 73 | 10 | ✓ 10-improvements.md re-rank + Wave 5 retrospective | ⋆⋆⋆ | 🔨 | Architecture |
 | 74 | 10 | ✓ Extract image-compose helpers (numpy/PIL) | ⋆⋆ | 🔨 | Architecture |
+| 75 | 11 | ✓ Extract system DAG executor from agents.py | ⋆⋆⋆ | 🔨🔨🔨 | Architecture |
+| 76 | 11 | ✓ Rewire blend_with_previous to weighted_blend | ⋆ | 🔨 | UX |
+| 77 | 11 | ✓ Persist memory decay config across restarts | ⋆⋆ | 🔨 | Memory |
+| 78 | 11 | ✓ Memory persistence presets (low/balanced/high) | ⋆⋆ | 🔨 | UX |
+| 79 | 11 | ✓ Pre-flight VRAM probe for sdxl_x4 / latent | ⋆⋆ | 🔨 | AI/ML |
+| 80 | 11 | ✓ Telemetry event-name registry + emit_typed | ⋆⋆⋆ | 🔨🔨 | Observability |
+| 81 | 11 | ✓ Duplicate-route lint at startup | ⋆⋆ | 🔨 | Architecture |
+| 82 | 11 | ✓ /agents/* rejection telemetry | ⋆⋆ | 🔨 | Observability |
 
 *Impact for [IMPROVE-59] is ⋆⋆⋆⋆⋆ if the app is ever distributed, ⋆⋆ if it stays local-only.
 
-**Legend:** A ``✓`` prefix marks items that have shipped. See §10.6 for the Wave 5 + Wave 6 retrospective.
+**Legend:** A ``✓`` prefix marks items that have shipped. See §10.6 for the Wave 5 / 6 / 7 retrospective.
 
 ---
 
@@ -416,24 +424,58 @@ five spawned-followup events from Wave 5:
 - [IMPROVE-55 telemetry] enhancer availability surface (router, source, fallback_reason in /editor/enhance-prompt).
 - [IMPROVE-35 telemetry] SSE routing_decision event for llm_router classifier picks.
 
-### Wave 7 — In progress + deferred queue (started 2026-04-28)
+### Wave 7 — Closure of Wave 6 follow-ups + new infrastructure (✓ shipped 2026-04-28)
 
-The wave's first commits are landing; the items below are the
-remaining deferred queue. See §10.6 "Wave 7 (in progress)" for
-what has shipped vs the still-queued items here.
+Mix of (a) closing Wave 6 spawned follow-ups (decay persist +
+presets; weighted_blend rewire; sdxl_x4 VRAM probe), (b) new
+architectural items the wave 6 audit surfaced (executor
+extraction; telemetry event registry; duplicate-route lint), and
+(c) one test-only deterministic-counter fix replacing a wall-clock
+flake from [IMPROVE-36].
+
+| # | Item | Effort | Status |
+|---:|---|---:|---|
+| 1 | (test) Convert parallel-wave speedup → deterministic counter | ¼d | ✓ shipped |
+| 2 | [IMPROVE-76] Rewire blend_with_previous to weighted_blend | ¼d | ✓ shipped |
+| 3 | (doc) Wave 6 closeout (mid-wave) | ⅛d | ✓ shipped |
+| 4 | [IMPROVE-77/78] Persist memory decay config + presets | ¾d | ✓ shipped |
+| 5 | [IMPROVE-80] Telemetry event-name registry + emit_typed | 1d | ✓ shipped |
+| 6 | [IMPROVE-79] Pre-flight VRAM probe for sdxl_x4 / latent | ½d | ✓ shipped |
+| 7 | [IMPROVE-75] Extract system DAG executor from agents.py | 2d | ✓ shipped |
+| 8 | [IMPROVE-81/82] Duplicate-route lint + /agents/* rejection telemetry | 1d | ✓ shipped |
+| 9 | (doc) Wave 7 retrospective (this commit) | ¼d | ✓ shipped |
+
+**Promotion to numbered IMPROVE tags:** IMPROVE-NEW-4/11/12/13/14/16/17/18
+graduated to permanent IMPROVE-75/76/77/78/79/80/81/82 on shipping.
+Source-level comments retain the IMPROVE-NEW-* tags for grep stability
+with the commit history.
+
+### Wave 8 — Deferred (queued for next iteration)
 
 **MCP items still demoted per Q3 (aspirational, post-Wave-5 reassessment confirms).**
 
-NEW candidates surfaced by Wave 5 audit (numbered IMPROVE-NEW-* until accepted):
+Carried-over NEW candidates from the Wave 7 deferred queue:
 - [IMPROVE-NEW-2] Unify token-budget primitive (waits for Tranche D)
-- [IMPROVE-NEW-4] Extract executor from agents.py (~2d refactor)
 - [IMPROVE-NEW-5] Voice/optimization/weights → registry files
 - [IMPROVE-NEW-6] LangGraph-style graph-time validation
 - [IMPROVE-NEW-7] HF accelerate offload manager probe
 - [IMPROVE-NEW-8] OpenAI / Anthropic SDK contract refresh
 - [IMPROVE-NEW-10] Per-feature smoke fixtures
 
-Wave 5 spawned follow-ups deferred to Wave 7+ (organized into
+NEW candidates surfaced by Wave 7 work (eligible for Wave 8):
+- Per-byte progress for ``hf_hub_download`` (filesystem watcher)
+  — the GGUF small-files gap from IMPROVE-8. Originally W7-A6;
+  bumped to keep Wave 7 focused.
+- Migrate ``_build_inter_node_context`` + budget constant from
+  agents.py to systems/executor.py (or a sibling module). Today
+  the executor lazy-imports them.
+- Streaming variant of execute_graph parallel-wave pre-pass —
+  IMPROVE-36 only the sync path got it; now that both
+  executors share helpers, the streaming path can pick up
+  parallel mode in one place.
+- /systems/* validation rejection telemetry (mirror of IMPROVE-82).
+
+Wave 5 spawned follow-ups still deferred (organized into
 themed tranches):
 - Tranche A — Flutter editor v2 (~3d): recently-closed panel,
   preset gallery, mask brush UI, blend slider, metrics overlay.
@@ -449,7 +491,7 @@ themed tranches):
 - Tranche G — Persistence + import (~1d): preset sharing/JSON
   export, preset versioning, POST /partner/import.
 
-Original Wave 6 items (some shipped above, others still queued):
+Original carry-overs (still demoted):
 - [IMPROVE-21] Sandbox MCP servers *(if Q1 stays local)*
 - [IMPROVE-26] Cache MCP client connections
 - [IMPROVE-28] Wire MCP tools into agent registry
@@ -464,15 +506,15 @@ Original Wave 6 items (some shipped above, others still queued):
 
 ---
 
-## 10.6 Wave 5 + Wave 6 retrospective
+## 10.6 Wave 5 + Wave 6 + Wave 7 retrospective
 
 > **Status as of 2026-04-28:** Wave 5 fully shipped (12 commits, +216
 > tests). Wave 6 fully shipped (12 commits, +118 tests across 8
 > table-rows; Tranche C compresses 5 sub-commits into row 4).
-> Wave 7 in progress (1209 → 1210 passes through the first two
-> commits). Tier 1 baseline grew 875 → 1210 passes. All 4 xfailed
-> agent tests resolved post-IMPROVE-71. Full Wave 7 retrospective
-> lands in the wave's closing doc commit.
+> Wave 7 fully shipped (8 numbered + 1 test-fix + 2 doc commits =
+> 11 total, +66 tests). Tier 1 baseline grew 875 → 1275 passes
+> over Waves 5-7. All 4 xfailed agent tests resolved
+> post-IMPROVE-71.
 
 ### Wave 5 (✓ shipped)
 
@@ -507,28 +549,55 @@ Original Wave 6 items (some shipped above, others still queued):
 | 7 | [IMPROVE-74] | bd840c3 | Extract image-compose helpers | +15 |
 | 8 | [IMPROVE-61] | 532d3ae | Memory decay configuration | +17 |
 
-### Wave 7 (in progress 2026-04-28)
+### Wave 7 (✓ shipped)
 
-Plan delivered post-Wave-6; sequence + open-question answers
-captured in chat. Closing retrospective + per-commit table lands
-with the wave's final doc commit. Quick status:
+| # | Tag | SHA | What landed | Tests |
+|---|---|---|---|---:|
+| 1 | [IMPROVE-36] | 792cc42 | Convert parallel-wave speedup test to deterministic counter (replaces a wall-clock flake under CI load) | 0 |
+| 2 | [IMPROVE-76] | d37801f | Rewire blend_with_previous to compose_utils.weighted_blend (closes IMPROVE-74's spawned follow-up) | +1 |
+| 3 | (doc)        | 1e112f9 | Wave 6 closeout — mark fully shipped + Wave 7 status | 0 |
+| 4 | [IMPROVE-77/78] | 05d7b07 | Persist memory decay config to data/partner/memory_decay.json + low/balanced/high preset endpoints | +21 |
+| 5 | [IMPROVE-80] | 25b851e | Telemetry event-name registry + emit_typed wrapper (36 events, keystone callsite-coverage test) | +13 |
+| 6 | [IMPROVE-79] | 817a771 | Pre-flight VRAM probe for sdxl_x4 / latent upscalers (avoids ~30s download + load on small cards) | +10 |
+| 7 | [IMPROVE-75] | 34640b6 | Extract system DAG executor from agents.py — single source of truth for sync + streaming + classifier helper. agents.py shrank 2326 → 1587 LoC (-32%) | +7 |
+| 8 | [IMPROVE-81/82] | 77aaf6b | Duplicate-route lint (sister to IMPROVE-72) + /agents/* rejection telemetry (validation_rejected, protected_delete_blocked) | +14 |
+| 9 | (doc)        | this    | Wave 7 retrospective + Wave 8 deferred queue | 0 |
 
-- 2 commits shipped at this checkpoint:
-  * 792cc42 [IMPROVE-36] Convert parallel-wave speedup test to
-    deterministic counter (test-only, replaces wall-clock flake).
-  * d37801f [IMPROVE-NEW-11] Rewire blend_with_previous to
-    compose_utils.weighted_blend (closes IMPROVE-74's spawned f/u).
-- 7 commits remaining (decay persist, presets endpoint, telemetry
-  event registry, sdxl_x4 VRAM probe, executor extract, three-way
-  bundle, end-of-wave doc).
+Net: +66 tests over Wave 7 (1209 → 1275). 12 commits including
+the test-fix and the two doc commits; 8 numbered IMPROVE-N items.
+
+### Wave 7 architectural impact
+
+  * agents.py shrank 32% (2326 → 1587 LoC) via [IMPROVE-75]
+    executor extraction. systems/executor.py is now the single
+    source of truth for sync + streaming DAG execution; the bug
+    that motivated this (the [IMPROVE-35] 3-tuple/4-tuple drift
+    fixed in commit bd8b4d7) is structurally impossible to
+    re-introduce.
+  * observability_events.py now catalogues 36 distinct
+    (subsystem, action) pairs across 9 subsystems. The keystone
+    test ``test_registry_covers_every_emit_callsite_in_codebase``
+    will fail CI on any new emit() (or emit_typed) callsite that
+    isn't registered. Future event additions require a one-line
+    registry edit alongside the call — typo regressions can no
+    longer slip through.
+  * Route-lint coverage now spans BOTH literal-after-param
+    shadowing (IMPROVE-72) and identical-path duplicates
+    (IMPROVE-81). The two real-app pins
+    (test_real_api_server_has_no_shadowing_issues +
+    test_real_api_server_has_no_duplicate_routes) catch a
+    re-order or merge regression at boot before any user hits it.
+  * Memory decay config now persists to
+    data/partner/memory_decay.json (IMPROVE-77) so user tuning
+    survives restarts; preset picker (IMPROVE-78) lets
+    non-technical users pick "memory persistence" without
+    learning the five tunable fields.
 
 ### Where to start today
 
-Wave 1-6 is shipped. Wave 7 is in progress; see §10.5 Wave 7 for
-the deferred queue (IMPROVE-NEW-* candidates and the themed
-tranches A/B/D/E/F/G). The current iteration is shipping the
-mid-wave doc closeout, so further updates land at the wave's
-end.
+Wave 1-7 is shipped — pick up an item from §10.5 Wave 8 (the
+deferred queue: IMPROVE-NEW-* candidates 2/5/6/7/8/10 + the
+new Wave-7-spawned items + themed tranches A/B/D/E/F/G).
 
 ---
 
@@ -578,12 +647,12 @@ Answer whichever are easy. The roadmap is shaped enough to make progress on Wave
 ## 10.8 Where to go from here
 
 - **Read chapter 1 → 9 if you haven't.** This chapter is the index; the others have the details.
-- **Pick a Wave 7 item and ship it** — see §10.5 Wave 7 (NEW candidates IMPROVE-NEW-2/4/5/6/7/8/10 + themed tranches A/B/D/E/F/G + carry-overs).
-- **Keep `[IMPROVE-N]` references alive.** When you fix one, grep `docs/features/` for that ID and cross out. If you add new ones in future work, number them IMPROVE-75+ (71-74 are taken; the IMPROVE-NEW-* tags graduate to permanent numbers on acceptance) and note them in the originating chapter.
+- **Pick a Wave 8 item and ship it** — see §10.5 Wave 8 (NEW candidates IMPROVE-NEW-2/5/6/7/8/10 + Wave-7-spawned items + themed tranches A/B/D/E/F/G + carry-overs).
+- **Keep `[IMPROVE-N]` references alive.** When you fix one, grep `docs/features/` for that ID and cross out. If you add new ones in future work, number them IMPROVE-83+ (1-82 are taken; the IMPROVE-NEW-* tags graduate to permanent numbers on acceptance) and note them in the originating chapter.
 - **The `MEMORY.md` in `~/.claude/projects/...` contains the feedback rule** that improvement suggestions should cite 2025–2026 sources. Every item here has citations in its origin chapter.
 
 ---
 
 **Guide complete.** `docs/features/README.md` → `01-architecture.md` → `02-llm-infrastructure.md` → `03-chat.md` → `04-agents-tools.md` → `05-systems.md` → `06-image-generation.md` → `07-image-editor.md` → `08-partner.md` → `09-observability.md` → `10-improvements.md` *(this file)*.
 
-Every major feature of the Local AI Platform is now documented end-to-end, with **74** research-backed improvement ideas cross-referenced into one prioritized plan. Waves 1-6 fully shipped; Wave 7 in progress.
+Every major feature of the Local AI Platform is now documented end-to-end, with **82** research-backed improvement ideas cross-referenced into one prioritized plan. Waves 1-7 fully shipped; Wave 8 in deferred queue.
