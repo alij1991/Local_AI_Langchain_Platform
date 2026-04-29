@@ -294,19 +294,31 @@ ToolAction = Literal[
 # and propagate everywhere automatically. Order matches the
 # Literal's declaration order (Python preserves it since 3.7+);
 # the ``frozenset`` cast in ``KNOWN_EVENTS`` strips ordering.
+#
+# [IMPROVE-106] Tuples are typed ``tuple[<Action>, ...]`` rather
+# than plain ``tuple[str, ...]`` so mypy --strict propagates the
+# Literal-union type from the Literal declaration through the
+# derivation chain. ``get_args`` returns ``tuple[Any, ...]`` per
+# typeshed, so the narrower annotation here is a deliberate
+# refinement (not a cast). Downstream consumers iterating over
+# these tuples see the action union, not just ``str`` — the
+# most useful guard against e.g. ``"send"`` accidentally
+# replacing ``"chat"``.
 
-_AGENT_ACTIONS: tuple[str, ...] = get_args(AgentAction)
-_CHAT_ACTIONS: tuple[str, ...] = get_args(ChatAction)
-_CONFIG_ACTIONS: tuple[str, ...] = get_args(ConfigAction)
-_EDITOR_ACTIONS: tuple[str, ...] = get_args(EditorAction)
-_IMAGE_ACTIONS: tuple[str, ...] = get_args(ImageAction)
-_IMAGES_ACTIONS: tuple[str, ...] = get_args(ImagesAction)
-_INSTRUCT_EDIT_ACTIONS: tuple[str, ...] = get_args(InstructEditAction)
-_MODEL_ACTIONS: tuple[str, ...] = get_args(ModelAction)
-_PARTNER_ACTIONS: tuple[str, ...] = get_args(PartnerAction)
-_PROVIDER_ACTIONS: tuple[str, ...] = get_args(ProviderAction)
-_SYSTEM_ACTIONS: tuple[str, ...] = get_args(SystemAction)
-_TOOL_ACTIONS: tuple[str, ...] = get_args(ToolAction)
+_AGENT_ACTIONS: tuple[AgentAction, ...] = get_args(AgentAction)
+_CHAT_ACTIONS: tuple[ChatAction, ...] = get_args(ChatAction)
+_CONFIG_ACTIONS: tuple[ConfigAction, ...] = get_args(ConfigAction)
+_EDITOR_ACTIONS: tuple[EditorAction, ...] = get_args(EditorAction)
+_IMAGE_ACTIONS: tuple[ImageAction, ...] = get_args(ImageAction)
+_IMAGES_ACTIONS: tuple[ImagesAction, ...] = get_args(ImagesAction)
+_INSTRUCT_EDIT_ACTIONS: tuple[InstructEditAction, ...] = get_args(
+    InstructEditAction,
+)
+_MODEL_ACTIONS: tuple[ModelAction, ...] = get_args(ModelAction)
+_PARTNER_ACTIONS: tuple[PartnerAction, ...] = get_args(PartnerAction)
+_PROVIDER_ACTIONS: tuple[ProviderAction, ...] = get_args(ProviderAction)
+_SYSTEM_ACTIONS: tuple[SystemAction, ...] = get_args(SystemAction)
+_TOOL_ACTIONS: tuple[ToolAction, ...] = get_args(ToolAction)
 
 
 # ── Frozen registry ────────────────────────────────────────────
