@@ -545,6 +545,7 @@ async def obs_timeseries(
     action: str | None = None,
     error_code: str | None = None,
     error_code_prefix: str | None = None,
+    fill_zeros: bool = False,
 ):
     """[IMPROVE-99] Time-series of event counts in fixed buckets.
 
@@ -575,6 +576,20 @@ async def obs_timeseries(
     error codes starting with the LITERAL ``cuda_`` (not
     ``cuda<any>``).
 
+    [IMPROVE-110] ``?fill_zeros=true`` zero-pads empty buckets
+    so the result is a complete time grid from the window-start
+    bucket boundary through to the current bucket. Default
+    ``False`` preserves the IMPROVE-99 lean-payload contract —
+    a 7-day window at 1-minute buckets is 10080 rows, most
+    empty, and the consumer's chart code can fill gaps using
+    its own time grid.
+
+    Set ``fill_zeros=true`` when the consumer is a Flutter
+    chart widget that doesn't want to handle gaps client-side
+    — the API now produces the full grid + zero-counts where
+    no events fired, so the chart renders without per-bucket
+    null-handling code.
+
     Buckets are aligned to UTC clock boundaries via SQLite's
     Unix-epoch arithmetic (cast ``ts`` to seconds, integer-
     divide by ``bucket_minutes * 60``, multiply back). This
@@ -591,22 +606,22 @@ async def obs_timeseries(
     Returns:
         {
           "buckets": [
-            {"bucket_start": "2026-04-29T08:00:00", "count": 12},
-            {"bucket_start": "2026-04-29T08:15:00", "count": 7},
+            {"bucket_start": "2026-04-29 08:00:00", "count": 12},
+            {"bucket_start": "2026-04-29 08:15:00", "count": 7},
             ...
           ],
           "bucket_minutes": 15,
           "window_hours": 24,
           "filters": {"subsystem": null, "action": null,
                       "error_code": "SchemaInvalid",
-                      "error_code_prefix": null}
+                      "error_code_prefix": null,
+                      "fill_zeros": false}
         }
 
-    Empty buckets (no events in that window) are NOT padded —
-    the dashboard is responsible for rendering gaps. Rationale:
-    a 7-day window at 1-minute buckets would be 10080 rows,
-    most empty; the API stays lean and the consumer can fill
-    using its own time grid.
+    NOTE: ``bucket_start`` uses a SPACE separator
+    ("YYYY-MM-DD HH:MM:SS"), matching SQLite's ``datetime()``
+    function output. The IMPROVE-110 zero-fill produces the
+    same format so consumers don't need to handle two shapes.
     """
     # Use ``int(... or default)`` only for None-coercion would
     # collapse ``0`` to the default; clamp explicitly so a user
@@ -663,6 +678,62 @@ async def obs_timeseries(
     try:
         rows = conn.execute(sql, full_params).fetchall()
         buckets = [dict(r) for r in rows]
+
+        if fill_zeros:
+            # [IMPROVE-110] Zero-pad empty buckets to give a
+            # complete time grid from window-start-aligned
+            # boundary to current-bucket-aligned boundary.
+            #
+            # We compute the grid in SQLite (not Python) so the
+            # alignment matches the bucket_start values from
+            # the GROUP BY query EXACTLY — same Unix-epoch
+            # arithmetic, same ``datetime(..., 'unixepoch')``
+            # formatting (space-separated). Doing this in
+            # Python via datetime() risks a 1-second drift
+            # under DST or leap-second handling differences.
+            #
+            # The grid is bounded by:
+            #   start = floor((now - window_hours) / bucket_seconds)
+            #           * bucket_seconds
+            #   end   = floor(now / bucket_seconds)
+            #           * bucket_seconds
+            #
+            # Total bucket count = (end - start) / bucket_seconds + 1.
+            # For window_hours=24, bucket_minutes=15, that's 97
+            # buckets (24h * 4 + 1 for the inclusive boundary).
+            grid_rows = conn.execute(
+                """
+                WITH RECURSIVE grid(b) AS (
+                    SELECT
+                      (CAST(strftime('%s', 'now', ?) AS INTEGER) / ?)
+                      * ?
+                    UNION ALL
+                    SELECT b + ?
+                    FROM grid
+                    WHERE b + ? <=
+                      (CAST(strftime('%s', 'now') AS INTEGER) / ?)
+                      * ?
+                )
+                SELECT datetime(b, 'unixepoch') AS bucket_start
+                FROM grid
+                """,
+                (
+                    since,
+                    bucket_seconds, bucket_seconds,
+                    bucket_seconds, bucket_seconds,
+                    bucket_seconds, bucket_seconds,
+                ),
+            ).fetchall()
+            grid_starts = [r["bucket_start"] for r in grid_rows]
+
+            # Merge: walk the grid + emit either the existing
+            # bucket count OR a zero. Preserves the original
+            # ascending order. O(N) merge.
+            count_map = {b["bucket_start"]: b["count"] for b in buckets}
+            buckets = [
+                {"bucket_start": gs, "count": count_map.get(gs, 0)}
+                for gs in grid_starts
+            ]
     finally:
         conn.close()
 
@@ -675,6 +746,7 @@ async def obs_timeseries(
             "action": action,
             "error_code": error_code,
             "error_code_prefix": error_code_prefix,
+            "fill_zeros": fill_zeros,
         },
     }
 

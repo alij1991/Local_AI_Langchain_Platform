@@ -393,18 +393,19 @@ def test_timeseries_prefix_composes_with_exact_error_code(client):
 def test_timeseries_prefix_filter_echoed_back(client):
     """[IMPROVE-108] error_code_prefix is echoed back in the
     filters dict so dashboards can render badges without
-    re-parsing the URL. The filters dict gains a 4th key
-    (subsystem / action / error_code / error_code_prefix)."""
+    re-parsing the URL.
+
+    [IMPROVE-110] filters dict gains ``fill_zeros`` key — pin
+    the 5-key shape so a future addition lands as a deliberate
+    +1 not a silent mutation."""
     resp = client.get(
         "/observability/timeseries?error_code_prefix=cuda_",
     )
     body = resp.json()
     assert body["filters"]["error_code_prefix"] == "cuda_"
-    # Pin the 4-key shape so a future addition (e.g.
-    # status_prefix) lands as a deliberate +1 not a silent
-    # mutation of the existing four.
     assert set(body["filters"].keys()) == {
-        "subsystem", "action", "error_code", "error_code_prefix",
+        "subsystem", "action", "error_code",
+        "error_code_prefix", "fill_zeros",
     }
 
 
@@ -430,3 +431,135 @@ def test_timeseries_prefix_escapes_underscore_literal(client):
     )
     total = sum(b["count"] for b in resp.json()["buckets"])
     assert total == 1  # only cuda_oom (literal underscore)
+
+
+# ── [IMPROVE-110] /observability/timeseries ?fill_zeros= ───────
+
+
+def test_timeseries_fill_zeros_default_off(client):
+    """[IMPROVE-110] Default ``fill_zeros=false`` preserves the
+    IMPROVE-99 lean payload contract — only buckets with events
+    appear in the response. Pin the default so a forgotten flag
+    doesn't silently 100x the payload size."""
+    db_mod = client._db_mod
+    _insert_event(
+        db_mod, subsystem="agent", action="iso_fill_default",
+    )
+    resp = client.get(
+        "/observability/timeseries"
+        "?subsystem=agent&action=iso_fill_default",
+    )
+    body = resp.json()
+    # Default false echoed back.
+    assert body["filters"]["fill_zeros"] is False
+    # Only the bucket with the inserted event appears (1 bucket).
+    assert len(body["buckets"]) == 1
+    assert body["buckets"][0]["count"] == 1
+
+
+def test_timeseries_fill_zeros_pads_empty_buckets(client):
+    """[IMPROVE-110] ``?fill_zeros=true`` returns a complete
+    time grid from the window-start bucket through the current
+    bucket. For window_hours=2, bucket_minutes=15, that's 9
+    buckets ((2*60)/15 + 1 for the inclusive boundary). The
+    single inserted event lands in one bucket; the other 8 are
+    zero-counts."""
+    db_mod = client._db_mod
+    _insert_event(
+        db_mod, subsystem="agent", action="iso_fill_pad",
+    )
+    resp = client.get(
+        "/observability/timeseries"
+        "?window_hours=2&bucket_minutes=15"
+        "&subsystem=agent&action=iso_fill_pad"
+        "&fill_zeros=true",
+    )
+    buckets = resp.json()["buckets"]
+    # 2h / 15min = 8 + 1 inclusive boundary = 9 buckets
+    assert len(buckets) == 9
+    # Exactly one bucket has the event; rest are zero.
+    non_zero = [b for b in buckets if b["count"] > 0]
+    assert len(non_zero) == 1
+    assert non_zero[0]["count"] == 1
+    # All other buckets are zero-counts (not None / missing).
+    zero_buckets = [b for b in buckets if b["count"] == 0]
+    assert len(zero_buckets) == 8
+
+
+def test_timeseries_fill_zeros_with_no_events(client):
+    """[IMPROVE-110] ``?fill_zeros=true`` with no events in the
+    window returns an all-zeros grid (no events, but the grid
+    still spans the full window). Pin so a chart consumer
+    rendering "0 events over 24 hours" sees the full grid
+    instead of an empty array."""
+    resp = client.get(
+        "/observability/timeseries"
+        "?window_hours=2&bucket_minutes=15"
+        "&subsystem=agent&action=iso_fill_no_events"
+        "&fill_zeros=true",
+    )
+    buckets = resp.json()["buckets"]
+    # Even with no events, the grid is fully populated.
+    assert len(buckets) == 9
+    # Every bucket is a zero-count.
+    assert all(b["count"] == 0 for b in buckets)
+
+
+def test_timeseries_fill_zeros_preserves_event_buckets(client):
+    """[IMPROVE-110] Pad-with-zeros must NOT lose any existing
+    bucket counts. Insert events in 2 distinct buckets (~30 min
+    apart with 15-min buckets), confirm both event-buckets land
+    with their full counts AND empty buckets between them are
+    zero-counts. Pin the merge correctness."""
+    db_mod = client._db_mod
+    # Bucket A: now (counts in current 15-min bucket)
+    _insert_event(
+        db_mod, subsystem="agent", action="iso_fill_preserve",
+        ts_offset_minutes=-1,  # ~now
+    )
+    _insert_event(
+        db_mod, subsystem="agent", action="iso_fill_preserve",
+        ts_offset_minutes=-2,  # ~now (same bucket)
+    )
+    # Bucket B: ~30 min ago (different 15-min bucket)
+    _insert_event(
+        db_mod, subsystem="agent", action="iso_fill_preserve",
+        ts_offset_minutes=-32,
+    )
+    resp = client.get(
+        "/observability/timeseries"
+        "?window_hours=2&bucket_minutes=15"
+        "&subsystem=agent&action=iso_fill_preserve"
+        "&fill_zeros=true",
+    )
+    buckets = resp.json()["buckets"]
+    # Sum across event-buckets must equal total events (3).
+    total = sum(b["count"] for b in buckets)
+    assert total == 3
+    # 2 distinct buckets carry the events; rest are zero.
+    non_zero = [b for b in buckets if b["count"] > 0]
+    assert len(non_zero) == 2
+
+
+def test_timeseries_fill_zeros_grid_aligned_to_bucket_boundaries(client):
+    """[IMPROVE-110] The zero-fill grid uses the SAME UTC
+    alignment as the SQL bucket query — both via Unix-epoch
+    arithmetic. Pin that bucket_start values are aligned
+    (every minute-component is a multiple of bucket_minutes)."""
+    resp = client.get(
+        "/observability/timeseries"
+        "?window_hours=1&bucket_minutes=15"
+        "&subsystem=agent&action=iso_fill_align"
+        "&fill_zeros=true",
+    )
+    buckets = resp.json()["buckets"]
+    # 1h / 15min = 4 + 1 inclusive = 5 buckets.
+    assert len(buckets) == 5
+    # Every bucket_start's minute-component MUST be 0/15/30/45.
+    for b in buckets:
+        # bucket_start is "YYYY-MM-DD HH:MM:SS" SQLite format.
+        minute = int(b["bucket_start"].split(":")[1])
+        assert minute in (0, 15, 30, 45), (
+            f"bucket_start {b['bucket_start']!r} has minute {minute} "
+            f"— not aligned to 15-min boundary"
+        )
