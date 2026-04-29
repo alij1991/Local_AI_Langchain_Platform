@@ -1313,3 +1313,268 @@ def test_readme_documents_schema_version(
         readme = zf.read("README.md").decode("utf-8")
     assert f"Schema version: {BUNDLE_SCHEMA_VERSION}" in readme
     assert "bundle.json" in readme
+
+
+# ── [IMPROVE-98] /partner/import/dry-run ───────────────────────
+
+
+def test_dry_run_returns_summary_with_dry_run_flag_true(
+    tmp_partner_db, tmp_partner_data_dir, stub_engine,
+):
+    """[IMPROVE-98] The dry-run summary carries
+    ``dry_run=True`` so the caller distinguishes "preview"
+    from "real restore" responses."""
+    from local_ai_platform.partner.export import (
+        build_export_bundle, restore_from_bundle,
+    )
+    bundle = build_export_bundle(stub_engine)
+    summary = restore_from_bundle(stub_engine, bundle, dry_run=True)
+    assert summary["dry_run"] is True
+
+
+def test_dry_run_does_not_write_profile_to_disk(
+    tmp_partner_db, tmp_partner_data_dir, stub_engine,
+):
+    """[IMPROVE-98] Pin the no-write contract for profile.json:
+    a dry-run on a bundle MUST NOT overwrite the on-disk
+    profile.json file. The profile_restored field still flips
+    to True (the bundle is valid) but the file isn't touched.
+
+    Comparison checks the profile NAME field (not raw bytes) so
+    the test isn't sensitive to timestamp regeneration in
+    save_profile — that's irrelevant; the no-write contract is
+    about whether the BUNDLE'S name leaked to disk, not about
+    whether save_profile itself emits identical bytes on every
+    call."""
+    from local_ai_platform.partner.export import (
+        build_export_bundle, restore_from_bundle,
+    )
+    from local_ai_platform.partner.profile import (
+        PartnerProfile, save_profile, load_profile, PARTNER_DATA_DIR,
+    )
+    # Build a bundle with persona name "Bundled".
+    bundled = PartnerProfile()
+    bundled.name = "Bundled"
+    save_profile(bundled)
+    stub_engine.profile = bundled
+    bundle = build_export_bundle(stub_engine)
+
+    # Now reset on-disk profile to "Baseline".
+    baseline = PartnerProfile()
+    baseline.name = "Baseline"
+    save_profile(baseline)
+    stub_engine.profile = baseline
+    assert load_profile().name == "Baseline"
+
+    summary = restore_from_bundle(stub_engine, bundle, dry_run=True)
+    assert summary["profile_restored"] is True  # bundle was valid
+    # File on disk MUST still be the baseline — bundle's name
+    # ("Bundled") MUST NOT have leaked through.
+    assert load_profile().name == "Baseline"
+
+
+def test_dry_run_does_not_swap_engine_state(
+    tmp_partner_db, tmp_partner_data_dir, stub_engine,
+):
+    """[IMPROVE-98] Pin the engine-state contract:
+    engine.profile / engine.user_profile MUST NOT be swapped
+    by a dry-run. The route handler relies on this so a Flutter
+    UI calling dry-run between two real operations doesn't see
+    its engine reference shift mid-stream."""
+    from local_ai_platform.partner.export import (
+        build_export_bundle, restore_from_bundle,
+    )
+    bundle = build_export_bundle(stub_engine)
+    profile_before = stub_engine.profile
+    user_profile_before = stub_engine.user_profile
+
+    restore_from_bundle(stub_engine, bundle, dry_run=True)
+
+    assert stub_engine.profile is profile_before
+    assert stub_engine.user_profile is user_profile_before
+
+
+def test_dry_run_skips_sqlite_writes(
+    tmp_partner_db, tmp_partner_data_dir, stub_engine,
+):
+    """[IMPROVE-98] Pin the SQL-write contract: the dry-run
+    must NOT INSERT rows into partner_* tables. A bundle with 5
+    facts run as dry-run leaves the table at its prior count
+    even though tables_restored reports the would-insert
+    count (5)."""
+    from local_ai_platform.partner.export import (
+        build_export_bundle, restore_from_bundle,
+    )
+    _seed_facts(count=3)
+    bundle = build_export_bundle(stub_engine)
+    pre_count = _table_count("partner_core_facts")
+    assert pre_count == 3
+
+    # Wipe the table so a real restore would write 3 rows.
+    from local_ai_platform.partner.memory import _get_conn
+    conn = _get_conn()
+    try:
+        conn.execute("DELETE FROM partner_core_facts")
+        conn.commit()
+    finally:
+        conn.close()
+    assert _table_count("partner_core_facts") == 0
+
+    summary = restore_from_bundle(stub_engine, bundle, dry_run=True)
+    # Summary reflects the WOULD-WRITE count.
+    assert summary["tables_restored"]["facts.jsonl"] == 3
+    # But the table is still empty — no INSERTs happened.
+    assert _table_count("partner_core_facts") == 0
+
+
+def test_dry_run_surfaces_corrupt_jsonl_errors(
+    tmp_partner_db, tmp_partner_data_dir, stub_engine,
+):
+    """[IMPROVE-98] Pin error parity: a corrupt JSONL row in
+    the bundle surfaces in the dry-run errors list with the
+    same shape as a real restore. Lets the Flutter UI show
+    "this bundle has 1 corrupt row, restore would skip it"
+    BEFORE committing."""
+    from local_ai_platform.partner.export import restore_from_bundle
+    # Hand-roll a bundle with a corrupt facts.jsonl line
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w") as zf:
+        zf.writestr(
+            "facts.jsonl",
+            '{"key": "ok", "value": "v1"}\n'
+            "BROKEN JSON LINE\n"
+            '{"key": "ok2", "value": "v2"}\n',
+        )
+    summary = restore_from_bundle(
+        stub_engine, buf.getvalue(), dry_run=True,
+    )
+    assert summary["dry_run"] is True
+    # 2 valid rows would be inserted
+    assert summary["tables_restored"]["facts.jsonl"] == 2
+    # 1 corrupt row surfaces in errors
+    assert any("facts.jsonl:line 2: json parse" in e
+               for e in summary["errors"])
+
+
+def test_dry_run_surfaces_unknown_decay_keys_without_writing(
+    tmp_partner_db, tmp_partner_data_dir, stub_engine,
+):
+    """[IMPROVE-98] Pin error parity for memory_decay.json:
+    a bundle with an unknown decay key surfaces in errors
+    without calling set_decay_config (which would persist).
+    The validation runs against set_decay_config's parameter
+    list via inspect — kept in sync automatically."""
+    from local_ai_platform.partner.export import restore_from_bundle
+    # Hand-roll a bundle with an unknown key in memory_decay.json
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w") as zf:
+        zf.writestr(
+            "memory_decay.json",
+            json.dumps({"unknown_param": 1.5, "importance_floor": 5}),
+        )
+    summary = restore_from_bundle(
+        stub_engine, buf.getvalue(), dry_run=True,
+    )
+    assert summary["memory_decay_restored"] is False
+    assert any("unknown decay config key" in e
+               for e in summary["errors"])
+
+
+def test_dry_run_validates_schema_version_same_as_real_restore(
+    tmp_partner_db, tmp_partner_data_dir, stub_engine,
+):
+    """[IMPROVE-98] Pin schema_version validation parity: a v=2
+    bundle is rejected in dry-run mode the same way as a real
+    restore. The Flutter UI shows the user "this bundle is too
+    new" before they wait for the real restore."""
+    from local_ai_platform.partner.export import restore_from_bundle
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w") as zf:
+        zf.writestr("bundle.json", json.dumps({"schema_version": 2}))
+        zf.writestr("profile.json", json.dumps({"name": "Future"}))
+    summary = restore_from_bundle(
+        stub_engine, buf.getvalue(), dry_run=True,
+    )
+    assert summary["dry_run"] is True
+    assert summary["profile_restored"] is False
+    assert any("schema_version 2" in e for e in summary["errors"])
+
+
+def test_partner_import_dry_run_endpoint_returns_summary(
+    tmp_partner_db, tmp_partner_data_dir, stub_engine, monkeypatch,
+):
+    """[IMPROVE-98] End-to-end pin: POST /partner/import/dry-run
+    accepts a multipart upload + returns the dry-run summary.
+    Mirrors test_partner_import_endpoint_round_trip but with
+    the dry-run endpoint + assertion that no writes occurred."""
+    pytest.importorskip("fastapi")
+    from fastapi.testclient import TestClient
+    from local_ai_platform.api.routers import partner as partner_router
+    from local_ai_platform.partner.export import build_export_bundle
+
+    monkeypatch.setattr(
+        partner_router, "get_partner_engine", lambda: stub_engine,
+    )
+
+    _seed_facts(count=2)
+    bundle = build_export_bundle(stub_engine)
+    pre_count = _table_count("partner_core_facts")
+
+    import api_server
+    with TestClient(api_server.app) as client:
+        resp = client.post(
+            "/partner/import/dry-run",
+            files={"file": ("export.zip", bundle, "application/zip")},
+        )
+    assert resp.status_code == 200
+    summary = resp.json()
+    assert summary["dry_run"] is True
+    assert summary["profile_restored"] is True
+    # Table count should NOT have changed.
+    assert _table_count("partner_core_facts") == pre_count
+
+
+def test_partner_import_dry_run_endpoint_empty_file_returns_400(
+    tmp_partner_db, tmp_partner_data_dir, stub_engine, monkeypatch,
+):
+    """[IMPROVE-98] Pin the empty-file 400 contract for
+    consistency with the production endpoint."""
+    pytest.importorskip("fastapi")
+    from fastapi.testclient import TestClient
+    from local_ai_platform.api.routers import partner as partner_router
+    monkeypatch.setattr(
+        partner_router, "get_partner_engine", lambda: stub_engine,
+    )
+
+    import api_server
+    with TestClient(api_server.app) as client:
+        resp = client.post(
+            "/partner/import/dry-run",
+            files={"file": ("empty.zip", b"", "application/zip")},
+        )
+    assert resp.status_code == 400
+    assert "empty file uploaded" in resp.json()["detail"]
+
+
+def test_partner_import_dry_run_endpoint_oversized_returns_413(
+    tmp_partner_db, tmp_partner_data_dir, stub_engine, monkeypatch,
+):
+    """[IMPROVE-98] Pin the 100 MB cap for the dry-run endpoint
+    matching the production endpoint — protects against memory
+    exhaustion via dry-run abuse."""
+    pytest.importorskip("fastapi")
+    from fastapi.testclient import TestClient
+    from local_ai_platform.api.routers import partner as partner_router
+    monkeypatch.setattr(
+        partner_router, "get_partner_engine", lambda: stub_engine,
+    )
+
+    oversized = b"\x00" * (101 * 1024 * 1024)
+    import api_server
+    with TestClient(api_server.app) as client:
+        resp = client.post(
+            "/partner/import/dry-run",
+            files={"file": ("huge.zip", oversized, "application/zip")},
+        )
+    assert resp.status_code == 413
+    assert "100 MB cap" in resp.json()["detail"]

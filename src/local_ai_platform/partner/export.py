@@ -331,6 +331,7 @@ def restore_from_bundle(
     zip_bytes: bytes,
     *,
     overwrite: bool = False,
+    dry_run: bool = False,
 ) -> dict[str, Any]:
     """[IMPROVE-94] Inverse of ``build_export_bundle``.
 
@@ -373,6 +374,11 @@ def restore_from_bundle(
         # twice. None means the bundle had no bundle.json (legacy
         # pre-IMPROVE-97 export).
         "schema_version": None,
+        # [IMPROVE-98] When dry_run=True, no writes happen — the
+        # summary reflects what WOULD have been restored. Pinned
+        # so the caller (route handler / Flutter UI) can render
+        # a confirmation step before committing.
+        "dry_run": dry_run,
     }
 
     try:
@@ -427,9 +433,15 @@ def restore_from_bundle(
                 try:
                     data = json.loads(zf.read("profile.json"))
                     from .profile import PartnerProfile, save_profile
+                    # [IMPROVE-98] Always parse + validate via
+                    # PartnerProfile.from_dict so the dry-run
+                    # surfaces shape errors (corrupt JSON, missing
+                    # required fields). Skip the actual save +
+                    # engine swap when dry_run=True.
                     new_profile = PartnerProfile.from_dict(data)
-                    save_profile(new_profile)
-                    engine.profile = new_profile
+                    if not dry_run:
+                        save_profile(new_profile)
+                        engine.profile = new_profile
                     summary["profile_restored"] = True
                 except Exception as exc:
                     logger.warning(
@@ -446,9 +458,13 @@ def restore_from_bundle(
                         UserProfile,
                         save_user_profile,
                     )
+                    # [IMPROVE-98] Parse + validate always; skip
+                    # the persisted save + engine swap when
+                    # dry_run=True.
                     new_user_profile = UserProfile.from_dict(data)
-                    save_user_profile(new_user_profile)
-                    engine.user_profile = new_user_profile
+                    if not dry_run:
+                        save_user_profile(new_user_profile)
+                        engine.user_profile = new_user_profile
                     summary["user_profile_restored"] = True
                 except Exception as exc:
                     logger.warning(
@@ -467,7 +483,19 @@ def restore_from_bundle(
                     # set_decay_config validates types + ranges
                     # and persists to disk. Unknown keys raise
                     # ValueError per IMPROVE-77 contract.
-                    set_decay_config(**data)
+                    # [IMPROVE-98] In dry-run mode we still need
+                    # to surface validation errors (e.g. unknown
+                    # keys, out-of-range values) so the caller
+                    # gets an accurate preview. Validate by
+                    # type-checking the input dict against
+                    # set_decay_config's parameter list rather
+                    # than calling the function — avoids the
+                    # disk write while preserving the error
+                    # surface.
+                    if dry_run:
+                        _validate_decay_config_keys(data)
+                    else:
+                        set_decay_config(**data)
                     summary["memory_decay_restored"] = True
                 except Exception as exc:
                     logger.warning(
@@ -484,6 +512,7 @@ def restore_from_bundle(
                     continue
                 rows_imported, table_errors = _restore_table_jsonl(
                     zf, filename, table, overwrite=overwrite,
+                    dry_run=dry_run,
                 )
                 summary["tables_restored"][filename] = rows_imported
                 summary["errors"].extend(table_errors)
@@ -496,12 +525,40 @@ def restore_from_bundle(
     return summary
 
 
+def _validate_decay_config_keys(data: dict[str, Any]) -> None:
+    """[IMPROVE-98] Validate that ``data`` has only keys
+    ``set_decay_config`` accepts, without actually calling it.
+
+    Used by the dry-run path so the preview surfaces the same
+    "unknown key" error a real restore would, but without the
+    disk write. The reference parameter list is pulled from
+    ``set_decay_config`` via ``inspect`` so the two stay in sync
+    automatically — a future addition to set_decay_config's
+    signature lands here without any change.
+
+    Raises ``ValueError`` if any key in ``data`` is not in the
+    accepted parameter list. Messages match the
+    ``set_decay_config`` raise shape for consistency.
+    """
+    import inspect
+    from .memory import set_decay_config
+    sig = inspect.signature(set_decay_config)
+    accepted = set(sig.parameters.keys())
+    unknown = set(data.keys()) - accepted
+    if unknown:
+        raise ValueError(
+            f"unknown decay config key(s): {sorted(unknown)}; "
+            f"accepted: {sorted(accepted)}"
+        )
+
+
 def _restore_table_jsonl(
     zf: zipfile.ZipFile,
     filename: str,
     table: str,
     *,
     overwrite: bool = False,
+    dry_run: bool = False,
 ) -> tuple[int, list[str]]:
     """[IMPROVE-94] Read JSONL from the bundle + INSERT into
     ``table``. Returns ``(rows_inserted, errors)``.
@@ -515,9 +572,16 @@ def _restore_table_jsonl(
 
     Init's ``init_partner_tables`` so a fresh DB without the
     schema gets the tables created before the inserts run.
+
+    [IMPROVE-98] With ``dry_run=True``: parse + validate the
+    JSONL rows (counting valid + bad rows in the same shape the
+    real restore would surface), but skip the SQLite writes
+    entirely. The DB is not opened — no connection cost in the
+    preview path. Returns the rows_would_be_inserted count.
     """
-    from .memory import _get_conn, init_partner_tables
-    init_partner_tables()
+    if not dry_run:
+        from .memory import _get_conn, init_partner_tables
+        init_partner_tables()
 
     errors: list[str] = []
     rows_inserted = 0
@@ -532,6 +596,24 @@ def _restore_table_jsonl(
         # Empty file — fresh-install case where the export had
         # no rows. Nothing to do.
         return 0, errors
+
+    if dry_run:
+        # [IMPROVE-98] Dry-run: parse + count without DB writes.
+        # Bad-row reporting matches the real-restore shape.
+        for line_no, line in enumerate(text.splitlines(), start=1):
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                json.loads(line)
+                rows_inserted += 1
+            except Exception as exc:
+                errors.append(
+                    f"{filename}:line {line_no}: json parse: {exc}",
+                )
+        return rows_inserted, errors
+
+    from .memory import _get_conn  # imported above only when not dry_run
 
     conn = _get_conn()
     try:

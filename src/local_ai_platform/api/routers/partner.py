@@ -501,6 +501,61 @@ async def partner_import(
     return summary
 
 
+@router.post("/partner/import/dry-run")
+async def partner_import_dry_run(
+    file: UploadFile = File(...),
+    partner=Depends(get_partner_engine),
+):
+    """[IMPROVE-98] Pre-restore preview of a bundle WITHOUT
+    writing.
+
+    Returns the same summary shape ``POST /partner/import``
+    would, but skips every persistence step:
+
+      * ``profile.json`` is parsed (so shape errors surface)
+        but ``save_profile`` + engine swap are skipped.
+      * ``user_profile.json`` likewise — parsed but not saved.
+      * ``memory_decay.json`` is validated against
+        ``set_decay_config`` accepted-key list (via inspect)
+        but the function is NOT called; no disk write.
+      * SQLite tables are read + JSONL rows are parsed +
+        counted, but no DB connection is opened — INSERT is
+        skipped.
+
+    The summary's ``dry_run`` field is True so the caller can
+    distinguish "preview" from "real restore" responses. All
+    other fields (profile_restored / tables_restored /
+    schema_version / errors) match the real restore output —
+    same shape errors, same row counts, same version surfaced.
+
+    Per Q3=A in the Wave 10 plan: separate route (cleaner than
+    a query-param flag on the existing endpoint). The size cap
+    (100 MB) and empty-file check (400) match the production
+    endpoint so a user can swap dry-run → import without
+    surprises.
+
+    Use case: Flutter UI uploads the bundle once, calls
+    /dry-run first to render a "this bundle has 12 facts +
+    230 messages, restore?" confirmation, then calls /import
+    if the user confirms. Avoids surprise overwrites and lets
+    users sanity-check the bundle before committing.
+    """
+    zip_bytes = await file.read()
+    if not zip_bytes:
+        raise HTTPException(400, "empty file uploaded")
+    if len(zip_bytes) > 100 * 1024 * 1024:
+        raise HTTPException(
+            413, f"bundle exceeds 100 MB cap ({len(zip_bytes)} bytes)",
+        )
+
+    from local_ai_platform.partner.export import restore_from_bundle
+
+    summary = restore_from_bundle(
+        partner, zip_bytes, dry_run=True,
+    )
+    return summary
+
+
 @router.delete("/partner/profile/{scope}")
 async def partner_reset_scope(
     scope: str,
