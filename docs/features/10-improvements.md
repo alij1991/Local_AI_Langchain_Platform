@@ -1,16 +1,16 @@
 # 10 — Improvement Roadmap
 
-> **Goal of this chapter:** a single consolidated view of the **70 improvement ideas** surfaced across chapters 1–9 (now **85** post Wave 8 mid-wave), scored for impact and effort, grouped by theme, and laid out in a phased roadmap. Every idea here is grounded in a 2025–2026 source — the citations are in each chapter; this doc focuses on *what to do when*.
+> **Goal of this chapter:** a single consolidated view of the **70 improvement ideas** surfaced across chapters 1–9 (now **88** post Wave 8), scored for impact and effort, grouped by theme, and laid out in a phased roadmap. Every idea here is grounded in a 2025–2026 source — the citations are in each chapter; this doc focuses on *what to do when*.
 
-> **Revised 2026-04-28** — Wave 5 shipped (12 commits: IMPROVE-29/31/33/34/35/36/51/52/53/54/55/56/57/63/67). Wave 6 shipped (12 commits, 8 table-rows: IMPROVE-71/72/8 + Tranche-C 5×telemetry + IMPROVE-73/46/74/61). Wave 7 shipped (8 commits + 1 test-fix + 2 doc commits: IMPROVE-NEW-4/11/12/13/14/16/17/18 promoted to IMPROVE-75/76/77/78/79/80/81/82, plus a deterministic-counter fix for the IMPROVE-36 parallel-wave speedup test). Wave 8 in progress (3 of 7 commits shipped: IMPROVE-83/84/85; see §10.5 Wave 8).
+> **Revised 2026-04-28** — Wave 5 shipped (12 commits: IMPROVE-29/31/33/34/35/36/51/52/53/54/55/56/57/63/67). Wave 6 shipped (12 commits, 8 table-rows: IMPROVE-71/72/8 + Tranche-C 5×telemetry + IMPROVE-73/46/74/61). Wave 7 shipped (8 commits + 1 test-fix + 2 doc commits: IMPROVE-NEW-4/11/12/13/14/16/17/18 promoted to IMPROVE-75/76/77/78/79/80/81/82, plus a deterministic-counter fix for the IMPROVE-36 parallel-wave speedup test). Wave 8 shipped (6 numbered + 2 doc commits: IMPROVE-83/84/85/86/87/88 — streaming parallel-wave parity, inter-node-context migration, /systems/* rejection telemetry mirror, per-byte hf_hub_download progress, VRAM-probe telemetry + decay-export bundle, graph-time DAG validation). Wave 9 in deferred queue.
 
 ---
 
 ## 10.1 Summary
 
-- **85 improvements** flagged inline as `[IMPROVE-N]` in chapters 1–9 + the Wave 5/6/7/8 audits (NEW from Wave 6 audit: 71/72/73/74; NEW from Wave 7: 75/76/77/78/79/80/81/82; NEW from Wave 8: 83/84/85, with 86/87/88 queued).
+- **88 improvements** flagged inline as `[IMPROVE-N]` in chapters 1–9 + the Wave 5/6/7/8 audits (NEW from Wave 6 audit: 71/72/73/74; NEW from Wave 7: 75/76/77/78/79/80/81/82; NEW from Wave 8: 83/84/85/86/87/88).
 - **10 themes** — security, architecture, observability, tracing, UX, memory & context, model & inference, background tasks, voice, and tools/MCP.
-- **7 waves** fully shipped (Waves 1-7); **1** in progress (Wave 8: 3 of 7 commits shipped); future Wave 9 holds carry-overs from the Wave 7/8 deferred queues.
+- **8 waves** shipped (Waves 1-8); **1** standing in deferred queues (post-Wave-8 backlog → Wave 9).
 
 All improvements are traceable back to a chapter + a 2025–2026 citation. This chapter is pure planning — *what* + *why this order*; *how* is in each origin chapter.
 
@@ -178,7 +178,7 @@ Smaller items that improve day-to-day use.
 
 ---
 
-## 10.4 The complete table (all 85)
+## 10.4 The complete table (all 88)
 
 Sortable if you paste into a spreadsheet. Chapter column links back to the originating doc.
 
@@ -269,10 +269,13 @@ Sortable if you paste into a spreadsheet. Chapter column links back to the origi
 | 83 | 11 | ✓ Streaming parallel-wave pre-pass (parity with sync) | ⋆⋆⋆ | 🔨🔨 | UX |
 | 84 | 11 | ✓ Migrate inter-node-context primitives to systems/executor | ⋆⋆ | 🔨 | Architecture |
 | 85 | 11 | ✓ /systems/* validation rejection telemetry (mirror IMPROVE-82) | ⋆⋆ | 🔨 | Observability |
+| 86 | 12 | ✓ Per-byte progress for hf_hub_download (filesystem watcher) | ⋆⋆⋆ | 🔨🔨 | UX |
+| 87 | 12 | ✓ VRAM probe telemetry + memory_decay.json export bundle | ⋆⋆ | 🔨 | Observability |
+| 88 | 12 | ✓ Graph-time DAG validation (tiered warn/block) | ⋆⋆⋆ | 🔨🔨 | Architecture |
 
 *Impact for [IMPROVE-59] is ⋆⋆⋆⋆⋆ if the app is ever distributed, ⋆⋆ if it stays local-only.
 
-**Legend:** A ``✓`` prefix marks items that have shipped. See §10.6 for the Wave 5 / 6 / 7 retrospective.
+**Legend:** A ``✓`` prefix marks items that have shipped. See §10.6 for the Wave 5 / 6 / 7 / 8 retrospective.
 
 ---
 
@@ -453,56 +456,84 @@ graduated to permanent IMPROVE-75/76/77/78/79/80/81/82 on shipping.
 Source-level comments retain the IMPROVE-NEW-* tags for grep stability
 with the commit history.
 
-### Wave 8 — In progress (3 of 7 commits shipped 2026-04-28)
+### Wave 8 — Closure of Wave 7 follow-ups + new lint surface (✓ shipped 2026-04-28)
 
 **MCP items still demoted per Q3 (aspirational, post-Wave-5 reassessment confirms).**
 
-Theme: close out the four Wave-7-spawned follow-ups + bundled
-telemetry/persistence polish + one forward-pull (graph-time DAG
-validation, NEW-6 refinement). Q1=B (refactor-share helper),
-Q2=B (full sweep, no shim), Q3=C (tiered warn/block for graph-time
-lint), Q4=A (filesystem watcher), Q5=B (mid + end-wave doc commits).
-
-#### Shipped so far
+Theme: close out the four Wave-7-spawned follow-ups (streaming
+parallel-wave parity, inter-node-context migration, /systems/*
+rejection telemetry mirror, per-byte hf_hub_download progress)
++ bundled telemetry/persistence polish (vram-probe + decay-export)
++ one forward-pull (graph-time DAG validation, NEW-6 tightened).
+Q1=B (refactor-share helper), Q2=B (full sweep, no shim),
+Q3=C (tiered warn/block for graph-time lint), Q4=A (filesystem
+watcher), Q5=B (mid + end-wave doc commits).
 
 | # | Tag | SHA | What landed | Tests |
 |---|---|---|---|---:|
-| 1 | [IMPROVE-83] | a11b485 | Streaming parallel-wave pre-pass (extract `_run_parallel_wave_or_fallback` shared helper; `astream_graph` parity with `execute_graph`) | +9 |
-| 2 | [IMPROVE-84] | b4c71dc | Migrate `_build_inter_node_context` + budget constant from agents.py to systems/executor.py (full sweep, no shim) | +3 |
-| 3 | [IMPROVE-85] | ec1465a | /systems/* validation rejection telemetry — `system.validation_rejected` event mirrors IMPROVE-82 | +5 |
+| 1 | [IMPROVE-83] | a11b485 | Streaming parallel-wave pre-pass — extract `_run_parallel_wave_or_fallback` shared helper; `astream_graph` parity with `execute_graph` | +9 |
+| 2 | [IMPROVE-84] | b4c71dc | Migrate `_build_inter_node_context` + budget constant + `_estimate_tokens` from agents.py to systems/executor.py (full sweep, no shim per Q2=B) | +3 |
+| 3 | [IMPROVE-85] | ec1465a | /systems/* validation rejection telemetry — `system.validation_rejected` event mirrors IMPROVE-82's /agents/* pattern | +5 |
+| 4 | (doc)        | 5eb5860 | Wave 8 mid-wave status — IMPROVE-83/84/85 shipped | 0 |
+| 5 | [IMPROVE-86] | c5f24ff | Per-byte progress for `hf_hub_download` via filesystem watcher (closes IMPROVE-8 GGUF small-files gap; version-independent per Q4=A) | +9 |
+| 6 | [IMPROVE-87] | a545164 | VRAM probe telemetry (`image.vram_probe`) + memory_decay.json in partner export ZIP (bundled W7 follow-ups from IMPROVE-77/79) | +10 |
+| 7 | [IMPROVE-88] | e79fdb8 | Graph-time DAG validation — unreachable/dead-end (warn) + orphan llm_router edges (block at save) per Q3=C tiered | +30 |
+| 8 | (doc)        | this    | Wave 8 retrospective + Wave 9 deferred queue | 0 |
 
-Net so far: +17 tests over Wave 8 (1275 → 1292). agents.py
-shrank a further 5.2% (1587 → 1505 LoC), bringing the
-Wave-7-anchor total reduction to 35.4% (2326 → 1505).
+Net: +66 tests over Wave 8 (1275 → 1341). 8 commits including
+the two doc commits; 6 numbered IMPROVE-N items.
 
-#### Remaining queue (4 commits)
-
-- [IMPROVE-86] Per-byte progress for ``hf_hub_download``
-  (filesystem watcher) — the GGUF small-files gap from
-  IMPROVE-8. Q4=A: filesystem watcher (version-independent).
-- [IMPROVE-87] VRAM probe telemetry + memory_decay.json in
-  partner export ZIP (bundled, mirrors W7's IMPROVE-77 +
-  IMPROVE-79 spawned-followups).
-- [IMPROVE-88] Graph-time DAG validation — unreachable nodes,
-  dead-end nodes, orphaned llm_router edges. Q3=C: tiered
-  (warn for unreachable/dead-end, block at save for orphan
-  edges).
-- (doc) Wave 8 retrospective + Wave 9 deferred queue.
-
-#### Deferred to Wave 9
+### Wave 9 — Deferred (queued for next iteration)
 
 Carried-over NEW candidates that didn't promote in Wave 8:
 - [IMPROVE-NEW-2] Unify token-budget primitive (waits for Tranche D)
 - [IMPROVE-NEW-5] Voice/optimization/weights → registry files
 - [IMPROVE-NEW-6] LangGraph-style graph-time validation
-  (FOLDED IN: IMPROVE-88 in Wave 8 covers a tightened scope).
+  (FOLDED IN: IMPROVE-88 covers the tightened scope; broader
+  semantic checks deferred until more graph-time issues surface)
 - [IMPROVE-NEW-7] HF accelerate offload manager probe
 - [IMPROVE-NEW-8] OpenAI / Anthropic SDK contract refresh
 - [IMPROVE-NEW-10] Per-feature smoke fixtures
-- Bulk emit_typed migration (74 callsites across 7 files)
-- Tile-based upscaling for latent/sdxl_x4 (IMPROVE-79 follow-up)
-- Per-subsystem Literal + overload for emit_typed action
-- Per-event Pydantic context schemas
+
+NEW candidates surfaced by Wave 8 work (eligible for Wave 9):
+- Bulk emit_typed migration (74 bare emit() callsites across 7
+  files — registry's typed front door is the contract; today
+  most callsites use bare emit because Wave 7 left migration
+  opportunistic).
+- Tile-based upscaling for latent/sdxl_x4 (IMPROVE-79 spawned
+  follow-up; high impact for >2k inputs but separate from W8
+  closeout theme).
+- Per-subsystem Literal + overload for emit_typed action arg
+  (IMPROVE-80 spawned follow-up; mypy catches action typos at
+  lint time).
+- Per-event Pydantic context schemas (IMPROVE-80 spawned
+  follow-up; turns the registry into a typed contract).
+- Per-rejection counter in /observability/summary surfacing
+  ``count(*.validation_rejected GROUP BY error_code)``.
+- /partner/import endpoint (Tranche G; the W8 export bundle
+  now includes memory_decay.json so the round-trip needs the
+  consumer side).
+- Graph-time visualisation in the editor (Flutter panel
+  rendering unreachable/dead-end markers) — Tranche A
+  candidate.
+
+Wave 5 spawned follow-ups still deferred (organized into
+themed tranches):
+- Tranche A — Flutter editor v2 (~3d): recently-closed panel,
+  preset gallery, mask brush UI, blend slider, metrics overlay.
+  Now also includes decay-preset slider (IMPROVE-78) +
+  graph-time DAG-lint visualisation (IMPROVE-88).
+- Tranche B — Voice persistence (~1d): persist voice_id/gender,
+  pre-rendered samples, per-emotion voice variants.
+- Tranche D — System DAG enrichments (~3d): LLM-summarized
+  inter-node context, per-edge "pass" config, classifier
+  confidence threshold.
+- Tranche E — Editor advanced (~2d): TTL cleanup cron, LPIPS
+  metric, per-step metrics caching, cropped-patch optimization.
+- Tranche F — Real-world evals (~2d): real-LLM enhancer eval
+  suite at tests/eval/edit_prompt_enhancer.py.
+- Tranche G — Persistence + import (~1d): preset sharing/JSON
+  export, preset versioning, POST /partner/import.
 
 Wave 5 spawned follow-ups still deferred (organized into
 themed tranches):
@@ -535,14 +566,15 @@ Original carry-overs (still demoted):
 
 ---
 
-## 10.6 Wave 5 + Wave 6 + Wave 7 retrospective
+## 10.6 Wave 5 + Wave 6 + Wave 7 + Wave 8 retrospective
 
 > **Status as of 2026-04-28:** Wave 5 fully shipped (12 commits, +216
 > tests). Wave 6 fully shipped (12 commits, +118 tests across 8
 > table-rows; Tranche C compresses 5 sub-commits into row 4).
 > Wave 7 fully shipped (8 numbered + 1 test-fix + 2 doc commits =
-> 11 total, +66 tests). Tier 1 baseline grew 875 → 1275 passes
-> over Waves 5-7. All 4 xfailed agent tests resolved
+> 11 total, +66 tests). Wave 8 fully shipped (6 numbered + 2 doc
+> commits = 8 total, +66 tests). Tier 1 baseline grew 875 → 1341
+> passes over Waves 5-8. All 4 xfailed agent tests resolved
 > post-IMPROVE-71.
 
 ### Wave 5 (✓ shipped)
@@ -590,10 +622,26 @@ Original carry-overs (still demoted):
 | 6 | [IMPROVE-79] | 817a771 | Pre-flight VRAM probe for sdxl_x4 / latent upscalers (avoids ~30s download + load on small cards) | +10 |
 | 7 | [IMPROVE-75] | 34640b6 | Extract system DAG executor from agents.py — single source of truth for sync + streaming + classifier helper. agents.py shrank 2326 → 1587 LoC (-32%) | +7 |
 | 8 | [IMPROVE-81/82] | 77aaf6b | Duplicate-route lint (sister to IMPROVE-72) + /agents/* rejection telemetry (validation_rejected, protected_delete_blocked) | +14 |
-| 9 | (doc)        | this    | Wave 7 retrospective + Wave 8 deferred queue | 0 |
+| 9 | (doc)        | bd543b4 | Wave 7 retrospective + Wave 8 deferred queue | 0 |
 
 Net: +66 tests over Wave 7 (1209 → 1275). 12 commits including
 the test-fix and the two doc commits; 8 numbered IMPROVE-N items.
+
+### Wave 8 (✓ shipped)
+
+| # | Tag | SHA | What landed | Tests |
+|---|---|---|---|---:|
+| 1 | [IMPROVE-83] | a11b485 | Streaming parallel-wave pre-pass — extract `_run_parallel_wave_or_fallback` shared helper; `astream_graph` parity with `execute_graph` (per Q1=B refactor-share) | +9 |
+| 2 | [IMPROVE-84] | b4c71dc | Migrate `_build_inter_node_context` + budget constant + `_estimate_tokens` from agents.py to systems/executor.py (per Q2=B full sweep, no shim) | +3 |
+| 3 | [IMPROVE-85] | ec1465a | /systems/* validation rejection telemetry — `system.validation_rejected` event, mirror of IMPROVE-82's /agents/* pattern | +5 |
+| 4 | (doc)        | 5eb5860 | Wave 8 mid-wave status — IMPROVE-83/84/85 shipped (per Q5=B mid + end-wave doc cadence) | 0 |
+| 5 | [IMPROVE-86] | c5f24ff | Per-byte progress for `hf_hub_download` via filesystem watcher (closes IMPROVE-8 GGUF small-files gap; per Q4=A version-independent watcher) | +9 |
+| 6 | [IMPROVE-87] | a545164 | VRAM probe telemetry (`image.vram_probe`) + `memory_decay.json` in partner export ZIP (bundled W7 follow-ups from IMPROVE-77/79) | +10 |
+| 7 | [IMPROVE-88] | e79fdb8 | Graph-time DAG validation — unreachable/dead-end (warn) + orphan llm_router edges (block at save) per Q3=C tiered enforcement | +30 |
+| 8 | (doc)        | this    | Wave 8 retrospective + Wave 9 deferred queue | 0 |
+
+Net: +66 tests over Wave 8 (1275 → 1341). 8 commits including
+the two doc commits; 6 numbered IMPROVE-N items.
 
 ### Wave 7 architectural impact
 
@@ -622,11 +670,55 @@ the test-fix and the two doc commits; 8 numbered IMPROVE-N items.
     non-technical users pick "memory persistence" without
     learning the five tunable fields.
 
+### Wave 8 architectural impact
+
+  * agents.py shrank a further 5.2% (1587 → 1505 LoC) via
+    [IMPROVE-84]'s inter-node-context migration, bringing the
+    Wave-7-anchor cumulative reduction to 35.4% (2326 → 1505).
+    systems/executor.py is now self-contained — no lazy imports
+    back to agents.py — and the keystone test
+    ``test_executor_does_not_lazy_import_inter_node_helpers_from_agents``
+    pins the discipline.
+  * Sync + streaming DAG executors are NOW byte-equivalent on
+    parallel-wave behaviour via [IMPROVE-83]'s shared
+    ``_run_parallel_wave_or_fallback`` helper. A diamond DAG
+    with three siblings overlaps under both ``execute_graph``
+    AND ``astream_graph`` when ``parallel_waves: True``;
+    pre-IMPROVE-83 the streaming path serialised silently. The
+    helper is the structural defence against the kind of drift
+    that bit IMPROVE-35 (3-tuple/4-tuple ``edge_map`` shape).
+  * Validation rejection telemetry now spans BOTH boundaries:
+    ``agent.validation_rejected`` (IMPROVE-82) +
+    ``system.validation_rejected`` (IMPROVE-85) +
+    ``system.validation_rejected error_code=OrphanLlmRouterEdge``
+    (IMPROVE-88). Dashboards charting "% of saves rejected" can
+    now drill into the per-cause distribution without grepping
+    logs.
+  * GGUF + single-file HF download progress now reports per-byte
+    via [IMPROVE-86]'s filesystem watcher — the IMPROVE-8 gap
+    that left users staring at a binary 0/1 progress for ~5 GB
+    GGUF fetches is closed. The watcher polls
+    ``HF_HUB_CACHE/models--<repo>/blobs/*.incomplete`` files,
+    which is stable across huggingface_hub releases (no private
+    API dependency).
+  * Save-time graph-time DAG-lint (IMPROVE-88) splits unreachable
+    + dead-end (warn-only, lifespan log) from orphan llm_router
+    edges (block at save with structured 400). The two real-app
+    pins (test_real_persisted_systems_have_no_orphan_llm_router_edges
+    + the existing route-lint pins) catch a save-time regression
+    before any user run hits it.
+  * Wave 7's emit_typed registry has now seen four real-world
+    extensions across Wave 8 (validation_rejected for /systems/*,
+    image.vram_probe, plus reuse for IMPROVE-88's error_code
+    discriminator). Pattern is settled; bulk migration of the
+    74 remaining bare-emit() callsites is the natural Wave 9
+    follow-up.
+
 ### Where to start today
 
-Wave 1-7 is shipped — pick up an item from §10.5 Wave 8 (the
-deferred queue: IMPROVE-NEW-* candidates 2/5/6/7/8/10 + the
-new Wave-7-spawned items + themed tranches A/B/D/E/F/G).
+Wave 1-8 is shipped — pick up an item from §10.5 Wave 9 (the
+deferred queue: IMPROVE-NEW-* candidates 2/5/7/8/10 + the
+Wave-8-spawned items + themed tranches A/B/D/E/F/G).
 
 ---
 
@@ -676,12 +768,12 @@ Answer whichever are easy. The roadmap is shaped enough to make progress on Wave
 ## 10.8 Where to go from here
 
 - **Read chapter 1 → 9 if you haven't.** This chapter is the index; the others have the details.
-- **Pick a Wave 8 item and ship it** — see §10.5 Wave 8 (NEW candidates IMPROVE-NEW-2/5/6/7/8/10 + Wave-7-spawned items + themed tranches A/B/D/E/F/G + carry-overs).
-- **Keep `[IMPROVE-N]` references alive.** When you fix one, grep `docs/features/` for that ID and cross out. If you add new ones in future work, number them IMPROVE-83+ (1-82 are taken; the IMPROVE-NEW-* tags graduate to permanent numbers on acceptance) and note them in the originating chapter.
+- **Pick a Wave 9 item and ship it** — see §10.5 Wave 9 (NEW candidates IMPROVE-NEW-2/5/7/8/10 + Wave-8-spawned items + themed tranches A/B/D/E/F/G + carry-overs).
+- **Keep `[IMPROVE-N]` references alive.** When you fix one, grep `docs/features/` for that ID and cross out. If you add new ones in future work, number them IMPROVE-89+ (1-88 are taken; the IMPROVE-NEW-* tags graduate to permanent numbers on acceptance) and note them in the originating chapter.
 - **The `MEMORY.md` in `~/.claude/projects/...` contains the feedback rule** that improvement suggestions should cite 2025–2026 sources. Every item here has citations in its origin chapter.
 
 ---
 
 **Guide complete.** `docs/features/README.md` → `01-architecture.md` → `02-llm-infrastructure.md` → `03-chat.md` → `04-agents-tools.md` → `05-systems.md` → `06-image-generation.md` → `07-image-editor.md` → `08-partner.md` → `09-observability.md` → `10-improvements.md` *(this file)*.
 
-Every major feature of the Local AI Platform is now documented end-to-end, with **85** research-backed improvement ideas cross-referenced into one prioritized plan. Waves 1-7 fully shipped; Wave 8 in progress (3 of 7 commits shipped 2026-04-28).
+Every major feature of the Local AI Platform is now documented end-to-end, with **88** research-backed improvement ideas cross-referenced into one prioritized plan. Waves 1-8 fully shipped; Wave 9 in deferred queue.
