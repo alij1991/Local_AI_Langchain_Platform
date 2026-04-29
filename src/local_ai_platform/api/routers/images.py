@@ -1371,6 +1371,24 @@ def upscale_image_endpoint(
     """Upscale an image. Methods: ``realesrgan`` (default, fast),
     ``lanczos`` (CPU fallback), ``latent`` (2x diffusers, [IMPROVE-46]),
     ``sdxl_x4`` (4x diffusers, [IMPROVE-46]).
+
+    [IMPROVE-117] Optional ``tile_size_override`` body field for
+    the diffusers paths (``latent`` / ``sdxl_x4``). When set, it
+    BYPASSES the [IMPROVE-100] band calibration that picks
+    ``tile_sample_min_size`` based on output resolution. Per
+    Q5=A in the Wave 13 plan: override always wins, INCLUDING
+    below the 256 floor. This is a power-user knob — passing
+    a tiny value like 128 trades aggressive seam-control for
+    higher per-tile VRAM pressure (can OOM); passing a large
+    value like 2048 reduces seam control but speeds inference.
+    No clamping — the operator decides. Falls through to the
+    band calibration when the field is absent.
+
+    The override is silently ignored on the realesrgan / lanczos
+    methods (they don't use VAE tiling at all). Bundles
+    metadata.tile_size_overridden=True when the override was
+    used (for dashboards charting "% of upscales bypassing
+    calibration").
     """
     image_id = body.get("image_id", "")
     session_id = body.get("session_id", "")
@@ -1379,6 +1397,36 @@ def upscale_image_endpoint(
     # [IMPROVE-46] Method picker. Pre-IMPROVE-46 callers (no method
     # field) get realesrgan as before — backward compat.
     method = (body.get("method") or "realesrgan").lower().strip()
+    # [IMPROVE-117] Optional power-user knob. None means
+    # "fall through to IMPROVE-100 band calibration".
+    tile_size_override_raw = body.get("tile_size_override")
+    tile_size_override: int | None = None
+    if tile_size_override_raw is not None:
+        try:
+            tile_size_override = int(tile_size_override_raw)
+        except (TypeError, ValueError):
+            raise HTTPException(
+                400,
+                {"error": {
+                    "code": "invalid_tile_size_override",
+                    "message": (
+                        f"tile_size_override must be int, "
+                        f"got {type(tile_size_override_raw).__name__}: "
+                        f"{tile_size_override_raw!r}"
+                    ),
+                }},
+            )
+        if tile_size_override <= 0:
+            raise HTTPException(
+                400,
+                {"error": {
+                    "code": "invalid_tile_size_override",
+                    "message": (
+                        f"tile_size_override must be positive, "
+                        f"got {tile_size_override}"
+                    ),
+                }},
+            )
 
     # Resolve image path from ID
     image_path = ""
@@ -1397,6 +1445,7 @@ def upscale_image_endpoint(
 
     result = image_service.upscale_image(
         image_path=image_path, prompt=prompt, scale=scale, method=method,
+        tile_size_override=tile_size_override,
     )
     if not result.ok:
         # [IMPROVE-46] invalid_method is a client error (400) not

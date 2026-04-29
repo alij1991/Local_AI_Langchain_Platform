@@ -6157,6 +6157,7 @@ class ImageGenerationService:
         scale: int = 4,
         method: str = "realesrgan",
         timeout_sec: int | None = None,
+        tile_size_override: int | None = None,
     ) -> ImageRuntimeResult:
         """Upscale an image using ML super-resolution.
 
@@ -6203,7 +6204,10 @@ class ImageGenerationService:
         if method_norm == "latent":
             ok, avail_gb, req_gb, _reason = self._probe_vram_for_method("latent")
             if ok:
-                return self._upscale_latent(img=img, prompt=prompt)
+                return self._upscale_latent(
+                    img=img, prompt=prompt,
+                    tile_size_override=tile_size_override,
+                )
             # [IMPROVE-93] Per Q3=C: regular probe failed → retry
             # the probe at the LOWER tiled-mode threshold. If THAT
             # passes, run the upscale with VAE tiling enabled
@@ -6224,6 +6228,7 @@ class ImageGenerationService:
                 )
                 return self._upscale_latent(
                     img=img, prompt=prompt, tile_mode=True,
+                    tile_size_override=tile_size_override,
                 )
             return ImageRuntimeResult(
                 ok=False, error_code="insufficient_vram",
@@ -6243,7 +6248,10 @@ class ImageGenerationService:
         if method_norm == "sdxl_x4":
             ok, avail_gb, req_gb, _reason = self._probe_vram_for_method("sdxl_x4")
             if ok:
-                result = self._upscale_sdxl_x4(img=img, prompt=prompt)
+                result = self._upscale_sdxl_x4(
+                    img=img, prompt=prompt,
+                    tile_size_override=tile_size_override,
+                )
                 if result.ok:
                     return result
                 # SDXL x4 OOM / load-fail → fall through to RealESRGAN.
@@ -6275,6 +6283,7 @@ class ImageGenerationService:
                     )
                     result = self._upscale_sdxl_x4(
                         img=img, prompt=prompt, tile_mode=True,
+                        tile_size_override=tile_size_override,
                     )
                     if result.ok:
                         return result
@@ -6392,6 +6401,45 @@ class ImageGenerationService:
         (8192, 384),     # 4K-8K output: moderate calibration
         (10**9, 256),    # >8K output: aggressive calibration
     ]
+
+    @classmethod
+    def _resolve_tile_size_with_override(
+        cls,
+        method: str,
+        input_max_dim: int,
+        override: int | None,
+    ) -> int | None:
+        """[IMPROVE-117] Resolve the effective ``tile_sample_min_size``
+        — when ``override`` is set, it BYPASSES the [IMPROVE-100]
+        band calibration. Per Q5=A in the Wave 13 plan: override
+        always wins, including BELOW the 256 floor (true power-
+        user knob; can OOM but operator chose).
+
+        Rationale for the no-clamp approach: an operator
+        explicitly passing ``tile_size_override=128`` on a
+        large card has chosen tighter seam control over per-
+        tile VRAM efficiency; an operator passing
+        ``tile_size_override=2048`` on a small card has chosen
+        speed over OOM safety. Both are legitimate. A clamp at
+        128/1024 (the alternative considered) would silently
+        rewrite the user's choice — bad UX. The endpoint
+        documents the failure modes; the operator decides.
+
+        Args:
+            method: 'latent' or 'sdxl_x4'.
+            input_max_dim: max(width, height) of the INPUT image
+                in pixels. Only consulted when override is None.
+            override: User-supplied ``tile_sample_min_size`` (or
+                None to fall through to [IMPROVE-100] calibration).
+
+        Returns:
+            int | None — the effective tile_sample_min_size to
+            pass to ``enable_vae_tiling``. None means "use
+            diffusers default" (no kwarg).
+        """
+        if override is not None:
+            return override
+        return cls._calibrate_tile_size_for_method(method, input_max_dim)
 
     @classmethod
     def _calibrate_tile_size_for_method(
@@ -6639,6 +6687,7 @@ class ImageGenerationService:
         img: Any,
         prompt: str,
         tile_mode: bool = False,
+        tile_size_override: int | None = None,
     ) -> ImageRuntimeResult:
         """[IMPROVE-46] 2x latent-space upscaler.
 
@@ -6681,8 +6730,12 @@ class ImageGenerationService:
                     # calibration: bigger inputs get smaller
                     # tile_sample_min_size to reduce seam
                     # visibility + VRAM pressure.
-                    tile_size = self._calibrate_tile_size_for_method(
+                    # [IMPROVE-117] tile_size_override (when set)
+                    # bypasses the band calibration — power-user
+                    # knob, no clamping below 256 floor.
+                    tile_size = self._resolve_tile_size_with_override(
                         "latent", max(img.width, img.height),
+                        tile_size_override,
                     )
                     self._enable_vae_tiling_with_calibration(
                         pipe, tile_size, "latent",
@@ -6716,9 +6769,16 @@ class ImageGenerationService:
             # (no calibration applies) OR when tile_mode=True but
             # the output dim is small enough for the diffusers
             # default.
+            # [IMPROVE-117] When tile_size_override is set,
+            # metadata records the OVERRIDE value (what was
+            # actually used), not the pre-calibration value.
+            # The override flag itself is also surfaced so
+            # dashboards can spot "this run bypassed
+            # calibration".
             calibrated_tile_size = (
-                self._calibrate_tile_size_for_method(
+                self._resolve_tile_size_with_override(
                     "latent", max(img.width, img.height),
+                    tile_size_override,
                 )
                 if tile_mode else None
             )
@@ -6732,6 +6792,13 @@ class ImageGenerationService:
                     "prompt": guide,
                     "tile_mode": tile_mode,
                     "tile_sample_min_size": calibrated_tile_size,
+                    # [IMPROVE-117] Whether the tile_size came
+                    # from a power-user override (True) or from
+                    # the IMPROVE-100 band calibration (False).
+                    # Always-present so dashboards can chart
+                    # override-rate without a key-existence
+                    # check.
+                    "tile_size_overridden": tile_size_override is not None,
                 },
             )
         except ImportError as exc:
@@ -6757,6 +6824,7 @@ class ImageGenerationService:
         img: Any,
         prompt: str,
         tile_mode: bool = False,
+        tile_size_override: int | None = None,
     ) -> ImageRuntimeResult:
         """[IMPROVE-46] 4x diffusers upscaler (SD x4 — same model
         family as Stability's original SD 1.5 upscaler, used here as
@@ -6798,8 +6866,12 @@ class ImageGenerationService:
                     # calibration: x4 scale means a 2K input
                     # produces an 8K output, hitting the
                     # aggressive (256) tile_size band.
-                    tile_size = self._calibrate_tile_size_for_method(
+                    # [IMPROVE-117] tile_size_override (when set)
+                    # bypasses the band calibration — same
+                    # contract as the latent path.
+                    tile_size = self._resolve_tile_size_with_override(
                         "sdxl_x4", max(img.width, img.height),
+                        tile_size_override,
                     )
                     self._enable_vae_tiling_with_calibration(
                         pipe, tile_size, "sdxl_x4",
@@ -6827,9 +6899,13 @@ class ImageGenerationService:
             output.save(buf, format="PNG")
             # [IMPROVE-100] Surface the calibrated tile_size in
             # metadata. See the latent path for the rationale.
+            # [IMPROVE-117] tile_size_override (when set)
+            # appears here as the effective tile_size; the
+            # override flag is also recorded in metadata.
             calibrated_tile_size = (
-                self._calibrate_tile_size_for_method(
+                self._resolve_tile_size_with_override(
                     "sdxl_x4", max(img.width, img.height),
+                    tile_size_override,
                 )
                 if tile_mode else None
             )
@@ -6843,6 +6919,10 @@ class ImageGenerationService:
                     "prompt": guide,
                     "tile_mode": tile_mode,
                     "tile_sample_min_size": calibrated_tile_size,
+                    # [IMPROVE-117] Same override-flag as the
+                    # latent path; pin so dashboards can chart
+                    # override-rate per method.
+                    "tile_size_overridden": tile_size_override is not None,
                 },
             )
         except ImportError as exc:

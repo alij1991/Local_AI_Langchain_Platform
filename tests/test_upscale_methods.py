@@ -1150,3 +1150,226 @@ def test_non_tiled_mode_metadata_has_tile_sample_min_size_none(
     assert result.ok is True
     assert result.metadata["tile_mode"] is False
     assert result.metadata["tile_sample_min_size"] is None
+
+
+# ── [IMPROVE-117] tile_size_override (power-user knob) ───────
+
+
+def test_resolve_tile_size_override_replaces_calibration():
+    """[IMPROVE-117] When override is set, the resolver
+    returns it verbatim — bypassing the IMPROVE-100 band
+    calibration."""
+    from local_ai_platform.images.service import ImageGenerationService
+    # 8K-output input would normally calibrate to 256.
+    # Override forces 512.
+    result = ImageGenerationService._resolve_tile_size_with_override(
+        "sdxl_x4", input_max_dim=2048, override=512,
+    )
+    assert result == 512
+
+
+def test_resolve_tile_size_override_below_256_floor_passes():
+    """[IMPROVE-117] Per Q5=A: override always wins, including
+    BELOW the 256 floor. No clamping. Power-user can OOM but
+    chose to."""
+    from local_ai_platform.images.service import ImageGenerationService
+    # 64 is way below the IMPROVE-100 256 floor.
+    result = ImageGenerationService._resolve_tile_size_with_override(
+        "sdxl_x4", input_max_dim=2048, override=64,
+    )
+    assert result == 64
+
+
+def test_resolve_tile_size_override_none_falls_through_to_calibration():
+    """[IMPROVE-117] Override=None means "use IMPROVE-100
+    calibration". Pin the fall-through behaviour for the
+    pre-IMPROVE-117 default."""
+    from local_ai_platform.images.service import ImageGenerationService
+    # 4K-output input falls into the (8192, 256) band.
+    result = ImageGenerationService._resolve_tile_size_with_override(
+        "sdxl_x4", input_max_dim=2048, override=None,
+    )
+    # Same as the calibration-only result.
+    calibrated = ImageGenerationService._calibrate_tile_size_for_method(
+        "sdxl_x4", input_max_dim=2048,
+    )
+    assert result == calibrated
+
+
+def test_resolve_tile_size_override_zero_or_negative_passes_through():
+    """[IMPROVE-117] The resolver itself does NOT validate
+    override values — that's the endpoint's job (returns
+    400 on non-positive). The resolver's "override always
+    wins" contract holds even for nonsensical values; the
+    endpoint guards the public API."""
+    from local_ai_platform.images.service import ImageGenerationService
+    # The endpoint rejects 0 with HTTP 400, but if a caller
+    # somehow bypasses that, the resolver doesn't second-
+    # guess them.
+    result = ImageGenerationService._resolve_tile_size_with_override(
+        "latent", input_max_dim=512, override=0,
+    )
+    assert result == 0
+
+
+def test_endpoint_tile_size_override_invalid_type_returns_400(
+    tmp_path, monkeypatch,
+):
+    """[IMPROVE-117] Non-int tile_size_override (e.g. string)
+    surfaces as HTTP 400 with code=invalid_tile_size_override.
+    Pin the validation contract."""
+    pytest.importorskip("fastapi")
+    from fastapi.testclient import TestClient
+    from local_ai_platform import db as db_mod
+
+    path = tmp_path / "app.db"
+    monkeypatch.setattr(db_mod, "DB_PATH", path)
+    db_mod.init_db()
+
+    import api_server
+    src = _write_png(tmp_path)
+    with TestClient(api_server.app) as c:
+        resp = c.post(
+            "/images/upscale",
+            json={
+                "image_path": src,
+                "method": "latent",
+                "tile_size_override": "not-an-int",
+            },
+        )
+    assert resp.status_code == 400
+    body = resp.json()
+    assert body["detail"]["error"]["code"] == "invalid_tile_size_override"
+
+
+def test_endpoint_tile_size_override_zero_returns_400(
+    tmp_path, monkeypatch,
+):
+    """[IMPROVE-117] Zero / negative tile_size_override returns
+    HTTP 400 — the endpoint validates before threading into
+    the service. Power-user knob has SOME guard rails (must
+    be positive); the no-clamp-below-256 freedom applies only
+    to positive values."""
+    pytest.importorskip("fastapi")
+    from fastapi.testclient import TestClient
+    from local_ai_platform import db as db_mod
+
+    path = tmp_path / "app.db"
+    monkeypatch.setattr(db_mod, "DB_PATH", path)
+    db_mod.init_db()
+
+    import api_server
+    src = _write_png(tmp_path)
+    with TestClient(api_server.app) as c:
+        resp = c.post(
+            "/images/upscale",
+            json={
+                "image_path": src,
+                "method": "latent",
+                "tile_size_override": 0,
+            },
+        )
+    assert resp.status_code == 400
+
+
+def test_upscale_image_threads_tile_size_override(monkeypatch, tmp_path):
+    """[IMPROVE-117] The override threads from upscale_image
+    through _upscale_latent → _resolve_tile_size_with_override.
+    Pin via stubbing _upscale_latent + asserting the kwarg."""
+    from local_ai_platform.images.service import ImageRuntimeResult
+    s = _make_service()
+    src = _write_png(tmp_path)
+
+    captured = {}
+
+    def fake_upscale_latent(*, img, prompt, tile_mode=False,
+                            tile_size_override=None):
+        captured["tile_size_override"] = tile_size_override
+        return ImageRuntimeResult(
+            ok=True, image_bytes=b"ok", metadata={"method": "latent"},
+        )
+
+    monkeypatch.setattr(s, "_upscale_latent", fake_upscale_latent)
+    # Force the probe to pass so the latent path runs.
+    monkeypatch.setattr(
+        s, "_probe_vram_for_method",
+        lambda method, tile_mode=False: (True, 16.0, 4.0, ""),
+    )
+
+    s.upscale_image(
+        image_path=src, method="latent",
+        tile_size_override=384,
+    )
+    assert captured["tile_size_override"] == 384
+
+
+def test_upscale_image_metadata_records_override_flag(
+    monkeypatch, tmp_path,
+):
+    """[IMPROVE-117] When tile_size_override is set + tile_mode
+    engages, metadata.tile_size_overridden is True. Pin so
+    dashboards can chart override-rate per method."""
+    import sys
+    s = _make_service()
+    src = _write_png(tmp_path)
+    # Force tile_mode by setting low VRAM (fails regular but
+    # passes tiled) — same pattern as
+    # test_latent_insufficient_regular_passes_tiled_engages_tiling.
+    _patch_torch_with_vram(monkeypatch, free_gb=2.0)
+
+    fake_pipe = MagicMock()
+    fake_pipe.return_value.images = [Image.new("RGB", (256, 256))]
+    fake_pipe.enable_sequential_cpu_offload = MagicMock()
+    fake_pipe.enable_vae_tiling = MagicMock()
+    fake_pipe.enable_vae_slicing = MagicMock()
+    fake_pipeline_class = MagicMock()
+    fake_pipeline_class.from_pretrained = MagicMock(return_value=fake_pipe)
+    fake_diffusers = MagicMock()
+    fake_diffusers.StableDiffusionLatentUpscalePipeline = fake_pipeline_class
+    monkeypatch.setitem(sys.modules, "diffusers", fake_diffusers)
+
+    result = s.upscale_image(
+        image_path=src, prompt="x", method="latent",
+        tile_size_override=384,
+    )
+    assert result.ok is True
+    assert result.metadata["tile_mode"] is True
+    # The override REPLACED the calibration value in the
+    # tile_sample_min_size field too.
+    assert result.metadata["tile_sample_min_size"] == 384
+    assert result.metadata["tile_size_overridden"] is True
+    # And enable_vae_tiling was called with the override
+    # value (not the IMPROVE-100 calibrated value).
+    fake_pipe.enable_vae_tiling.assert_called_once_with(
+        tile_sample_min_size=384,
+    )
+
+
+def test_upscale_image_metadata_overridden_false_when_not_set(
+    monkeypatch, tmp_path,
+):
+    """[IMPROVE-117] When tile_size_override is None (the
+    default), metadata.tile_size_overridden is False. The
+    flag is always-present so dashboards don't need a key-
+    existence check."""
+    import sys
+    s = _make_service()
+    src = _write_png(tmp_path)
+    _patch_torch_with_vram(monkeypatch, free_gb=2.0)
+
+    fake_pipe = MagicMock()
+    fake_pipe.return_value.images = [Image.new("RGB", (256, 256))]
+    fake_pipe.enable_sequential_cpu_offload = MagicMock()
+    fake_pipe.enable_vae_tiling = MagicMock()
+    fake_pipe.enable_vae_slicing = MagicMock()
+    fake_pipeline_class = MagicMock()
+    fake_pipeline_class.from_pretrained = MagicMock(return_value=fake_pipe)
+    fake_diffusers = MagicMock()
+    fake_diffusers.StableDiffusionLatentUpscalePipeline = fake_pipeline_class
+    monkeypatch.setitem(sys.modules, "diffusers", fake_diffusers)
+
+    result = s.upscale_image(
+        image_path=src, prompt="x", method="latent",
+    )
+    assert result.ok is True
+    assert result.metadata["tile_size_overridden"] is False
