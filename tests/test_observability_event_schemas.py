@@ -1036,9 +1036,18 @@ def test_emit_typed_callsite_keys_match_pinned_schema():
         __optional_keys__`` (no unexpected extras — typo'd keys
         get caught here)
 
-    Events WITHOUT a pinned schema are skipped silently (no
-    regression risk). Adding a schema raises the bar for that
-    event going forward.
+    [IMPROVE-109] OPT-OUT FLIP: a callsite for a (sub, act)
+    tuple WITHOUT a pinned schema is now a FAILURE rather than
+    a silent skip. Pre-IMPROVE-109 this test skipped unregistered
+    tuples (the audit was opt-in: registering a schema activated
+    checks). Post-IMPROVE-107's 100% coverage every known
+    (sub, act) HAS a schema, so a missing-schema callsite is by
+    definition a regression — either:
+      * a new event was added to the Literal but no schema was
+        defined; OR
+      * the callsite uses an unregistered tuple (which would
+        also fail the keystone runtime check at emit_typed,
+        but a static-analysis fail at lint is faster).
 
     Failure messages name the file, callsite signature, and the
     specific missing/extra keys so the fix is one grep.
@@ -1048,7 +1057,19 @@ def test_emit_typed_callsite_keys_match_pinned_schema():
     for path, subsystem, action, callsite_keys in callsites:
         schema = EVENT_CONTEXT_SCHEMAS.get((subsystem, action))
         if schema is None:
-            continue  # event without pinned schema — skip
+            # [IMPROVE-109] Opt-out: missing schema is a failure,
+            # not a silent skip. Every (sub, act) tuple in
+            # KNOWN_EVENT_NAMES has a schema as of [IMPROVE-107]
+            # — this surfaces the regression class "added a new
+            # event to the Literal but forgot the schema" at
+            # CI time rather than runtime.
+            failures.append(
+                f"{path}: emit_typed({subsystem!r}, {action!r}, "
+                f"context={sorted(callsite_keys)})"
+                f"\n    UNREGISTERED schema — add an entry to "
+                f"EVENT_CONTEXT_SCHEMAS or remove this callsite"
+            )
+            continue
         required, optional = _required_optional_keys(schema)
         all_allowed = required | optional
         missing = required - callsite_keys
@@ -1174,12 +1195,29 @@ def test_track_event_callsite_keys_match_pinned_schema():
     walker convention; only literal-dict callsites get
     validated. This is the pay-off pin for IMPROVE-102's six
     Recorder schemas.
+
+    [IMPROVE-109] OPT-OUT FLIP: matches the emit_typed audit —
+    a literal-context callsite for a (sub, act) WITHOUT a
+    pinned schema is a FAILURE (was silent skip pre-IMPROVE-109).
     """
     callsites = _extract_track_event_callsite_contexts()
     failures: list[str] = []
     for path, subsystem, action, callsite_keys in callsites:
         schema = EVENT_CONTEXT_SCHEMAS.get((subsystem, action))
         if schema is None:
+            # [IMPROVE-109] Opt-out: missing schema is a failure,
+            # mirror of the emit_typed audit's flip. Note that
+            # Recorder events fire BOTH ``sub.act`` and
+            # ``sub.act.start`` from the same context dict —
+            # the audit reports the canonical (the action as
+            # passed to track_event, no .start suffix) so the
+            # error message points at the right callsite.
+            failures.append(
+                f"{path}: track_event({subsystem!r}, {action!r}, "
+                f"context={sorted(callsite_keys)})"
+                f"\n    UNREGISTERED schema — add an entry to "
+                f"EVENT_CONTEXT_SCHEMAS or remove this callsite"
+            )
             continue
         required, optional = _required_optional_keys(schema)
         all_allowed = required | optional
@@ -1202,13 +1240,83 @@ def test_track_event_callsite_keys_match_pinned_schema():
         )
 
 
+def test_every_known_event_has_pinned_schema():
+    """[IMPROVE-109] Strict pin: every (subsystem, action) tuple
+    in ``KNOWN_EVENT_NAMES`` MUST have a corresponding entry in
+    ``EVENT_CONTEXT_SCHEMAS``. The opt-out flip's structural
+    defence — pre-IMPROVE-109 a new event added to the Literal
+    types could ship without a schema (the emit-callsite audit
+    skipped events without schemas). Post-IMPROVE-109 + post-
+    IMPROVE-107's 100% coverage:
+
+      * ``KNOWN_EVENT_NAMES`` is the authoritative event-name
+        registry (66 tuples as of Wave 12).
+      * ``EVENT_CONTEXT_SCHEMAS`` is the authoritative
+        event-shape registry.
+      * Both must agree on membership: a tuple in one MUST be
+        in the other.
+
+    A failure here means one of two things:
+
+      * A new event was added to ``XxxAction = Literal[...]``
+        without a corresponding TypedDict + EVENT_CONTEXT_SCHEMAS
+        entry. Fix: add the schema (mirror of IMPROVE-107's
+        pattern).
+      * A schema was deleted but the event_name stayed
+        registered. Fix: remove the event_name from the Literal
+        if the event is gone, OR re-add the schema.
+
+    The keystone runtime check (``UnknownEventNameError`` in
+    emit_typed) catches the inverse direction (a callsite using
+    an UNregistered name) at runtime. This test catches the
+    same regression class at CI time + extends to the schema
+    side.
+
+    Empty-context events (e.g. ``partner.voice_init``) STILL
+    need a schema entry — the empty-shape TypedDict pins the
+    "no required context" contract per IMPROVE-107.
+
+    Failure messages list the missing tuples sorted so a fresh
+    contributor can see exactly which schemas to add.
+    """
+    from local_ai_platform.observability_events import (
+        KNOWN_EVENT_NAMES,
+    )
+    pinned = set(EVENT_CONTEXT_SCHEMAS.keys())
+    known: set[tuple[str, str]] = set()
+    for name in KNOWN_EVENT_NAMES:
+        sub, _, act = name.partition(".")
+        known.add((sub, act))
+
+    missing = sorted(known - pinned)
+    if missing:
+        pytest.fail(
+            f"[IMPROVE-109] {len(missing)} known event(s) lack a "
+            f"pinned context schema. Every entry in "
+            f"KNOWN_EVENT_NAMES MUST have a TypedDict + "
+            f"EVENT_CONTEXT_SCHEMAS entry. Missing:\n  "
+            + "\n  ".join(f"({s!r}, {a!r})" for s, a in missing)
+        )
+
+    # Symmetric pin: nothing in EVENT_CONTEXT_SCHEMAS should be
+    # absent from KNOWN_EVENT_NAMES (a stale entry would silently
+    # validate against a never-emitted event). Today this is
+    # tautologically true (the audit walker test verifies the
+    # forward direction); pin the reverse so a future commit
+    # adding a schema for an unregistered event surfaces here.
+    extras = sorted(pinned - known)
+    if extras:
+        pytest.fail(
+            f"[IMPROVE-109] {len(extras)} pinned schema(s) reference "
+            f"unregistered event tuples (stale schemas?):\n  "
+            + "\n  ".join(f"({s!r}, {a!r})" for s, a in extras)
+        )
+
+
 def test_pinned_schema_count_grows_or_stays():
     """[IMPROVE-92] Audit pin: the number of pinned schemas in
     ``EVENT_CONTEXT_SCHEMAS`` should only ever GROW (or stay
-    the same), never shrink. A future commit removing a schema
-    would silently drop coverage for that event — the audit's
-    "events without schemas are skipped" semantics means a
-    deletion goes unnoticed.
+    the same), never shrink without a deliberate baseline bump.
 
     Today: 66 pinned schemas (6 from [IMPROVE-92] + 12 from
     [IMPROVE-95]'s Wave 10 batch + 10 from [IMPROVE-101]'s
@@ -1220,9 +1328,18 @@ def test_pinned_schema_count_grows_or_stays():
     ``EVENT_CONTEXT_SCHEMAS`` in the same commit so the intent
     is explicit in code review.
 
-    [IMPROVE-109] will replace this baseline pin with a strict
-    "every KNOWN_EVENT_NAMES tuple MUST have a schema" check —
-    the opt-out flip becomes safe once coverage hits 100% (now).
+    [IMPROVE-109] kept this count baseline alongside the new
+    ``test_every_known_event_has_pinned_schema`` strict pin
+    because the two tests catch DIFFERENT regression classes:
+
+      * count baseline: schema removed (count drops below 66)
+      * strict pin: event added without schema (or schema
+        removed but event-name kept — tuple-mismatch)
+
+    Defence in depth — both pin essentials of the type-safety
+    contract from different angles. The count baseline ALSO
+    gives a more readable failure message ("count dropped from
+    66 to 65") than the strict pin's "tuple X is missing".
     """
     pinned_count = len(EVENT_CONTEXT_SCHEMAS)
     minimum_pinned = 66  # baseline as of [IMPROVE-107] (100% coverage)
