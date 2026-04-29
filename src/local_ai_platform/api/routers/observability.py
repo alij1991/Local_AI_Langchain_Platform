@@ -342,6 +342,18 @@ async def obs_summary(window_hours: int = 24):
     """Error rate + avg/max duration per (subsystem, action).
 
     Call with ?window_hours=168 for weekly rollup.
+
+    [IMPROVE-90] In addition to the per-(subsystem, action) rollup
+    in ``items``, the response carries a ``rejections`` array that
+    surfaces ``error_code`` distribution for every event with a
+    non-null ``error_code`` column. Wave 7 [IMPROVE-82] /
+    Wave 8 [IMPROVE-85, IMPROVE-87, IMPROVE-88] introduced typed
+    error codes (SchemaInvalid / CycleDetected /
+    OrphanLlmRouterEdge for systems; InvalidTool /
+    DuplicateAgent for agents; etc.) so dashboards can drill
+    into rejection causes. Pre-IMPROVE-90 the only way to get the
+    split was a separate SQL query; surfacing it here removes the
+    join and lets dashboards render a single chart.
     """
     window_hours = max(1, min(int(window_hours or 24), 24 * 365))
     conn = get_conn()
@@ -363,6 +375,29 @@ async def obs_summary(window_hours: int = 24):
             (since,),
         ).fetchall()
         items = [dict(r) for r in rows]
+        # [IMPROVE-90] Per-error_code rollup. Filters NULL/empty
+        # error_code so only events that *carried* a typed code
+        # (Wave 7+ rejection events; image OOM ladder error
+        # codes; etc.) appear. Sorted by count DESC so the most
+        # frequent rejection rises to the top of the list.
+        rejection_rows = conn.execute(
+            """
+            SELECT subsystem, action, error_code,
+                   COUNT(*) AS count
+            FROM app_events
+            WHERE ts > datetime('now', ?)
+              AND error_code IS NOT NULL
+              AND error_code != ''
+            GROUP BY subsystem, action, error_code
+            ORDER BY count DESC, subsystem, action, error_code
+            """,
+            (since,),
+        ).fetchall()
+        rejections = [dict(r) for r in rejection_rows]
     finally:
         conn.close()
-    return {"items": items, "window_hours": window_hours}
+    return {
+        "items": items,
+        "rejections": rejections,
+        "window_hours": window_hours,
+    }
