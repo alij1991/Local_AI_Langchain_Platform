@@ -401,3 +401,128 @@ async def obs_summary(window_hours: int = 24):
         "rejections": rejections,
         "window_hours": window_hours,
     }
+
+
+@router.get("/observability/timeseries")
+async def obs_timeseries(
+    window_hours: int = 24,
+    bucket_minutes: int = 15,
+    subsystem: str | None = None,
+    action: str | None = None,
+    error_code: str | None = None,
+):
+    """[IMPROVE-99] Time-series of event counts in fixed buckets.
+
+    Per Q4=A in the Wave 10 plan: the ``error_code`` filter
+    composes with the existing ``subsystem`` / ``action``
+    filters on the same endpoint. A "rejection rate over time"
+    chart for SchemaInvalid is one query:
+
+        GET /observability/timeseries
+            ?window_hours=24
+            &bucket_minutes=15
+            &error_code=SchemaInvalid
+
+    All filters are optional + AND-composed. The
+    ``error_code`` filter is exact-match (not LIKE) — pin a
+    typo'd code at the dashboard layer rather than swallowing
+    it via prefix matching.
+
+    Buckets are aligned to UTC clock boundaries via SQLite's
+    Unix-epoch arithmetic (cast ``ts`` to seconds, integer-
+    divide by ``bucket_minutes * 60``, multiply back). This
+    means a 15-minute bucket boundary lands at :00, :15, :30,
+    :45 of every hour — predictable for caching + chart
+    rendering.
+
+    ``bucket_minutes`` is clamped to [1, 60] to prevent abuse
+    (a 1-minute bucket over a 7-day window is 10080 rows;
+    larger granularities below 1 minute serve no
+    dashboard purpose). ``window_hours`` clamped to [1, 8760]
+    matches /observability/summary semantics.
+
+    Returns:
+        {
+          "buckets": [
+            {"bucket_start": "2026-04-29T08:00:00", "count": 12},
+            {"bucket_start": "2026-04-29T08:15:00", "count": 7},
+            ...
+          ],
+          "bucket_minutes": 15,
+          "window_hours": 24,
+          "filters": {"subsystem": null, "action": null,
+                      "error_code": "SchemaInvalid"}
+        }
+
+    Empty buckets (no events in that window) are NOT padded —
+    the dashboard is responsible for rendering gaps. Rationale:
+    a 7-day window at 1-minute buckets would be 10080 rows,
+    most empty; the API stays lean and the consumer can fill
+    using its own time grid.
+    """
+    # Use ``int(... or default)`` only for None-coercion would
+    # collapse ``0`` to the default; clamp explicitly so a user
+    # passing 0 lands at the min, not the default.
+    window_hours = max(1, min(int(window_hours), 24 * 365))
+    bucket_minutes = max(1, min(int(bucket_minutes), 60))
+    bucket_seconds = bucket_minutes * 60
+    since = f"-{window_hours} hours"
+
+    # Build the WHERE clause additively; an empty filter ≡ "no
+    # constraint", which is the most common dashboard pattern.
+    # Filters compose with AND.
+    where_parts: list[str] = ["ts > datetime('now', ?)"]
+    params: list[Any] = [since]
+    if subsystem:
+        where_parts.append("subsystem = ?")
+        params.append(subsystem)
+    if action:
+        where_parts.append("action = ?")
+        params.append(action)
+    if error_code:
+        # Empty string filter MUST NOT match NULL error_codes
+        # (defensive coding). The simple ``= ?`` SQL handles
+        # this — NULL never equals anything in SQL.
+        where_parts.append("error_code = ?")
+        params.append(error_code)
+
+    where_clause = " AND ".join(where_parts)
+
+    # SQLite time bucketing via Unix-epoch arithmetic. Aligns
+    # to UTC clock boundaries by integer-dividing the ``ts``
+    # epoch seconds by ``bucket_seconds`` then multiplying
+    # back. Result is an ISO-8601 string via ``datetime(...,
+    # 'unixepoch')``.
+    sql = f"""
+        SELECT
+          datetime(
+            (CAST(strftime('%s', ts) AS INTEGER) / ?) * ?,
+            'unixepoch'
+          ) AS bucket_start,
+          COUNT(*) AS count
+        FROM app_events
+        WHERE {where_clause}
+        GROUP BY bucket_start
+        ORDER BY bucket_start
+    """
+    # The bucket_seconds param appears twice in the SQL
+    # (numerator + multiplier); both come first.
+    full_params = [bucket_seconds, bucket_seconds, *params]
+
+    conn = get_conn()
+    try:
+        rows = conn.execute(sql, full_params).fetchall()
+        buckets = [dict(r) for r in rows]
+    finally:
+        conn.close()
+
+    return {
+        "buckets": buckets,
+        "bucket_minutes": bucket_minutes,
+        "window_hours": window_hours,
+        "filters": {
+            "subsystem": subsystem,
+            "action": action,
+            "error_code": error_code,
+        },
+    }
