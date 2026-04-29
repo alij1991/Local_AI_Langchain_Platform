@@ -76,15 +76,20 @@ EXPECTED_SUMMARY_FILTERS = {
 }
 
 
-# /observability/timeseries filters echo (post-IMPROVE-110):
-# 5-key always-present dict. Note ``fill_zeros`` (legacy from
-# IMPROVE-110, may grow ``fill_zero_time`` alias in IMPROVE-124).
+# /observability/timeseries filters echo (post-IMPROVE-124):
+# 6-key always-present dict. ``fill_zeros`` (legacy from
+# IMPROVE-110) coexists with ``fill_zero_time`` (canonical
+# from IMPROVE-124) — deprecation alias relationship per
+# Q5=A in the Wave 14 plan. No removal date set; both keys
+# echo independently so dashboards can verify which name was
+# in play.
 EXPECTED_TIMESERIES_FILTERS = {
     "subsystem",
     "action",
     "error_code",
     "error_code_prefix",
     "fill_zeros",
+    "fill_zero_time",
 }
 
 

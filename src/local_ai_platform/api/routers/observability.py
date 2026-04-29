@@ -645,6 +645,7 @@ async def obs_timeseries(
     error_code: str | None = None,
     error_code_prefix: str | None = None,
     fill_zeros: bool = False,
+    fill_zero_time: bool | None = None,
 ):
     """[IMPROVE-99] Time-series of event counts in fixed buckets.
 
@@ -689,6 +690,21 @@ async def obs_timeseries(
     no events fired, so the chart renders without per-bucket
     null-handling code.
 
+    [IMPROVE-124] ``?fill_zero_time=true`` is a deprecation
+    alias for ``?fill_zeros=true`` — same semantics, named for
+    symmetry with [IMPROVE-115]'s ``?fill_zero_dim=true`` on
+    /observability/summary. Both names work; ``fill_zero_time``
+    is the canonical going forward (matches the dim-axis sibling
+    naming). Per Q5=A in the Wave 14 plan: no removal date set
+    for ``fill_zeros`` — the alias coexists indefinitely.
+
+    When BOTH are passed, ``fill_zero_time`` wins (the canonical
+    name takes precedence over the deprecated alias). When ONLY
+    ``fill_zero_time`` is passed, it overrides the default
+    False. When ONLY ``fill_zeros`` is passed, the legacy path
+    works unchanged. The filters echo dict surfaces both keys
+    so dashboards can verify which name was effective.
+
     Buckets are aligned to UTC clock boundaries via SQLite's
     Unix-epoch arithmetic (cast ``ts`` to seconds, integer-
     divide by ``bucket_minutes * 60``, multiply back). This
@@ -729,6 +745,21 @@ async def obs_timeseries(
     bucket_minutes = max(1, min(int(bucket_minutes), 60))
     bucket_seconds = bucket_minutes * 60
     since = f"-{window_hours} hours"
+
+    # [IMPROVE-124] Resolve the effective zero-fill flag.
+    # ``fill_zero_time`` is the canonical name; ``fill_zeros`` is
+    # the deprecation alias (kept indefinitely per Q5=A).
+    # Resolution rules:
+    #   * fill_zero_time is not None → wins (operator
+    #     explicitly chose the canonical axis).
+    #   * fill_zero_time is None, fill_zeros is anything →
+    #     legacy path; fill_zeros's value is used.
+    # The filters echo dict reports both keys with their
+    # passed-or-default values so the dashboard can verify
+    # which name was in play.
+    effective_fill = (
+        fill_zero_time if fill_zero_time is not None else fill_zeros
+    )
 
     # Build the WHERE clause additively; an empty filter ≡ "no
     # constraint", which is the most common dashboard pattern.
@@ -778,10 +809,14 @@ async def obs_timeseries(
         rows = conn.execute(sql, full_params).fetchall()
         buckets = [dict(r) for r in rows]
 
-        if fill_zeros:
+        if effective_fill:
             # [IMPROVE-110] Zero-pad empty buckets to give a
             # complete time grid from window-start-aligned
             # boundary to current-bucket-aligned boundary.
+            # [IMPROVE-124] ``effective_fill`` is the resolved
+            # value of ``fill_zero_time`` (canonical) or
+            # ``fill_zeros`` (deprecated alias) — same semantic,
+            # two names. Same downstream zero-fill logic.
             #
             # We compute the grid in SQLite (not Python) so the
             # alignment matches the bucket_start values from
@@ -845,7 +880,19 @@ async def obs_timeseries(
             "action": action,
             "error_code": error_code,
             "error_code_prefix": error_code_prefix,
+            # [IMPROVE-110] legacy name; [IMPROVE-124]
+            # canonical name. Both surface as always-present
+            # keys so dashboards can verify which was passed.
+            # The legacy ``fill_zeros`` echoes the operator's
+            # value verbatim; the new ``fill_zero_time``
+            # echoes either the operator's value (when passed)
+            # or None (when not passed — distinguishing
+            # "operator omitted" from "operator passed
+            # False"). Future Wave 15+ commits may add a
+            # deprecation date to ``fill_zeros`` once usage
+            # data confirms most callers have migrated.
             "fill_zeros": fill_zeros,
+            "fill_zero_time": fill_zero_time,
         },
     }
 

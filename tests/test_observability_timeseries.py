@@ -474,9 +474,11 @@ def test_timeseries_prefix_filter_echoed_back(client):
     filters dict so dashboards can render badges without
     re-parsing the URL.
 
-    [IMPROVE-110] filters dict gains ``fill_zeros`` key — pin
-    the 5-key shape so a future addition lands as a deliberate
-    +1 not a silent mutation."""
+    [IMPROVE-110] filters dict gains ``fill_zeros`` key.
+    [IMPROVE-124] filters dict gains ``fill_zero_time`` key
+    (the canonical name; ``fill_zeros`` becomes the
+    deprecation alias). Pin the 6-key shape so a future
+    addition lands as a deliberate +1 not a silent mutation."""
     resp = client.get(
         "/observability/timeseries?error_code_prefix=cuda_",
     )
@@ -484,7 +486,7 @@ def test_timeseries_prefix_filter_echoed_back(client):
     assert body["filters"]["error_code_prefix"] == "cuda_"
     assert set(body["filters"].keys()) == {
         "subsystem", "action", "error_code",
-        "error_code_prefix", "fill_zeros",
+        "error_code_prefix", "fill_zeros", "fill_zero_time",
     }
 
 
@@ -750,3 +752,133 @@ def test_insert_in_current_bucket_supports_custom_bucket_minutes(client):
     # 60-min buckets land at :00 of every hour.
     minute = int(buckets[0]["bucket_start"].split(":")[1])
     assert minute == 0
+
+
+# ── [IMPROVE-124] fill_zero_time deprecation alias ───────────
+
+
+def test_timeseries_fill_zero_time_alias_enables_zero_padding(client):
+    """[IMPROVE-124] ``?fill_zero_time=true`` alone enables zero-
+    padding identical to ``?fill_zeros=true``. Pin the alias
+    semantics — the new canonical name produces the same
+    behaviour as the legacy ``fill_zeros`` when used in
+    isolation."""
+    resp = client.get(
+        "/observability/timeseries"
+        "?window_hours=1&bucket_minutes=15"
+        "&subsystem=agent&action=iso_alias_alone"
+        "&fill_zero_time=true",
+    )
+    buckets = resp.json()["buckets"]
+    # 1h / 15min = 4 + 1 inclusive = 5 zero-padded buckets.
+    assert len(buckets) == 5
+    assert all(b["count"] == 0 for b in buckets)
+
+
+def test_timeseries_fill_zero_time_canonical_wins_over_fill_zeros(client):
+    """[IMPROVE-124] When BOTH params are passed,
+    ``fill_zero_time`` wins (canonical takes precedence over
+    deprecated alias). Pin: ``fill_zero_time=false&fill_zeros=true``
+    → no zero-padding (canonical False overrides legacy True)."""
+    db_mod = client._db_mod
+    _insert_event(
+        db_mod, subsystem="agent",
+        action="iso_alias_canonical_wins",
+        ts_offset_minutes=-5,
+    )
+    resp = client.get(
+        "/observability/timeseries"
+        "?window_hours=1&bucket_minutes=15"
+        "&subsystem=agent&action=iso_alias_canonical_wins"
+        "&fill_zero_time=false&fill_zeros=true",
+    )
+    buckets = resp.json()["buckets"]
+    # fill_zero_time=False wins → only the bucket(s) holding
+    # the inserted event surface (no zero-padding). Exactly 1
+    # bucket since 1 event in 1 bucket.
+    assert len(buckets) == 1
+
+
+def test_timeseries_fill_zero_time_legacy_fill_zeros_still_works(client):
+    """[IMPROVE-124] ``?fill_zeros=true`` (legacy alias) keeps
+    working when ``fill_zero_time`` is NOT passed. Pin the
+    backward-compat contract — pre-IMPROVE-124 callers don't
+    need to migrate immediately (no removal date set per Q5=A)."""
+    resp = client.get(
+        "/observability/timeseries"
+        "?window_hours=1&bucket_minutes=15"
+        "&subsystem=agent&action=iso_alias_legacy"
+        "&fill_zeros=true",
+    )
+    buckets = resp.json()["buckets"]
+    # Same zero-padded grid as the alias-alone test.
+    assert len(buckets) == 5
+    assert all(b["count"] == 0 for b in buckets)
+
+
+def test_timeseries_fill_zero_time_default_disables_zero_padding(client):
+    """[IMPROVE-124] When NEITHER param is passed, the default
+    is no zero-padding (the IMPROVE-99 lean-payload contract
+    preserved). Pin so a future commit accidentally flipping
+    the default surfaces here."""
+    resp = client.get(
+        "/observability/timeseries"
+        "?window_hours=1&bucket_minutes=15"
+        "&subsystem=agent&action=iso_alias_default",
+    )
+    buckets = resp.json()["buckets"]
+    # No events fired + no zero-padding → empty buckets list.
+    assert buckets == []
+
+
+def test_timeseries_fill_zero_time_false_overrides_legacy_true(client):
+    """[IMPROVE-124] ``fill_zero_time=false`` explicitly
+    overrides ``fill_zeros=true`` — confirms the precedence
+    rule even when the canonical value is the default-equivalent
+    ``False``. Pin so the resolution logic stays
+    ``fill_zero_time is not None ? fill_zero_time : fill_zeros``
+    rather than a degenerate ``fill_zero_time or fill_zeros``."""
+    resp = client.get(
+        "/observability/timeseries"
+        "?window_hours=1&bucket_minutes=15"
+        "&subsystem=agent&action=iso_alias_false_overrides"
+        "&fill_zero_time=false&fill_zeros=true",
+    )
+    buckets = resp.json()["buckets"]
+    # fill_zero_time=False wins; no events match the synthetic
+    # action filter, so no zero-padding gives empty list.
+    assert buckets == []
+
+
+def test_timeseries_filters_echo_includes_fill_zero_time(client):
+    """[IMPROVE-124] The filters echo dict surfaces BOTH keys
+    (``fill_zeros`` and ``fill_zero_time``) as always-present.
+    Pin the 6-key shape — extension of [IMPROVE-110]'s 5-key
+    shape with the new canonical name added."""
+    resp = client.get(
+        "/observability/timeseries"
+        "?fill_zero_time=true",
+    )
+    filters = resp.json()["filters"]
+    # Both keys present.
+    assert "fill_zeros" in filters
+    assert "fill_zero_time" in filters
+    # When fill_zero_time is passed, it surfaces the operator's
+    # value verbatim. fill_zeros surfaces its default (False)
+    # when not passed.
+    assert filters["fill_zero_time"] is True
+    assert filters["fill_zeros"] is False
+
+
+def test_timeseries_filters_echo_fill_zero_time_none_when_omitted(client):
+    """[IMPROVE-124] When ``fill_zero_time`` is NOT passed, the
+    echo value is ``None`` (distinguishing "operator omitted"
+    from "operator passed False"). The legacy ``fill_zeros``
+    surfaces its default ``False`` when not passed (it's a bool
+    parameter, not bool | None)."""
+    resp = client.get("/observability/timeseries")
+    filters = resp.json()["filters"]
+    # Pre-IMPROVE-124 fill_zeros default-False stays.
+    assert filters["fill_zeros"] is False
+    # IMPROVE-124 fill_zero_time None when omitted.
+    assert filters["fill_zero_time"] is None
