@@ -703,6 +703,211 @@ class PartnerMem0InitContext(TypedDict):
     retry_in_sec: NotRequired[float]
 
 
+# ── [IMPROVE-95] Wave 10 batch: 12 high-traffic event schemas ─
+
+# Closes 25% of the IMPROVE-92 schema-coverage gap (6 → 18 of
+# 54 events pinned). Schemas land alphabetised by (subsystem,
+# action) so a future addition slots into the obvious place.
+# Each schema's docstring names the source file:line(s) so the
+# audit failure messages map straight to the callsite.
+
+
+class AgentToolCallContext(TypedDict):
+    """[IMPROVE-95] Context schema for ``agent.tool_call``.
+
+    Fires from agents.py:1073 on every model-emitted tool_call
+    that the agent loop dispatches. ``args_preview`` is the
+    string-cast first 200 chars of the tool args (debug-friendly,
+    log-safe).
+    """
+    __pydantic_config__ = _FORBID_EXTRA  # type: ignore[misc]
+    agent: str
+    tool: str
+    call_id: str
+    args_preview: str
+    thread_id: str
+
+
+class ConfigLoadContext(TypedDict):
+    """[IMPROVE-95] Context schema for ``config.load``.
+
+    Fires once at boot from config.py:415 after settings + .env
+    resolution. ``env_file_path`` is None when no .env file was
+    found; ``override_count`` reports how many env-var entries
+    actually overrode a default.
+    """
+    __pydantic_config__ = _FORBID_EXTRA  # type: ignore[misc]
+    env_file_found: bool
+    env_file_path: str | None
+    override_count: int
+
+
+class ImageOomLadderDoneContext(TypedDict):
+    """[IMPROVE-95] Context schema for ``image.oom_ladder_done``.
+
+    Fires from images/service.py:4646 (helper
+    ``_emit_oom_ladder_done``) at the close of every OOM retry
+    ladder. ``successful_stage`` is None when ALL stages
+    exhausted. Tier 1's ``test_oom_retry_ladder.py`` exercises
+    this event end-to-end.
+    """
+    __pydantic_config__ = _FORBID_EXTRA  # type: ignore[misc]
+    successful_stage: str | None
+    stages_tried: list[str]
+    stage_count: int
+
+
+class ImageOomLadderStartContext(TypedDict):
+    """[IMPROVE-95] Context schema for ``image.oom_ladder_start``.
+
+    Fires from images/service.py:9379 at ladder entry with the
+    full plan. ``stages_planned`` is the ordered list of retry
+    stages the ladder will attempt. ``error_code`` carries the
+    triggering OOM type (cuda_oom / system_oom / etc.).
+    """
+    __pydantic_config__ = _FORBID_EXTRA  # type: ignore[misc]
+    error_code: str
+    original_width: int
+    original_height: int
+    original_steps: int
+    stages_planned: list[str]
+    allow_cpu: bool
+
+
+class ImageOomStageAttemptContext(TypedDict):
+    """[IMPROVE-95] Context schema for ``image.oom_stage_attempt``.
+
+    Fires from images/service.py:9461 (ok) and 9487 (error) for
+    every individual ladder stage. ``retry_*`` keys describe the
+    attempted parameters at that stage; ok/error variants share
+    the same key set (status + error_code/error_message handled
+    by the emit_typed signature itself, not the context dict).
+    """
+    __pydantic_config__ = _FORBID_EXTRA  # type: ignore[misc]
+    stage_name: str
+    retry_width: int
+    retry_height: int
+    retry_steps: int
+    retry_timeout_s: int
+    retry_device: str
+
+
+class ImageOptimizationPlanContext(TypedDict):
+    """[IMPROVE-95] Context schema for ``image.optimization_plan``.
+
+    Fires from images/service.py:3934 once per image generation
+    request after the optimization-rules layer resolves. The
+    ``rules_*`` lists carry the plan-vs-applied decision trail
+    so dashboards can chart "rules suppressed by family" etc.
+    """
+    __pydantic_config__ = _FORBID_EXTRA  # type: ignore[misc]
+    backend: str
+    family: str
+    quality_tier: str
+    steps: int
+    is_few_step: bool
+    is_cpu: bool
+    rules_fired: list[str]
+    rules_suppressed: list[str]
+    rules_suppressed_by: dict[str, Any]
+
+
+class ImageWarmupContext(TypedDict):
+    """[IMPROVE-95] Context schema for ``image.warmup``.
+
+    Fires from images/service.py:7390 (ok) and 7401 (error) on
+    image-pipeline warmup. error_code/error_message land on the
+    emit_typed signature itself (not the context dict) so the
+    schema is identical across both variants.
+    """
+    __pydantic_config__ = _FORBID_EXTRA  # type: ignore[misc]
+    mode: str
+    device: str
+
+
+class ProviderAvailabilityProbeContext(TypedDict):
+    """[IMPROVE-95] Context schema for ``provider.availability_probe``.
+
+    Fires from providers/router.py:102 (ok with available bool)
+    and 116 (error path — ``available`` omitted because the
+    probe failed before resolving). NotRequired captures the
+    union without forcing the error path to fabricate a value.
+    """
+    __pydantic_config__ = _FORBID_EXTRA  # type: ignore[misc]
+    provider: str
+    available: NotRequired[bool]
+
+
+class SystemNodeEndContext(TypedDict):
+    """[IMPROVE-95] Context schema for ``system.node_end``.
+
+    Fires from 6 callsites in systems/executor.py covering ok /
+    error / cached-preloaded-ok / cached-preloaded-error / stream
+    / skipped paths (executor.py:805/818/1107/1081/1212/1234) +
+    the agent-not-found skipped path (executor.py:757) which
+    adds a ``reason`` key. The skipped/skip-reason path is the
+    only variant that carries ``reason``.
+    """
+    __pydantic_config__ = _FORBID_EXTRA  # type: ignore[misc]
+    run_id: str
+    system_name: str
+    node_id: str
+    agent: str
+    role: str
+    reason: NotRequired[str]
+
+
+class SystemNodeStartContext(TypedDict):
+    """[IMPROVE-95] Context schema for ``system.node_start``.
+
+    Fires from systems/executor.py:780 (sync) and 1146
+    (streaming) with the same six core keys. The streaming
+    preloaded variant at executor.py:1062 adds a ``preloaded``
+    bool flag; NotRequired captures the union.
+    """
+    __pydantic_config__ = _FORBID_EXTRA  # type: ignore[misc]
+    run_id: str
+    system_name: str
+    node_id: str
+    agent: str
+    role: str
+    step: int
+    preloaded: NotRequired[bool]
+
+
+class SystemRoutingDecisionContext(TypedDict):
+    """[IMPROVE-95] Context schema for ``system.routing_decision``.
+
+    Fires from systems/executor.py:1275 once per llm_router
+    node. ``chosen_option`` is None when no rule matched (the
+    router fell through to default routing). ``candidates`` is
+    the list of router-edge target node_ids the rule layer
+    considered.
+    """
+    __pydantic_config__ = _FORBID_EXTRA  # type: ignore[misc]
+    run_id: str
+    system_name: str
+    node_id: str
+    chosen_option: str | None
+    candidates: list[str]
+    rule_count: int
+
+
+class SystemRunDoneContext(TypedDict):
+    """[IMPROVE-95] Context schema for ``system.run_done``.
+
+    Fires from systems/executor.py:853 (sync) and 1306
+    (streaming) at the end of every system run. ``streaming``
+    is a literal True only on the streaming-executor path
+    (mirrors IMPROVE-83's flag on ``system.wave_parallel``).
+    """
+    __pydantic_config__ = _FORBID_EXTRA  # type: ignore[misc]
+    run_id: str
+    system_name: str
+    conversation_id: str
+    streaming: NotRequired[bool]
+
+
 # Map (subsystem, action) → TypedDict schema class. The audit
 # test ``test_emit_typed_callsite_keys_match_pinned_schema``
 # walks emit_typed callsites and validates each against the
@@ -710,9 +915,21 @@ class PartnerMem0InitContext(TypedDict):
 # ``__optional_keys__`` introspection. New schemas land here
 # alongside their TypedDict definition above.
 EVENT_CONTEXT_SCHEMAS: dict[tuple[str, str], type] = {
+    ("agent", "tool_call"): AgentToolCallContext,
     ("agent", "validation_rejected"): AgentValidationRejectedContext,
+    ("config", "load"): ConfigLoadContext,
+    ("image", "oom_ladder_done"): ImageOomLadderDoneContext,
+    ("image", "oom_ladder_start"): ImageOomLadderStartContext,
+    ("image", "oom_stage_attempt"): ImageOomStageAttemptContext,
+    ("image", "optimization_plan"): ImageOptimizationPlanContext,
     ("image", "vram_probe"): ImageVramProbeContext,
+    ("image", "warmup"): ImageWarmupContext,
     ("partner", "mem0_init"): PartnerMem0InitContext,
+    ("provider", "availability_probe"): ProviderAvailabilityProbeContext,
+    ("system", "node_end"): SystemNodeEndContext,
+    ("system", "node_start"): SystemNodeStartContext,
+    ("system", "routing_decision"): SystemRoutingDecisionContext,
+    ("system", "run_done"): SystemRunDoneContext,
     ("system", "validation_rejected"): SystemValidationRejectedContext,
     ("system", "wave_parallel"): SystemWaveParallelContext,
     ("system", "wave_parallel_fallback"): SystemWaveParallelFallbackContext,

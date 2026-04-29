@@ -56,9 +56,21 @@ from pydantic import TypeAdapter
 
 from local_ai_platform.observability_events import (
     EVENT_CONTEXT_SCHEMAS,
+    AgentToolCallContext,
     AgentValidationRejectedContext,
+    ConfigLoadContext,
+    ImageOomLadderDoneContext,
+    ImageOomLadderStartContext,
+    ImageOomStageAttemptContext,
+    ImageOptimizationPlanContext,
     ImageVramProbeContext,
+    ImageWarmupContext,
     PartnerMem0InitContext,
+    ProviderAvailabilityProbeContext,
+    SystemNodeEndContext,
+    SystemNodeStartContext,
+    SystemRoutingDecisionContext,
+    SystemRunDoneContext,
     SystemValidationRejectedContext,
     SystemWaveParallelContext,
     SystemWaveParallelFallbackContext,
@@ -174,6 +186,134 @@ def test_system_wave_parallel_schema_streaming_optional():
     assert "streaming" in optional
     assert "run_id" in required
     assert "agents" in required
+
+
+# ── [IMPROVE-95] Wave 10 batch: per-schema introspection (12) ──
+
+
+def test_agent_tool_call_schema_strict():
+    """[IMPROVE-95] All five keys (agent / tool / call_id /
+    args_preview / thread_id) are always present on the single
+    callsite at agents.py:1073. No NotRequired."""
+    required, optional = _required_optional_keys(AgentToolCallContext)
+    assert required == {"agent", "tool", "call_id", "args_preview", "thread_id"}
+    assert optional == frozenset()
+
+
+def test_config_load_schema_three_required_keys():
+    """[IMPROVE-95] Boot-time event with exactly three keys.
+    ``env_file_path`` is explicitly nullable (str | None) so the
+    'no .env found' case doesn't drop the key."""
+    required, optional = _required_optional_keys(ConfigLoadContext)
+    assert required == {"env_file_found", "env_file_path", "override_count"}
+    assert optional == frozenset()
+
+
+def test_image_oom_ladder_done_schema_successful_stage_nullable():
+    """[IMPROVE-95] ``successful_stage`` is None when ALL stages
+    were exhausted — explicitly nullable, NOT NotRequired (the
+    key is always present, just sometimes None)."""
+    required, optional = _required_optional_keys(ImageOomLadderDoneContext)
+    assert required == {"successful_stage", "stages_tried", "stage_count"}
+    assert optional == frozenset()
+
+
+def test_image_oom_ladder_start_schema_strict():
+    """[IMPROVE-95] Six required keys at ladder entry. Pin so a
+    future stages_planned-as-tuple-not-list typo gets caught
+    at schema-validation time."""
+    required, optional = _required_optional_keys(ImageOomLadderStartContext)
+    assert required == {
+        "error_code", "original_width", "original_height",
+        "original_steps", "stages_planned", "allow_cpu",
+    }
+    assert optional == frozenset()
+
+
+def test_image_oom_stage_attempt_schema_identical_across_ok_error():
+    """[IMPROVE-95] Both ok and error variants of the
+    ``image.oom_stage_attempt`` event share the same six retry_*
+    keys; error_code/error_message live on the emit_typed
+    signature itself, NOT in the context dict."""
+    required, optional = _required_optional_keys(ImageOomStageAttemptContext)
+    assert required == {
+        "stage_name", "retry_width", "retry_height", "retry_steps",
+        "retry_timeout_s", "retry_device",
+    }
+    assert optional == frozenset()
+
+
+def test_image_optimization_plan_schema_full_shape():
+    """[IMPROVE-95] The optimization-plan event carries the full
+    rules-fired/suppressed/suppressed_by trail. No optional
+    keys — all nine fields populated on every fire."""
+    required, optional = _required_optional_keys(ImageOptimizationPlanContext)
+    assert required == {
+        "backend", "family", "quality_tier", "steps", "is_few_step",
+        "is_cpu", "rules_fired", "rules_suppressed", "rules_suppressed_by",
+    }
+    assert optional == frozenset()
+
+
+def test_image_warmup_schema_two_required_keys():
+    """[IMPROVE-95] The warmup event carries only mode + device
+    in context; error_code/error_message land on emit_typed's
+    signature, not the context dict, so the schema is identical
+    across ok and error callsites."""
+    required, optional = _required_optional_keys(ImageWarmupContext)
+    assert required == {"mode", "device"}
+    assert optional == frozenset()
+
+
+def test_provider_availability_probe_schema_available_optional():
+    """[IMPROVE-95] ``provider`` is always present;
+    ``available`` only fires on the success path
+    (providers/router.py:102) since the error path 116 omits it
+    by design (the probe failed before resolving)."""
+    required, optional = _required_optional_keys(ProviderAvailabilityProbeContext)
+    assert required == {"provider"}
+    assert optional == {"available"}
+
+
+def test_system_node_end_schema_reason_optional():
+    """[IMPROVE-95] Five core keys always present;
+    ``reason`` only on the agent-not-found skipped path
+    (executor.py:757)."""
+    required, optional = _required_optional_keys(SystemNodeEndContext)
+    assert required == {"run_id", "system_name", "node_id", "agent", "role"}
+    assert optional == {"reason"}
+
+
+def test_system_node_start_schema_preloaded_optional():
+    """[IMPROVE-95] Six core keys present in sync + streaming
+    callsites; ``preloaded`` only in the streaming-preloaded
+    variant at executor.py:1062."""
+    required, optional = _required_optional_keys(SystemNodeStartContext)
+    assert required == {
+        "run_id", "system_name", "node_id", "agent", "role", "step",
+    }
+    assert optional == {"preloaded"}
+
+
+def test_system_routing_decision_schema_strict_chosen_nullable():
+    """[IMPROVE-95] All six keys always present;
+    ``chosen_option`` is explicitly nullable (str | None) for
+    the no-rule-matched fallback case, NOT NotRequired."""
+    required, optional = _required_optional_keys(SystemRoutingDecisionContext)
+    assert required == {
+        "run_id", "system_name", "node_id", "chosen_option",
+        "candidates", "rule_count",
+    }
+    assert optional == frozenset()
+
+
+def test_system_run_done_schema_streaming_optional():
+    """[IMPROVE-95] Three core keys; ``streaming`` flag only on
+    the streaming-executor path (executor.py:1306). Mirrors
+    [IMPROVE-83]'s convention on system.wave_parallel."""
+    required, optional = _required_optional_keys(SystemRunDoneContext)
+    assert required == {"run_id", "system_name", "conversation_id"}
+    assert optional == {"streaming"}
 
 
 # ── Pydantic TypeAdapter validation (audit-time) ───────────────
@@ -355,13 +495,14 @@ def test_pinned_schema_count_grows_or_stays():
     "events without schemas are skipped" semantics means a
     deletion goes unnoticed.
 
-    Today: 6 pinned schemas. If a future commit needs to
+    Today: 18 pinned schemas (6 from [IMPROVE-92] + 12 from
+    [IMPROVE-95]'s Wave 10 batch). If a future commit needs to
     delete one (e.g. event renamed), update this baseline AND
     update ``EVENT_CONTEXT_SCHEMAS`` in the same commit so the
     intent is explicit in code review.
     """
     pinned_count = len(EVENT_CONTEXT_SCHEMAS)
-    minimum_pinned = 6  # baseline as of [IMPROVE-92]
+    minimum_pinned = 18  # baseline as of [IMPROVE-95]
     assert pinned_count >= minimum_pinned, (
         f"[IMPROVE-92] Pinned schema count dropped below the "
         f"baseline ({pinned_count} < {minimum_pinned}). "
