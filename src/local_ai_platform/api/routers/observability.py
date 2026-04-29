@@ -309,11 +309,27 @@ async def obs_recent(
     subsystem: str | None = None,
     status: str | None = None,
     action: str | None = None,
+    error_code: str | None = None,
+    error_code_prefix: str | None = None,
     limit: int = 100,
 ):
     """Recent events, filterable. Use for ad-hoc debugging.
 
     Example: GET /observability/recent?subsystem=image&status=error&limit=50
+
+    [IMPROVE-113] ``error_code`` and ``error_code_prefix`` axes
+    extend the filter set to match /observability/timeseries +
+    /observability/summary + /observability/rejections (the
+    IMPROVE-108 cross-endpoint axis pair). The two filters
+    AND-compose; an empty filter is "no constraint".
+
+    The ``filters`` echo dict carries all five filter axes
+    (subsystem/status/action/error_code/error_code_prefix) so
+    dashboards can render a "showing: prefix=X" badge without
+    re-parsing the URL. ``limit`` is a pagination control, not
+    a filter — it stays out of the echo dict (matching
+    /timeseries' convention of echoing filters but not
+    bucket_minutes / window_hours).
     """
     # Cap limit to protect the API from runaway queries
     limit = max(1, min(int(limit or 100), 1000))
@@ -329,6 +345,17 @@ async def obs_recent(
     if action:
         q += " AND action = ?"
         params.append(action)
+    # [IMPROVE-113] error_code + error_code_prefix axes — same
+    # helper as /timeseries + /summary + /rejections so the LIKE
+    # escape semantic (literal underscore matches literal
+    # underscore, not LIKE wildcard) is consistent across the
+    # four observability endpoints.
+    err_clauses, err_params = _build_error_code_filter(
+        error_code, error_code_prefix,
+    )
+    for clause in err_clauses:
+        q += f" AND {clause}"
+    params.extend(err_params)
     q += " ORDER BY id DESC LIMIT ?"
     params.append(limit)
     try:
@@ -336,7 +363,22 @@ async def obs_recent(
         items = [dict(r) for r in rows]
     finally:
         conn.close()
-    return {"items": items, "count": len(items)}
+    return {
+        "items": items,
+        "count": len(items),
+        # [IMPROVE-113] Filters echo — five-key dict matching the
+        # four-axis filter set + error_code_prefix. Always-present
+        # so consumers don't need a key-existence check. Pin the
+        # 5-key shape so a future addition lands as a deliberate
+        # +1 (mirrors IMPROVE-110's fill_zeros echo on /timeseries).
+        "filters": {
+            "subsystem": subsystem,
+            "status": status,
+            "action": action,
+            "error_code": error_code,
+            "error_code_prefix": error_code_prefix,
+        },
+    }
 
 
 # ── [IMPROVE-108] Observability query helpers ─────────────────
