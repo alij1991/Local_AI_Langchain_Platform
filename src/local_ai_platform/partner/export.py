@@ -36,6 +36,8 @@ from __future__ import annotations
 import io
 import json
 import logging
+import platform
+import sys
 import zipfile
 from datetime import datetime, timezone
 from pathlib import Path
@@ -188,31 +190,116 @@ def build_export_bundle(engine: Any) -> bytes:
     return buffer.getvalue()
 
 
+def _get_install_uuid() -> str:
+    """[IMPROVE-112] Return the per-install UUID, generating it
+    on first call.
+
+    Persists to ``<DB_PATH parent>/install_uuid.txt`` so it
+    survives restarts; deleting the data directory resets the
+    UUID (treated as a fresh install — correct, the deleted
+    install no longer exists). The file path is derived from
+    ``db.DB_PATH`` at call time so test fixtures monkeypatching
+    DB_PATH get isolated install_uuid files automatically (no
+    extra fixture work needed).
+
+    Why a per-install UUID rather than per-bundle: support
+    debugging — operators receiving multiple bundle exports
+    from the same user can correlate them via install_uuid.
+    A per-bundle UUID would require carrying it separately
+    (e.g. in a support ticket).
+
+    Generation is best-effort: a write failure (read-only
+    filesystem, permissions) falls back to a fresh UUID per
+    call. The bundle still gets a value (forward-rolling),
+    just not stable across exports on a broken install. The
+    fallback path emits a debug log so operators can spot it.
+    """
+    import uuid
+    from local_ai_platform.db import DB_PATH
+    path = DB_PATH.parent / "install_uuid.txt"
+    try:
+        if path.exists():
+            stored = path.read_text(encoding="utf-8").strip()
+            if stored:
+                return stored
+        # First-call generation.
+        new_uuid = str(uuid.uuid4())
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(new_uuid, encoding="utf-8")
+        return new_uuid
+    except OSError as exc:
+        logger.debug(
+            "[IMPROVE-112] install_uuid persistence failed (%s); "
+            "returning a non-persistent UUID", exc,
+        )
+        return str(uuid.uuid4())
+
+
+def _try_diffusers_version() -> str | None:
+    """[IMPROVE-112] Return the installed diffusers version, or
+    None if diffusers isn't importable in this environment.
+
+    Used by ``_write_bundle_metadata`` to record the diffusers
+    version a bundle was exported against — useful for support
+    debugging "this bundle's images/* state assumed diffusers
+    >= X" without requiring users to find the version
+    themselves.
+
+    Try-import is silent on failure; diffusers is an optional
+    dependency in this codebase (the partner subsystem doesn't
+    require it).
+    """
+    try:
+        import diffusers
+        return getattr(diffusers, "__version__", None)
+    except (ImportError, ModuleNotFoundError):
+        return None
+
+
 def _write_bundle_metadata(zf: zipfile.ZipFile) -> None:
     """[IMPROVE-97] Write ``bundle.json`` with the schema version
     + provenance metadata.
 
-    Shape:
+    Shape post-IMPROVE-112:
 
       {
         "schema_version": 1,
         "generated_at": "2026-04-29T12:34:56.789012+00:00",
         "platform": "Local AI Platform",
-        "exporter": "partner.export.build_export_bundle"
+        "exporter": "partner.export.build_export_bundle",
+        "install_uuid": "8f4e2c1a-...",
+        "os_hint": "Windows-11",
+        "python_version": "3.11.4",
+        "diffusers_version": "0.30.0"
       }
 
     The ``schema_version`` is the only field
-    ``restore_from_bundle`` reads for compatibility checking;
-    ``generated_at`` + ``platform`` + ``exporter`` are
-    informational (useful for debugging "which install made
-    this bundle"). A future v=2 bump may add fields; the
-    restore path is forward-compat so extra keys are ignored.
+    ``restore_from_bundle`` reads for compatibility checking.
+    ``generated_at`` + ``platform`` + ``exporter`` (IMPROVE-97)
+    + the four IMPROVE-112 provenance fields are informational
+    (useful for debugging "which install made this bundle" +
+    "what diffusers version was active").
+
+    [IMPROVE-112] Provenance fields stay at schema_version=1
+    per Q6=A — fields are ADDITIVE, restore tolerates extras
+    per the IMPROVE-97 forward-compat contract. A future v=2
+    bump only happens for breaking changes (key removal,
+    type change), not field additions.
     """
     metadata = {
         "schema_version": BUNDLE_SCHEMA_VERSION,
         "generated_at": datetime.now(timezone.utc).isoformat(),
         "platform": "Local AI Platform",
         "exporter": "partner.export.build_export_bundle",
+        # [IMPROVE-112] Provenance fields — additive at v=1.
+        "install_uuid": _get_install_uuid(),
+        "os_hint": f"{platform.system()}-{platform.release()}",
+        "python_version": (
+            f"{sys.version_info.major}."
+            f"{sys.version_info.minor}."
+            f"{sys.version_info.micro}"
+        ),
+        "diffusers_version": _try_diffusers_version(),
     }
     zf.writestr(
         "bundle.json", json.dumps(metadata, indent=2, default=str),

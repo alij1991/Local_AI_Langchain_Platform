@@ -1175,6 +1175,181 @@ def test_export_bundle_metadata_lands_first_in_zip(
         )
 
 
+# ── [IMPROVE-112] Bundle.json richer provenance ────────────────
+
+
+def test_bundle_metadata_includes_install_uuid(
+    tmp_partner_db, tmp_partner_data_dir, stub_engine,
+):
+    """[IMPROVE-112] ``bundle.json`` carries an ``install_uuid``
+    field — useful for support debugging when an operator
+    receives multiple bundles from the same user. The value is
+    a UUID4 string."""
+    import uuid as uuid_mod
+    from local_ai_platform.partner.export import build_export_bundle
+    bundle = build_export_bundle(stub_engine)
+    with zipfile.ZipFile(io.BytesIO(bundle), "r") as zf:
+        meta = json.loads(zf.read("bundle.json"))
+        assert "install_uuid" in meta
+        # Parses as a valid UUID (any version) — a UUID4 hex
+        # string is always parseable.
+        parsed = uuid_mod.UUID(meta["install_uuid"])
+        assert str(parsed) == meta["install_uuid"]
+
+
+def test_install_uuid_persists_across_bundle_exports(
+    tmp_partner_db, tmp_partner_data_dir, stub_engine,
+):
+    """[IMPROVE-112] Two bundles exported from the same install
+    carry the SAME ``install_uuid``. Pin the per-install
+    semantic — pre-IMPROVE-112 there was no install identifier;
+    if a future commit accidentally regenerates per-export the
+    correlation property breaks."""
+    from local_ai_platform.partner.export import build_export_bundle
+    bundle1 = build_export_bundle(stub_engine)
+    bundle2 = build_export_bundle(stub_engine)
+    with zipfile.ZipFile(io.BytesIO(bundle1), "r") as zf:
+        uuid1 = json.loads(zf.read("bundle.json"))["install_uuid"]
+    with zipfile.ZipFile(io.BytesIO(bundle2), "r") as zf:
+        uuid2 = json.loads(zf.read("bundle.json"))["install_uuid"]
+    assert uuid1 == uuid2, (
+        f"[IMPROVE-112] install_uuid changed between exports: "
+        f"{uuid1} → {uuid2}"
+    )
+
+
+def test_install_uuid_isolated_per_test_db_path(
+    tmp_partner_db, tmp_partner_data_dir, stub_engine,
+):
+    """[IMPROVE-112] The install_uuid file is stored alongside
+    DB_PATH so test fixtures monkeypatching DB_PATH automatically
+    get their own UUID. Pin: the persisted file lives at
+    ``<DB_PATH parent>/install_uuid.txt`` and contains the same
+    UUID that the bundle reports."""
+    from local_ai_platform.partner.export import build_export_bundle
+    from local_ai_platform import db as db_mod
+    bundle = build_export_bundle(stub_engine)
+    with zipfile.ZipFile(io.BytesIO(bundle), "r") as zf:
+        bundle_uuid = json.loads(zf.read("bundle.json"))["install_uuid"]
+    # File alongside DB_PATH carries the same UUID
+    uuid_file = db_mod.DB_PATH.parent / "install_uuid.txt"
+    assert uuid_file.exists()
+    assert uuid_file.read_text(encoding="utf-8").strip() == bundle_uuid
+
+
+def test_bundle_metadata_includes_os_hint(
+    tmp_partner_db, tmp_partner_data_dir, stub_engine,
+):
+    """[IMPROVE-112] ``os_hint`` is "{system}-{release}" via
+    ``platform.system()`` + ``platform.release()``. Pin the
+    format so a future commit using a different separator (e.g.
+    "Windows 11") doesn't silently change the field shape."""
+    import platform as platform_mod
+    from local_ai_platform.partner.export import build_export_bundle
+    bundle = build_export_bundle(stub_engine)
+    with zipfile.ZipFile(io.BytesIO(bundle), "r") as zf:
+        meta = json.loads(zf.read("bundle.json"))
+        assert "os_hint" in meta
+        expected = f"{platform_mod.system()}-{platform_mod.release()}"
+        assert meta["os_hint"] == expected
+
+
+def test_bundle_metadata_includes_python_version(
+    tmp_partner_db, tmp_partner_data_dir, stub_engine,
+):
+    """[IMPROVE-112] ``python_version`` is the running interpreter
+    version as ``"X.Y.Z"`` (major.minor.micro). Pin so a future
+    commit using ``sys.version`` (the freeform string with build
+    info) doesn't silently change the field shape — the
+    semver-style 3-tuple is what dashboards parse."""
+    import sys as sys_mod
+    from local_ai_platform.partner.export import build_export_bundle
+    bundle = build_export_bundle(stub_engine)
+    with zipfile.ZipFile(io.BytesIO(bundle), "r") as zf:
+        meta = json.loads(zf.read("bundle.json"))
+        assert "python_version" in meta
+        expected = (
+            f"{sys_mod.version_info.major}."
+            f"{sys_mod.version_info.minor}."
+            f"{sys_mod.version_info.micro}"
+        )
+        assert meta["python_version"] == expected
+
+
+def test_bundle_metadata_includes_diffusers_version(
+    tmp_partner_db, tmp_partner_data_dir, stub_engine,
+):
+    """[IMPROVE-112] ``diffusers_version`` is None when diffusers
+    isn't importable; otherwise the ``__version__`` string. Pin
+    the field's presence (always populated, even with None) so
+    consumers don't need a key-existence check."""
+    from local_ai_platform.partner.export import build_export_bundle
+    bundle = build_export_bundle(stub_engine)
+    with zipfile.ZipFile(io.BytesIO(bundle), "r") as zf:
+        meta = json.loads(zf.read("bundle.json"))
+        assert "diffusers_version" in meta
+        # In this environment diffusers IS installed (per
+        # pyproject.toml dependency).
+        try:
+            import diffusers as df
+            expected = df.__version__
+            assert meta["diffusers_version"] == expected
+        except ImportError:
+            assert meta["diffusers_version"] is None
+
+
+def test_bundle_metadata_stays_at_schema_version_1(
+    tmp_partner_db, tmp_partner_data_dir, stub_engine,
+):
+    """[IMPROVE-112] Per Q6=A: provenance fields are ADDITIVE,
+    schema_version stays at 1. A bump to 2 only happens for
+    breaking changes (key removal, type change), not field
+    additions. Pin so a future commit accidentally bumping to
+    v=2 surfaces here."""
+    from local_ai_platform.partner.export import (
+        BUNDLE_SCHEMA_VERSION, build_export_bundle,
+    )
+    bundle = build_export_bundle(stub_engine)
+    with zipfile.ZipFile(io.BytesIO(bundle), "r") as zf:
+        meta = json.loads(zf.read("bundle.json"))
+        assert meta["schema_version"] == 1
+        assert BUNDLE_SCHEMA_VERSION == 1
+
+
+def test_restore_tolerates_unknown_provenance_fields(
+    tmp_partner_db, tmp_partner_data_dir, stub_engine,
+):
+    """[IMPROVE-112] The IMPROVE-97 restore path is forward-compat
+    so unknown provenance fields are tolerated (extras silently
+    ignored). Pin the contract: a bundle with future-version
+    provenance fields restores cleanly without errors."""
+    from local_ai_platform.partner.export import restore_from_bundle
+    # Hand-roll a bundle.json with future fields the current
+    # restore path doesn't read — they MUST be ignored.
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w") as zf:
+        zf.writestr(
+            "bundle.json",
+            json.dumps({
+                "schema_version": 1,
+                "install_uuid": "test-uuid-1234",
+                "future_provenance_field": "ignored",
+                "another_extra": [1, 2, 3],
+            }),
+        )
+        # Add a profile so the restore has at least one component.
+        zf.writestr("profile.json", json.dumps({"name": "Test"}))
+    summary = restore_from_bundle(stub_engine, buf.getvalue())
+    # The schema_version reads the provenance correctly.
+    assert summary["schema_version"] == 1
+    # No error from the unknown fields.
+    assert all(
+        "future_provenance_field" not in e
+        and "another_extra" not in e
+        for e in summary["errors"]
+    )
+
+
 def test_restore_from_bundle_accepts_schema_version_1(
     tmp_partner_db, tmp_partner_data_dir, stub_engine,
 ):
