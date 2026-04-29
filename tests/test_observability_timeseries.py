@@ -66,6 +66,15 @@ def _insert_event(db_mod, *, subsystem, action, status="ok",
     ``ts_offset_minutes`` is negative (events in the past).
     Positive values would land in the future — SQLite accepts
     them but the window filter would exclude them, so don't.
+
+    NOTE: small ``ts_offset_minutes`` values (e.g. ``-1`` /
+    ``-2``) can STRADDLE a 15-min bucket boundary when "now"
+    falls in the first minute after a :00 / :15 / :30 / :45
+    clock boundary. For tests that need >1 events in the SAME
+    bucket deterministically, use
+    ``_insert_event_in_current_bucket`` instead — it anchors
+    the timestamp to ``bucket_start`` so the placement is
+    independent of where "now" lands within the bucket.
     """
     conn = db_mod.get_conn()
     try:
@@ -77,6 +86,76 @@ def _insert_event(db_mod, *, subsystem, action, status="ok",
             """,
             (
                 f"{ts_offset_minutes} minutes",
+                subsystem, action, status, error_code,
+            ),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+
+def _insert_event_in_current_bucket(
+    db_mod, *, subsystem, action, status="ok", error_code=None,
+    bucket_minutes=15, bucket_offset_seconds=30,
+):
+    """[IMPROVE-119] Insert an event anchored to the CURRENT
+    bucket's start (vs ``_insert_event``'s relative-to-"now"
+    placement).
+
+    Computes ``bucket_start`` via the same Unix-epoch
+    arithmetic the /observability/timeseries endpoint uses:
+
+        bucket_start_unix = floor(now_unix / bucket_seconds)
+                          * bucket_seconds
+
+    Then inserts the event at
+    ``bucket_start_unix + bucket_offset_seconds``.
+
+    Two events inserted via this helper with the SAME
+    ``bucket_minutes`` are GUARANTEED to land in the same
+    bucket — regardless of where "now" falls within the bucket
+    at insertion time. This fixes the bucket-straddling flake
+    where ``ts_offset_minutes=-1`` / ``-2`` could land in
+    different buckets when "now" is in the first minute after a
+    :00 / :15 / :30 / :45 clock boundary.
+
+    Args:
+        bucket_minutes: Match the value the test passes to the
+            endpoint's ``?bucket_minutes=`` (default 15 — the
+            most common test bucket size).
+        bucket_offset_seconds: Position within the bucket. Pass
+            different values when inserting multiple events to
+            ensure distinct timestamps (some queries care about
+            ts ordering even within the same bucket).
+    """
+    bucket_seconds = bucket_minutes * 60
+    conn = db_mod.get_conn()
+    try:
+        # The two ``strftime('%s','now')`` calls inside the
+        # subtraction CAN drift by a second if invoked across a
+        # second boundary, but that's harmless: both expressions
+        # would just use the next-second's now and still
+        # produce the SAME ``floor`` result (since the floor
+        # rounds DOWN to the bucket boundary). Worst-case
+        # rare-edge: the ``+ ?`` offset positions the event 1s
+        # later than expected, still well inside the bucket.
+        conn.execute(
+            f"""
+            INSERT INTO app_events
+                (ts, subsystem, action, status, error_code)
+            VALUES (
+                datetime(
+                    (CAST(strftime('%s','now') AS INTEGER)
+                     - (CAST(strftime('%s','now') AS INTEGER)
+                        % {bucket_seconds}))
+                    + ?,
+                    'unixepoch'
+                ),
+                ?, ?, ?, ?
+            )
+            """,
+            (
+                bucket_offset_seconds,
                 subsystem, action, status, error_code,
             ),
         )
@@ -510,18 +589,35 @@ def test_timeseries_fill_zeros_preserves_event_buckets(client):
     bucket counts. Insert events in 2 distinct buckets (~30 min
     apart with 15-min buckets), confirm both event-buckets land
     with their full counts AND empty buckets between them are
-    zero-counts. Pin the merge correctness."""
+    zero-counts. Pin the merge correctness.
+
+    [IMPROVE-119] Bucket A's two events use the
+    ``_insert_event_in_current_bucket`` helper rather than
+    ``ts_offset_minutes=-1, -2``. The relative-offset shape was
+    flake-prone at clock boundaries: when "now" landed in the
+    first minute after :00 / :15 / :30 / :45, ``-1`` and ``-2``
+    straddled the boundary into different buckets, producing 3
+    non-zero buckets instead of the expected 2. Anchoring to
+    ``bucket_start + offset_seconds`` is deterministic.
+    """
     db_mod = client._db_mod
-    # Bucket A: now (counts in current 15-min bucket)
-    _insert_event(
+    # Bucket A: current 15-min bucket. Anchored to bucket_start
+    # so both events deterministically land in the same bucket
+    # (see test docstring + helper docstring for the boundary-
+    # straddle flake this fixes).
+    _insert_event_in_current_bucket(
         db_mod, subsystem="agent", action="iso_fill_preserve",
-        ts_offset_minutes=-1,  # ~now
+        bucket_minutes=15, bucket_offset_seconds=30,
     )
-    _insert_event(
+    _insert_event_in_current_bucket(
         db_mod, subsystem="agent", action="iso_fill_preserve",
-        ts_offset_minutes=-2,  # ~now (same bucket)
+        bucket_minutes=15, bucket_offset_seconds=60,
     )
-    # Bucket B: ~30 min ago (different 15-min bucket)
+    # Bucket B: ~30 min ago. The 30-min gap from "now" GUARANTEES
+    # a different bucket from Bucket A regardless of where "now"
+    # falls within its bucket: 15-min buckets + 30-min gap = at
+    # least 2 boundary crossings between Bucket A and Bucket B,
+    # so they cannot collide. No anchor helper needed here.
     _insert_event(
         db_mod, subsystem="agent", action="iso_fill_preserve",
         ts_offset_minutes=-32,
@@ -563,3 +659,94 @@ def test_timeseries_fill_zeros_grid_aligned_to_bucket_boundaries(client):
             f"bucket_start {b['bucket_start']!r} has minute {minute} "
             f"— not aligned to 15-min boundary"
         )
+
+
+# ── [IMPROVE-119] _insert_event_in_current_bucket helper pins ─
+
+
+def test_insert_in_current_bucket_places_two_events_same_bucket(client):
+    """[IMPROVE-119] Two events inserted via the bucket-anchored
+    helper land in EXACTLY ONE bucket — the deterministic pin
+    that fixes the boundary-straddle flake.
+
+    Run-time invariance: this test must pass regardless of which
+    minute-of-hour the test runs at. Pre-IMPROVE-119 the
+    equivalent assertion using ``ts_offset_minutes=-1, -2``
+    would fail ~6.7% of runs (1 minute out of every 15).
+    """
+    db_mod = client._db_mod
+    _insert_event_in_current_bucket(
+        db_mod, subsystem="agent",
+        action="iso_anchor_same_bucket",
+        bucket_minutes=15, bucket_offset_seconds=15,
+    )
+    _insert_event_in_current_bucket(
+        db_mod, subsystem="agent",
+        action="iso_anchor_same_bucket",
+        bucket_minutes=15, bucket_offset_seconds=120,
+    )
+    resp = client.get(
+        "/observability/timeseries"
+        "?window_hours=1&bucket_minutes=15"
+        "&subsystem=agent&action=iso_anchor_same_bucket",
+    )
+    buckets = resp.json()["buckets"]
+    assert len(buckets) == 1, (
+        f"expected exactly 1 bucket; got {len(buckets)}: {buckets}"
+    )
+    assert buckets[0]["count"] == 2
+
+
+def test_insert_in_current_bucket_lands_on_aligned_boundary(client):
+    """[IMPROVE-119] The inserted event's bucket_start is
+    aligned to a clock boundary (minute % bucket_minutes == 0).
+    Verifies the helper's Unix-epoch arithmetic matches the
+    endpoint's bucketing exactly — same modulo, same anchor."""
+    db_mod = client._db_mod
+    _insert_event_in_current_bucket(
+        db_mod, subsystem="agent",
+        action="iso_anchor_aligned",
+        bucket_minutes=15, bucket_offset_seconds=45,
+    )
+    resp = client.get(
+        "/observability/timeseries"
+        "?window_hours=1&bucket_minutes=15"
+        "&subsystem=agent&action=iso_anchor_aligned",
+    )
+    buckets = resp.json()["buckets"]
+    assert len(buckets) == 1
+    bucket_start = buckets[0]["bucket_start"]
+    # bucket_start is "YYYY-MM-DD HH:MM:SS" SQLite format. The
+    # minute component must be 0/15/30/45 (15-min alignment).
+    minute = int(bucket_start.split(":")[1])
+    assert minute in (0, 15, 30, 45), (
+        f"bucket_start {bucket_start!r} not 15-min aligned"
+    )
+    # Seconds component is :00 — bucket boundaries are
+    # whole-minute aligned regardless of where "now" falls.
+    second = int(bucket_start.split(":")[2])
+    assert second == 0, (
+        f"bucket_start seconds component {second} != 0"
+    )
+
+
+def test_insert_in_current_bucket_supports_custom_bucket_minutes(client):
+    """[IMPROVE-119] Helper accepts ``bucket_minutes != 15``.
+    Pin a 60-min bucket case so a future test using hourly
+    buckets can use the same helper without surprise."""
+    db_mod = client._db_mod
+    _insert_event_in_current_bucket(
+        db_mod, subsystem="agent",
+        action="iso_anchor_60min",
+        bucket_minutes=60, bucket_offset_seconds=300,
+    )
+    resp = client.get(
+        "/observability/timeseries"
+        "?window_hours=2&bucket_minutes=60"
+        "&subsystem=agent&action=iso_anchor_60min",
+    )
+    buckets = resp.json()["buckets"]
+    assert len(buckets) == 1
+    # 60-min buckets land at :00 of every hour.
+    minute = int(buckets[0]["bucket_start"].split(":")[1])
+    assert minute == 0
