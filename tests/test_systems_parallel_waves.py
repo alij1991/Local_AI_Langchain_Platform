@@ -540,3 +540,391 @@ def test_telemetry_duplicate_agent_fallback_emits_event(monkeypatch):
     assert perf["parallel_waves_skipped"] == 1
     # No actual parallel wave fired.
     assert [c for c in captured if c[1] == "wave_parallel"] == []
+
+
+# ── [IMPROVE-83] Streaming-path parallel-wave parity ───────────────
+
+
+def _make_orch_with_streaming_stub():
+    """Like _make_orch but also stubs ``astream_chat_with_agent`` so
+    direct calls into ``astream_system_graph`` don't try to talk to a
+    real LLM. The streaming stub yields one token + a done frame so
+    the executor's per-node-loop ``async for`` consumes a realistic
+    shape for nodes that aren't preloaded.
+    """
+    orch = _make_orch()
+
+    async def _fake_astream(agent_name: str, prompt: str, **kw):
+        # Single-token stream — mimics the path-A producer in
+        # AgentOrchestrator.astream_chat_with_agent.
+        yield {"type": "token", "text": f"streamed:{agent_name}"}
+        yield {"type": "done", "content": f"streamed:{agent_name}"}
+
+    orch.astream_chat_with_agent = _fake_astream
+    return orch
+
+
+async def _drain_stream(gen):
+    """Collect every event the streaming executor yields into a
+    list. Tests assert on the list directly (event types, ordering,
+    payload shape)."""
+    events = []
+    async for ev in gen:
+        events.append(ev)
+    return events
+
+
+def test_streaming_default_is_sequential_no_flag():
+    """Streaming executor with no ``parallel_waves`` flag runs
+    siblings one at a time. Pin so the default doesn't accidentally
+    flip to parallel and silently change semantics."""
+    orch = _make_orch_with_streaming_stub()
+
+    in_flight: set[str] = set()
+    in_flight_lock = threading.Lock()
+    max_concurrent = [0]
+
+    def _fake_chat(agent_name: str, prompt: str, **kw):
+        with in_flight_lock:
+            in_flight.add(agent_name)
+            max_concurrent[0] = max(max_concurrent[0], len(in_flight))
+        time.sleep(0.05)
+        with in_flight_lock:
+            in_flight.discard(agent_name)
+        return f"output of {agent_name}"
+
+    orch.chat_with_agent = _fake_chat
+
+    definition = {
+        "nodes": [
+            {"id": "start_n", "agent": "alpha"},
+            {"id": "b_n", "agent": "beta"},
+            {"id": "c_n", "agent": "gamma"},
+        ],
+        "edges": [
+            {"source": "start_n", "target": "b_n",
+             "rule": {"type": "always"}},
+            {"source": "start_n", "target": "c_n",
+             "rule": {"type": "always"}},
+        ],
+        "start_node_id": "start_n",
+        # No parallel_waves flag → max_concurrent stays at 1.
+    }
+    asyncio.run(_drain_stream(
+        orch.astream_system_graph(definition, "Test"),
+    ))
+    # Streaming path uses astream_chat_with_agent for non-preloaded
+    # nodes; chat_with_agent fires for nothing in this run since
+    # parallel mode is off. Pin via max_concurrent==0 (chat_with_agent
+    # was never called).
+    assert max_concurrent[0] == 0
+
+
+def test_streaming_parallel_waves_runs_three_siblings_concurrently():
+    """[IMPROVE-83] The streaming executor under parallel_waves=True
+    overlaps siblings in the same wave. Sibling agents fire via
+    chat_with_agent (preload), not astream_chat_with_agent — the
+    cached output is replayed as one token frame."""
+    orch = _make_orch_with_streaming_stub()
+
+    in_flight: set[str] = set()
+    in_flight_lock = threading.Lock()
+    max_concurrent = [0]
+
+    def _fake_chat(agent_name: str, prompt: str, **kw):
+        with in_flight_lock:
+            in_flight.add(agent_name)
+            max_concurrent[0] = max(max_concurrent[0], len(in_flight))
+        time.sleep(0.05)
+        with in_flight_lock:
+            in_flight.discard(agent_name)
+        return f"output of {agent_name}"
+
+    orch.chat_with_agent = _fake_chat
+
+    definition = {
+        "nodes": [
+            {"id": "start_n", "agent": "alpha"},
+            {"id": "b_n", "agent": "beta"},
+            {"id": "c_n", "agent": "gamma"},
+            {"id": "d_n", "agent": "delta"},
+        ],
+        "edges": [
+            {"source": "start_n", "target": "b_n",
+             "rule": {"type": "always"}},
+            {"source": "start_n", "target": "c_n",
+             "rule": {"type": "always"}},
+            {"source": "start_n", "target": "d_n",
+             "rule": {"type": "always"}},
+        ],
+        "start_node_id": "start_n",
+        "parallel_waves": True,
+    }
+    asyncio.run(_drain_stream(
+        orch.astream_system_graph(definition, "Test"),
+    ))
+    # Three siblings ran concurrently in the same wave.
+    assert max_concurrent[0] == 3
+
+
+def test_streaming_parallel_wave_yields_wave_parallel_event():
+    """The streaming executor yields a top-level ``wave_parallel``
+    SSE event before the per-node node_start events fire so the
+    frontend can render "wave 2: 3 nodes in flight"."""
+    orch = _make_orch_with_streaming_stub()
+    orch.chat_with_agent = lambda a, p, **kw: f"out:{a}"
+
+    definition = {
+        "nodes": [
+            {"id": "start_n", "agent": "alpha"},
+            {"id": "b_n", "agent": "beta"},
+            {"id": "c_n", "agent": "gamma"},
+        ],
+        "edges": [
+            {"source": "start_n", "target": "b_n",
+             "rule": {"type": "always"}},
+            {"source": "start_n", "target": "c_n",
+             "rule": {"type": "always"}},
+        ],
+        "start_node_id": "start_n",
+        "parallel_waves": True,
+    }
+    events = asyncio.run(_drain_stream(
+        orch.astream_system_graph(definition, "Test"),
+    ))
+    wave_events = [e for e in events if e.get("type") == "wave_parallel"]
+    assert len(wave_events) == 1
+    payload = wave_events[0]
+    assert payload["node_count"] == 2
+    assert set(payload["agents"]) == {"beta", "gamma"}
+    assert payload["errors"] == 0
+    assert "duration_ms" in payload
+
+
+def test_streaming_preloaded_node_marks_node_start_preloaded():
+    """When a node ran in the parallel preload, its ``node_start``
+    event carries ``preloaded=True`` so the frontend can render it
+    differently from a streamed node (e.g., skip the typing
+    animation)."""
+    orch = _make_orch_with_streaming_stub()
+    orch.chat_with_agent = lambda a, p, **kw: f"out:{a}"
+
+    definition = {
+        "nodes": [
+            {"id": "start_n", "agent": "alpha"},
+            {"id": "b_n", "agent": "beta"},
+            {"id": "c_n", "agent": "gamma"},
+        ],
+        "edges": [
+            {"source": "start_n", "target": "b_n",
+             "rule": {"type": "always"}},
+            {"source": "start_n", "target": "c_n",
+             "rule": {"type": "always"}},
+        ],
+        "start_node_id": "start_n",
+        "parallel_waves": True,
+    }
+    events = asyncio.run(_drain_stream(
+        orch.astream_system_graph(definition, "Test"),
+    ))
+    node_starts = [e for e in events if e.get("type") == "node_start"]
+    # b_n + c_n preloaded; start_n was a single-node wave (no
+    # parallel preload) — pin both shapes.
+    preloaded_ids = {
+        e["node"] for e in node_starts if e.get("preloaded") is True
+    }
+    assert preloaded_ids == {"b_n", "c_n"}
+    non_preloaded = [
+        e for e in node_starts if not e.get("preloaded")
+    ]
+    assert any(e["node"] == "start_n" for e in non_preloaded)
+
+
+def test_streaming_preloaded_node_emits_cached_text_as_token():
+    """A preloaded node yields its cached text in one ``token``
+    event so consumers counting token bytes still see a non-empty
+    body — same shape as a streamed node, just delivered in one
+    frame."""
+    orch = _make_orch_with_streaming_stub()
+    orch.chat_with_agent = lambda a, p, **kw: f"OUT:{a}"
+
+    definition = {
+        "nodes": [
+            {"id": "start_n", "agent": "alpha"},
+            {"id": "b_n", "agent": "beta"},
+            {"id": "c_n", "agent": "gamma"},
+        ],
+        "edges": [
+            {"source": "start_n", "target": "b_n",
+             "rule": {"type": "always"}},
+            {"source": "start_n", "target": "c_n",
+             "rule": {"type": "always"}},
+        ],
+        "start_node_id": "start_n",
+        "parallel_waves": True,
+    }
+    events = asyncio.run(_drain_stream(
+        orch.astream_system_graph(definition, "Test"),
+    ))
+    tokens_for_b = [
+        e for e in events
+        if e.get("type") == "token" and e.get("node") == "b_n"
+    ]
+    assert len(tokens_for_b) == 1
+    assert tokens_for_b[0]["text"] == "OUT:beta"
+
+
+def test_streaming_parallel_wave_run_done_carries_counters(monkeypatch):
+    """The streaming ``run_done`` event carries the same per-run
+    counters as the sync executor — dashboards charting parallel
+    engagement can treat both paths uniformly."""
+    orch = _make_orch_with_streaming_stub()
+    orch.chat_with_agent = lambda a, p, **kw: f"out:{a}"
+
+    captured = _capture_emits(monkeypatch)
+
+    definition = {
+        "nodes": [
+            {"id": "start_n", "agent": "alpha"},
+            {"id": "b_n", "agent": "beta"},
+            {"id": "c_n", "agent": "gamma"},
+        ],
+        "edges": [
+            {"source": "start_n", "target": "b_n",
+             "rule": {"type": "always"}},
+            {"source": "start_n", "target": "c_n",
+             "rule": {"type": "always"}},
+        ],
+        "start_node_id": "start_n",
+        "parallel_waves": True,
+    }
+    asyncio.run(_drain_stream(
+        orch.astream_system_graph(definition, "Test"),
+    ))
+    run_done = [c for c in captured if c[1] == "run_done"]
+    assert len(run_done) == 1
+    perf = run_done[0][3]
+    assert perf is not None
+    assert perf["parallel_waves_used"] == 1
+    assert perf["concurrent_nodes_total"] == 2
+    assert perf["parallel_waves_skipped"] == 0
+
+
+def test_streaming_duplicate_agents_in_wave_falls_back_to_sequential(monkeypatch):
+    """[IMPROVE-83] Streaming executor honours the same safety
+    fallback as the sync path — duplicate agents in one wave
+    don't preload."""
+    orch = _make_orch_with_streaming_stub()
+    orch.chat_with_agent = lambda a, p, **kw: f"out:{a}"
+
+    captured = _capture_emits(monkeypatch)
+
+    definition = {
+        "nodes": [
+            {"id": "start_n", "agent": "alpha"},
+            {"id": "b_n", "agent": "beta"},
+            {"id": "c_n", "agent": "beta"},  # duplicate
+        ],
+        "edges": [
+            {"source": "start_n", "target": "b_n",
+             "rule": {"type": "always"}},
+            {"source": "start_n", "target": "c_n",
+             "rule": {"type": "always"}},
+        ],
+        "start_node_id": "start_n",
+        "parallel_waves": True,
+    }
+    asyncio.run(_drain_stream(
+        orch.astream_system_graph(definition, "Test"),
+    ))
+    fallbacks = [c for c in captured if c[1] == "wave_parallel_fallback"]
+    assert len(fallbacks) == 1
+    # Streaming flag rides on context.
+    assert fallbacks[0][2].get("streaming") is True
+    run_done = [c for c in captured if c[1] == "run_done"]
+    perf = run_done[0][3]
+    assert perf["parallel_waves_used"] == 0
+    assert perf["parallel_waves_skipped"] == 1
+    # Wave_parallel observability event should NOT fire.
+    assert [c for c in captured if c[1] == "wave_parallel"] == []
+
+
+def test_streaming_wave_parallel_event_carries_streaming_flag(monkeypatch):
+    """The observability ``system.wave_parallel`` event from the
+    streaming path carries ``streaming: True`` in context so a
+    dashboard can chart streaming vs. sync parallel engagement
+    separately."""
+    orch = _make_orch_with_streaming_stub()
+    orch.chat_with_agent = lambda a, p, **kw: f"out:{a}"
+
+    captured = _capture_emits(monkeypatch)
+
+    definition = {
+        "nodes": [
+            {"id": "start_n", "agent": "alpha"},
+            {"id": "b_n", "agent": "beta"},
+            {"id": "c_n", "agent": "gamma"},
+        ],
+        "edges": [
+            {"source": "start_n", "target": "b_n",
+             "rule": {"type": "always"}},
+            {"source": "start_n", "target": "c_n",
+             "rule": {"type": "always"}},
+        ],
+        "start_node_id": "start_n",
+        "parallel_waves": True,
+    }
+    asyncio.run(_drain_stream(
+        orch.astream_system_graph(definition, "Test"),
+    ))
+    parallel_events = [c for c in captured if c[1] == "wave_parallel"]
+    assert len(parallel_events) == 1
+    assert parallel_events[0][2].get("streaming") is True
+
+
+def test_streaming_preload_error_recorded_as_node_error():
+    """If a preloaded ``chat_with_agent`` raises, the cached
+    exception is re-played in the per-node loop so the SSE consumer
+    sees a node_end with status='error' AND the error_message lands
+    in node_outputs. Same shape as the sync executor's preload-error
+    path."""
+    orch = _make_orch_with_streaming_stub()
+
+    def _erratic_chat(agent_name: str, prompt: str, **kw):
+        if agent_name == "beta":
+            raise RuntimeError("beta blew up")
+        return f"out:{agent_name}"
+
+    orch.chat_with_agent = _erratic_chat
+
+    definition = {
+        "nodes": [
+            {"id": "start_n", "agent": "alpha"},
+            {"id": "b_n", "agent": "beta"},
+            {"id": "c_n", "agent": "gamma"},
+        ],
+        "edges": [
+            {"source": "start_n", "target": "b_n",
+             "rule": {"type": "always"}},
+            {"source": "start_n", "target": "c_n",
+             "rule": {"type": "always"}},
+        ],
+        "start_node_id": "start_n",
+        "parallel_waves": True,
+    }
+    events = asyncio.run(_drain_stream(
+        orch.astream_system_graph(definition, "Test"),
+    ))
+    b_node_ends = [
+        e for e in events
+        if e.get("type") == "node_end" and e.get("node") == "b_n"
+    ]
+    assert len(b_node_ends) == 1
+    assert b_node_ends[0]["status"] == "error"
+    # gamma still ran fine alongside.
+    c_node_ends = [
+        e for e in events
+        if e.get("type") == "node_end" and e.get("node") == "c_n"
+    ]
+    assert len(c_node_ends) == 1
+    assert c_node_ends[0]["status"] == "ok"

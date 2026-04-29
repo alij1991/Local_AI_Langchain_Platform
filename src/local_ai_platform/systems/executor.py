@@ -272,6 +272,235 @@ def _build_dag_structures(
     return node_map, edge_map, in_degree, current_nodes
 
 
+# ── [IMPROVE-83] Shared parallel-wave pre-pass ───────────────────
+
+
+class _ParallelWaveResult:
+    """Return value of ``_run_parallel_wave_or_fallback``.
+
+    Both executors call the helper before their per-node loop and
+    merge the result back in: ``preloaded_outputs`` short-circuits
+    the LLM call inside the loop, the three int counters get added
+    to the executor's running totals (surfaced in ``run_done.perf``),
+    and ``streaming_event`` carries an optional SSE-shaped dict the
+    streaming executor yields to the frontend.
+
+    Plain class rather than ``@dataclass`` to keep the executor
+    module's import surface small (no ``dataclasses`` import).
+    """
+
+    __slots__ = (
+        "preloaded_outputs",
+        "parallel_waves_used",
+        "concurrent_nodes_total",
+        "parallel_waves_skipped",
+        "streaming_event",
+    )
+
+    def __init__(
+        self,
+        *,
+        preloaded_outputs: dict[str, tuple[str, int, Exception | None]],
+        parallel_waves_used: int,
+        concurrent_nodes_total: int,
+        parallel_waves_skipped: int,
+        streaming_event: dict[str, Any] | None = None,
+    ) -> None:
+        self.preloaded_outputs = preloaded_outputs
+        self.parallel_waves_used = parallel_waves_used
+        self.concurrent_nodes_total = concurrent_nodes_total
+        self.parallel_waves_skipped = parallel_waves_skipped
+        self.streaming_event = streaming_event
+
+
+async def _run_parallel_wave_or_fallback(
+    orch: "AgentOrchestrator",
+    *,
+    runnable_for_parallel: list[str],
+    node_map: dict[str, dict],
+    node_outputs: list[dict[str, Any]],
+    context_budget: int,
+    user_input: str,
+    parallel_waves_flag: bool,
+    run_id: str,
+    system_name: str,
+    step: int,
+    streaming: bool = False,
+) -> _ParallelWaveResult:
+    """[IMPROVE-83] Shared parallel-wave pre-pass for both executors.
+
+    Pre-IMPROVE-83 only the sync ``execute_graph`` had the
+    [IMPROVE-36] parallel-wave pre-pass. The streaming variant
+    ``astream_graph`` ran every wave sequentially even with
+    ``parallel_waves: True`` set on the system. Now that both
+    executors share ``_build_dag_structures`` and
+    ``_evaluate_edge_rule``, lifting the pre-pass into a shared
+    helper closes the parity gap — and a future bug-fix lands once,
+    not twice.
+
+    Single source of truth here also pre-empts the kind of drift
+    that bit IMPROVE-35 (the 3-tuple/4-tuple ``edge_map`` shape
+    that diverged between the two paths and went unnoticed for a
+    full release because every streaming test stubbed the executor
+    itself).
+
+    Behaviour preserved byte-for-byte from the inline form:
+      * Only fires when ``parallel_waves_flag is True`` AND the
+        wave has 2+ runnable nodes.
+      * Falls back to sequential when nodes share the same agent
+        (the [IMPROVE-36] safety constraint — protects shared
+        in-memory ``_smart_memories[agent]`` state).
+      * Each preloaded node runs via ``asyncio.to_thread`` over
+        ``orch.chat_with_agent``, with the SAME pre-wave context
+        block (siblings see same context — pipelining traded for
+        speed).
+      * Per-node duration captured and surfaced on the cached entry
+        so the per-node loop's downstream emit sees the actual
+        chat-with-agent time, not the post-cache lookup time.
+      * Errors during the wave still fire the wave_parallel event
+        (with ``errors`` count in context) — the event tracks the
+        parallel DECISION, not whether the agents succeeded.
+
+    The ``streaming`` flag controls:
+      * Whether ``streaming=True`` lands in the wave_parallel /
+        wave_parallel_fallback context dict (matches the
+        ``run.start`` / ``run_done`` distinction).
+      * Whether the result carries a non-None ``streaming_event``
+        dict the streaming executor yields back to the SSE
+        consumer. Sync callers ignore the field.
+
+    Returns ``_ParallelWaveResult`` with empty preloaded_outputs +
+    zero counters when the helper short-circuits (parallel disabled,
+    single-node wave, or duplicate-agent fallback). Caller proceeds
+    sequentially in those cases.
+    """
+    if not parallel_waves_flag or len(runnable_for_parallel) <= 1:
+        return _ParallelWaveResult(
+            preloaded_outputs={},
+            parallel_waves_used=0,
+            concurrent_nodes_total=0,
+            parallel_waves_skipped=0,
+        )
+
+    # Lazy import — the constant + helper are owned by agents.py
+    # today (Wave 7 IMPROVE-75 left this as a spawned-followup;
+    # IMPROVE-84 in Wave 8 closes the migration).
+    from ..agents import _build_inter_node_context
+
+    wave_agents = [
+        node_map[n].get("agent", "") for n in runnable_for_parallel
+    ]
+
+    if len(wave_agents) != len(set(wave_agents)):
+        # Wave is unsafe to parallelize — duplicate agents.
+        # [IMPROVE-36 telemetry] Track safety-fallbacks too so a
+        # user wondering "why didn't parallel engage" can grep for
+        # this in run logs.
+        logger.info(
+            "[IMPROVE-36] parallel_waves on but wave has duplicate "
+            "agents (%s); falling back to sequential", wave_agents,
+        )
+        emit(
+            "system", "wave_parallel_fallback", status="ok",
+            context={
+                "run_id": run_id,
+                "system_name": system_name,
+                "step": step,
+                "node_count": len(runnable_for_parallel),
+                "agents": wave_agents,
+                "reason": "duplicate_agents",
+                "streaming": streaming,
+            },
+        )
+        return _ParallelWaveResult(
+            preloaded_outputs={},
+            parallel_waves_used=0,
+            concurrent_nodes_total=0,
+            parallel_waves_skipped=1,
+        )
+
+    # Wave is safe — run concurrently.
+    pre_wave_ctx = _build_inter_node_context(
+        node_outputs, budget_tokens=context_budget,
+    )
+
+    async def _preload(_nid: str):
+        _node_def = node_map[_nid]
+        _agent = _node_def.get("agent", "")
+        if pre_wave_ctx:
+            _prompt = (
+                f"{user_input}\n\nContext from prior agents:\n"
+                f"{pre_wave_ctx}"
+            )
+        else:
+            _prompt = user_input
+        _t0 = _time.monotonic()
+        try:
+            _out = await asyncio.to_thread(
+                orch.chat_with_agent, _agent, _prompt,
+            )
+            return _nid, _out, int(
+                (_time.monotonic() - _t0) * 1000,
+            ), None
+        except Exception as _exc:
+            return _nid, "", int(
+                (_time.monotonic() - _t0) * 1000,
+            ), _exc
+
+    _wave_t0 = _time.monotonic()
+    results = await asyncio.gather(
+        *[_preload(n) for n in runnable_for_parallel],
+    )
+    _wave_ms = int((_time.monotonic() - _wave_t0) * 1000)
+    preloaded_outputs: dict[str, tuple[str, int, Exception | None]] = {}
+    for _nid, _out, _dur, _exc in results:
+        preloaded_outputs[_nid] = (_out, _dur, _exc)
+    logger.info(
+        "[IMPROVE-36] parallel wave: %d nodes ran concurrently",
+        len(runnable_for_parallel),
+    )
+    _wave_errors = sum(
+        1 for _, _, _, exc in results if exc is not None
+    )
+    emit(
+        "system", "wave_parallel", status="ok",
+        duration_ms=_wave_ms,
+        context={
+            "run_id": run_id,
+            "system_name": system_name,
+            "step": step,
+            "node_count": len(runnable_for_parallel),
+            "agents": wave_agents,
+            "errors": _wave_errors,
+            "streaming": streaming,
+        },
+        perf={"node_count": len(runnable_for_parallel)},
+    )
+
+    streaming_event: dict[str, Any] | None = None
+    if streaming:
+        # [IMPROVE-83] SSE-shaped event — distinct from the
+        # observability ``wave_parallel`` event above. The frontend
+        # uses this to render "wave N: K nodes in flight" before the
+        # per-node node_start events fire.
+        streaming_event = {
+            "type": "wave_parallel",
+            "step": step,
+            "node_count": len(runnable_for_parallel),
+            "agents": wave_agents,
+            "duration_ms": _wave_ms,
+            "errors": _wave_errors,
+        }
+
+    return _ParallelWaveResult(
+        preloaded_outputs=preloaded_outputs,
+        parallel_waves_used=1,
+        concurrent_nodes_total=len(runnable_for_parallel),
+        parallel_waves_skipped=0,
+        streaming_event=streaming_event,
+    )
+
+
 # ── Sync executor ────────────────────────────────────────────────
 
 
@@ -375,120 +604,41 @@ async def execute_graph(
         step += 1
         next_nodes: list[str] = []
 
-        # [IMPROVE-36] Pre-pass: when parallel_waves is on AND the
-        # wave is safe (no duplicate agents), run all runnable
-        # ``chat_with_agent`` calls concurrently and stash their
-        # outputs. The existing per-node loop below then reuses
-        # the stashed result instead of re-running the LLM call.
-        #
-        # "Safe" = no two nodes in the wave share the same agent.
-        # The doc warns about shared in-memory state on the same
-        # agent (``_smart_memories[agent]``); the conservative
-        # fallback to sequential mode keeps that case correct
-        # without requiring callers to reason about it.
+        # [IMPROVE-36 / IMPROVE-83] Pre-pass: when parallel_waves
+        # is on AND the wave has 2+ runnable distinct-agent nodes,
+        # run all ``chat_with_agent`` calls concurrently and stash
+        # outputs. The per-node loop below reuses the stashed
+        # result instead of re-running the LLM call. The shared
+        # helper drives both this sync executor and ``astream_graph``
+        # so the parallel-wave decision lives in one place.
         #
         # Sequential semantics still apply WITHIN a wave when
-        # parallel mode is off — node 2 in the same wave sees
-        # node 1's output via the rebuilt context block. Parallel
-        # mode intentionally TRADES that pipelining for speed:
-        # all siblings see the same pre-wave context.
-        preloaded_outputs: dict[
-            str, tuple[str, int, Exception | None]
-        ] = {}
+        # parallel mode is off — node 2 sees node 1's output via
+        # the rebuilt context block. Parallel mode intentionally
+        # TRADES that pipelining for speed: siblings see the same
+        # pre-wave context.
         runnable_for_parallel = [
             n for n in current_nodes
             if n not in visited and n in node_map
             and node_map[n].get("agent", "") in orch.definitions
         ]
-        if parallel_waves and len(runnable_for_parallel) > 1:
-            wave_agents = [
-                node_map[n].get("agent", "") for n in runnable_for_parallel
-            ]
-            if len(wave_agents) == len(set(wave_agents)):
-                # Wave is safe to parallelize.
-                pre_wave_ctx = _build_inter_node_context(
-                    node_outputs, budget_tokens=context_budget,
-                )
-
-                async def _preload(_nid: str):
-                    _node_def = node_map[_nid]
-                    _agent = _node_def.get("agent", "")
-                    if pre_wave_ctx:
-                        _prompt = (
-                            f"{user_input}\n\nContext from prior agents:\n"
-                            f"{pre_wave_ctx}"
-                        )
-                    else:
-                        _prompt = user_input
-                    _t0 = _time.monotonic()
-                    try:
-                        _out = await asyncio.to_thread(
-                            orch.chat_with_agent, _agent, _prompt,
-                        )
-                        return _nid, _out, int(
-                            (_time.monotonic() - _t0) * 1000,
-                        ), None
-                    except Exception as _exc:
-                        return _nid, "", int(
-                            (_time.monotonic() - _t0) * 1000,
-                        ), _exc
-
-                _wave_t0 = _time.monotonic()
-                results = await asyncio.gather(
-                    *[_preload(n) for n in runnable_for_parallel],
-                )
-                _wave_ms = int((_time.monotonic() - _wave_t0) * 1000)
-                for _nid, _out, _dur, _exc in results:
-                    preloaded_outputs[_nid] = (_out, _dur, _exc)
-                logger.info(
-                    "[IMPROVE-36] parallel wave: %d nodes ran "
-                    "concurrently", len(runnable_for_parallel),
-                )
-                # [IMPROVE-36 telemetry] Counter-bump + per-wave
-                # event so /observability/summary can answer
-                # "how often does this engage and at what
-                # fan-out". Errors during the wave still fire the
-                # event — it tracks the parallel decision, not
-                # whether the agents themselves succeeded.
-                parallel_waves_used += 1
-                concurrent_nodes_total += len(runnable_for_parallel)
-                _wave_errors = sum(
-                    1 for _, _, _, exc in results if exc is not None
-                )
-                emit(
-                    "system", "wave_parallel", status="ok",
-                    duration_ms=_wave_ms,
-                    context={
-                        "run_id": run_id,
-                        "system_name": system_name,
-                        "step": step,
-                        "node_count": len(runnable_for_parallel),
-                        "agents": wave_agents,
-                        "errors": _wave_errors,
-                    },
-                    perf={"node_count": len(runnable_for_parallel)},
-                )
-            else:
-                logger.info(
-                    "[IMPROVE-36] parallel_waves on but wave has "
-                    "duplicate agents (%s); falling back to "
-                    "sequential", wave_agents,
-                )
-                # [IMPROVE-36 telemetry] Track safety-fallbacks
-                # too so a user wondering "why didn't parallel
-                # engage" can grep for this in run logs.
-                parallel_waves_skipped += 1
-                emit(
-                    "system", "wave_parallel_fallback", status="ok",
-                    context={
-                        "run_id": run_id,
-                        "system_name": system_name,
-                        "step": step,
-                        "node_count": len(runnable_for_parallel),
-                        "agents": wave_agents,
-                        "reason": "duplicate_agents",
-                    },
-                )
+        _wave_result = await _run_parallel_wave_or_fallback(
+            orch,
+            runnable_for_parallel=runnable_for_parallel,
+            node_map=node_map,
+            node_outputs=node_outputs,
+            context_budget=context_budget,
+            user_input=user_input,
+            parallel_waves_flag=parallel_waves,
+            run_id=run_id,
+            system_name=system_name,
+            step=step,
+            streaming=False,
+        )
+        preloaded_outputs = _wave_result.preloaded_outputs
+        parallel_waves_used += _wave_result.parallel_waves_used
+        concurrent_nodes_total += _wave_result.concurrent_nodes_total
+        parallel_waves_skipped += _wave_result.parallel_waves_skipped
 
         for nid in current_nodes:
             if nid in visited:
@@ -718,10 +868,52 @@ async def astream_graph(
              "streaming": True,
          })
 
+    # [IMPROVE-83] Parallel-waves parity with the sync executor.
+    # Pre-IMPROVE-83 the streaming path ignored ``parallel_waves`` —
+    # a 3-way fan-out streamed one sibling at a time even with the
+    # flag on, so users opting into parallel mode for batched LLM
+    # work paid the latency on the streaming UI. Sharing the
+    # _run_parallel_wave_or_fallback helper closes the parity gap.
+    parallel_waves = bool(system_definition.get("parallel_waves", False))
+    parallel_waves_used = 0
+    concurrent_nodes_total = 0
+    parallel_waves_skipped = 0
+
     step = 0
     while current_nodes and step < max_steps:
         step += 1
         next_nodes: list[str] = []
+
+        # [IMPROVE-83] Same pre-pass as ``execute_graph``. The
+        # helper's ``streaming=True`` flag tags the wave_parallel /
+        # wave_parallel_fallback observability events with
+        # ``streaming: True`` and returns a dict in
+        # ``streaming_event`` we can yield to the SSE consumer
+        # before the per-node node_start events fire.
+        runnable_for_parallel = [
+            n for n in current_nodes
+            if n not in visited and n in node_map
+            and node_map[n].get("agent", "") in orch.definitions
+        ]
+        _wave_result = await _run_parallel_wave_or_fallback(
+            orch,
+            runnable_for_parallel=runnable_for_parallel,
+            node_map=node_map,
+            node_outputs=node_outputs,
+            context_budget=context_budget,
+            user_input=user_input,
+            parallel_waves_flag=parallel_waves,
+            run_id=run_id,
+            system_name=system_name,
+            step=step,
+            streaming=True,
+        )
+        preloaded_outputs = _wave_result.preloaded_outputs
+        parallel_waves_used += _wave_result.parallel_waves_used
+        concurrent_nodes_total += _wave_result.concurrent_nodes_total
+        parallel_waves_skipped += _wave_result.parallel_waves_skipped
+        if _wave_result.streaming_event is not None:
+            yield _wave_result.streaming_event
 
         for nid in current_nodes:
             if nid in visited:
@@ -766,113 +958,205 @@ async def astream_graph(
                 }
                 continue
 
-            # [IMPROVE-33] same budgeted context builder as sync.
-            ctx_block = _build_inter_node_context(
-                node_outputs, budget_tokens=context_budget,
-            )
-            if ctx_block:
-                prompt = (
-                    f"{user_input}\n\nContext from prior agents:\n"
-                    f"{ctx_block}"
+            # [IMPROVE-83] When this node ran in the parallel wave
+            # above, surface the cached output as a single token
+            # event rather than re-running ``astream_chat_with_agent``.
+            # The streaming UI sees the final text appear in one
+            # frame — the speedup is real even though we lose the
+            # per-token streaming illusion (the underlying call
+            # already finished). Mirrors the sync executor's
+            # cache-or-call branch below at the same line.
+            if nid in preloaded_outputs:
+                _cached_text, _cached_dur, _cached_exc = (
+                    preloaded_outputs[nid]
                 )
+                emit("system", "node_start", status="start",
+                     context={"run_id": run_id, "system_name": system_name,
+                              "node_id": nid, "agent": agent_name,
+                              "role": role, "step": step,
+                              "preloaded": True})
+                yield {
+                    "type": "node_start",
+                    "node": nid, "agent": agent_name, "role": role,
+                    "preloaded": True,
+                }
+                if _cached_exc is not None:
+                    duration_ms = _cached_dur
+                    output = str(_cached_exc)
+                    node_status = "error"
+                    node_outputs.append({
+                        "node": nid, "agent": agent_name, "role": role,
+                        "text": output, "status": "error",
+                        "duration_ms": duration_ms,
+                    })
+                    emit("system", "node_end", status="error",
+                         duration_ms=duration_ms,
+                         error_code=type(_cached_exc).__name__,
+                         error_message=str(_cached_exc),
+                         context={"run_id": run_id,
+                                  "system_name": system_name,
+                                  "node_id": nid, "agent": agent_name,
+                                  "role": role})
+                else:
+                    output = _cached_text or ""
+                    duration_ms = _cached_dur
+                    node_status = "ok"
+                    if output:
+                        # Deliver the cached text in one token frame
+                        # so consumers that count tokens still see a
+                        # non-empty body for the node.
+                        yield {
+                            "type": "token",
+                            "node": nid,
+                            "text": output,
+                        }
+                    node_outputs.append({
+                        "node": nid, "agent": agent_name, "role": role,
+                        "text": output, "status": "ok",
+                        "duration_ms": duration_ms,
+                    })
+                    emit("system", "node_end", status="ok",
+                         duration_ms=duration_ms,
+                         context={"run_id": run_id,
+                                  "system_name": system_name,
+                                  "node_id": nid, "agent": agent_name,
+                                  "role": role},
+                         perf={"output_length":
+                               len(output) if output else 0})
+                yield {
+                    "type": "node_end",
+                    "node": nid, "agent": agent_name, "role": role,
+                    "text": output, "status": node_status,
+                    "duration_ms": duration_ms,
+                }
+                # Edge routing follows below — same as for
+                # non-preloaded nodes (control flow falls into the
+                # shared edge block via this if/else's else branch
+                # being skipped — see structure: routing block is
+                # at the ``for nid`` indent, not nested in the
+                # streaming branch).
+                # Continue to edge routing — restart the per-node
+                # loop body's tail by jumping to the routing
+                # section. Implemented via shared edge block below
+                # the if/else; we set output + visited and fall
+                # through to that block.
             else:
-                prompt = user_input
+                # [IMPROVE-33] same budgeted context builder as sync.
+                ctx_block = _build_inter_node_context(
+                    node_outputs, budget_tokens=context_budget,
+                )
+                if ctx_block:
+                    prompt = (
+                        f"{user_input}\n\nContext from prior agents:\n"
+                        f"{ctx_block}"
+                    )
+                else:
+                    prompt = user_input
 
-            node_start = _time.monotonic()
-            emit("system", "node_start", status="start",
-                 context={"run_id": run_id, "system_name": system_name,
-                          "node_id": nid, "agent": agent_name, "role": role,
-                          "step": step})
-            yield {
-                "type": "node_start",
-                "node": nid, "agent": agent_name, "role": role,
-            }
+                node_start = _time.monotonic()
+                emit("system", "node_start", status="start",
+                     context={"run_id": run_id, "system_name": system_name,
+                              "node_id": nid, "agent": agent_name,
+                              "role": role, "step": step})
+                yield {
+                    "type": "node_start",
+                    "node": nid, "agent": agent_name, "role": role,
+                }
 
-            # Stream this node via astream_chat_with_agent. Tag each
-            # inner event with the owning node id so consumers can
-            # reconstruct per-node sub-streams. The agent's own
-            # ``done`` event is consumed here (not re-yielded) — the
-            # system-level ``done`` only fires after the whole DAG
-            # walk completes.
-            output = ""
-            node_status = "ok"
-            try:
-                async for event in orch.astream_chat_with_agent(
-                    agent_name, prompt,
-                ):
-                    etype = event.get("type", "")
-                    if etype == "token":
-                        text = event.get("text", "")
-                        if text:
-                            output += text
+                # Stream this node via astream_chat_with_agent. Tag
+                # each inner event with the owning node id so
+                # consumers can reconstruct per-node sub-streams.
+                # The agent's own ``done`` event is consumed here
+                # (not re-yielded) — the system-level ``done`` only
+                # fires after the whole DAG walk completes.
+                output = ""
+                node_status = "ok"
+                try:
+                    async for event in orch.astream_chat_with_agent(
+                        agent_name, prompt,
+                    ):
+                        etype = event.get("type", "")
+                        if etype == "token":
+                            text = event.get("text", "")
+                            if text:
+                                output += text
+                                yield {
+                                    "type": "token",
+                                    "node": nid,
+                                    "text": text,
+                                }
+                        elif etype == "tool_call":
                             yield {
-                                "type": "token",
+                                "type": "tool_call",
                                 "node": nid,
-                                "text": text,
+                                "name": event.get("name", ""),
+                                "args": event.get("args", ""),
+                                "call_id": event.get("call_id", ""),
                             }
-                    elif etype == "tool_call":
-                        yield {
-                            "type": "tool_call",
-                            "node": nid,
-                            "name": event.get("name", ""),
-                            "args": event.get("args", ""),
-                            "call_id": event.get("call_id", ""),
-                        }
-                    elif etype == "tool_result":
-                        yield {
-                            "type": "tool_result",
-                            "node": nid,
-                            "name": event.get("name", ""),
-                            "content": event.get("content", ""),
-                            "call_id": event.get("call_id", ""),
-                        }
-                    elif etype == "done":
-                        # Prefer the inner stream's ``content`` when
-                        # we collected nothing via tokens (path A
-                        # of astream_chat_with_agent yields tokens
-                        # naturally; path B may emit a synthetic
-                        # "No response returned." token. Either way,
-                        # ``content`` is the canonical full text).
-                        if not output:
-                            output = event.get("content", "") or ""
-                duration_ms = int((_time.monotonic() - node_start) * 1000)
-                node_outputs.append({
-                    "node": nid, "agent": agent_name, "role": role,
-                    "text": output, "status": "ok",
-                    "duration_ms": duration_ms,
-                })
-                emit("system", "node_end", status="ok",
-                     duration_ms=duration_ms,
-                     context={"run_id": run_id, "system_name": system_name,
-                              "node_id": nid, "agent": agent_name,
-                              "role": role},
-                     perf={"output_length": len(output) if output else 0})
-                # [IMPROVE-33] context block is rebuilt per-node
-                # from node_outputs so we no longer maintain a
-                # parallel accumulator string here.
-            except Exception as exc:
-                duration_ms = int((_time.monotonic() - node_start) * 1000)
-                node_status = "error"
-                output = str(exc)
-                node_outputs.append({
-                    "node": nid, "agent": agent_name, "role": role,
-                    "text": output, "status": "error",
-                    "duration_ms": duration_ms,
-                })
-                emit("system", "node_end", status="error",
-                     duration_ms=duration_ms,
-                     error_code=type(exc).__name__,
-                     error_message=str(exc),
-                     context={"run_id": run_id, "system_name": system_name,
-                              "node_id": nid, "agent": agent_name,
-                              "role": role})
+                        elif etype == "tool_result":
+                            yield {
+                                "type": "tool_result",
+                                "node": nid,
+                                "name": event.get("name", ""),
+                                "content": event.get("content", ""),
+                                "call_id": event.get("call_id", ""),
+                            }
+                        elif etype == "done":
+                            # Prefer the inner stream's ``content``
+                            # when we collected nothing via tokens
+                            # (path A of astream_chat_with_agent
+                            # yields tokens naturally; path B may
+                            # emit a synthetic "No response
+                            # returned." token. Either way,
+                            # ``content`` is the canonical full
+                            # text).
+                            if not output:
+                                output = event.get("content", "") or ""
+                    duration_ms = int(
+                        (_time.monotonic() - node_start) * 1000,
+                    )
+                    node_outputs.append({
+                        "node": nid, "agent": agent_name, "role": role,
+                        "text": output, "status": "ok",
+                        "duration_ms": duration_ms,
+                    })
+                    emit("system", "node_end", status="ok",
+                         duration_ms=duration_ms,
+                         context={"run_id": run_id,
+                                  "system_name": system_name,
+                                  "node_id": nid, "agent": agent_name,
+                                  "role": role},
+                         perf={"output_length":
+                               len(output) if output else 0})
+                    # [IMPROVE-33] context block is rebuilt per-node
+                    # from node_outputs so we no longer maintain a
+                    # parallel accumulator string here.
+                except Exception as exc:
+                    duration_ms = int(
+                        (_time.monotonic() - node_start) * 1000,
+                    )
+                    node_status = "error"
+                    output = str(exc)
+                    node_outputs.append({
+                        "node": nid, "agent": agent_name, "role": role,
+                        "text": output, "status": "error",
+                        "duration_ms": duration_ms,
+                    })
+                    emit("system", "node_end", status="error",
+                         duration_ms=duration_ms,
+                         error_code=type(exc).__name__,
+                         error_message=str(exc),
+                         context={"run_id": run_id,
+                                  "system_name": system_name,
+                                  "node_id": nid, "agent": agent_name,
+                                  "role": role})
 
-            yield {
-                "type": "node_end",
-                "node": nid, "agent": agent_name, "role": role,
-                "text": output, "status": node_status,
-                "duration_ms": duration_ms,
-            }
+                yield {
+                    "type": "node_end",
+                    "node": nid, "agent": agent_name, "role": role,
+                    "text": output, "status": node_status,
+                    "duration_ms": duration_ms,
+                }
 
             # Edge routing — same rules as execute_graph
             # (IMPROVE-35 added llm_router with shared classification).
@@ -940,6 +1224,12 @@ async def astream_graph(
              "error_count": errors,
              "final_text_length": len(final_text) if final_text else 0,
              "steps": step,
+             # [IMPROVE-83] Same per-run aggregates as the sync
+             # executor so dashboards charting parallel engagement
+             # don't have to special-case the streaming path.
+             "parallel_waves_used": parallel_waves_used,
+             "concurrent_nodes_total": concurrent_nodes_total,
+             "parallel_waves_skipped": parallel_waves_skipped,
          })
 
     yield {
