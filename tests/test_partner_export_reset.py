@@ -400,8 +400,9 @@ def test_export_bundle_is_valid_zip(
     # Verify ZIP shape via in-memory read.
     with zipfile.ZipFile(io.BytesIO(bundle), "r") as zf:
         names = set(zf.namelist())
-    # README + 2 JSON files + 6 JSONL files = 9 entries.
-    assert len(names) == 9
+    # [IMPROVE-97] bundle.json + README + 2 JSON files +
+    # 6 JSONL files = 10 entries.
+    assert len(names) == 10
 
 
 def test_export_bundle_contains_all_expected_files(
@@ -413,6 +414,8 @@ def test_export_bundle_contains_all_expected_files(
     with zipfile.ZipFile(io.BytesIO(bundle), "r") as zf:
         names = set(zf.namelist())
     expected = {
+        # [IMPROVE-97] bundle.json carries schema_version + provenance
+        "bundle.json",
         "profile.json", "user_profile.json", "README.md",
         "facts.jsonl", "key_memories.jsonl", "archived.jsonl",
         "journal.jsonl", "messages.jsonl", "knowledge_graph.jsonl",
@@ -1106,3 +1109,207 @@ def test_partner_import_endpoint_oversized_returns_413(
         )
     assert resp.status_code == 413
     assert "100 MB cap" in resp.json()["detail"]
+
+
+# ── [IMPROVE-97] Bundle versioning (asymmetric) ────────────────
+
+
+def test_export_bundle_writes_bundle_json_with_schema_version(
+    tmp_partner_db, tmp_partner_data_dir, stub_engine,
+):
+    """[IMPROVE-97] Pin Q2=C: the export ALWAYS writes
+    ``bundle.json`` with the current ``BUNDLE_SCHEMA_VERSION``.
+    Pre-IMPROVE-97 bundles didn't have this file; this commit
+    adds it as the first entry in the ZIP for partial-read
+    tooling friendliness."""
+    from local_ai_platform.partner.export import (
+        BUNDLE_SCHEMA_VERSION, build_export_bundle,
+    )
+    bundle = build_export_bundle(stub_engine)
+    with zipfile.ZipFile(io.BytesIO(bundle), "r") as zf:
+        assert "bundle.json" in zf.namelist()
+        meta = json.loads(zf.read("bundle.json"))
+        assert meta["schema_version"] == BUNDLE_SCHEMA_VERSION
+        assert meta["schema_version"] == 1  # explicit value pin
+        assert meta["platform"] == "Local AI Platform"
+        assert "generated_at" in meta
+        # ISO-8601 timestamp parses cleanly
+        from datetime import datetime
+        datetime.fromisoformat(meta["generated_at"])
+
+
+def test_export_bundle_metadata_lands_first_in_zip(
+    tmp_partner_db, tmp_partner_data_dir, stub_engine,
+):
+    """[IMPROVE-97] ``bundle.json`` lands first in the ZIP so a
+    partial-read tool (CLI inspector, dashboard preview) can
+    determine compatibility without decompressing the rest.
+    Pin the order convention."""
+    from local_ai_platform.partner.export import build_export_bundle
+    bundle = build_export_bundle(stub_engine)
+    with zipfile.ZipFile(io.BytesIO(bundle), "r") as zf:
+        names = zf.namelist()
+        assert names[0] == "bundle.json", (
+            f"[IMPROVE-97] bundle.json must land first in ZIP for "
+            f"partial-read compatibility checks. Got order: "
+            f"{names[:3]}"
+        )
+
+
+def test_restore_from_bundle_accepts_schema_version_1(
+    tmp_partner_db, tmp_partner_data_dir, stub_engine,
+):
+    """[IMPROVE-97] The current export schema_version (1) is
+    accepted; the round-trip succeeds and the version is
+    surfaced in the summary."""
+    from local_ai_platform.partner.export import (
+        build_export_bundle, restore_from_bundle,
+    )
+    _seed_facts(count=2)
+    bundle = build_export_bundle(stub_engine)
+    summary = restore_from_bundle(stub_engine, bundle)
+    assert summary["schema_version"] == 1
+    assert summary["errors"] == []
+    assert summary["profile_restored"] is True
+
+
+def test_restore_from_bundle_accepts_legacy_missing_version(
+    tmp_partner_db, tmp_partner_data_dir, stub_engine,
+):
+    """[IMPROVE-97] A pre-IMPROVE-97 bundle (no bundle.json
+    file) still restores cleanly per Q2=C asymmetric: lenient
+    inbound. The summary's ``schema_version`` is None to signal
+    legacy."""
+    # Build a "legacy" bundle by stripping bundle.json from a
+    # current bundle. Mimics what a user might have on disk
+    # from a pre-IMPROVE-97 export.
+    from local_ai_platform.partner.export import (
+        build_export_bundle, restore_from_bundle,
+    )
+    bundle = build_export_bundle(stub_engine)
+    # Re-zip without bundle.json
+    legacy_buf = io.BytesIO()
+    with zipfile.ZipFile(io.BytesIO(bundle), "r") as src:
+        with zipfile.ZipFile(legacy_buf, "w") as dst:
+            for name in src.namelist():
+                if name == "bundle.json":
+                    continue
+                dst.writestr(name, src.read(name))
+
+    summary = restore_from_bundle(stub_engine, legacy_buf.getvalue())
+    assert summary["schema_version"] is None
+    # Legacy still restores everything else
+    assert summary["profile_restored"] is True
+    assert summary["errors"] == []
+
+
+def test_restore_from_bundle_rejects_too_new_version(
+    tmp_partner_db, tmp_partner_data_dir, stub_engine,
+):
+    """[IMPROVE-97] A bundle with schema_version=2 (a future
+    install's export) is rejected with an actionable error;
+    no partial restore happens. Pin Q2=C strict-out for high
+    versions."""
+    from local_ai_platform.partner.export import restore_from_bundle
+    # Hand-roll a bundle with v=2
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w") as zf:
+        zf.writestr("bundle.json", json.dumps({"schema_version": 2}))
+        zf.writestr("profile.json", json.dumps({"name": "Future"}))
+
+    summary = restore_from_bundle(stub_engine, buf.getvalue())
+    assert summary["profile_restored"] is False
+    assert len(summary["errors"]) == 1
+    err = summary["errors"][0]
+    assert "schema_version 2" in err
+    assert "newer than this install supports" in err
+    assert "max 1" in err
+
+
+def test_restore_from_bundle_rejects_negative_version(
+    tmp_partner_db, tmp_partner_data_dir, stub_engine,
+):
+    """[IMPROVE-97] schema_version must be >= 1. Pin so a
+    typo'd bundle (e.g. v=0 or v=-1) doesn't slip through."""
+    from local_ai_platform.partner.export import restore_from_bundle
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w") as zf:
+        zf.writestr("bundle.json", json.dumps({"schema_version": 0}))
+        zf.writestr("profile.json", json.dumps({"name": "Bad"}))
+    summary = restore_from_bundle(stub_engine, buf.getvalue())
+    assert summary["profile_restored"] is False
+    assert any("schema_version must be >= 1" in e
+               for e in summary["errors"])
+
+
+def test_restore_from_bundle_rejects_non_integer_version(
+    tmp_partner_db, tmp_partner_data_dir, stub_engine,
+):
+    """[IMPROVE-97] schema_version must be an int. A
+    string ('1.0') / float / null lands as a structured error,
+    not an exception."""
+    from local_ai_platform.partner.export import restore_from_bundle
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w") as zf:
+        zf.writestr(
+            "bundle.json", json.dumps({"schema_version": "1.0"}),
+        )
+        zf.writestr("profile.json", json.dumps({"name": "Stringy"}))
+    summary = restore_from_bundle(stub_engine, buf.getvalue())
+    assert summary["profile_restored"] is False
+    assert any("must be an integer" in e for e in summary["errors"])
+
+
+def test_restore_from_bundle_corrupt_bundle_json_continues_legacy_path(
+    tmp_partner_db, tmp_partner_data_dir, stub_engine,
+):
+    """[IMPROVE-97] Corrupt bundle.json (e.g. truncated bytes)
+    surfaces an error but DOES NOT gate the rest of the restore —
+    it falls through as if v=missing per the legacy path. The
+    rationale: the rest of the bundle may be perfectly valid
+    even if metadata is broken."""
+    from local_ai_platform.partner.export import restore_from_bundle
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w") as zf:
+        zf.writestr("bundle.json", "{broken json")
+        zf.writestr("profile.json", json.dumps({"name": "Recovered"}))
+    summary = restore_from_bundle(stub_engine, buf.getvalue())
+    # Errors include the parse failure
+    assert any("bundle.json: parse failed" in e
+               for e in summary["errors"])
+    assert any("proceeding as legacy bundle" in e
+               for e in summary["errors"])
+    # But profile.json still landed
+    assert summary["profile_restored"] is True
+
+
+def test_export_then_restore_round_trip_preserves_schema_version(
+    tmp_partner_db, tmp_partner_data_dir, stub_engine,
+):
+    """[IMPROVE-97] End-to-end pin: a fresh export's
+    schema_version flows into the restore summary. Catches a
+    future regression where the export forgets to write the
+    field or the restore forgets to surface it."""
+    from local_ai_platform.partner.export import (
+        BUNDLE_SCHEMA_VERSION, build_export_bundle, restore_from_bundle,
+    )
+    bundle = build_export_bundle(stub_engine)
+    summary = restore_from_bundle(stub_engine, bundle)
+    assert summary["schema_version"] == BUNDLE_SCHEMA_VERSION
+
+
+def test_readme_documents_schema_version(
+    tmp_partner_db, tmp_partner_data_dir, stub_engine,
+):
+    """[IMPROVE-97] The README inside the ZIP names the schema
+    version + the bundle.json file so a user inspecting the
+    archive (with no API access) can tell what version they
+    have."""
+    from local_ai_platform.partner.export import (
+        BUNDLE_SCHEMA_VERSION, build_export_bundle,
+    )
+    bundle = build_export_bundle(stub_engine)
+    with zipfile.ZipFile(io.BytesIO(bundle), "r") as zf:
+        readme = zf.read("README.md").decode("utf-8")
+    assert f"Schema version: {BUNDLE_SCHEMA_VERSION}" in readme
+    assert "bundle.json" in readme

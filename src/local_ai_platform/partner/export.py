@@ -56,6 +56,22 @@ _EXPORT_TABLES: dict[str, str] = {
     "knowledge_graph.jsonl": "partner_knowledge_graph",
 }
 
+# [IMPROVE-97] Bundle schema version. Per Q2=C in the Wave 10
+# plan, the rollout is asymmetric:
+#   * EXPORT (build_export_bundle) ALWAYS writes the current
+#     version → bundle.json carries ``schema_version=1`` going
+#     forward.
+#   * RESTORE (restore_from_bundle) accepts v=missing (legacy
+#     pre-IMPROVE-97 bundles users may have on disk) AND v=1
+#     (current). Rejects v>1 (too-new bundle from a future
+#     install) and any non-integer / negative value.
+#
+# When a future schema break warrants v=2, bump the constant
+# AND add a v=1 → v=2 migration step in restore_from_bundle.
+# A single source of truth makes the asymmetric "lenient
+# inbound, strict outbound" contract explicit in code review.
+BUNDLE_SCHEMA_VERSION: int = 1
+
 
 def build_export_bundle(engine: Any) -> bytes:
     """Build an in-memory ZIP archive of all partner state.
@@ -75,6 +91,11 @@ def build_export_bundle(engine: Any) -> bytes:
     """
     buffer = io.BytesIO()
     with zipfile.ZipFile(buffer, "w", zipfile.ZIP_DEFLATED) as zf:
+        # ── [IMPROVE-97] Bundle metadata (schema_version) ───────
+        # Always lands first so a partial-read consumer (e.g. a
+        # CLI inspector tool) can determine compatibility without
+        # decompressing the rest of the bundle.
+        _write_bundle_metadata(zf)
         # ── In-memory engine state (JSON files) ──────────────────
         _write_profile(zf, engine)
         _write_user_profile(zf, engine)
@@ -90,6 +111,37 @@ def build_export_bundle(engine: Any) -> bytes:
         # ── README explaining the bundle ─────────────────────────
         zf.writestr("README.md", _build_readme())
     return buffer.getvalue()
+
+
+def _write_bundle_metadata(zf: zipfile.ZipFile) -> None:
+    """[IMPROVE-97] Write ``bundle.json`` with the schema version
+    + provenance metadata.
+
+    Shape:
+
+      {
+        "schema_version": 1,
+        "generated_at": "2026-04-29T12:34:56.789012+00:00",
+        "platform": "Local AI Platform",
+        "exporter": "partner.export.build_export_bundle"
+      }
+
+    The ``schema_version`` is the only field
+    ``restore_from_bundle`` reads for compatibility checking;
+    ``generated_at`` + ``platform`` + ``exporter`` are
+    informational (useful for debugging "which install made
+    this bundle"). A future v=2 bump may add fields; the
+    restore path is forward-compat so extra keys are ignored.
+    """
+    metadata = {
+        "schema_version": BUNDLE_SCHEMA_VERSION,
+        "generated_at": datetime.now(timezone.utc).isoformat(),
+        "platform": "Local AI Platform",
+        "exporter": "partner.export.build_export_bundle",
+    }
+    zf.writestr(
+        "bundle.json", json.dumps(metadata, indent=2, default=str),
+    )
 
 
 def _write_profile(zf: zipfile.ZipFile, engine: Any) -> None:
@@ -210,6 +262,7 @@ def _build_readme() -> str:
     return f"""# Partner Export
 
 Generated: {ts}
+Schema version: {BUNDLE_SCHEMA_VERSION}
 
 This archive contains every piece of partner state stored on this
 machine. Use it to back up your data before resetting any scope via
@@ -218,6 +271,10 @@ or to satisfy data-portability requests.
 
 ## Files
 
+- `bundle.json` — [IMPROVE-97] Schema version + provenance metadata.
+  The `schema_version` field is the only one `restore_from_bundle`
+  reads for compatibility checking. A bundle without this file
+  (legacy pre-IMPROVE-97 export) still restores cleanly.
 - `profile.json` — AI persona (name, traits, voice, style).
   Mirrors `data/partner/profile.json` on disk.
 - `user_profile.json` — Your BigFive personality estimates +
@@ -310,11 +367,60 @@ def restore_from_bundle(
         "memory_decay_restored": False,
         "tables_restored": {},
         "errors": [],
+        # [IMPROVE-97] Schema version surfaced to the caller so
+        # the route handler / dashboard can chart "% of restores
+        # from legacy v=missing bundles" without reading the ZIP
+        # twice. None means the bundle had no bundle.json (legacy
+        # pre-IMPROVE-97 export).
+        "schema_version": None,
     }
 
     try:
         with zipfile.ZipFile(io.BytesIO(zip_bytes), "r") as zf:
             names = set(zf.namelist())
+
+            # ── [IMPROVE-97] bundle.json: schema_version check ──
+            # Per Q2=C: ACCEPT v=missing (legacy compat) AND
+            # v=BUNDLE_SCHEMA_VERSION; REJECT v>SCHEMA_VERSION
+            # (too-new) and non-integer / negative values.
+            # Rejection lands in the errors list; the rest of the
+            # bundle is NOT processed when the version is
+            # incompatible.
+            if "bundle.json" in names:
+                try:
+                    meta = json.loads(zf.read("bundle.json"))
+                    raw_version = meta.get("schema_version")
+                    if not isinstance(raw_version, int):
+                        summary["errors"].append(
+                            f"bundle.json: schema_version must be an "
+                            f"integer, got {type(raw_version).__name__}"
+                        )
+                        return summary
+                    if raw_version < 1:
+                        summary["errors"].append(
+                            f"bundle.json: schema_version must be >= 1, "
+                            f"got {raw_version}"
+                        )
+                        return summary
+                    if raw_version > BUNDLE_SCHEMA_VERSION:
+                        summary["errors"].append(
+                            f"bundle.json: schema_version {raw_version} "
+                            f"is newer than this install supports "
+                            f"(max {BUNDLE_SCHEMA_VERSION}); upgrade "
+                            f"the platform or use an older bundle"
+                        )
+                        return summary
+                    summary["schema_version"] = raw_version
+                except Exception as exc:
+                    # Corrupt bundle.json — surface as an error
+                    # but continue with the rest of the bundle
+                    # since v=missing is also accepted (legacy
+                    # path). Don't gate the whole restore on a
+                    # broken metadata file.
+                    summary["errors"].append(
+                        f"bundle.json: parse failed: {exc}; "
+                        f"proceeding as legacy bundle"
+                    )
 
             # ── profile.json ─────────────────────────────────
             if "profile.json" in names:
