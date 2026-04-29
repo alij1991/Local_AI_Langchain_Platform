@@ -688,7 +688,7 @@ def _capture_emits(monkeypatch):
                   context=None, perf=None):
         captured.append((subsystem, action, dict(context or {}), dict(perf) if perf else None))
 
-    monkeypatch.setattr(svc, "emit", fake_emit)
+    monkeypatch.setattr(svc, "emit_typed", fake_emit)
     return captured
 
 
@@ -765,7 +765,7 @@ def test_telemetry_emit_failure_does_not_break_planning(monkeypatch):
     def boom(*args, **kwargs):
         raise RuntimeError("synthetic emit failure")
 
-    monkeypatch.setattr(svc, "emit", boom)
+    monkeypatch.setattr(svc, "emit_typed", boom)
     ctx = _make_ctx(quality_tier="balanced", steps=20)
     plan = _apply_rules(ctx, _OPTIMIZATION_RULES)
     # plan should still have the required terminal keys.

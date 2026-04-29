@@ -424,11 +424,12 @@ def test_config_load_event_emitted_once(clean_env, monkeypatch):
         if subsystem == "config" and action == "load":
             calls.append({"subsystem": subsystem, "action": action, "status": status, **kwargs})
 
-    # Patch the emit symbol at its import site inside config module.
-    # config._emit_config_load does a local ``from local_ai_platform.observability import emit``,
+    # [IMPROVE-89] Patch ``emit_typed`` at its source module —
+    # config._emit_config_load does a local
+    # ``from local_ai_platform.observability_events import emit_typed``,
     # so we patch the source module so both paths see the fake.
-    import local_ai_platform.observability as obs_mod
-    monkeypatch.setattr(obs_mod, "emit", _fake_emit)
+    import local_ai_platform.observability_events as oe_mod
+    monkeypatch.setattr(oe_mod, "emit_typed", _fake_emit)
 
     cfg_mod.reset_settings_cache()
 
@@ -449,16 +450,17 @@ def test_config_load_event_reports_env_file_presence(clean_env, monkeypatch):
     from local_ai_platform import config as cfg_mod
     calls: list[dict] = []
 
-    import local_ai_platform.observability as obs_mod
+    import local_ai_platform.observability_events as oe_mod
 
     def _fake(subsystem, action, status="ok", **kwargs):
-        # Parameter names MUST match the real emit() signature — config
-        # calls it with keyword args, so a rename would silently drop
-        # the event (TypeError swallowed inside _emit_config_load).
+        # Parameter names MUST match the real emit_typed() signature —
+        # config calls it positionally then with kwargs, so a rename
+        # would silently drop the event (TypeError swallowed inside
+        # _emit_config_load).
         if subsystem == "config" and action == "load":
             calls.append(kwargs.get("context") or {})
 
-    monkeypatch.setattr(obs_mod, "emit", _fake)
+    monkeypatch.setattr(oe_mod, "emit_typed", _fake)
     cfg_mod.reset_settings_cache()
     cfg_mod.get_settings()
 
@@ -491,7 +493,7 @@ def test_config_load_event_deferred_until_app_events_table_exists(
 
     from local_ai_platform import config as cfg_mod
     from local_ai_platform import db as db_mod
-    import local_ai_platform.observability as obs_mod
+    import local_ai_platform.observability_events as oe_mod
 
     db_path = tmp_path / "data" / "app.db"
     monkeypatch.setattr(db_mod, "DB_PATH", db_path)
@@ -505,7 +507,7 @@ def test_config_load_event_deferred_until_app_events_table_exists(
         if subsystem == "config" and action == "load":
             calls.append(kwargs.get("context") or {})
 
-    monkeypatch.setattr(obs_mod, "emit", _fake)
+    monkeypatch.setattr(oe_mod, "emit_typed", _fake)
     cfg_mod.reset_settings_cache()
 
     # First call: no table yet. Settings cached, but emit must defer.

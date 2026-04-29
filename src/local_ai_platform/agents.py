@@ -31,7 +31,8 @@ from .memory import (
     db_messages_to_langchain,
     langchain_to_chat_messages,
 )
-from .observability import emit, track_event
+from .observability import track_event
+from .observability_events import emit_typed
 from .providers import (
     ChatMessage,
     ChatResponse,
@@ -406,7 +407,7 @@ class AgentOrchestrator:
                     len(pending_calls), auto_resume_iters,
                     [tc.get("name") for tc in pending_calls],
                 )
-                emit("agent", "tool_auto_resume", status="ok",
+                emit_typed("agent", "tool_auto_resume", status="ok",
                      context={
                          "agent": agent_name,
                          "thread_id": thread_id,
@@ -1069,7 +1070,7 @@ class AgentOrchestrator:
                                     for tc in chunk.tool_call_chunks:
                                         if tc.get("name"):
                                             logger.info("Tool call: %s args=%s", tc.get("name"), str(tc.get("args", ""))[:200])
-                                            emit("agent", "tool_call", status="ok",
+                                            emit_typed("agent", "tool_call", status="ok",
                                                  context={
                                                      "agent": agent_name,
                                                      "tool": tc.get("name", ""),
@@ -1088,7 +1089,7 @@ class AgentOrchestrator:
                             output = data.get("output", "")
                             tool_name = event.get("name", "")
                             logger.info("Tool result: %s len=%d", tool_name, len(str(output)))
-                            emit("agent", "tool_result", status="ok",
+                            emit_typed("agent", "tool_result", status="ok",
                                  context={
                                      "agent": agent_name,
                                      "tool": tool_name,
@@ -1175,7 +1176,7 @@ class AgentOrchestrator:
                         len(pending_calls), auto_resume_iters,
                         [tc.get("name") for tc in pending_calls],
                     )
-                    emit("agent", "tool_auto_resume", status="ok",
+                    emit_typed("agent", "tool_auto_resume", status="ok",
                          context={
                              "agent": agent_name,
                              "thread_id": tid,
@@ -1202,7 +1203,7 @@ class AgentOrchestrator:
                 if "does not support tools" in str(exc).lower():
                     self._models_without_tool_support.add(definition.model_name)
                     logger.info("Model %s doesn't support tools, falling back to direct stream", definition.model_name)
-                    emit("agent", "fallback", status="ok",
+                    emit_typed("agent", "fallback", status="ok",
                          context={
                              "agent": agent_name,
                              "model": definition.model_name,

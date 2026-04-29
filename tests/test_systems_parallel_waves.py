@@ -410,8 +410,8 @@ def _capture_emits(monkeypatch):
                   context=None, perf=None):
         captured.append((subsystem, action, dict(context or {}), dict(perf) if perf else None))
 
-    monkeypatch.setattr(_agents_mod, "emit", fake_emit)
-    monkeypatch.setattr(_executor_mod, "emit", fake_emit)
+    monkeypatch.setattr(_agents_mod, "emit_typed", fake_emit)
+    monkeypatch.setattr(_executor_mod, "emit_typed", fake_emit)
     return captured
 
 

@@ -104,7 +104,7 @@ from local_ai_platform.formatting import format_bytes_human
 from local_ai_platform.http_client import get_sync_client
 from local_ai_platform.huggingface import HuggingFaceController
 from local_ai_platform.images.service import ImageGenerationService
-from local_ai_platform.observability import emit
+from local_ai_platform.observability_events import emit_typed
 from local_ai_platform.ollama import OllamaController
 from local_ai_platform.providers import ProviderRouter
 
@@ -780,7 +780,7 @@ async def pull_ollama_model(
         "error": None, "started_at": time.time(), "progress_pct": None,
     }
     logger.info("Starting background pull for model: %s", name)
-    emit("model", "download.start", status="start",
+    emit_typed("model", "download.start", status="start",
          context={"provider": "ollama", "model_id": name})
 
     def _do_pull():
@@ -813,7 +813,7 @@ async def pull_ollama_model(
                         # Emit progress at every 10% bucket crossed
                         _bucket = (pct // 10) * 10
                         if _bucket > _last_pct_emitted and _bucket <= 100:
-                            emit("model", "download.progress", status="ok",
+                            emit_typed("model", "download.progress", status="ok",
                                  context={"provider": "ollama", "model_id": name,
                                           "phase": status},
                                  perf={"pct": _bucket, "completed_bytes": completed,
@@ -833,7 +833,7 @@ async def pull_ollama_model(
             pulls_state[name]["completed_at"] = time.time()
             _invalidate_cache("models:")
             logger.info("Pull complete: %s", name)
-            emit("model", "download.done", status="ok",
+            emit_typed("model", "download.done", status="ok",
                  duration_ms=int((time.monotonic() - _pull_t0) * 1000),
                  context={"provider": "ollama", "model_id": name})
         except Exception as exc:
@@ -843,7 +843,7 @@ async def pull_ollama_model(
             # registry can show a "task ended at..." timestamp.
             pulls_state[name]["completed_at"] = time.time()
             logger.error("Pull failed for %s: %s", name, exc)
-            emit("model", "download.error", status="error",
+            emit_typed("model", "download.error", status="error",
                  duration_ms=int((time.monotonic() - _pull_t0) * 1000),
                  error_code=type(exc).__name__,
                  error_message=str(exc),
@@ -2119,7 +2119,7 @@ def _hf_download_worker(
 
     _bound_tqdm = make_hf_progress_tqdm(downloads_state[download_key])
     _hf_t0 = time.monotonic()
-    emit("model", "download.start", status="start",
+    emit_typed("model", "download.start", status="start",
          context={"provider": "huggingface", "model_id": model_id,
                   "gguf_filename": gguf_filename,
                   "download_key": download_key,
@@ -2300,7 +2300,7 @@ def _hf_download_worker(
                 image_service.refresh_models()
             except Exception:
                 pass
-        emit("model", "download.done", status="ok",
+        emit_typed("model", "download.done", status="ok",
              duration_ms=int((time.monotonic() - _hf_t0) * 1000),
              context={"provider": "huggingface", "model_id": model_id,
                       "gguf_filename": gguf_filename,
@@ -2312,7 +2312,7 @@ def _hf_download_worker(
         # success path; UI can show same "ended at" widget).
         downloads_state[download_key]["completed_at"] = time.time()
         logger.warning("HF download failed for %s: %s", model_id, exc)
-        emit("model", "download.error", status="error",
+        emit_typed("model", "download.error", status="error",
              duration_ms=int((time.monotonic() - _hf_t0) * 1000),
              error_code=type(exc).__name__,
              error_message=str(exc),

@@ -56,7 +56,7 @@ def captured_emits(monkeypatch):
             "perf": perf,
         })
 
-    monkeypatch.setattr(svc, "emit", _fake_emit)
+    monkeypatch.setattr(svc, "emit_typed", _fake_emit)
     return events
 
 

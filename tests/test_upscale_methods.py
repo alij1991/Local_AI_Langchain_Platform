@@ -568,7 +568,13 @@ def _capture_vram_probe_emits(monkeypatch):
     probe-emit callsite (inside service.py's _emit_vram_probe) is
     observable."""
     captured: list[tuple[str, str, str, dict, dict | None]] = []
+    # [IMPROVE-89] Bulk migration moved emit_typed to a top-level
+    # import in service.py, so the bound reference lives on
+    # ``svc.emit_typed`` (not just ``oe.emit_typed``). Patch both so
+    # the probe path's call resolves to the fake regardless of which
+    # reference is used.
     from local_ai_platform import observability_events as oe
+    from local_ai_platform.images import service as svc
 
     def fake_emit_typed(subsystem, action, status="ok",
                         duration_ms=None, error_code=None,
@@ -580,6 +586,7 @@ def _capture_vram_probe_emits(monkeypatch):
         ))
 
     monkeypatch.setattr(oe, "emit_typed", fake_emit_typed)
+    monkeypatch.setattr(svc, "emit_typed", fake_emit_typed)
     return captured
 
 
@@ -690,11 +697,13 @@ def test_probe_emit_failure_does_not_break_probe(monkeypatch):
     _patch_torch_with_vram(monkeypatch, free_gb=8.0)
 
     from local_ai_platform import observability_events as oe
+    from local_ai_platform.images import service as svc
 
     def boom(*a, **kw):
         raise RuntimeError("observability outage")
 
     monkeypatch.setattr(oe, "emit_typed", boom)
+    monkeypatch.setattr(svc, "emit_typed", boom)
 
     # Probe must still complete successfully.
     ok, avail, req, reason = s._probe_vram_for_method("sdxl_x4")

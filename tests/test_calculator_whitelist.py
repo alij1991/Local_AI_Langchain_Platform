@@ -52,7 +52,7 @@ def captured_emits(monkeypatch):
             "perf": perf,
         })
 
-    monkeypatch.setattr(builtin, "emit", _fake_emit)
+    monkeypatch.setattr(builtin, "emit_typed", _fake_emit)
     return events
 
 

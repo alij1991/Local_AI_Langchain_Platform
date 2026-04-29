@@ -7,7 +7,7 @@ from langchain_core.tools import StructuredTool
 from pydantic import BaseModel, Field
 
 from ..config import get_settings
-from ..observability import emit
+from ..observability_events import emit_typed
 
 # Sandbox root — all file operations are restricted to this directory.
 # [IMPROVE-69] Reads via ``AppSettings.local_ai_workspace`` so ``.env``
@@ -37,7 +37,7 @@ def _safe_path(user_path: str) -> Path:
     except ValueError:
         # Record every sandbox escape attempt so the weekly observability
         # review can flag repeated attacks or a misbehaving agent.
-        emit(
+        emit_typed(
             "tool",
             "file_ops.path_rejected",
             status="error",

@@ -78,6 +78,14 @@ _AGENT_ACTIONS = (
     "validation_rejected",
 )
 
+# config: settings/env bootstrap. Single ``load`` event today;
+# [IMPROVE-89] registered the subsystem during the bulk
+# emit_typed migration since the pre-existing kwarg-shape emit
+# in config.py used to fly under the keystone test's regex.
+_CONFIG_ACTIONS = (
+    "load",
+)
+
 # editor: image-editor session ops (apply_edit, undo, redo,
 # blend, export). Wave 5 [IMPROVE-52/53/56/57] all wrote here.
 _EDITOR_ACTIONS = (
@@ -90,9 +98,18 @@ _EDITOR_ACTIONS = (
 
 # image: image generation pipeline. Wave 5/6 added several
 # observability events (oom_ladder_*, optimization_plan).
+# ``infer.start``/``load.start`` are literal-string companions to
+# ``infer``/``load`` end-events — they fire from explicit
+# ``emit("image", "infer.start", ...)`` calls (NOT from the
+# Recorder class's f-string ``f"{action}.start"`` shape, which is
+# dynamic-action and ignored by the keystone). [IMPROVE-89]
+# registered them after tightening the keystone regex revealed
+# they'd been firing without coverage.
 _IMAGE_ACTIONS = (
     "infer",
+    "infer.start",
     "load",
+    "load.start",
     "oom_ladder_done",
     "oom_ladder_start",
     "oom_stage_attempt",
@@ -121,20 +138,50 @@ _IMAGES_ACTIONS = (
 # instruct_edit: editor model-load / inference pipeline
 # (separate subsystem from "editor" because the load is
 # expensive and surfaced separately for the user-visible
-# spinner).
+# spinner). ``run.start`` is the literal-string companion to
+# ``run``; [IMPROVE-89] surfaced it during keystone-regex
+# tightening.
 _INSTRUCT_EDIT_ACTIONS = (
     "load",
     "run",
+    "run.start",
 )
 
-# partner: voice/persona partner.
+# model: HF download lifecycle (snapshot + hf_hub_download).
+# Actions use a dotted shape (``download.start`` etc.) because
+# the model.* namespace previously used dotted action names that
+# the pre-[IMPROVE-89] keystone regex couldn't match — the
+# events fired but were invisible to coverage. Registering them
+# here closes that gap; the regex was tightened in the same
+# commit to allow ``[a-z_]+(?:\.[a-z_]+)*`` action names so
+# future dotted actions are pinned too.
+_MODEL_ACTIONS = (
+    "download.done",
+    "download.error",
+    "download.progress",
+    "download.start",
+)
+
+# partner: voice/persona partner. ``chat.start`` /
+# ``voice_init.start`` are literal-string companions to the
+# corresponding end events; ``stt.partial`` is a separate
+# mid-stream event for STT chunk-level results; ``mem0_init``
+# fires on Mem0/ChromaDB cold-start. [IMPROVE-89] registered
+# all four after keystone-regex tightening revealed they'd been
+# firing without coverage (digit in ``mem0_init`` and dotted
+# names in the ``.start``/``.partial`` shapes both escaped the
+# old regex).
 _PARTNER_ACTIONS = (
     "chat",
+    "chat.start",
     "emotion_detect",
     "fact_extract",
+    "mem0_init",
     "stt",
+    "stt.partial",
     "tts",
     "voice_init",
+    "voice_init.start",
 )
 
 # provider: LLM provider availability + routing.
@@ -145,11 +192,14 @@ _PROVIDER_ACTIONS = (
 # system: DAG executor lifecycle. Wave 5/6 added
 # routing_decision (IMPROVE-35 SSE), wave_parallel +
 # wave_parallel_fallback (IMPROVE-36 telemetry), validate
-# (IMPROVE-31).
+# (IMPROVE-31). ``run.start`` is the literal-string companion to
+# ``run_done``; [IMPROVE-89] registered it after the keystone
+# regex tightening surfaced the gap.
 _SYSTEM_ACTIONS = (
     "node_end",
     "node_start",
     "routing_decision",
+    "run.start",
     "run_done",
     "validate",
     # [IMPROVE-85] Mirror of [IMPROVE-82]'s
@@ -166,9 +216,14 @@ _SYSTEM_ACTIONS = (
     "wave_parallel_fallback",
 )
 
-# tool: built-in tool execution.
+# tool: built-in tool execution. ``file_ops.path_rejected`` was
+# registered by [IMPROVE-89] — tools/file_ops.py and
+# tools/rag_tools.py both fire it from their workspace-sandbox
+# rejection paths, but the dotted action name didn't match the
+# pre-[IMPROVE-89] keystone regex.
 _TOOL_ACTIONS = (
     "calculator_eval",
+    "file_ops.path_rejected",
 )
 
 
@@ -179,10 +234,12 @@ _TOOL_ACTIONS = (
 # of its commit so the keystone test passes.
 KNOWN_EVENTS: dict[str, frozenset[str]] = {
     "agent": frozenset(_AGENT_ACTIONS),
+    "config": frozenset(_CONFIG_ACTIONS),
     "editor": frozenset(_EDITOR_ACTIONS),
     "image": frozenset(_IMAGE_ACTIONS),
     "images": frozenset(_IMAGES_ACTIONS),
     "instruct_edit": frozenset(_INSTRUCT_EDIT_ACTIONS),
+    "model": frozenset(_MODEL_ACTIONS),
     "partner": frozenset(_PARTNER_ACTIONS),
     "provider": frozenset(_PROVIDER_ACTIONS),
     "system": frozenset(_SYSTEM_ACTIONS),
@@ -209,10 +266,12 @@ KNOWN_EVENT_NAMES: frozenset[str] = frozenset(
 # misspelled-action case at first call).
 SubsystemName = Literal[
     "agent",
+    "config",
     "editor",
     "image",
     "images",
     "instruct_edit",
+    "model",
     "partner",
     "provider",
     "system",

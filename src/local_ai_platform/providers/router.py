@@ -5,7 +5,7 @@ import time
 from typing import Any, AsyncGenerator, Generator
 
 from ..config import get_settings
-from ..observability import emit
+from ..observability_events import emit_typed
 from .base import (
     BaseProvider,
     ChatMessage,
@@ -99,7 +99,7 @@ class ProviderRouter:
         t0 = time.monotonic()
         try:
             result = bool(provider.is_available())
-            emit(
+            emit_typed(
                 "provider",
                 "availability_probe",
                 status="ok",
@@ -113,7 +113,7 @@ class ProviderRouter:
             # it's down.
             logger.warning("is_available() raised for %s: %s", name, exc)
             result = False
-            emit(
+            emit_typed(
                 "provider",
                 "availability_probe",
                 status="error",

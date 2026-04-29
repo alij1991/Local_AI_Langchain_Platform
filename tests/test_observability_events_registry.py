@@ -209,7 +209,15 @@ _EMIT_LITERAL_PATTERN = re.compile(
     # ``emit_typed("subsys", "action", ...)``. Word boundary keeps
     # ``self.emit`` / ``recorder.subsystem_event`` etc. out — only
     # the bare ``emit`` and ``emit_typed`` front doors count.
-    r"""\bemit(?:_typed)?\(\s*["']([a-z_]+)["']\s*,\s*["']([a-z_]+)["']""",
+    #
+    # [IMPROVE-89] tightened the action group from ``[a-z_]+`` to
+    # ``[a-z_][a-z0-9_]*(?:\.[a-z_][a-z0-9_]*)*`` so digit-bearing
+    # actions (``mem0_init``) and dotted actions
+    # (``download.start``, ``file_ops.path_rejected``) are no
+    # longer invisible to coverage. Pre-tightening, those
+    # callsites silently fired with unregistered names because the
+    # regex skipped them — bug noticed during the bulk migration.
+    r"""\bemit(?:_typed)?\(\s*["']([a-z_]+)["']\s*,\s*["']([a-z_][a-z0-9_]*(?:\.[a-z_][a-z0-9_]*)*)["']""",
     re.MULTILINE,
 )
 
@@ -336,4 +344,62 @@ def test_no_dynamic_action_emit_callsites_in_codebase():
         "Found dynamic-action emit() callsites that escape the "
         "registry's static coverage:\n  "
         + "\n  ".join(f"{p}: emit(..., {a}, ...)" for p, a in dynamic[:5])
+    )
+
+
+def test_no_bare_emit_imports_in_src_after_bulk_migration():
+    """[IMPROVE-89] Pin: no ``from local_ai_platform.observability
+    import emit`` (or relative form) should appear in any production
+    module after the Wave 9 bulk migration to ``emit_typed``.
+
+    Why this is stricter than the keystone callsite test: the
+    keystone catches the missing-registry case, but a future revert
+    that re-imports ``emit`` and calls it WITH a registered name
+    would slip through the keystone (no unregistered emit). This pin
+    makes the typed front door the only legitimate route, so a
+    future contributor can't accidentally bypass the runtime
+    UnknownEventNameError check + bypass the per-event schemas
+    landing in IMPROVE-92.
+
+    Exempts ``observability_events.py`` (defines the ``_emit`` alias)
+    and ``observability.py`` (defines ``emit`` itself). Comment
+    references are skipped via the "#" prefix check.
+    """
+    src_root = Path(__file__).parent.parent / "src" / "local_ai_platform"
+    # Match: from <path>.observability import emit  (with optional
+    # other names, but the bare ``emit`` must appear in the import
+    # list). Skips ``emit_typed`` and ``track_event`` etc.
+    pattern = re.compile(
+        r"""^from\s+\S*observability\s+import\s+([^\n]+)$""",
+        re.MULTILINE,
+    )
+    # The forbidden names list — a real import line can include any
+    # of these but ``emit`` (without the ``_typed`` suffix) is
+    # specifically forbidden.
+    offenders: list[tuple[str, str]] = []
+    EXEMPT_FILES = {"observability_events.py", "observability.py"}
+    for py in src_root.rglob("*.py"):
+        if py.name in EXEMPT_FILES:
+            continue
+        try:
+            text = py.read_text(encoding="utf-8")
+        except UnicodeDecodeError:
+            text = py.read_text(encoding="latin-1")
+        for m in pattern.finditer(text):
+            imports = m.group(1)
+            # Split on commas, strip "as X" aliases.
+            names = [
+                n.strip().split(" as ")[0].strip()
+                for n in imports.split(",")
+            ]
+            # Strip parentheses from multiline imports if present.
+            names = [n.strip("()") for n in names if n.strip("()")]
+            if "emit" in names:
+                offenders.append((str(py), m.group(0)))
+    assert not offenders, (
+        "[IMPROVE-89] Found bare-``emit`` imports that bypass the "
+        "typed front door — migrate the file to ``emit_typed``:\n  "
+        + "\n  ".join(
+            f"{p}: {line}" for p, line in offenders[:10]
+        )
     )

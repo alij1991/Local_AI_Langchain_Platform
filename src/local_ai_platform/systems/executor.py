@@ -35,7 +35,7 @@ import time as _time
 import uuid
 from typing import TYPE_CHECKING, Any, AsyncGenerator
 
-from ..observability import emit
+from ..observability_events import emit_typed
 
 if TYPE_CHECKING:
     from ..agents import AgentOrchestrator
@@ -503,7 +503,7 @@ async def _run_parallel_wave_or_fallback(
             "[IMPROVE-36] parallel_waves on but wave has duplicate "
             "agents (%s); falling back to sequential", wave_agents,
         )
-        emit(
+        emit_typed(
             "system", "wave_parallel_fallback", status="ok",
             context={
                 "run_id": run_id,
@@ -565,7 +565,7 @@ async def _run_parallel_wave_or_fallback(
     _wave_errors = sum(
         1 for _, _, _, exc in results if exc is not None
     )
-    emit(
+    emit_typed(
         "system", "wave_parallel", status="ok",
         duration_ms=_wave_ms,
         context={
@@ -665,7 +665,7 @@ async def execute_graph(
     visited: set[str] = set()
     max_steps = len(nodes) * 2  # prevent infinite loops
 
-    emit("system", "run.start", status="start",
+    emit_typed("system", "run.start", status="start",
          context={
              "run_id": run_id,
              "system_name": system_name,
@@ -754,7 +754,7 @@ async def execute_graph(
                     "text": f"(agent '{agent_name}' not found)",
                     "status": "skipped", "duration_ms": 0,
                 })
-                emit("system", "node_end", status="skipped",
+                emit_typed("system", "node_end", status="skipped",
                      duration_ms=0,
                      context={"run_id": run_id, "system_name": system_name,
                               "node_id": nid, "agent": agent_name, "role": role,
@@ -777,7 +777,7 @@ async def execute_graph(
 
             # Execute
             node_start = _time.monotonic()
-            emit("system", "node_start", status="start",
+            emit_typed("system", "node_start", status="start",
                  context={"run_id": run_id, "system_name": system_name,
                           "node_id": nid, "agent": agent_name, "role": role,
                           "step": step})
@@ -802,7 +802,7 @@ async def execute_graph(
                     "text": output, "status": "ok",
                     "duration_ms": duration_ms,
                 })
-                emit("system", "node_end", status="ok",
+                emit_typed("system", "node_end", status="ok",
                      duration_ms=duration_ms,
                      context={"run_id": run_id, "system_name": system_name,
                               "node_id": nid, "agent": agent_name,
@@ -815,7 +815,7 @@ async def execute_graph(
                     "text": str(exc), "status": "error",
                     "duration_ms": duration_ms,
                 })
-                emit("system", "node_end", status="error",
+                emit_typed("system", "node_end", status="error",
                      duration_ms=duration_ms,
                      error_code=type(exc).__name__,
                      error_message=str(exc),
@@ -850,7 +850,7 @@ async def execute_graph(
     )
 
     errors = sum(1 for n in node_outputs if n.get("status") == "error")
-    emit("system", "run_done", status="error" if errors else "ok",
+    emit_typed("system", "run_done", status="error" if errors else "ok",
          duration_ms=total_ms,
          context={"run_id": run_id, "system_name": system_name,
                   "conversation_id": conversation_id},
@@ -905,7 +905,7 @@ async def astream_graph(
     dict — that's what ``/systems/{name}/chat/stream``'s end-frame
     renders.
 
-    The same ``emit("system", ...)`` calls as the sync path stay
+    The same ``emit_typed("system", ...)`` calls as the sync path stay
     intact so the active TraceRecorder ContextVar (set by
     ``trace_run`` at the route layer per IMPROVE-68) records the
     per-node timeline identically — operators on /runs see the
@@ -947,7 +947,7 @@ async def astream_graph(
     visited: set[str] = set()
     max_steps = len(nodes) * 2
 
-    emit("system", "run.start", status="start",
+    emit_typed("system", "run.start", status="start",
          context={
              "run_id": run_id,
              "system_name": system_name,
@@ -1034,7 +1034,7 @@ async def astream_graph(
                     "text": skipped_text, "status": "skipped",
                     "duration_ms": 0,
                 })
-                emit("system", "node_end", status="skipped",
+                emit_typed("system", "node_end", status="skipped",
                      duration_ms=0,
                      context={"run_id": run_id, "system_name": system_name,
                               "node_id": nid, "agent": agent_name,
@@ -1059,7 +1059,7 @@ async def astream_graph(
                 _cached_text, _cached_dur, _cached_exc = (
                     preloaded_outputs[nid]
                 )
-                emit("system", "node_start", status="start",
+                emit_typed("system", "node_start", status="start",
                      context={"run_id": run_id, "system_name": system_name,
                               "node_id": nid, "agent": agent_name,
                               "role": role, "step": step,
@@ -1078,7 +1078,7 @@ async def astream_graph(
                         "text": output, "status": "error",
                         "duration_ms": duration_ms,
                     })
-                    emit("system", "node_end", status="error",
+                    emit_typed("system", "node_end", status="error",
                          duration_ms=duration_ms,
                          error_code=type(_cached_exc).__name__,
                          error_message=str(_cached_exc),
@@ -1104,7 +1104,7 @@ async def astream_graph(
                         "text": output, "status": "ok",
                         "duration_ms": duration_ms,
                     })
-                    emit("system", "node_end", status="ok",
+                    emit_typed("system", "node_end", status="ok",
                          duration_ms=duration_ms,
                          context={"run_id": run_id,
                                   "system_name": system_name,
@@ -1143,7 +1143,7 @@ async def astream_graph(
                     prompt = user_input
 
                 node_start = _time.monotonic()
-                emit("system", "node_start", status="start",
+                emit_typed("system", "node_start", status="start",
                      context={"run_id": run_id, "system_name": system_name,
                               "node_id": nid, "agent": agent_name,
                               "role": role, "step": step})
@@ -1209,7 +1209,7 @@ async def astream_graph(
                         "text": output, "status": "ok",
                         "duration_ms": duration_ms,
                     })
-                    emit("system", "node_end", status="ok",
+                    emit_typed("system", "node_end", status="ok",
                          duration_ms=duration_ms,
                          context={"run_id": run_id,
                                   "system_name": system_name,
@@ -1231,7 +1231,7 @@ async def astream_graph(
                         "text": output, "status": "error",
                         "duration_ms": duration_ms,
                     })
-                    emit("system", "node_end", status="error",
+                    emit_typed("system", "node_end", status="error",
                          duration_ms=duration_ms,
                          error_code=type(exc).__name__,
                          error_message=str(exc),
@@ -1272,7 +1272,7 @@ async def astream_graph(
                     "candidates": list(_llm_router_targets),
                     "rule_count": len(_llm_router_targets),
                 }
-                emit(
+                emit_typed(
                     "system", "routing_decision", status="ok",
                     context={
                         "run_id": run_id,
@@ -1303,7 +1303,7 @@ async def astream_graph(
     )
 
     errors = sum(1 for n in node_outputs if n.get("status") == "error")
-    emit("system", "run_done", status="error" if errors else "ok",
+    emit_typed("system", "run_done", status="error" if errors else "ok",
          duration_ms=total_ms,
          context={"run_id": run_id, "system_name": system_name,
                   "conversation_id": conversation_id,

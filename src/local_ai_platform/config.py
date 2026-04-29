@@ -410,11 +410,11 @@ def _emit_config_load(settings: AppSettings) -> bool:
         # Local import — observability.py imports db.py which imports
         # stdlib, so this is safe, but keeping it local avoids any
         # future circular import risk if db.py ever grows dependencies.
-        from local_ai_platform.observability import emit
+        from local_ai_platform.observability_events import emit_typed
 
-        emit(
-            subsystem="config",
-            action="load",
+        emit_typed(
+            "config",
+            "load",
             status="ok",
             context={
                 "env_file_found": env_file_found,

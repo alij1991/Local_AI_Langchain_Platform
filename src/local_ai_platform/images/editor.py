@@ -18,7 +18,7 @@ from typing import Any
 from PIL import Image
 
 from . import processors, ai_enhance
-from ..observability import emit
+from ..observability_events import emit_typed
 # [IMPROVE-74] Image-compose primitives (compute_diff_metrics,
 # apply_mask_composite, decode_mask_base64, weighted_blend) live in
 # their own module so future image-gen post-processing can call them
@@ -728,7 +728,7 @@ class ImageEditorService:
                     elif operation == "analyze":
                         # Special: analyze returns dict, not image
                         _analyze_out = ai_models.analyze_image_quality(image)
-                        emit("editor", "op", status="ok",
+                        emit_typed("editor", "op", status="ok",
                              duration_ms=int((time.monotonic() - start) * 1000),
                              context={**_edit_ctx, "dispatch": "analyze"},
                              perf={"analyze_keys": len(_analyze_out) if isinstance(_analyze_out, dict) else 0})
@@ -738,7 +738,7 @@ class ImageEditorService:
                 except ImportError:
                     raise ValueError(f"Unknown operation: {operation}")
         except Exception as exc:
-            emit("editor", "op", status="error",
+            emit_typed("editor", "op", status="error",
                  duration_ms=int((time.monotonic() - start) * 1000),
                  error_code=type(exc).__name__,
                  error_message=str(exc),
@@ -817,7 +817,7 @@ class ImageEditorService:
 
         logger.info("Edit %s applied to session %s in %dms", operation, session_id, duration_ms)
 
-        emit("editor", "op", status="ok",
+        emit_typed("editor", "op", status="ok",
              duration_ms=duration_ms,
              context=_edit_ctx,
              perf={"width": result.width, "height": result.height,
@@ -838,7 +838,7 @@ class ImageEditorService:
     def undo(self, session_id: str) -> dict[str, Any]:
         session = self._sessions.get(session_id) or self._restore_session(session_id)
         if not session or session.current_step < 0:
-            emit("editor", "undo", status="error",
+            emit_typed("editor", "undo", status="error",
                  error_code="NothingToUndo",
                  context={"session_id": session_id})
             raise ValueError("Nothing to undo")
@@ -849,7 +849,7 @@ class ImageEditorService:
         session.current_step -= 1
 
         img = session.current_image
-        emit("editor", "undo", status="ok",
+        emit_typed("editor", "undo", status="ok",
              context={"session_id": session_id,
                       "undone_operation": undone.operation,
                       "current_step": session.current_step})
@@ -866,7 +866,7 @@ class ImageEditorService:
     def redo(self, session_id: str) -> dict[str, Any]:
         session = self._sessions.get(session_id) or self._restore_session(session_id)
         if not session or not session.redo_stack:
-            emit("editor", "redo", status="error",
+            emit_typed("editor", "redo", status="error",
                  error_code="NothingToRedo",
                  context={"session_id": session_id})
             raise ValueError("Nothing to redo")
@@ -875,7 +875,7 @@ class ImageEditorService:
         session.current_step += 1
 
         img = session.current_image
-        emit("editor", "redo", status="ok",
+        emit_typed("editor", "redo", status="ok",
              context={"session_id": session_id,
                       "redone_operation": step.operation,
                       "current_step": session.current_step})
@@ -962,7 +962,7 @@ class ImageEditorService:
             # resize, crop) is handled inside the helper.
             result = _weighted_blend(prev_img, cur_img, float(blend))
         except FileNotFoundError as exc:
-            emit("editor", "blend_with_previous", status="error",
+            emit_typed("editor", "blend_with_previous", status="error",
                  error_code="FileMissing",
                  error_message=str(exc),
                  context=_blend_ctx)
@@ -999,7 +999,7 @@ class ImageEditorService:
         session.current_step = step_num
         self._save_step_db(session_id, step)
 
-        emit("editor", "blend_with_previous", status="ok",
+        emit_typed("editor", "blend_with_previous", status="ok",
              duration_ms=duration_ms,
              context=_blend_ctx,
              perf={"width": result.width, "height": result.height,
@@ -1099,7 +1099,7 @@ class ImageEditorService:
         """Export the current state to a specific format."""
         session = self._sessions.get(session_id) or self._restore_session(session_id)
         if not session:
-            emit("editor", "export", status="error",
+            emit_typed("editor", "export", status="error",
                  error_code="SessionNotFound",
                  context={"session_id": session_id, "format": fmt})
             raise ValueError(f"Session not found: {session_id}")
@@ -1114,14 +1114,14 @@ class ImageEditorService:
             export_path = self._session_dir(session_id) / f"export{ext}"
             export_path.write_bytes(data)
         except Exception as exc:
-            emit("editor", "export", status="error",
+            emit_typed("editor", "export", status="error",
                  duration_ms=int((time.monotonic() - _export_t0) * 1000),
                  error_code=type(exc).__name__,
                  error_message=str(exc),
                  context={"session_id": session_id, "format": fmt, "quality": quality})
             raise
 
-        emit("editor", "export", status="ok",
+        emit_typed("editor", "export", status="ok",
              duration_ms=int((time.monotonic() - _export_t0) * 1000),
              context={"session_id": session_id, "format": fmt.upper(), "quality": quality},
              perf={"size": len(data), "width": w, "height": h})

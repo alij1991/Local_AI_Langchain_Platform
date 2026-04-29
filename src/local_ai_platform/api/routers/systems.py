@@ -55,7 +55,6 @@ from local_ai_platform.api.deps import (
     get_orchestrator,
     get_router_or_none,
 )
-from local_ai_platform.observability import emit
 from local_ai_platform.observability_events import emit_typed
 from local_ai_platform.providers import ProviderRouter
 from local_ai_platform.tracing import (
@@ -366,7 +365,7 @@ def _validate_system_or_400(name: str, definition: dict) -> None:
         )
 
     # All save-time checks passed.
-    emit(
+    emit_typed(
         "system",
         "validate",
         status="ok",

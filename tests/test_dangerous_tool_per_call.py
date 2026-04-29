@@ -481,7 +481,7 @@ def test_auto_resume_emits_observability_event():
         with patch(
             "langgraph.prebuilt.create_react_agent",
             return_value=fake,
-        ), patch("local_ai_platform.agents.emit", _fake_emit):
+        ), patch("local_ai_platform.agents.emit_typed", _fake_emit):
             async for _ in orch.astream_chat_with_agent(
                 "tester", "do something",
             ):

@@ -19,7 +19,7 @@ from typing import Any, Final
 
 from local_ai_platform.config import AppConfig, get_settings
 from local_ai_platform.formatting import format_bytes_human
-from local_ai_platform.observability import emit
+from local_ai_platform.observability_events import emit_typed
 
 
 logger = logging.getLogger("local_ai_platform.images")
@@ -1465,7 +1465,7 @@ def _emit_detection_event(
     """
     try:
         family = hints.get("model_family")
-        emit(
+        emit_typed(
             "images", "detect_hints",
             status="ok" if family != "unknown" else "error",
             error_code=None if family != "unknown" else "UnknownFamily",
@@ -1477,7 +1477,7 @@ def _emit_detection_event(
         )
     except Exception:
         # Never let telemetry break detection.
-        logger.debug("emit(images.detect_hints) failed", exc_info=True)
+        logger.debug("emit_typed(images.detect_hints) failed", exc_info=True)
 
 
 
@@ -3931,7 +3931,7 @@ def _apply_rules(
         rules_suppressed = [
             r.name for r in candidates if r.name in suppressed
         ]
-        emit(
+        emit_typed(
             "image", "optimization_plan", status="ok",
             context={
                 "backend": ctx.backend,
@@ -4643,7 +4643,7 @@ def _emit_oom_ladder_done(
     """
     duration_ms = int((time.monotonic() - ladder_t0) * 1000)
     try:
-        emit(
+        emit_typed(
             "image",
             "oom_ladder_done",
             status="ok" if success else "error",
@@ -6408,8 +6408,6 @@ class ImageGenerationService:
         applies to its telemetry.
         """
         try:
-            from ..observability_events import emit_typed
-
             emit_typed(
                 "image", "vram_probe",
                 status="ok" if ok else "error",
@@ -7231,7 +7229,7 @@ class ImageGenerationService:
                 "[IMG] Warmup complete in %dms (mode=%s, device=%s)",
                 duration_ms, mode, device,
             )
-            emit(
+            emit_typed(
                 "image", "warmup", status="ok",
                 duration_ms=duration_ms,
                 context={"mode": mode, "device": device},
@@ -7242,7 +7240,7 @@ class ImageGenerationService:
             logger.debug(
                 "[IMG] Warmup failed (non-fatal): %s", exc, exc_info=True,
             )
-            emit(
+            emit_typed(
                 "image", "warmup", status="error",
                 duration_ms=duration_ms,
                 error_code="WarmupFailed",
@@ -7288,7 +7286,7 @@ class ImageGenerationService:
         key = (model_id_or_path, mode, device, dtype_name, skip_text_encoders)
         if key in self._pipelines:
             logger.info("[IMG] Reusing cached pipeline: %s (mode=%s, device=%s, dtype=%s, skip_te=%s)", model_id_or_path, mode, device, dtype_name, skip_text_encoders)
-            emit("image", "load", status="ok", duration_ms=0,
+            emit_typed("image", "load", status="ok", duration_ms=0,
                  context={"model_id": model_id_or_path, "mode": mode, "device": device,
                           "dtype": dtype_name, "cache_hit": True})
             return self._pipelines[key]
@@ -7300,7 +7298,7 @@ class ImageGenerationService:
         _load_t0 = time.monotonic()
         _load_ctx = {"model_id": model_id_or_path, "mode": mode, "device": device,
                      "dtype": dtype_name, "cache_hit": False, "low_mem": low_mem}
-        emit("image", "load.start", status="start", context=_load_ctx)
+        emit_typed("image", "load.start", status="start", context=_load_ctx)
 
         # FREE memory from previously cached pipelines BEFORE loading the new
         # model.  Loading a new model with from_pretrained() allocates RAM for
@@ -7535,7 +7533,7 @@ class ImageGenerationService:
                                 pass
                     self._pipelines[key] = pipe
                     logger.info("[IMG] Nunchaku pipeline loaded in %.1fs", time.time() - load_start)
-                    emit("image", "load", status="ok",
+                    emit_typed("image", "load", status="ok",
                          duration_ms=int((time.monotonic() - _load_t0) * 1000),
                          context={**_load_ctx, "backend": "nunchaku"},
                          perf={"cached_pipelines": len(self._pipelines)})
@@ -7952,7 +7950,7 @@ class ImageGenerationService:
         logger.info("[IMG] Pipeline loaded in %.1fs", load_elapsed)
 
         self._pipelines[key] = pipe
-        emit("image", "load", status="ok",
+        emit_typed("image", "load", status="ok",
              duration_ms=int((time.monotonic() - _load_t0) * 1000),
              context=_load_ctx,
              perf={"cached_pipelines": len(self._pipelines)})
@@ -9220,7 +9218,7 @@ class ImageGenerationService:
         # so dashboards can compute ladder wall-clock + success rate.
         ladder_t0 = time.monotonic()
         try:
-            emit(
+            emit_typed(
                 "image", "oom_ladder_start", status="start",
                 context={
                     "error_code": original_error.error_code,
@@ -9301,7 +9299,7 @@ class ImageGenerationService:
                 # [IMPROVE-44 telemetry] Per-stage success event.
                 successful_stage = stage.name
                 try:
-                    emit(
+                    emit_typed(
                         "image", "oom_stage_attempt", status="ok",
                         duration_ms=stage_ms,
                         context={
@@ -9327,7 +9325,7 @@ class ImageGenerationService:
             # operator can see which stages ran out of which kind of
             # memory.
             try:
-                emit(
+                emit_typed(
                     "image", "oom_stage_attempt", status="error",
                     duration_ms=stage_ms,
                     error_code=retry.error_code,
@@ -9530,7 +9528,7 @@ class ImageGenerationService:
         if loras:
             execution_plan["loras"] = loras
         _img_hints = execution_plan.get("model_hints") or {}
-        emit("image", "plan", status="ok",
+        emit_typed("image", "plan", status="ok",
              context={
                  "model_id": model_id,
                  "model_family": _img_hints.get("model_family"),
@@ -9716,7 +9714,7 @@ class ImageGenerationService:
             "scheduler": scheduler,
         }
         _infer_t0 = time.monotonic()
-        emit("image", "infer.start", status="start", context=_infer_ctx)
+        emit_typed("image", "infer.start", status="start", context=_infer_ctx)
         result = self._run_diffusers(
             model_id_or_path=resolved_model,
             model_source=model_source,
@@ -9735,7 +9733,7 @@ class ImageGenerationService:
         )
         logger.info("[IMG] Base generation result: ok=%s, error_code=%s, error=%s",
                      result.ok, result.error_code, result.error_message[:200] if result.error_message else None)
-        emit("image", "infer",
+        emit_typed("image", "infer",
              status="ok" if result.ok else "error",
              duration_ms=int((time.monotonic() - _infer_t0) * 1000),
              error_code=None if result.ok else (result.error_code or "unknown"),
@@ -9932,13 +9930,13 @@ class ImageGenerationService:
             try:
                 image_bytes = self._apply_postprocess(image_bytes, upscale=enable_upscale, postprocess=enable_postprocess)
                 logger.info("[IMG] Postprocess done (%d bytes)", len(image_bytes))
-                emit("image", "postprocess", status="ok",
+                emit_typed("image", "postprocess", status="ok",
                      duration_ms=int((time.monotonic() - _pp_t0) * 1000),
                      context=_pp_ctx,
                      perf={"output_bytes": len(image_bytes)})
             except Exception as exc:
                 logger.warning("[IMG] Postprocess FAILED: %s", exc)
-                emit("image", "postprocess", status="error",
+                emit_typed("image", "postprocess", status="error",
                      duration_ms=int((time.monotonic() - _pp_t0) * 1000),
                      error_code=type(exc).__name__,
                      error_message=str(exc),

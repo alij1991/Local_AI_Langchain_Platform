@@ -7,7 +7,7 @@ from langchain_core.tools import StructuredTool
 from pydantic import BaseModel, Field
 
 from ..config import get_settings
-from ..observability import emit
+from ..observability_events import emit_typed
 
 # [IMPROVE-69] See tools/file_ops.py for the WORKSPACE_ROOT rationale —
 # these two modules share the workspace sandbox contract and migrate
@@ -56,7 +56,7 @@ def _safe_path(user_path: str) -> Path:
     try:
         resolved.relative_to(WORKSPACE_ROOT)
     except ValueError:
-        emit(
+        emit_typed(
             "tool",
             "file_ops.path_rejected",
             status="error",

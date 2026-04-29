@@ -20,7 +20,7 @@ from pathlib import Path
 from typing import Any
 
 from ..config import get_settings
-from ..observability import emit
+from ..observability_events import emit_typed
 
 logger = logging.getLogger(__name__)
 
@@ -520,7 +520,7 @@ def _init_mem0():
             embed_model,
             " (after retry)" if is_retry else "",
         )
-        emit(
+        emit_typed(
             "partner",
             "mem0_init",
             status="ok",
@@ -541,7 +541,7 @@ def _init_mem0():
         )
         _mem0_available = False
         _mem0_last_failure_monotonic = time.monotonic()
-        emit(
+        emit_typed(
             "partner",
             "mem0_init",
             status="error",
@@ -559,7 +559,7 @@ def _init_mem0():
         )
         _mem0_available = False
         _mem0_last_failure_monotonic = time.monotonic()
-        emit(
+        emit_typed(
             "partner",
             "mem0_init",
             status="error",

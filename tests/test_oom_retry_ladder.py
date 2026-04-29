@@ -586,7 +586,7 @@ def _capture_emits(monkeypatch):
                   context=None, perf=None):
         captured.append((subsystem, action, status, dict(context or {}), dict(perf) if perf else None))
 
-    monkeypatch.setattr(svc, "emit", fake_emit)
+    monkeypatch.setattr(svc, "emit_typed", fake_emit)
     return captured
 
 

@@ -10,7 +10,7 @@ from typing import Callable
 from langchain_core.tools import StructuredTool
 from pydantic import BaseModel, Field
 
-from ..observability import emit
+from ..observability_events import emit_typed
 
 
 class MultiplyInput(BaseModel):
@@ -159,7 +159,7 @@ def calculator(expression: str) -> str:
         # Whitelist violation — either a feature miss or a jailbreak
         # attempt. The UnsafeExpression error_code powers the weekly
         # review query without being diluted by runtime math errors.
-        emit(
+        emit_typed(
             "tool", "calculator_eval", status="error",
             error_code="UnsafeExpression",
             error_message=str(exc)[:200],
@@ -167,7 +167,7 @@ def calculator(expression: str) -> str:
         )
         return f"Error evaluating '{expression}': {exc}"
     except SyntaxError as exc:
-        emit(
+        emit_typed(
             "tool", "calculator_eval", status="error",
             error_code="SyntaxError",
             error_message=str(exc)[:200],
@@ -178,7 +178,7 @@ def calculator(expression: str) -> str:
         # Math-domain errors, ZeroDivisionError, OverflowError, TypeError
         # from calling sqrt() with no args, etc. These are user-input
         # errors, NOT jailbreak signals — keep them on their own code.
-        emit(
+        emit_typed(
             "tool", "calculator_eval", status="error",
             error_code="EvalError",
             error_message=str(exc)[:200],
@@ -186,7 +186,7 @@ def calculator(expression: str) -> str:
         )
         return f"Error evaluating '{expression}': {exc}"
 
-    emit(
+    emit_typed(
         "tool", "calculator_eval", status="ok",
         context={"expression_length": len(expr)},
         perf={"result_type": type(result).__name__},
