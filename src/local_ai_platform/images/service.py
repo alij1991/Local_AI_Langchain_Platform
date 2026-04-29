@@ -6368,6 +6368,117 @@ class ImageGenerationService:
         "sdxl_x4": 3.5,
     }
 
+    # [IMPROVE-100] Tile-size calibration per OUTPUT resolution.
+    # diffusers' default ``tile_sample_min_size`` (512 in latent
+    # space, ~4096 in image space for SDXL VAE) works fine for
+    # typical 1K outputs but >4K inputs/outputs produce visible
+    # seams + OOM risk because the latent tiles still exceed
+    # comfortable VAE working memory. Smaller tiles trade
+    # slightly more seam edges for lower per-tile VRAM.
+    #
+    # The keying is on OUTPUT max dimension (after scale) so the
+    # calibration holds for both methods. ``latent`` is x2,
+    # ``sdxl_x4`` is x4 — the per-method scale factor is applied
+    # in ``_calibrate_tile_size_for_method``.
+    #
+    # None ≡ "use diffusers default" (no kwarg passed). Returning
+    # a value triggers ``enable_vae_tiling(tile_sample_min_size=N)``;
+    # if a future diffusers version drops support for the kwarg
+    # we fall back to the no-arg call (try/except wraps the call).
+    _UPSCALE_TILE_SIZE_BANDS: list[tuple[int, int | None]] = [
+        # (output_max_dim_threshold, tile_sample_min_size)
+        # Bands evaluated in order; first match wins.
+        (4096, None),    # ≤4K output: default tile_size
+        (8192, 384),     # 4K-8K output: moderate calibration
+        (10**9, 256),    # >8K output: aggressive calibration
+    ]
+
+    @classmethod
+    def _calibrate_tile_size_for_method(
+        cls,
+        method: str,
+        input_max_dim: int,
+    ) -> int | None:
+        """[IMPROVE-100] Calibrate VAE tile_sample_min_size per
+        input resolution + upscale method.
+
+        Per Q5 of the IMPROVE-93 follow-up note: smaller tiles
+        for >4K inputs reduce seam visibility + per-tile VRAM
+        pressure. The threshold is keyed on OUTPUT max
+        dimension (input_max_dim × per-method scale factor) so
+        a 2K input + sdxl_x4 (= 8K output) calibrates the same
+        way as a 4K input + latent (= 8K output).
+
+        Returns None when the diffusers default is sufficient
+        (typical 1K outputs); returns an integer to be passed
+        as ``enable_vae_tiling(tile_sample_min_size=...)``.
+
+        Args:
+            method: 'latent' or 'sdxl_x4'.
+            input_max_dim: max(width, height) of the INPUT image
+                in pixels.
+
+        Returns:
+            int | None — None means "use diffusers default";
+            an int means "pass tile_sample_min_size=N".
+        """
+        scale = {"latent": 2, "sdxl_x4": 4}.get(method, 2)
+        output_max_dim = input_max_dim * scale
+        for threshold, tile_size in cls._UPSCALE_TILE_SIZE_BANDS:
+            if output_max_dim <= threshold:
+                return tile_size
+        # Bands cover up to 10**9 — unreachable in practice; the
+        # last band (>8K) returns 256. Defensive fallback to None
+        # if a future band-table change leaves a gap.
+        return None
+
+    @staticmethod
+    def _enable_vae_tiling_with_calibration(
+        pipe: Any, tile_size: int | None, method: str,
+    ) -> None:
+        """[IMPROVE-100] Call ``pipe.enable_vae_tiling`` with the
+        calibrated tile_sample_min_size kwarg if supported.
+
+        Compatibility strategy: try with the kwarg first; on
+        TypeError (older diffusers without the kwarg), fall
+        back to the no-arg call. This way, newer diffusers gets
+        the calibration benefit while older versions still get
+        the basic tiling.
+
+        Wrapped in outer try/except per [IMPROVE-93]'s
+        failure-tolerance contract: a missing
+        ``enable_vae_tiling`` method on a future diffusers
+        version doesn't brick the upscale.
+
+        Logs at DEBUG so successful tiling doesn't spam logs;
+        the calibration value lands in metadata via the caller.
+        """
+        try:
+            if tile_size is None:
+                pipe.enable_vae_tiling()
+            else:
+                try:
+                    pipe.enable_vae_tiling(
+                        tile_sample_min_size=tile_size,
+                    )
+                except TypeError:
+                    # Older diffusers that doesn't accept the
+                    # kwarg. Fall back to default tiling.
+                    logger.debug(
+                        "[IMPROVE-100] enable_vae_tiling does not "
+                        "accept tile_sample_min_size kwarg "
+                        "(method=%s, tile_size=%d); falling back "
+                        "to default tile size",
+                        method, tile_size,
+                    )
+                    pipe.enable_vae_tiling()
+        except Exception:
+            logger.debug(
+                "[IMPROVE-100] enable_vae_tiling failed for %s "
+                "pipeline; continuing without tiling",
+                method, exc_info=True,
+            )
+
     def _probe_vram_for_method(
         self, method: str, *, tile_mode: bool = False,
     ) -> tuple[bool, float, float, str]:
@@ -6566,18 +6677,16 @@ class ImageGenerationService:
                     # [IMPROVE-93] VAE tiling + slicing. Both are
                     # idempotent — calling on a non-VAE pipeline
                     # is a no-op, calling twice doesn't double up.
-                    # Wrap in try/except so a missing method on a
-                    # future diffusers version doesn't break the
-                    # upscale entirely (load happens, just without
-                    # tiling).
-                    try:
-                        pipe.enable_vae_tiling()
-                    except Exception:
-                        logger.debug(
-                            "[IMPROVE-93] enable_vae_tiling failed "
-                            "for latent pipeline; continuing",
-                            exc_info=True,
-                        )
+                    # [IMPROVE-100] Per-input-resolution
+                    # calibration: bigger inputs get smaller
+                    # tile_sample_min_size to reduce seam
+                    # visibility + VRAM pressure.
+                    tile_size = self._calibrate_tile_size_for_method(
+                        "latent", max(img.width, img.height),
+                    )
+                    self._enable_vae_tiling_with_calibration(
+                        pipe, tile_size, "latent",
+                    )
                     try:
                         pipe.enable_vae_slicing()
                     except Exception:
@@ -6601,6 +6710,18 @@ class ImageGenerationService:
             ).images[0]
             buf = io.BytesIO()
             output.save(buf, format="PNG")
+            # [IMPROVE-100] Surface the calibrated tile_size in
+            # metadata when tile mode engaged so dashboards can
+            # chart calibration distribution. None when tile_mode=False
+            # (no calibration applies) OR when tile_mode=True but
+            # the output dim is small enough for the diffusers
+            # default.
+            calibrated_tile_size = (
+                self._calibrate_tile_size_for_method(
+                    "latent", max(img.width, img.height),
+                )
+                if tile_mode else None
+            )
             return ImageRuntimeResult(
                 ok=True, image_bytes=buf.getvalue(),
                 metadata={
@@ -6610,6 +6731,7 @@ class ImageGenerationService:
                     "upscaled_size": f"{output.width}x{output.height}",
                     "prompt": guide,
                     "tile_mode": tile_mode,
+                    "tile_sample_min_size": calibrated_tile_size,
                 },
             )
         except ImportError as exc:
@@ -6672,14 +6794,16 @@ class ImageGenerationService:
                     # [IMPROVE-93] VAE tiling + slicing. See the
                     # latent path for the failure-tolerance
                     # rationale (try/except per call).
-                    try:
-                        pipe.enable_vae_tiling()
-                    except Exception:
-                        logger.debug(
-                            "[IMPROVE-93] enable_vae_tiling failed "
-                            "for sdxl_x4 pipeline; continuing",
-                            exc_info=True,
-                        )
+                    # [IMPROVE-100] Per-input-resolution
+                    # calibration: x4 scale means a 2K input
+                    # produces an 8K output, hitting the
+                    # aggressive (256) tile_size band.
+                    tile_size = self._calibrate_tile_size_for_method(
+                        "sdxl_x4", max(img.width, img.height),
+                    )
+                    self._enable_vae_tiling_with_calibration(
+                        pipe, tile_size, "sdxl_x4",
+                    )
                     try:
                         pipe.enable_vae_slicing()
                     except Exception:
@@ -6701,6 +6825,14 @@ class ImageGenerationService:
             ).images[0]
             buf = io.BytesIO()
             output.save(buf, format="PNG")
+            # [IMPROVE-100] Surface the calibrated tile_size in
+            # metadata. See the latent path for the rationale.
+            calibrated_tile_size = (
+                self._calibrate_tile_size_for_method(
+                    "sdxl_x4", max(img.width, img.height),
+                )
+                if tile_mode else None
+            )
             return ImageRuntimeResult(
                 ok=True, image_bytes=buf.getvalue(),
                 metadata={
@@ -6710,6 +6842,7 @@ class ImageGenerationService:
                     "upscaled_size": f"{output.width}x{output.height}",
                     "prompt": guide,
                     "tile_mode": tile_mode,
+                    "tile_sample_min_size": calibrated_tile_size,
                 },
             )
         except ImportError as exc:

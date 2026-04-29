@@ -945,3 +945,208 @@ def test_probe_emit_failure_does_not_break_probe(monkeypatch):
     ok, avail, req, reason = s._probe_vram_for_method("sdxl_x4")
     assert ok is True
     assert reason == "sufficient"
+
+
+# ── [IMPROVE-100] Tile-size calibration per input resolution ───
+
+
+def test_calibration_bands_documented_in_module():
+    """[IMPROVE-100] Pin the band table. The thresholds 4096 /
+    8192 + tile sizes None / 384 / 256 are deliberate — keyed
+    on OUTPUT max dimension, calibrated against diffusers VAE
+    tiling defaults (~512 in latent space ≡ ~4K image space).
+    """
+    s = _make_service()
+    bands = s._UPSCALE_TILE_SIZE_BANDS
+    # Three bands covering ≤4K / 4K-8K / >8K.
+    assert len(bands) == 3
+    assert bands[0] == (4096, None)
+    assert bands[1] == (8192, 384)
+    assert bands[2][1] == 256
+
+
+def test_calibration_returns_none_for_typical_1k_input():
+    """[IMPROVE-100] A 1K input via the latent (x2) method
+    produces 2K output — well under 4K — so the calibration
+    returns None (use diffusers default tile size). This is
+    the most common case for users; the calibration must not
+    over-engineer for it."""
+    s = _make_service()
+    assert s._calibrate_tile_size_for_method("latent", 1024) is None
+    assert s._calibrate_tile_size_for_method("latent", 1500) is None
+
+
+def test_calibration_returns_moderate_tile_size_for_2k_to_4k_output():
+    """[IMPROVE-100] A 2K input via x4 method = 8K output ≡ at
+    the boundary between moderate (384) and aggressive (256).
+    The boundary is INCLUSIVE on the lower side — 8192 stays
+    in the 384 band; 8193 jumps to 256."""
+    s = _make_service()
+    # latent (x2): 2048 input → 4096 output (right at the
+    # boundary, returns None per ≤4096 band)
+    assert s._calibrate_tile_size_for_method("latent", 2048) is None
+    # latent (x2): 2049 input → 4098 output (jumps to 384 band)
+    assert s._calibrate_tile_size_for_method("latent", 2049) == 384
+    # sdxl_x4 (x4): 1024 input → 4096 output (right at boundary)
+    assert s._calibrate_tile_size_for_method("sdxl_x4", 1024) is None
+    # sdxl_x4 (x4): 1025 input → 4100 output (in 384 band)
+    assert s._calibrate_tile_size_for_method("sdxl_x4", 1025) == 384
+
+
+def test_calibration_returns_aggressive_tile_size_for_huge_outputs():
+    """[IMPROVE-100] A 4K input via x4 method = 16K output —
+    well over the 8192 threshold, hits the aggressive band
+    (256). Pin so a future band-table edit doesn't accidentally
+    drop the >8K case."""
+    s = _make_service()
+    # latent (x2): 4096 input → 8192 output (exactly at the
+    # 8192 boundary — stays in 384 band per ≤8192)
+    assert s._calibrate_tile_size_for_method("latent", 4096) == 384
+    # latent (x2): 4097 input → 8194 output (jumps to 256 band)
+    assert s._calibrate_tile_size_for_method("latent", 4097) == 256
+    # sdxl_x4 (x4): 4096 input → 16384 output (way over 8192)
+    assert s._calibrate_tile_size_for_method("sdxl_x4", 4096) == 256
+
+
+def test_calibration_unknown_method_defaults_to_x2_scale():
+    """[IMPROVE-100] An unknown method falls back to x2 scale —
+    safe-default behaviour matching the regular VRAM probe's
+    handling of unknown methods. Pin so a future method
+    addition doesn't accidentally crash the calibration."""
+    s = _make_service()
+    # 1024 × 2 = 2048 → in the ≤4096 band → None
+    assert s._calibrate_tile_size_for_method("future_method", 1024) is None
+
+
+def test_tiled_mode_passes_calibrated_tile_size_to_enable_vae_tiling(
+    monkeypatch, tmp_path,
+):
+    """[IMPROVE-100] When tile_mode engages on a large input,
+    the calibrated tile_sample_min_size kwarg is passed to
+    pipe.enable_vae_tiling. Pin the propagation so a future
+    refactor doesn't drop the calibration."""
+    s = _make_service()
+    # Produce a 3K input — latent (x2) → 6K output → 384 band
+    src = tmp_path / "big.png"
+    Image.new("RGB", (3000, 3000), color=(128, 128, 128)).save(src)
+    _patch_torch_with_vram(monkeypatch, free_gb=2.0)
+
+    import sys
+    fake_pipe = MagicMock()
+    fake_pipe.return_value.images = [Image.new("RGB", (256, 256))]
+    fake_pipe.enable_sequential_cpu_offload = MagicMock()
+    fake_pipe.enable_vae_tiling = MagicMock()
+    fake_pipe.enable_vae_slicing = MagicMock()
+    fake_pipeline_class = MagicMock()
+    fake_pipeline_class.from_pretrained = MagicMock(return_value=fake_pipe)
+    fake_diffusers = MagicMock()
+    fake_diffusers.StableDiffusionLatentUpscalePipeline = fake_pipeline_class
+    monkeypatch.setitem(sys.modules, "diffusers", fake_diffusers)
+
+    result = s.upscale_image(image_path=str(src), prompt="x", method="latent")
+    assert result.ok is True
+    # enable_vae_tiling called with tile_sample_min_size=384
+    fake_pipe.enable_vae_tiling.assert_called_once_with(
+        tile_sample_min_size=384,
+    )
+    # And the metadata surfaces it
+    assert result.metadata["tile_sample_min_size"] == 384
+
+
+def test_tiled_mode_falls_back_when_kwarg_unsupported(
+    monkeypatch, tmp_path,
+):
+    """[IMPROVE-100] An older diffusers without the
+    tile_sample_min_size kwarg raises TypeError; the helper
+    falls back to the no-arg ``enable_vae_tiling()`` call.
+    The upscale still succeeds — the calibration benefit is
+    lost but tiling itself still works."""
+    s = _make_service()
+    src = tmp_path / "big.png"
+    Image.new("RGB", (3000, 3000), color=(128, 128, 128)).save(src)
+    _patch_torch_with_vram(monkeypatch, free_gb=2.0)
+
+    import sys
+    fake_pipe = MagicMock()
+    fake_pipe.return_value.images = [Image.new("RGB", (256, 256))]
+    fake_pipe.enable_sequential_cpu_offload = MagicMock()
+    # First call (with kwarg) raises TypeError; second call
+    # (without kwarg) succeeds. side_effect models the
+    # call sequence.
+    fake_pipe.enable_vae_tiling.side_effect = [
+        TypeError("unexpected kwarg tile_sample_min_size"),
+        None,
+    ]
+    fake_pipe.enable_vae_slicing = MagicMock()
+    fake_pipeline_class = MagicMock()
+    fake_pipeline_class.from_pretrained = MagicMock(return_value=fake_pipe)
+    fake_diffusers = MagicMock()
+    fake_diffusers.StableDiffusionLatentUpscalePipeline = fake_pipeline_class
+    monkeypatch.setitem(sys.modules, "diffusers", fake_diffusers)
+
+    result = s.upscale_image(image_path=str(src), prompt="x", method="latent")
+    assert result.ok is True
+    # enable_vae_tiling called twice: kwarg attempt + fallback.
+    assert fake_pipe.enable_vae_tiling.call_count == 2
+
+
+def test_tiled_mode_no_calibration_for_small_inputs(
+    monkeypatch, tmp_path,
+):
+    """[IMPROVE-100] A small 512x512 input via latent (x2) =
+    1024x1024 output — well under 4K. The calibration returns
+    None, so enable_vae_tiling is called with NO kwarg (uses
+    diffusers default tile size). Pin so a regression doesn't
+    cause every tiled call to over-tile small images."""
+    s = _make_service()
+    src = _write_png(tmp_path)  # default 512x512 size
+    _patch_torch_with_vram(monkeypatch, free_gb=2.0)
+
+    import sys
+    fake_pipe = MagicMock()
+    fake_pipe.return_value.images = [Image.new("RGB", (256, 256))]
+    fake_pipe.enable_sequential_cpu_offload = MagicMock()
+    fake_pipe.enable_vae_tiling = MagicMock()
+    fake_pipe.enable_vae_slicing = MagicMock()
+    fake_pipeline_class = MagicMock()
+    fake_pipeline_class.from_pretrained = MagicMock(return_value=fake_pipe)
+    fake_diffusers = MagicMock()
+    fake_diffusers.StableDiffusionLatentUpscalePipeline = fake_pipeline_class
+    monkeypatch.setitem(sys.modules, "diffusers", fake_diffusers)
+
+    result = s.upscale_image(image_path=src, prompt="x", method="latent")
+    assert result.ok is True
+    # enable_vae_tiling called WITHOUT the tile_sample_min_size kwarg
+    fake_pipe.enable_vae_tiling.assert_called_once_with()
+    # Metadata reflects None
+    assert result.metadata["tile_sample_min_size"] is None
+
+
+def test_non_tiled_mode_metadata_has_tile_sample_min_size_none(
+    monkeypatch, tmp_path,
+):
+    """[IMPROVE-100] When tile_mode=False (sufficient regular
+    VRAM), the tile_sample_min_size in metadata is None — no
+    calibration applies. Pin the metadata shape parity across
+    tile/non-tile paths so dashboards rely on the field
+    presence consistently."""
+    s = _make_service()
+    src = _write_png(tmp_path)
+    _patch_torch_with_vram(monkeypatch, free_gb=10.0)  # sufficient
+
+    import sys
+    fake_pipe = MagicMock()
+    fake_pipe.return_value.images = [Image.new("RGB", (256, 256))]
+    fake_pipe.enable_sequential_cpu_offload = MagicMock()
+    fake_pipe.enable_vae_tiling = MagicMock()
+    fake_pipe.enable_vae_slicing = MagicMock()
+    fake_pipeline_class = MagicMock()
+    fake_pipeline_class.from_pretrained = MagicMock(return_value=fake_pipe)
+    fake_diffusers = MagicMock()
+    fake_diffusers.StableDiffusionLatentUpscalePipeline = fake_pipeline_class
+    monkeypatch.setitem(sys.modules, "diffusers", fake_diffusers)
+
+    result = s.upscale_image(image_path=src, prompt="x", method="latent")
+    assert result.ok is True
+    assert result.metadata["tile_mode"] is False
+    assert result.metadata["tile_sample_min_size"] is None
