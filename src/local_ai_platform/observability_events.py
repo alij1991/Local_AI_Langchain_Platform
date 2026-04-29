@@ -1131,6 +1131,158 @@ class SystemValidateContext(TypedDict):
     edge_count: int
 
 
+# ── [IMPROVE-102] Wave 11 batch: 6 Recorder context schemas ────
+
+# Wave 10 [IMPROVE-96] surfaced (via the AST walker over
+# track_event callsites) 6 historically-unregistered events
+# fired through the Recorder context-manager pattern:
+# chat.send, chat.enhance_prompt, editor.edit, image.generate,
+# image.enhance_prompt, tool.invoke. Registering them closed
+# the dynamic-action gap; this commit adds their context
+# schemas so the keystone+schema audit covers shape-side too.
+#
+# Each Recorder event fires TWICE — ``__enter__`` emits
+# ``f"{action}.start"`` and ``__exit__`` emits ``action`` —
+# both with the SAME context dict that ``track_event`` was
+# called with. So one TypedDict per event covers BOTH the base
+# event and its ``.start`` companion (mirrors IMPROVE-101's
+# image.infer / image.infer.start sharing convention).
+#
+# Coverage 28 → 40 of 54 events (74%).
+#
+# These schemas validate against track_event callsites via the
+# audit walker enhancement in tests/test_observability_event_schemas.py
+# — the IMPROVE-92 walker only saw emit_typed; this commit
+# extends it to track_event so context-manager-driven events
+# get the same validation treatment.
+
+
+class ChatEnhancePromptContext(TypedDict):
+    """[IMPROVE-102] Context schema for ``chat.enhance_prompt``
+    and ``chat.enhance_prompt.start``.
+
+    Fires from api/routers/chat.py:358 via the Recorder pattern.
+    Three required keys cover the prompt-rewriter's prelude
+    (length, target model hint, detected prompt-shape).
+    ``detected_type`` is one of "story" / "code" / "factual" /
+    "creative" / etc. — pin as ``str`` rather than Literal
+    because the prompt-shape detector enum can grow.
+    """
+    __pydantic_config__ = _FORBID_EXTRA  # type: ignore[misc]
+    prompt_length: int
+    model_hint: str
+    detected_type: str
+
+
+class ChatSendContext(TypedDict):
+    """[IMPROVE-102] Context schema for ``chat.send`` and
+    ``chat.send.start``.
+
+    Fires from api/routers/chat.py:720 (sync) and 947 (stream)
+    via the Recorder pattern. The streaming callsite at 947
+    spreads ``obs_ctx`` (variable) so the schema audit walker
+    can only validate the sync callsite at 720 — but both
+    paths assemble matching shapes (the streaming path adds
+    ``thread_id``).
+
+    ``streaming`` is a literal False at chat.py:720 / True at
+    932 (the ``obs_ctx`` definition) — pin as ``bool`` so the
+    schema covers both. ``thread_id`` is NotRequired because
+    the sync path omits it (the variable-context callsite is
+    skipped by the audit but the runtime emit can carry it).
+    """
+    __pydantic_config__ = _FORBID_EXTRA  # type: ignore[misc]
+    agent: str
+    model: str
+    provider: str
+    conversation_id: str
+    run_id: str
+    has_images: bool
+    image_count: int
+    streaming: bool
+    thread_id: NotRequired[str]
+
+
+class EditorEditContext(TypedDict):
+    """[IMPROVE-102] Context schema for ``editor.edit`` and
+    ``editor.edit.start``.
+
+    Fires from api/routers/editor.py:432 via the Recorder
+    pattern. Three required keys: session_id (UUID-like),
+    operation (one of the ~12 editor ops — apply_edit, undo,
+    redo, etc.), param_count (size of the params dict; lets
+    dashboards chart "ops with no params" separately).
+    """
+    __pydantic_config__ = _FORBID_EXTRA  # type: ignore[misc]
+    session_id: str
+    operation: str
+    param_count: int
+
+
+class ImageEnhancePromptContext(TypedDict):
+    """[IMPROVE-102] Context schema for ``image.enhance_prompt``
+    and ``image.enhance_prompt.start``.
+
+    Fires from api/routers/images.py:643 via the Recorder
+    pattern. Four required keys cover the image-prompt-
+    rewriter's prelude. ``model_family`` is the resolved
+    target diffusers family (``flux_dev``, ``sdxl_base``,
+    ``z_image_turbo``, etc.); ``prompt_weighting`` is a bool
+    flagging whether the rewriter should preserve weighting
+    syntax.
+    """
+    __pydantic_config__ = _FORBID_EXTRA  # type: ignore[misc]
+    prompt_length: int
+    model_family: str
+    model_hint: str
+    prompt_weighting: bool
+
+
+class ImageGenerateContext(TypedDict):
+    """[IMPROVE-102] Context schema for ``image.generate`` and
+    ``image.generate.start``.
+
+    Fires from api/routers/images.py:876 via the Recorder
+    pattern. Six dimensional keys (model_id + steps + width +
+    height + num_images + prompt_length) are always populated
+    from body.get() with int defaults. ``scheduler`` and
+    ``controlnet_type`` come from body.get() WITHOUT defaults
+    — both can be None when the request omits them, hence
+    ``str | None`` (nullable, always present, NOT NotRequired).
+    """
+    __pydantic_config__ = _FORBID_EXTRA  # type: ignore[misc]
+    model_id: str
+    prompt_length: int
+    steps: int
+    width: int
+    height: int
+    num_images: int
+    scheduler: str | None
+    controlnet_type: str | None
+
+
+class ToolInvokeContext(TypedDict):
+    """[IMPROVE-102] Context schema for ``tool.invoke`` and
+    ``tool.invoke.start``.
+
+    Fires from agents.py:578 (sync wrapped_func) and 590 (async
+    wrapped_coro) via the Recorder pattern. Both callsites
+    spread the same ``ctx`` dict assembled at lines 576/588 —
+    three required keys: ``tool`` (resolved tool name),
+    ``dangerous`` (bool — the per-call interrupt flag from
+    [IMPROVE-29]), ``arg_size`` (int — tries to estimate but
+    returns -1 on Exception, hence the wider type). Both
+    callsites use variable-context (``context=ctx``) so the
+    audit walker skips them — but the schema is still pinned
+    so a future literal-context refactor inherits validation
+    automatically.
+    """
+    __pydantic_config__ = _FORBID_EXTRA  # type: ignore[misc]
+    tool: str
+    dangerous: bool
+    arg_size: int
+
+
 # Map (subsystem, action) → TypedDict schema class. The audit
 # test ``test_emit_typed_callsite_keys_match_pinned_schema``
 # walks emit_typed callsites and validates each against the
@@ -1140,7 +1292,17 @@ class SystemValidateContext(TypedDict):
 EVENT_CONTEXT_SCHEMAS: dict[tuple[str, str], type] = {
     ("agent", "tool_call"): AgentToolCallContext,
     ("agent", "validation_rejected"): AgentValidationRejectedContext,
+    ("chat", "enhance_prompt"): ChatEnhancePromptContext,
+    ("chat", "enhance_prompt.start"): ChatEnhancePromptContext,
+    ("chat", "send"): ChatSendContext,
+    ("chat", "send.start"): ChatSendContext,
     ("config", "load"): ConfigLoadContext,
+    ("editor", "edit"): EditorEditContext,
+    ("editor", "edit.start"): EditorEditContext,
+    ("image", "enhance_prompt"): ImageEnhancePromptContext,
+    ("image", "enhance_prompt.start"): ImageEnhancePromptContext,
+    ("image", "generate"): ImageGenerateContext,
+    ("image", "generate.start"): ImageGenerateContext,
     ("image", "infer"): ImageInferContext,
     ("image", "infer.start"): ImageInferContext,
     ("image", "oom_ladder_done"): ImageOomLadderDoneContext,
@@ -1166,4 +1328,6 @@ EVENT_CONTEXT_SCHEMAS: dict[tuple[str, str], type] = {
     ("system", "validation_rejected"): SystemValidationRejectedContext,
     ("system", "wave_parallel"): SystemWaveParallelContext,
     ("system", "wave_parallel_fallback"): SystemWaveParallelFallbackContext,
+    ("tool", "invoke"): ToolInvokeContext,
+    ("tool", "invoke.start"): ToolInvokeContext,
 }

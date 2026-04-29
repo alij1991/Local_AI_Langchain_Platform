@@ -58,7 +58,12 @@ from local_ai_platform.observability_events import (
     EVENT_CONTEXT_SCHEMAS,
     AgentToolCallContext,
     AgentValidationRejectedContext,
+    ChatEnhancePromptContext,
+    ChatSendContext,
     ConfigLoadContext,
+    EditorEditContext,
+    ImageEnhancePromptContext,
+    ImageGenerateContext,
     ImageInferContext,
     ImageOomLadderDoneContext,
     ImageOomLadderStartContext,
@@ -82,6 +87,7 @@ from local_ai_platform.observability_events import (
     SystemValidationRejectedContext,
     SystemWaveParallelContext,
     SystemWaveParallelFallbackContext,
+    ToolInvokeContext,
 )
 
 
@@ -440,6 +446,145 @@ def test_system_validate_schema_three_required_keys():
     assert optional == frozenset()
 
 
+# ── [IMPROVE-102] Wave 11 batch: 6 Recorder context schemas ────
+
+
+def test_chat_enhance_prompt_schema_three_required_keys():
+    """[IMPROVE-102] Recorder track_event callsite at
+    chat.py:358. Three required keys cover prompt length +
+    target model hint + detected prompt-shape."""
+    required, optional = _required_optional_keys(ChatEnhancePromptContext)
+    assert required == {"prompt_length", "model_hint", "detected_type"}
+    assert optional == frozenset()
+
+
+def test_chat_send_schema_thread_id_optional():
+    """[IMPROVE-102] Eight always-present keys cover the sync
+    callsite (chat.py:720); ``thread_id`` only on the streaming
+    callsite at chat.py:947 hence NotRequired. Both callsites
+    share this schema via the (sub, act) + (sub, act.start)
+    pairing."""
+    required, optional = _required_optional_keys(ChatSendContext)
+    assert required == {
+        "agent", "model", "provider", "conversation_id", "run_id",
+        "has_images", "image_count", "streaming",
+    }
+    assert optional == {"thread_id"}
+
+
+def test_chat_send_and_start_share_same_schema():
+    """[IMPROVE-102] Pin the schema-sharing convention for the
+    Recorder pattern: a single TypedDict covers both the base
+    and ``.start`` companion event because the Recorder spreads
+    the same context dict on __enter__ + __exit__."""
+    assert EVENT_CONTEXT_SCHEMAS[("chat", "send")] is ChatSendContext
+    assert EVENT_CONTEXT_SCHEMAS[("chat", "send.start")] is ChatSendContext
+
+
+def test_chat_enhance_prompt_and_start_share_same_schema():
+    """[IMPROVE-102] Pin the schema-sharing convention for
+    chat.enhance_prompt's Recorder pair (chat.py:358)."""
+    assert EVENT_CONTEXT_SCHEMAS[
+        ("chat", "enhance_prompt")
+    ] is ChatEnhancePromptContext
+    assert EVENT_CONTEXT_SCHEMAS[
+        ("chat", "enhance_prompt.start")
+    ] is ChatEnhancePromptContext
+
+
+def test_editor_edit_schema_three_required_keys():
+    """[IMPROVE-102] Recorder track_event callsite at
+    editor.py:432. Three required keys: session_id /
+    operation / param_count."""
+    required, optional = _required_optional_keys(EditorEditContext)
+    assert required == {"session_id", "operation", "param_count"}
+    assert optional == frozenset()
+
+
+def test_editor_edit_and_start_share_same_schema():
+    """[IMPROVE-102] Pin the schema-sharing convention for
+    editor.edit's Recorder pair (editor.py:432)."""
+    assert EVENT_CONTEXT_SCHEMAS[
+        ("editor", "edit")
+    ] is EditorEditContext
+    assert EVENT_CONTEXT_SCHEMAS[
+        ("editor", "edit.start")
+    ] is EditorEditContext
+
+
+def test_image_enhance_prompt_schema_four_required_keys():
+    """[IMPROVE-102] Recorder track_event callsite at
+    images.py:643. Four required keys cover the image-prompt
+    rewriter prelude (length / family / model_hint / weighting
+    flag)."""
+    required, optional = _required_optional_keys(ImageEnhancePromptContext)
+    assert required == {
+        "prompt_length", "model_family", "model_hint", "prompt_weighting",
+    }
+    assert optional == frozenset()
+
+
+def test_image_enhance_prompt_and_start_share_same_schema():
+    """[IMPROVE-102] Pin the schema-sharing convention for
+    image.enhance_prompt's Recorder pair (images.py:643)."""
+    assert EVENT_CONTEXT_SCHEMAS[
+        ("image", "enhance_prompt")
+    ] is ImageEnhancePromptContext
+    assert EVENT_CONTEXT_SCHEMAS[
+        ("image", "enhance_prompt.start")
+    ] is ImageEnhancePromptContext
+
+
+def test_image_generate_schema_scheduler_nullable():
+    """[IMPROVE-102] Eight required keys cover the images.py:876
+    Recorder callsite. ``scheduler`` and ``controlnet_type`` are
+    explicitly nullable (``str | None``) — they come from
+    body.get() WITHOUT defaults, so they're always-present-but-
+    nullable rather than NotRequired (the keys themselves DO
+    appear in every callsite)."""
+    required, optional = _required_optional_keys(ImageGenerateContext)
+    assert required == {
+        "model_id", "prompt_length", "steps", "width", "height",
+        "num_images", "scheduler", "controlnet_type",
+    }
+    assert optional == frozenset()
+
+
+def test_image_generate_and_start_share_same_schema():
+    """[IMPROVE-102] Pin the schema-sharing convention for
+    image.generate's Recorder pair (images.py:876)."""
+    assert EVENT_CONTEXT_SCHEMAS[
+        ("image", "generate")
+    ] is ImageGenerateContext
+    assert EVENT_CONTEXT_SCHEMAS[
+        ("image", "generate.start")
+    ] is ImageGenerateContext
+
+
+def test_tool_invoke_schema_three_required_keys():
+    """[IMPROVE-102] Recorder track_event callsites at
+    agents.py:578 (sync) and 590 (async). Both spread the same
+    ``ctx`` dict from lines 576/588 — three required keys
+    (tool / dangerous / arg_size). Both callsites use
+    variable-context so the audit walker skips them — but the
+    schema is pinned so a future literal-context refactor
+    inherits validation automatically."""
+    required, optional = _required_optional_keys(ToolInvokeContext)
+    assert required == {"tool", "dangerous", "arg_size"}
+    assert optional == frozenset()
+
+
+def test_tool_invoke_and_start_share_same_schema():
+    """[IMPROVE-102] Pin the schema-sharing convention for
+    tool.invoke's Recorder pair (agents.py:578 + 590)."""
+    assert EVENT_CONTEXT_SCHEMAS[
+        ("tool", "invoke")
+    ] is ToolInvokeContext
+    assert EVENT_CONTEXT_SCHEMAS[
+        ("tool", "invoke.start")
+    ] is ToolInvokeContext
+
+
 # ── Pydantic TypeAdapter validation (audit-time) ───────────────
 
 
@@ -621,6 +766,138 @@ def test_emit_typed_callsite_keys_match_pinned_schema():
         )
 
 
+# ── [IMPROVE-102] Audit: track_event callsite shapes ───────────
+
+
+def _extract_track_event_callsite_contexts() -> list[
+    tuple[str, str, str, frozenset[str]]
+]:
+    """[IMPROVE-102] Walk every ``.py`` under
+    ``src/local_ai_platform`` and yield ``(file, subsystem,
+    action, context_keys)`` for every ``track_event(subsys,
+    action, ...)`` callsite where the context arg is a literal
+    dict.
+
+    Mirror of the IMPROVE-92 emit_typed walker — same skip
+    rules apply (variable context, spread-syntax dicts, no
+    context kwarg). The Recorder pattern uses the same
+    ``context=`` kwarg as emit_typed so the same shape
+    extraction works.
+
+    track_event's signature: ``track_event(subsystem, action,
+    context=None)`` — context is the third positional OR a
+    kwarg. Both forms are handled.
+
+    Skip ``observability.py`` (the track_event def + docstring
+    examples live there, would match falsely).
+    """
+    src_root = (
+        Path(__file__).parent.parent
+        / "src" / "local_ai_platform"
+    )
+    found: list[tuple[str, str, str, frozenset[str]]] = []
+    for py in src_root.rglob("*.py"):
+        # Don't scan the observability module — track_event def +
+        # docstring snippets would match falsely.
+        if py.name == "observability.py":
+            continue
+        try:
+            text = py.read_text(encoding="utf-8")
+        except UnicodeDecodeError:
+            text = py.read_text(encoding="latin-1")
+        try:
+            tree = ast.parse(text)
+        except SyntaxError:
+            continue
+        for node in ast.walk(tree):
+            if not isinstance(node, ast.Call):
+                continue
+            func = node.func
+            if not isinstance(func, ast.Name) or func.id != "track_event":
+                continue
+            if len(node.args) < 2:
+                continue
+            sub_arg, act_arg = node.args[0], node.args[1]
+            if not (isinstance(sub_arg, ast.Constant)
+                    and isinstance(sub_arg.value, str)):
+                continue
+            if not (isinstance(act_arg, ast.Constant)
+                    and isinstance(act_arg.value, str)):
+                continue
+            # Find context — either third positional or kwarg.
+            ctx_node = None
+            if len(node.args) >= 3:
+                ctx_node = node.args[2]
+            else:
+                for kw in node.keywords:
+                    if kw.arg == "context":
+                        ctx_node = kw.value
+                        break
+            if ctx_node is None:
+                continue
+            if not isinstance(ctx_node, ast.Dict):
+                # Variable / computed context — skip (audit
+                # philosophy: best-effort static analysis,
+                # never false-positive).
+                continue
+            # Spread-syntax dicts have None keys — skip per
+            # IMPROVE-101 walker convention.
+            if any(k is None for k in ctx_node.keys):
+                continue
+            keys: set[str] = set()
+            for k in ctx_node.keys:
+                if isinstance(k, ast.Constant) and isinstance(k.value, str):
+                    keys.add(k.value)
+            found.append((
+                str(py),
+                sub_arg.value,
+                act_arg.value,
+                frozenset(keys),
+            ))
+    return found
+
+
+def test_track_event_callsite_keys_match_pinned_schema():
+    """[IMPROVE-102] Audit: every track_event callsite for an
+    event WITH a pinned schema must match the schema's
+    required/optional key sets — same contract as the
+    emit_typed audit. Recorder fires both ``sub.act`` and
+    ``sub.act.start`` from the same context dict, so the schema
+    pinned for either tuple is enforced against the
+    track_event callsite's literal keys.
+
+    Variable-context + spread-syntax callsites are skipped per
+    walker convention; only literal-dict callsites get
+    validated. This is the pay-off pin for IMPROVE-102's six
+    Recorder schemas.
+    """
+    callsites = _extract_track_event_callsite_contexts()
+    failures: list[str] = []
+    for path, subsystem, action, callsite_keys in callsites:
+        schema = EVENT_CONTEXT_SCHEMAS.get((subsystem, action))
+        if schema is None:
+            continue
+        required, optional = _required_optional_keys(schema)
+        all_allowed = required | optional
+        missing = required - callsite_keys
+        extras = callsite_keys - all_allowed
+        if missing or extras:
+            failures.append(
+                f"{path}: track_event({subsystem!r}, {action!r}, "
+                f"context={sorted(callsite_keys)})"
+                + (f"\n    missing required: {sorted(missing)}"
+                   if missing else "")
+                + (f"\n    unexpected extras: {sorted(extras)}"
+                   if extras else "")
+            )
+    if failures:
+        pytest.fail(
+            f"[IMPROVE-102] {len(failures)} track_event callsite(s) "
+            f"don't match the pinned context schema:\n  "
+            + "\n  ".join(failures)
+        )
+
+
 def test_pinned_schema_count_grows_or_stays():
     """[IMPROVE-92] Audit pin: the number of pinned schemas in
     ``EVENT_CONTEXT_SCHEMAS`` should only ever GROW (or stay
@@ -629,15 +906,17 @@ def test_pinned_schema_count_grows_or_stays():
     "events without schemas are skipped" semantics means a
     deletion goes unnoticed.
 
-    Today: 28 pinned schemas (6 from [IMPROVE-92] + 12 from
+    Today: 40 pinned schemas (6 from [IMPROVE-92] + 12 from
     [IMPROVE-95]'s Wave 10 batch + 10 from [IMPROVE-101]'s
-    Wave 11 Tier-A batch). If a future commit needs to delete
-    one (e.g. event renamed), update this baseline AND update
-    ``EVENT_CONTEXT_SCHEMAS`` in the same commit so the intent
-    is explicit in code review.
+    Wave 11 Tier-A batch + 12 from [IMPROVE-102]'s Wave 11
+    Recorder batch — 6 schemas × 2 entries each for the base
+    + ``.start`` companion). If a future commit needs to
+    delete one (e.g. event renamed), update this baseline AND
+    update ``EVENT_CONTEXT_SCHEMAS`` in the same commit so the
+    intent is explicit in code review.
     """
     pinned_count = len(EVENT_CONTEXT_SCHEMAS)
-    minimum_pinned = 28  # baseline as of [IMPROVE-101]
+    minimum_pinned = 40  # baseline as of [IMPROVE-102]
     assert pinned_count >= minimum_pinned, (
         f"[IMPROVE-92] Pinned schema count dropped below the "
         f"baseline ({pinned_count} < {minimum_pinned}). "
