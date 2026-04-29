@@ -45,38 +45,21 @@ import pytest
 
 
 @pytest.fixture
-def client(monkeypatch, tmp_path):
-    """In-process TestClient with a tmp DB. Mirrors the fixture
-    pattern in test_observability_timeseries.py + summary tests.
+def client(obs_test_client):
+    """[IMPROVE-122] Delegates to the shared ``obs_test_client``
+    fixture in ``tests/conftest.py``. The shared fixture handles
+    the TestClient + tmp DB + post-startup truncation pattern;
+    this thin wrapper preserves the ``client`` parameter name
+    used by every test function in this file (no churn in test
+    signatures).
 
-    /recent doesn't window by time (no ``window_hours=`` param),
-    so startup-emitted events from ``TestClient(api_server.app)``
-    initialisation would otherwise pollute the count assertions.
-    Truncate ``app_events`` AFTER TestClient startup but BEFORE
-    yielding so each test starts with a clean event log."""
-    pytest.importorskip("fastapi")
-    from fastapi.testclient import TestClient
-    from local_ai_platform import db as db_mod
-
-    path = tmp_path / "app.db"
-    monkeypatch.setattr(db_mod, "DB_PATH", path)
-    db_mod.init_db()
-
-    import api_server
-    with TestClient(api_server.app) as c:
-        # Clear startup-emitted events (image warmup,
-        # agent setup, etc.) so /recent count assertions
-        # are deterministic. The other observability test
-        # files window by ts_offset_minutes so this isn't
-        # needed there — but /recent has no time window.
-        conn = db_mod.get_conn()
-        try:
-            conn.execute("DELETE FROM app_events")
-            conn.commit()
-        finally:
-            conn.close()
-        c._db_mod = db_mod
-        yield c
+    Pre-IMPROVE-122 this file's fixture body was a near-
+    duplicate of the equivalent body in
+    ``test_observability_summary_rejections.py``. Both delegate
+    to ``obs_test_client`` now; future obs-test files can do the
+    same (or use ``obs_test_client`` directly).
+    """
+    return obs_test_client
 
 
 def _insert_event(db_mod, *, subsystem, action, status="ok",

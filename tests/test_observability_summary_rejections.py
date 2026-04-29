@@ -31,43 +31,22 @@ import pytest
 
 
 @pytest.fixture
-def client(monkeypatch, tmp_path):
-    """In-process TestClient with a tmp DB so test events don't
-    pollute the dev DB.
+def client(obs_test_client):
+    """[IMPROVE-122] Delegates to the shared ``obs_test_client``
+    fixture in ``tests/conftest.py``. The shared fixture handles
+    the TestClient + tmp DB + [IMPROVE-115] post-startup
+    truncation pattern; this thin wrapper preserves the
+    ``client`` parameter name used by every test function in
+    this file (no churn in test signatures).
 
-    Mirror of test_dag_lint.py's fixture — same pattern.
-
-    [IMPROVE-115] Truncate app_events AFTER TestClient startup
-    but BEFORE yielding so each test starts with a clean event
-    log. /summary's items rollup is a GROUP BY count — startup
-    events would otherwise appear as extra (subsystem, action)
-    tuples + skew the dim-axis fill_zero_dim assertions. The
-    IMPROVE-90 tests above are pattern-based (rejection
-    presence, group-by counts on inserted events), so the
-    truncation is harmless for them.
+    The truncation rationale ([IMPROVE-115]): /summary's items
+    rollup is a GROUP BY count — startup events would otherwise
+    appear as extra (subsystem, action) tuples and skew the
+    dim-axis fill_zero_dim assertions. The [IMPROVE-90] tests
+    are pattern-based (rejection presence, group-by counts on
+    inserted events), so the truncation is harmless for them.
     """
-    pytest.importorskip("fastapi")
-    from fastapi.testclient import TestClient
-    from local_ai_platform import db as db_mod
-
-    path = tmp_path / "app.db"
-    monkeypatch.setattr(db_mod, "DB_PATH", path)
-    db_mod.init_db()
-
-    import api_server
-    with TestClient(api_server.app) as c:
-        # Make the active DB easily accessible so each test can
-        # insert events directly without re-resolving DB_PATH.
-        c._db_mod = db_mod
-        # [IMPROVE-115] Clean event log before each test (see
-        # docstring above for rationale).
-        conn = db_mod.get_conn()
-        try:
-            conn.execute("DELETE FROM app_events")
-            conn.commit()
-        finally:
-            conn.close()
-        yield c
+    return obs_test_client
 
 
 def _insert_event(db_mod, *, subsystem, action, status="ok",
