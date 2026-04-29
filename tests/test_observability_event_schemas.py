@@ -56,37 +56,59 @@ from pydantic import TypeAdapter
 
 from local_ai_platform.observability_events import (
     EVENT_CONTEXT_SCHEMAS,
+    AgentFallbackContext,
+    AgentProtectedDeleteBlockedContext,
+    AgentToolAutoResumeContext,
     AgentToolCallContext,
+    AgentToolResultContext,
     AgentValidationRejectedContext,
     ChatEnhancePromptContext,
     ChatSendContext,
     ConfigLoadContext,
+    EditorBlendWithPreviousContext,
     EditorEditContext,
+    EditorExportContext,
+    EditorOpContext,
+    EditorRedoContext,
+    EditorUndoContext,
     ImageEnhancePromptContext,
     ImageGenerateContext,
     ImageInferContext,
+    ImageLoadContext,
     ImageOomLadderDoneContext,
     ImageOomLadderStartContext,
     ImageOomStageAttemptContext,
     ImageOptimizationPlanContext,
+    ImagePlanContext,
+    ImagePostprocessContext,
+    ImagesDetectHintsContext,
     ImageVramProbeContext,
     ImageWarmupContext,
+    InstructEditLoadContext,
     InstructEditRunContext,
     ModelDownloadDoneContext,
     ModelDownloadErrorContext,
     ModelDownloadProgressContext,
     ModelDownloadStartContext,
     PartnerChatContext,
+    PartnerEmotionDetectContext,
+    PartnerFactExtractContext,
     PartnerMem0InitContext,
+    PartnerSttContext,
+    PartnerTtsContext,
+    PartnerVoiceInitContext,
     ProviderAvailabilityProbeContext,
     SystemNodeEndContext,
     SystemNodeStartContext,
     SystemRoutingDecisionContext,
     SystemRunDoneContext,
+    SystemRunStartContext,
     SystemValidateContext,
     SystemValidationRejectedContext,
     SystemWaveParallelContext,
     SystemWaveParallelFallbackContext,
+    ToolCalculatorEvalContext,
+    ToolFileOpsPathRejectedContext,
     ToolInvokeContext,
 )
 
@@ -585,6 +607,288 @@ def test_tool_invoke_and_start_share_same_schema():
     ] is ToolInvokeContext
 
 
+# ── [IMPROVE-107] Final-tier schemas: 100% coverage ────────────
+
+
+def test_agent_fallback_schema_four_required_keys():
+    """[IMPROVE-107] Fallback fires from agents.py:1206 with the
+    four-key ``{agent, model, provider, reason}`` shape. ``reason``
+    is today always ``"model_does_not_support_tools"`` but the
+    field is ``str`` (not Literal) for future fallback reasons."""
+    required, optional = _required_optional_keys(AgentFallbackContext)
+    assert required == {"agent", "model", "provider", "reason"}
+    assert optional == frozenset()
+
+
+def test_agent_protected_delete_blocked_schema_single_key():
+    """[IMPROVE-107] DELETE /agents/<name> rejection at
+    api/routers/agents.py:441 with a single ``agent_name`` key —
+    error_code/error_message land on emit_typed's signature."""
+    required, optional = _required_optional_keys(AgentProtectedDeleteBlockedContext)
+    assert required == {"agent_name"}
+    assert optional == frozenset()
+
+
+def test_agent_tool_auto_resume_schema_via_optional():
+    """[IMPROVE-107] Fires from agents.py:410 (post-interrupt;
+    adds ``via="resume"``) and 1179 (post-empty-response retry;
+    omits ``via``). ``via`` is NotRequired to capture the union."""
+    required, optional = _required_optional_keys(AgentToolAutoResumeContext)
+    assert required == {"agent", "thread_id", "tool_names", "iter"}
+    assert optional == {"via"}
+
+
+def test_agent_tool_result_schema_four_required_keys():
+    """[IMPROVE-107] Fires from agents.py:1092 after each tool
+    dispatch returns. ``call_id`` is the LangGraph run_id that
+    correlates tool_call → tool_result pairs."""
+    required, optional = _required_optional_keys(AgentToolResultContext)
+    assert required == {"agent", "tool", "call_id", "thread_id"}
+    assert optional == frozenset()
+
+
+def test_editor_blend_with_previous_schema_three_required_keys():
+    """[IMPROVE-107] Fires from images/editor.py:965 + 1002 via
+    the shared ``_blend_ctx`` dict (line 947). ``blend`` is the
+    0.0-1.0 mix factor; ``current_step`` is the step index the
+    blend was applied against."""
+    required, optional = _required_optional_keys(EditorBlendWithPreviousContext)
+    assert required == {"session_id", "blend", "current_step"}
+    assert optional == frozenset()
+
+
+def test_editor_export_schema_quality_optional():
+    """[IMPROVE-107] Fires from images/editor.py:1102
+    (SessionNotFound; ``quality`` omitted because the lookup
+    failed before quality was resolved), 1117 (other-error), 1124
+    (ok). ``quality`` is NotRequired."""
+    required, optional = _required_optional_keys(EditorExportContext)
+    assert required == {"session_id", "format"}
+    assert optional == {"quality"}
+
+
+def test_editor_op_schema_dispatch_optional():
+    """[IMPROVE-107] Fires from images/editor.py:731 (analyze ok
+    with ``dispatch``), 741 (error), 820 (apply_edit ok). All
+    three callsites spread ``_edit_ctx`` (line 700). ``dispatch``
+    is NotRequired — only the analyze-success branch sets it."""
+    required, optional = _required_optional_keys(EditorOpContext)
+    assert required == {"session_id", "operation", "param_keys", "source"}
+    assert optional == {"dispatch"}
+
+
+def test_editor_redo_schema_history_keys_optional():
+    """[IMPROVE-107] Fires from images/editor.py:869 (NothingToRedo
+    error; only session_id) and 878 (ok; full shape). The
+    redone_operation + current_step keys are NotRequired because
+    the error path fires before the redo stack pop."""
+    required, optional = _required_optional_keys(EditorRedoContext)
+    assert required == {"session_id"}
+    assert optional == {"redone_operation", "current_step"}
+
+
+def test_editor_undo_schema_history_keys_optional():
+    """[IMPROVE-107] Fires from images/editor.py:841 (NothingToUndo
+    error) and 852 (ok). Same pattern as ``editor.redo``:
+    history-bearing keys NotRequired because the error path can't
+    populate them."""
+    required, optional = _required_optional_keys(EditorUndoContext)
+    assert required == {"session_id"}
+    assert optional == {"undone_operation", "current_step"}
+
+
+def test_image_load_schema_low_mem_and_backend_optional():
+    """[IMPROVE-107] Fires from images/service.py:7592 (.start
+    with full _load_ctx), 7580 (cache_hit shortcut omitting
+    ``low_mem``), 7827 (nunchaku ok with ``backend``), 8244
+    (regular ok). ``low_mem`` is NotRequired because the
+    cache_hit path uses a minimal context; ``backend`` is
+    NotRequired because only the nunchaku branch sets it."""
+    required, optional = _required_optional_keys(ImageLoadContext)
+    assert required == {"model_id", "mode", "device", "dtype", "cache_hit"}
+    assert optional == {"low_mem", "backend"}
+
+
+def test_image_load_and_start_share_same_schema():
+    """[IMPROVE-107] Pin the schema-sharing convention: a single
+    TypedDict covers both ``image.load`` and ``image.load.start``
+    because the .start emit at service.py:7592 spreads the same
+    ``_load_ctx`` variable that the ok-path emits use."""
+    assert EVENT_CONTEXT_SCHEMAS[("image", "load")] is ImageLoadContext
+    assert EVENT_CONTEXT_SCHEMAS[("image", "load.start")] is ImageLoadContext
+
+
+def test_image_plan_schema_nullable_planner_fields():
+    """[IMPROVE-107] Fires from images/service.py:9822 once per
+    image generation request after the planner resolves model +
+    device + backend + dtype + LoRA / init / mask flags. The
+    detector-derived fields are nullable (``str | None``) because
+    ``_img_hints.get`` and ``execution_plan.get`` return None
+    when the upstream stage didn't populate them — they're always
+    PRESENT in the dict, just sometimes None."""
+    required, optional = _required_optional_keys(ImagePlanContext)
+    assert required == {
+        "model_id", "model_family", "model_variant", "device_plan",
+        "inference_backend", "torch_dtype", "has_lora",
+        "has_init_image", "has_mask", "scheduler",
+    }
+    assert optional == frozenset()
+
+
+def test_image_postprocess_schema_four_required_keys():
+    """[IMPROVE-107] Fires from images/service.py:10224 (ok) and
+    10230 (error) via the shared ``_pp_ctx`` dict at line 10216.
+    ``upscale`` and ``postprocess`` are stage-flag bools; the
+    output_bytes perf field lands on emit_typed's ``perf=`` arg."""
+    required, optional = _required_optional_keys(ImagePostprocessContext)
+    assert required == {"model_id", "upscale", "postprocess", "input_bytes"}
+    assert optional == frozenset()
+
+
+def test_images_detect_hints_schema_signals_optional():
+    """[IMPROVE-107] Fires from images/service.py:1469 with
+    spread syntax (``{**signals, ...}``) so the audit walker
+    skips the callsite. The schema covers the two always-present
+    keys plus the known signals flags as NotRequired — pin the
+    forward-looking shape so a future literal-context refactor
+    inherits validation."""
+    required, optional = _required_optional_keys(ImagesDetectHintsContext)
+    assert required == {"family", "variant"}
+    # The signal fields are best-effort optional — five known
+    # detector flags pinned today; the schema is forward-looking.
+    assert "has_safetensors_metadata" in optional
+    assert "has_model_index_json" in optional
+
+
+def test_instruct_edit_load_schema_gguf_keys_optional():
+    """[IMPROVE-107] Fires from images/ai_enhance.py:2235
+    (kontext/nunchaku via ``_load_context`` at line 2229) and
+    2712 (cosxl with bare ``{"backend": "cosxl"}``). The
+    GGUF-specific keys are kontext-only — NotRequired so cosxl
+    + nunchaku don't fabricate values."""
+    required, optional = _required_optional_keys(InstructEditLoadContext)
+    assert required == {"backend"}
+    assert optional == {"gguf_quant", "gguf_quant_overridden"}
+
+
+def test_instruct_edit_run_start_shares_run_schema():
+    """[IMPROVE-107] ``instruct_edit.run.start`` (ai_enhance.py:2185)
+    spreads the same ``_ie_ctx`` dict that the IMPROVE-101
+    ``instruct_edit.run`` callsites spread, so the .start
+    companion REUSES ``InstructEditRunContext`` rather than
+    introducing a new schema. Pin the reuse so a future split
+    surfaces here."""
+    assert EVENT_CONTEXT_SCHEMAS[("instruct_edit", "run")] is InstructEditRunContext
+    assert EVENT_CONTEXT_SCHEMAS[("instruct_edit", "run.start")] is InstructEditRunContext
+
+
+def test_partner_emotion_detect_schema_two_required_keys():
+    """[IMPROVE-107] Fires from partner/engine.py:513 (tag-prefix
+    detection) and 586 (heuristic fallback). ``source`` is one of
+    "tag_prefix" / "heuristic_fallback" — pinned as ``str`` for
+    future detector additions (LLM-classifier, embedding-based)."""
+    required, optional = _required_optional_keys(PartnerEmotionDetectContext)
+    assert required == {"emotion", "source"}
+    assert optional == frozenset()
+
+
+def test_partner_fact_extract_schema_two_required_keys():
+    """[IMPROVE-107] Fires from partner/engine.py:733 once per
+    user message after Mem0 fact-extraction. ``life_event_detected``
+    is the boolean result of the heuristic life-event scanner —
+    the new_facts perf field lands on emit_typed's ``perf=`` arg."""
+    required, optional = _required_optional_keys(PartnerFactExtractContext)
+    assert required == {"input_length", "life_event_detected"}
+    assert optional == frozenset()
+
+
+def test_partner_stt_schema_samples_optional():
+    """[IMPROVE-107] Fires from 5 callsites in partner/engine.py
+    covering file vs. buffer paths (995/1004/1010/1107/1117) plus
+    the stt.partial throttled coalesce at 1131. ``samples`` is
+    NotRequired — only the buffer-path callsites carry it."""
+    required, optional = _required_optional_keys(PartnerSttContext)
+    assert required == {"source"}
+    assert optional == {"samples"}
+
+
+def test_partner_stt_and_partial_share_same_schema():
+    """[IMPROVE-107] Pin the schema-sharing convention: a single
+    TypedDict covers both ``partner.stt`` and
+    ``partner.stt.partial`` because partial uses a strict subset
+    of stt's keys (just ``source: "buffer"``). A future stt.partial
+    addition inherits validation automatically."""
+    assert EVENT_CONTEXT_SCHEMAS[("partner", "stt")] is PartnerSttContext
+    assert EVENT_CONTEXT_SCHEMAS[("partner", "stt.partial")] is PartnerSttContext
+
+
+def test_partner_tts_schema_voice_and_skipped_empty_optional():
+    """[IMPROVE-107] Fires from 5 callsites in partner/engine.py
+    (1391/1400/1411/1436/1444). All callsites spread ``_tts_ctx``
+    (line 1386). ``voice`` is NotRequired (kokoro-only); the
+    ``skipped_empty`` bool lands only on the empty-text shortcut."""
+    required, optional = _required_optional_keys(PartnerTtsContext)
+    assert required == {"emotion", "input_length", "path"}
+    assert optional == {"voice", "skipped_empty"}
+
+
+def test_partner_voice_init_schema_no_required_keys():
+    """[IMPROVE-107] Fires from partner/engine.py:893 (.start) and
+    986 (ok). Both pass empty ``{}`` — the per-component status
+    bools live on ``perf=``. The empty-shape schema pins the "no
+    required context" contract so a future addition lands as a
+    deliberate NotRequired update."""
+    required, optional = _required_optional_keys(PartnerVoiceInitContext)
+    assert required == frozenset()
+    assert optional == frozenset()
+
+
+def test_partner_voice_init_and_start_share_same_schema():
+    """[IMPROVE-107] Pin the schema-sharing convention: a single
+    TypedDict covers both ``partner.voice_init`` and the .start
+    companion. Both callsites fire empty ``{}``; sharing one
+    schema lets a future addition (e.g. driver_version on .start)
+    land as a deliberate NotRequired update."""
+    assert EVENT_CONTEXT_SCHEMAS[("partner", "voice_init")] is PartnerVoiceInitContext
+    assert EVENT_CONTEXT_SCHEMAS[("partner", "voice_init.start")] is PartnerVoiceInitContext
+
+
+def test_system_run_start_schema_streaming_optional():
+    """[IMPROVE-107] Fires from systems/executor.py:668 (sync) and
+    950 (streaming). Five required dimensional keys; ``streaming``
+    is NotRequired — only the streaming-path callsite (line 957)
+    sets it to True. Sibling ``SystemRunDoneContext`` covers the
+    end event with a different shape (no node_count/edge_count)."""
+    required, optional = _required_optional_keys(SystemRunStartContext)
+    assert required == {
+        "run_id", "system_name", "conversation_id",
+        "node_count", "edge_count",
+    }
+    assert optional == {"streaming"}
+
+
+def test_tool_calculator_eval_schema_single_key():
+    """[IMPROVE-107] Fires from tools/builtin.py:163 (UnsafeExpression
+    error), 171 (SyntaxError), 182 (EvalError), 190 (ok). All four
+    callsites carry the single ``expression_length`` key — the
+    error_code / error_message / result_type fields land on
+    emit_typed's signature itself."""
+    required, optional = _required_optional_keys(ToolCalculatorEvalContext)
+    assert required == {"expression_length"}
+    assert optional == frozenset()
+
+
+def test_tool_file_ops_path_rejected_schema_single_key():
+    """[IMPROVE-107] Fires from tools/file_ops.py:42 and
+    tools/rag_tools.py:61 (both with
+    ``error_code="PathOutsideWorkspace"``). The two callsites
+    share a single ``user_path`` truncated to 200 chars at the
+    call site."""
+    required, optional = _required_optional_keys(ToolFileOpsPathRejectedContext)
+    assert required == {"user_path"}
+    assert optional == frozenset()
+
+
 # ── Pydantic TypeAdapter validation (audit-time) ───────────────
 
 
@@ -906,17 +1210,22 @@ def test_pinned_schema_count_grows_or_stays():
     "events without schemas are skipped" semantics means a
     deletion goes unnoticed.
 
-    Today: 40 pinned schemas (6 from [IMPROVE-92] + 12 from
+    Today: 66 pinned schemas (6 from [IMPROVE-92] + 12 from
     [IMPROVE-95]'s Wave 10 batch + 10 from [IMPROVE-101]'s
     Wave 11 Tier-A batch + 12 from [IMPROVE-102]'s Wave 11
-    Recorder batch — 6 schemas × 2 entries each for the base
-    + ``.start`` companion). If a future commit needs to
-    delete one (e.g. event renamed), update this baseline AND
-    update ``EVENT_CONTEXT_SCHEMAS`` in the same commit so the
-    intent is explicit in code review.
+    Recorder batch + 26 from [IMPROVE-107]'s Wave 12 final-tier
+    batch — 100% coverage of the registered (subsystem, action)
+    tuples). If a future commit needs to delete one (e.g. event
+    renamed), update this baseline AND update
+    ``EVENT_CONTEXT_SCHEMAS`` in the same commit so the intent
+    is explicit in code review.
+
+    [IMPROVE-109] will replace this baseline pin with a strict
+    "every KNOWN_EVENT_NAMES tuple MUST have a schema" check —
+    the opt-out flip becomes safe once coverage hits 100% (now).
     """
     pinned_count = len(EVENT_CONTEXT_SCHEMAS)
-    minimum_pinned = 40  # baseline as of [IMPROVE-102]
+    minimum_pinned = 66  # baseline as of [IMPROVE-107] (100% coverage)
     assert pinned_count >= minimum_pinned, (
         f"[IMPROVE-92] Pinned schema count dropped below the "
         f"baseline ({pinned_count} < {minimum_pinned}). "

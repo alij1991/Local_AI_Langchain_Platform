@@ -1295,6 +1295,453 @@ class ToolInvokeContext(TypedDict):
     arg_size: int
 
 
+# ── [IMPROVE-107] Wave 12 batch: final-tier schemas (40 → 66) ──
+
+# Closes the schema-coverage gap to 100% — every registered
+# (subsystem, action) tuple in ``KNOWN_EVENT_NAMES`` now has a
+# pinned context schema. The unpinned 26 tuples split into 22
+# new TypedDict classes plus one reuse of IMPROVE-101's
+# ``InstructEditRunContext`` for ``instruct_edit.run.start``
+# (the .start companion shares the existing schema because both
+# callsites spread the same ``_ie_ctx`` variable).
+#
+# Three of the 22 new classes share between an event and its
+# .start companion — same convention as IMPROVE-101 (image.infer
+# pair) and IMPROVE-102 (Recorder pairs):
+#
+#   * ``ImageLoadContext``       — image.load + image.load.start
+#                                  (both spread ``_load_ctx`` at
+#                                  service.py:7590)
+#   * ``PartnerSttContext``      — partner.stt + partner.stt.partial
+#                                  (partial uses a strict subset of
+#                                  stt's keys — a future stt.partial
+#                                  gain inherits validation)
+#   * ``PartnerVoiceInitContext``— partner.voice_init +
+#                                  voice_init.start (both fire empty
+#                                  ``{}`` contexts; the schema
+#                                  documents the "no context"
+#                                  contract so a future addition
+#                                  lands as a deliberate
+#                                  NotRequired update rather than
+#                                  silently passing the audit)
+#
+# Coverage 40 → 66 tuples (74% → 100%). Per Q1=C in the Wave 12
+# plan this commit also formalises the IMPROVE-106 mypy
+# dependency in ``pyproject.toml`` so a fresh clone running
+# Tier 1 doesn't silently skip the strict-mode test. Once 100%
+# coverage is real, IMPROVE-109 flips the audit from opt-in to
+# opt-out (callsites for unregistered tuples fail rather than
+# being skipped) — that's structurally safe today.
+
+
+class AgentFallbackContext(TypedDict):
+    """[IMPROVE-107] Context schema for ``agent.fallback``.
+
+    Fires from agents.py:1206 when the agent loop falls back to
+    a non-tool-using model (e.g. when the chosen model doesn't
+    advertise tool support). ``reason`` is today always
+    ``"model_does_not_support_tools"`` but the field is ``str``
+    (not Literal) because future fallback reasons will land
+    here.
+    """
+    __pydantic_config__ = _FORBID_EXTRA  # type: ignore[misc]
+    agent: str
+    model: str
+    provider: str
+    reason: str
+
+
+class AgentProtectedDeleteBlockedContext(TypedDict):
+    """[IMPROVE-107] Context schema for ``agent.protected_delete_blocked``.
+
+    Fires from api/routers/agents.py:441 when DELETE /agents/<name>
+    targets one of the default agents (assistant, coder, etc.).
+    Single key — operators querying "rejected default-agent
+    deletes" group by agent_name to spot users repeatedly trying
+    to delete a protected agent. error_code/error_message land
+    on emit_typed's signature itself, NOT in this context dict.
+    """
+    __pydantic_config__ = _FORBID_EXTRA  # type: ignore[misc]
+    agent_name: str
+
+
+class AgentToolAutoResumeContext(TypedDict):
+    """[IMPROVE-107] Context schema for ``agent.tool_auto_resume``.
+
+    Fires from agents.py:410 (after dangerous-tool interrupt
+    resume) and 1179 (after retry-on-empty-response auto-resume).
+    The 410 callsite adds ``via="resume"`` to disambiguate the
+    interrupt-resume path from the empty-response-retry path
+    (1179 omits ``via`` — the audit walker sees this NotRequired).
+    ``tool_names`` may contain ``None`` entries when a pending
+    tool_call has no resolved name yet.
+    """
+    __pydantic_config__ = _FORBID_EXTRA  # type: ignore[misc]
+    agent: str
+    thread_id: str
+    tool_names: list[str | None]
+    iter: int
+    via: NotRequired[str]
+
+
+class AgentToolResultContext(TypedDict):
+    """[IMPROVE-107] Context schema for ``agent.tool_result``.
+
+    Fires from agents.py:1092 after each tool dispatch returns
+    a result. ``call_id`` is ``event.get("run_id")`` — the
+    LangGraph-assigned per-call identifier that lets downstream
+    consumers correlate ``agent.tool_call`` → ``agent.tool_result``
+    pairs without inspecting the tool args.
+    """
+    __pydantic_config__ = _FORBID_EXTRA  # type: ignore[misc]
+    agent: str
+    tool: str
+    call_id: str
+    thread_id: str
+
+
+class EditorBlendWithPreviousContext(TypedDict):
+    """[IMPROVE-107] Context schema for ``editor.blend_with_previous``.
+
+    Fires from images/editor.py:965 (FileMissing error) and 1002
+    (ok) via the shared ``_blend_ctx`` dict assembled at
+    editor.py:947. Three required keys: session_id (UUID-like),
+    blend (0.0-1.0 float), current_step (the step index the
+    blend was applied against). The width/height/file_size perf
+    fields land on emit_typed's ``perf=`` arg, NOT this context
+    dict.
+    """
+    __pydantic_config__ = _FORBID_EXTRA  # type: ignore[misc]
+    session_id: str
+    blend: float
+    current_step: int
+
+
+class EditorExportContext(TypedDict):
+    """[IMPROVE-107] Context schema for ``editor.export``.
+
+    Fires from images/editor.py:1102 (SessionNotFound; ``quality``
+    omitted because the session lookup failed before quality was
+    resolved), 1117 (other-error; full triple), 1124 (ok; full
+    triple). ``quality`` is NotRequired — every other key is
+    always present.
+    """
+    __pydantic_config__ = _FORBID_EXTRA  # type: ignore[misc]
+    session_id: str
+    format: str
+    quality: NotRequired[int]
+
+
+class EditorOpContext(TypedDict):
+    """[IMPROVE-107] Context schema for ``editor.op``.
+
+    Fires from images/editor.py:731 (analyze ok, with
+    ``dispatch="analyze"``), 741 (error; bare ``_edit_ctx``),
+    820 (apply_edit ok; bare ``_edit_ctx``). All three callsites
+    spread the same ``_edit_ctx`` dict assembled at editor.py:700.
+    ``dispatch`` is NotRequired — only the analyze-success
+    branch sets it. ``source`` is one of "original" / "current";
+    pin as ``str`` rather than Literal because the editor surface
+    may grow additional source modes.
+    """
+    __pydantic_config__ = _FORBID_EXTRA  # type: ignore[misc]
+    session_id: str
+    operation: str
+    param_keys: list[str]
+    source: str
+    dispatch: NotRequired[str]
+
+
+class EditorRedoContext(TypedDict):
+    """[IMPROVE-107] Context schema for ``editor.redo``.
+
+    Fires from images/editor.py:869 (NothingToRedo error; only
+    session_id) and 878 (ok; full shape).
+    ``redone_operation`` + ``current_step`` are NotRequired
+    because the NothingToRedo path fires before the redo stack
+    pop — the keys aren't yet known.
+    """
+    __pydantic_config__ = _FORBID_EXTRA  # type: ignore[misc]
+    session_id: str
+    redone_operation: NotRequired[str]
+    current_step: NotRequired[int]
+
+
+class EditorUndoContext(TypedDict):
+    """[IMPROVE-107] Context schema for ``editor.undo``.
+
+    Fires from images/editor.py:841 (NothingToUndo error; only
+    session_id) and 852 (ok; full shape).
+    ``undone_operation`` + ``current_step`` are NotRequired —
+    same shape pattern as ``EditorRedoContext``.
+    """
+    __pydantic_config__ = _FORBID_EXTRA  # type: ignore[misc]
+    session_id: str
+    undone_operation: NotRequired[str]
+    current_step: NotRequired[int]
+
+
+class ImageLoadContext(TypedDict):
+    """[IMPROVE-107] Context schema for ``image.load`` and
+    ``image.load.start``.
+
+    Fires from images/service.py:7592 (.start, with the full
+    ``_load_ctx``), 7580 (cache_hit shortcut path — a 5-key
+    subset omitting ``low_mem``), 7827 (nunchaku ok with
+    ``backend="nunchaku"``), 8244 (regular ok with bare
+    ``_load_ctx``). ``low_mem`` is NotRequired because the
+    cache_hit path doesn't assemble ``_load_ctx`` (it builds its
+    own minimal context at line 7581). ``backend`` is
+    NotRequired — only set on the nunchaku branch.
+    ``cache_hit`` is always present (False on .start; True on
+    the cache-hit ok path).
+    """
+    __pydantic_config__ = _FORBID_EXTRA  # type: ignore[misc]
+    model_id: str
+    mode: str
+    device: str
+    dtype: str
+    cache_hit: bool
+    low_mem: NotRequired[bool]
+    backend: NotRequired[str]
+
+
+class ImagePlanContext(TypedDict):
+    """[IMPROVE-107] Context schema for ``image.plan``.
+
+    Fires from images/service.py:9822 once per image generation
+    request after the image-pipeline planner resolves model +
+    device + backend + dtype + LoRA / init / mask flags. Ten
+    required keys cover the planning decision trail so dashboards
+    can chart "% of generations using nunchaku backend" or "%
+    with init image" without inspecting individual rows. The
+    detector-derived fields are nullable (``str | None``) because
+    ``_img_hints.get`` and ``execution_plan.get`` return None
+    when the upstream stage didn't populate them. ``scheduler``
+    echoes the user-requested scheduler name (None when unset).
+    """
+    __pydantic_config__ = _FORBID_EXTRA  # type: ignore[misc]
+    model_id: str
+    model_family: str | None
+    model_variant: str | None
+    device_plan: str | None
+    inference_backend: str | None
+    torch_dtype: str | None
+    has_lora: bool
+    has_init_image: bool
+    has_mask: bool
+    scheduler: str | None
+
+
+class ImagePostprocessContext(TypedDict):
+    """[IMPROVE-107] Context schema for ``image.postprocess``.
+
+    Fires from images/service.py:10224 (ok) and 10230 (error)
+    via the shared ``_pp_ctx`` dict at line 10216. Four required
+    keys: model_id, upscale (bool — whether the upscale stage
+    was requested), postprocess (bool — whether other
+    postprocess stages were requested), input_bytes (int —
+    pre-postprocess image size for size-vs-output dashboards).
+    The output_bytes perf field lands on emit_typed's ``perf=``
+    arg.
+    """
+    __pydantic_config__ = _FORBID_EXTRA  # type: ignore[misc]
+    model_id: str
+    upscale: bool
+    postprocess: bool
+    input_bytes: int
+
+
+class ImagesDetectHintsContext(TypedDict):
+    """[IMPROVE-107] Context schema for ``images.detect_hints``.
+
+    Fires from images/service.py:1469 in
+    ``_emit_detect_hints``. The callsite uses
+    ``{**signals, "family": ..., "variant": ...}`` spread
+    syntax so the audit walker skips it (per the IMPROVE-101
+    spread-syntax skip). The schema covers the two always-present
+    keys plus the known ``signals`` flags as NotRequired. The
+    walker still skips this callsite (spread syntax), so the
+    schema is forward-looking — if a future commit refactors to
+    a literal context, validation activates automatically.
+
+    Note: the ``images`` (plural) subsystem is a historical
+    inconsistency from IMPROVE-39 / IMPROVE-47 detection
+    telemetry; don't normalise here per the comment in the
+    Literal definition above.
+    """
+    __pydantic_config__ = _FORBID_EXTRA  # type: ignore[misc]
+    family: str | None
+    variant: str | None
+    has_safetensors_metadata: NotRequired[bool]
+    has_model_index_json: NotRequired[bool]
+    has_unet_dir: NotRequired[bool]
+    has_transformer_dir: NotRequired[bool]
+    config_class: NotRequired[str | None]
+
+
+class InstructEditLoadContext(TypedDict):
+    """[IMPROVE-107] Context schema for ``instruct_edit.load``.
+
+    Fires from images/ai_enhance.py:2235 (kontext/nunchaku ok
+    via ``_load_context`` assembled at line 2229) and 2712 (cosxl
+    ok with bare ``{"backend": "cosxl"}``). ``backend`` is
+    always present; ``gguf_quant`` and ``gguf_quant_overridden``
+    are only on the kontext branch (the kontext-only block at
+    line 2233 sets them; nunchaku skips because GGUF doesn't
+    apply; cosxl uses a different loader). NotRequired captures
+    the union without forcing cosxl/nunchaku to fabricate values.
+    """
+    __pydantic_config__ = _FORBID_EXTRA  # type: ignore[misc]
+    backend: str
+    gguf_quant: NotRequired[str]
+    gguf_quant_overridden: NotRequired[bool]
+
+
+class PartnerEmotionDetectContext(TypedDict):
+    """[IMPROVE-107] Context schema for ``partner.emotion_detect``.
+
+    Fires from partner/engine.py:513 (tag-prefix detection — the
+    fast path that finds an explicit ``[emotion]`` tag at the
+    front of the LLM reply) and 586 (heuristic fallback —
+    keyword scoring over the visible reply). ``source`` is one
+    of "tag_prefix" / "heuristic_fallback"; pinned as ``str``
+    rather than Literal because future detector additions
+    (LLM-classifier, embedding-based) will land here.
+    """
+    __pydantic_config__ = _FORBID_EXTRA  # type: ignore[misc]
+    emotion: str
+    source: str
+
+
+class PartnerFactExtractContext(TypedDict):
+    """[IMPROVE-107] Context schema for ``partner.fact_extract``.
+
+    Fires from partner/engine.py:733 once per user message after
+    Mem0 fact-extraction completes. ``input_length`` is the raw
+    user text length (not tokenized); ``life_event_detected`` is
+    the boolean result of the heuristic life-event scanner — per
+    IMPROVE-77 the partner's memory-decay flow uses this to
+    refresh long-term salience for "I changed jobs" style
+    inputs. The new_facts perf field lands on emit_typed's
+    ``perf=`` arg, NOT this context dict.
+    """
+    __pydantic_config__ = _FORBID_EXTRA  # type: ignore[misc]
+    input_length: int
+    life_event_detected: bool
+
+
+class PartnerSttContext(TypedDict):
+    """[IMPROVE-107] Context schema for ``partner.stt`` and
+    ``partner.stt.partial``.
+
+    Fires from partner/engine.py:995 (ASRNotInitialized error;
+    ``{source: "file"}``), 1004 (file STT error;
+    ``{source: "file"}``), 1010 (file STT ok;
+    ``{source: "file"}``), 1107 (buffer STT error;
+    ``{source, samples}``), 1117 (buffer STT ok;
+    ``{source, samples}``), 1131 (stt.partial throttled
+    coalesce; ``{source: "buffer"}``). ``source`` is one of
+    "file" / "buffer"; ``samples`` is NotRequired — only the
+    buffer-path callsites carry it (file paths don't expose a
+    sample count). The text_length / coalesced_count perf
+    fields land on emit_typed's ``perf=`` arg.
+    """
+    __pydantic_config__ = _FORBID_EXTRA  # type: ignore[misc]
+    source: str
+    samples: NotRequired[int]
+
+
+class PartnerTtsContext(TypedDict):
+    """[IMPROVE-107] Context schema for ``partner.tts``.
+
+    Fires from partner/engine.py:1391 (Chatterbox path), 1400
+    (TTSNotInitialized error), 1411 (kokoro skipped-empty
+    branch with ``{voice, skipped_empty}``), 1436 (kokoro ok
+    with ``voice``), 1444 (kokoro error with ``voice``). All
+    callsites spread or extend the ``_tts_ctx`` dict assembled
+    at engine.py:1386 — three required keys (emotion,
+    input_length, path). ``voice`` is NotRequired — added on
+    every kokoro callsite after emotion-aware voice resolution;
+    chatterbox path omits it. ``skipped_empty`` is NotRequired —
+    only the skipped-empty branch sets it. ``path`` is one of
+    "chatterbox" / "kokoro".
+    """
+    __pydantic_config__ = _FORBID_EXTRA  # type: ignore[misc]
+    emotion: str
+    input_length: int
+    path: str
+    voice: NotRequired[str]
+    skipped_empty: NotRequired[bool]
+
+
+class PartnerVoiceInitContext(TypedDict):
+    """[IMPROVE-107] Context schema for ``partner.voice_init``
+    and ``partner.voice_init.start``.
+
+    Fires from partner/engine.py:893 (.start) and 986 (ok). Both
+    callsites pass empty ``{}`` — the per-component status (asr
+    / tts / vad bools) lives on the emit_typed ``perf=`` arg
+    rather than the context dict. The empty-shape schema
+    documents the "no required context" contract so a future
+    addition (e.g. driver_version on .start) lands as a
+    deliberate NotRequired update rather than silently passing
+    through the audit.
+    """
+    __pydantic_config__ = _FORBID_EXTRA  # type: ignore[misc]
+
+
+class SystemRunStartContext(TypedDict):
+    """[IMPROVE-107] Context schema for ``system.run.start``.
+
+    Fires from systems/executor.py:668 (sync) and 950 (streaming)
+    at the top of every system run. Five required dimensional
+    keys (run_id / system_name / conversation_id / node_count /
+    edge_count); ``streaming`` is NotRequired — only the
+    streaming-path callsite (executor.py:957) sets it to True.
+    The sibling ``SystemRunDoneContext`` from IMPROVE-95 covers
+    ``system.run_done``; the start variant carries node_count +
+    edge_count for at-entry dashboards (the done variant doesn't
+    re-emit them since they're invariant for a run).
+    """
+    __pydantic_config__ = _FORBID_EXTRA  # type: ignore[misc]
+    run_id: str
+    system_name: str
+    conversation_id: str
+    node_count: int
+    edge_count: int
+    streaming: NotRequired[bool]
+
+
+class ToolCalculatorEvalContext(TypedDict):
+    """[IMPROVE-107] Context schema for ``tool.calculator_eval``.
+
+    Fires from tools/builtin.py:163 (UnsafeExpression error),
+    171 (SyntaxError), 182 (EvalError — math-domain runtime
+    errors), 190 (ok). All four callsites carry the single
+    ``expression_length`` key. The error_code / error_message /
+    result_type perf fields land on emit_typed's signature
+    itself, NOT this context dict, so the schema is identical
+    across all four variants.
+    """
+    __pydantic_config__ = _FORBID_EXTRA  # type: ignore[misc]
+    expression_length: int
+
+
+class ToolFileOpsPathRejectedContext(TypedDict):
+    """[IMPROVE-107] Context schema for ``tool.file_ops.path_rejected``.
+
+    Fires from tools/file_ops.py:42 and tools/rag_tools.py:61
+    (both with ``error_code="PathOutsideWorkspace"``). The two
+    callsites share a single ``user_path`` truncated to 200
+    chars at the call site — pin as ``str``. Both are
+    literal-context callsites so the audit walker validates
+    them automatically.
+    """
+    __pydantic_config__ = _FORBID_EXTRA  # type: ignore[misc]
+    user_path: str
+
+
 # Map (subsystem, action) → TypedDict schema class. The audit
 # test ``test_emit_typed_callsite_keys_match_pinned_schema``
 # walks emit_typed callsites and validates each against the
@@ -1302,44 +1749,70 @@ class ToolInvokeContext(TypedDict):
 # ``__optional_keys__`` introspection. New schemas land here
 # alongside their TypedDict definition above.
 EVENT_CONTEXT_SCHEMAS: dict[tuple[str, str], type] = {
+    ("agent", "fallback"): AgentFallbackContext,
+    ("agent", "protected_delete_blocked"): AgentProtectedDeleteBlockedContext,
+    ("agent", "tool_auto_resume"): AgentToolAutoResumeContext,
     ("agent", "tool_call"): AgentToolCallContext,
+    ("agent", "tool_result"): AgentToolResultContext,
     ("agent", "validation_rejected"): AgentValidationRejectedContext,
     ("chat", "enhance_prompt"): ChatEnhancePromptContext,
     ("chat", "enhance_prompt.start"): ChatEnhancePromptContext,
     ("chat", "send"): ChatSendContext,
     ("chat", "send.start"): ChatSendContext,
     ("config", "load"): ConfigLoadContext,
+    ("editor", "blend_with_previous"): EditorBlendWithPreviousContext,
     ("editor", "edit"): EditorEditContext,
     ("editor", "edit.start"): EditorEditContext,
+    ("editor", "export"): EditorExportContext,
+    ("editor", "op"): EditorOpContext,
+    ("editor", "redo"): EditorRedoContext,
+    ("editor", "undo"): EditorUndoContext,
     ("image", "enhance_prompt"): ImageEnhancePromptContext,
     ("image", "enhance_prompt.start"): ImageEnhancePromptContext,
     ("image", "generate"): ImageGenerateContext,
     ("image", "generate.start"): ImageGenerateContext,
     ("image", "infer"): ImageInferContext,
     ("image", "infer.start"): ImageInferContext,
+    ("image", "load"): ImageLoadContext,
+    ("image", "load.start"): ImageLoadContext,
     ("image", "oom_ladder_done"): ImageOomLadderDoneContext,
     ("image", "oom_ladder_start"): ImageOomLadderStartContext,
     ("image", "oom_stage_attempt"): ImageOomStageAttemptContext,
     ("image", "optimization_plan"): ImageOptimizationPlanContext,
+    ("image", "plan"): ImagePlanContext,
+    ("image", "postprocess"): ImagePostprocessContext,
     ("image", "vram_probe"): ImageVramProbeContext,
     ("image", "warmup"): ImageWarmupContext,
+    ("images", "detect_hints"): ImagesDetectHintsContext,
+    ("instruct_edit", "load"): InstructEditLoadContext,
     ("instruct_edit", "run"): InstructEditRunContext,
+    ("instruct_edit", "run.start"): InstructEditRunContext,
     ("model", "download.done"): ModelDownloadDoneContext,
     ("model", "download.error"): ModelDownloadErrorContext,
     ("model", "download.progress"): ModelDownloadProgressContext,
     ("model", "download.start"): ModelDownloadStartContext,
     ("partner", "chat"): PartnerChatContext,
     ("partner", "chat.start"): PartnerChatContext,
+    ("partner", "emotion_detect"): PartnerEmotionDetectContext,
+    ("partner", "fact_extract"): PartnerFactExtractContext,
     ("partner", "mem0_init"): PartnerMem0InitContext,
+    ("partner", "stt"): PartnerSttContext,
+    ("partner", "stt.partial"): PartnerSttContext,
+    ("partner", "tts"): PartnerTtsContext,
+    ("partner", "voice_init"): PartnerVoiceInitContext,
+    ("partner", "voice_init.start"): PartnerVoiceInitContext,
     ("provider", "availability_probe"): ProviderAvailabilityProbeContext,
     ("system", "node_end"): SystemNodeEndContext,
     ("system", "node_start"): SystemNodeStartContext,
     ("system", "routing_decision"): SystemRoutingDecisionContext,
+    ("system", "run.start"): SystemRunStartContext,
     ("system", "run_done"): SystemRunDoneContext,
     ("system", "validate"): SystemValidateContext,
     ("system", "validation_rejected"): SystemValidationRejectedContext,
     ("system", "wave_parallel"): SystemWaveParallelContext,
     ("system", "wave_parallel_fallback"): SystemWaveParallelFallbackContext,
+    ("tool", "calculator_eval"): ToolCalculatorEvalContext,
+    ("tool", "file_ops.path_rejected"): ToolFileOpsPathRejectedContext,
     ("tool", "invoke"): ToolInvokeContext,
     ("tool", "invoke.start"): ToolInvokeContext,
 }

@@ -75,9 +75,17 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
+# [IMPROVE-107] mypy is required for the [IMPROVE-106] strict-mode
+# guard (tests/test_observability_events_mypy_strict.py runs
+# ``mypy.api.run`` in-process). The test gates on
+# ``pytest.importorskip("mypy")`` so a fresh clone WITHOUT the
+# dev extra still passes Tier 1 — but the strict-mode contract
+# is silently un-enforced. Listing mypy here makes ``pip install
+# -e .[dev]`` a one-stop install for running the full sweep.
 dev = [
   "pytest",
   "ruff",
+  "mypy>=1.13",
 ]
 # ── High-performance GGUF inference (llama.cpp with CUDA) ──
 # NOTE: For GPU support, install with:
