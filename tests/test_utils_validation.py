@@ -1,15 +1,19 @@
-"""[IMPROVE-111] Tests for ``utils.validation``.
+"""[IMPROVE-111+114] Tests for ``utils.validation``.
 
 The Wave 12 plan (Q5=A) promoted partner/export.py's
 ``_validate_decay_config_keys`` to a generic helper in NEW
-``src/local_ai_platform/utils/validation.py``. This test file
-covers the helper's contract end-to-end + pins the existing
-``_validate_decay_config_keys`` callsite still works after
-delegation.
+``src/local_ai_platform/utils/validation.py``. The Wave 13 plan
+(Q2=A) added the ``filter_kwargs_to_signature`` sibling for the
+3 diffusers-pipeline-kwarg whitelisting callsites in
+``images/processors.py:1243`` + ``images/editor.py:713`` +
+``images/editor.py:725`` (per Wave 12 [IMPROVE-108]'s
+spawned follow-up note about migrating those duplications).
 
 Sources (2025-2026):
   * Wave 10 [IMPROVE-98] commit (a05fb46) — original
     ``_validate_decay_config_keys`` that the helper generalises.
+  * Wave 12 [IMPROVE-111] commit (4e7ce54) — initial
+    creation of this module + the validation pair.
   * Python ``inspect.signature`` + ``Parameter.kind``
     introspection (Python 3.11 docs):
     https://docs.python.org/3.11/library/inspect.html#inspect.signature
@@ -19,6 +23,7 @@ from __future__ import annotations
 import pytest
 
 from local_ai_platform.utils.validation import (
+    filter_kwargs_to_signature,
     validate_kwargs_against_signature,
 )
 
@@ -253,3 +258,190 @@ def test_decay_config_keys_delegates_to_helper():
     # fix). Pre-IMPROVE-111 ``importance_floor`` was wrongly
     # flagged.
     assert "importance_floor" not in msg.split(";")[0]
+
+
+# ── [IMPROVE-114] filter_kwargs_to_signature ────────────────
+
+
+def test_filter_returns_only_known_keys():
+    """[IMPROVE-114] Unknown keys are silently dropped, known
+    keys land in the returned dict."""
+    result = filter_kwargs_to_signature(
+        _three_param_fn, {"x": 1, "y": 2, "unknown": 99},
+    )
+    assert result == {"x": 1, "y": 2}
+
+
+def test_filter_returns_empty_dict_for_no_matches():
+    """[IMPROVE-114] All keys unknown → empty dict (not None,
+    not raise — silent filter)."""
+    result = filter_kwargs_to_signature(
+        _three_param_fn, {"foo": 1, "bar": 2},
+    )
+    assert result == {}
+
+
+def test_filter_returns_empty_dict_for_empty_payload():
+    """[IMPROVE-114] Empty payload → empty dict. No NPE / IndexError."""
+    result = filter_kwargs_to_signature(_three_param_fn, {})
+    assert result == {}
+
+
+def test_filter_excludes_named_keys_even_if_in_signature():
+    """[IMPROVE-114] ``exclude=["image"]`` drops ``image`` even
+    though it IS a parameter of the target function. This is
+    the editor.py + processors.py callsite shape — image is
+    passed positionally, the kwargs filter mustn't re-send it."""
+    def fn(image, x: int = 0, y: int = 0): ...
+    result = filter_kwargs_to_signature(
+        fn, {"image": "img", "x": 1, "y": 2}, exclude=["image"],
+    )
+    assert result == {"x": 1, "y": 2}
+    assert "image" not in result
+
+
+def test_filter_exclude_none_drops_nothing_extra():
+    """[IMPROVE-114] ``exclude=None`` (the default) means
+    "drop nothing extra"; if a key is in the signature it
+    survives."""
+    def fn(image, x: int = 0): ...
+    result = filter_kwargs_to_signature(
+        fn, {"image": "img", "x": 1},
+    )
+    assert result == {"image": "img", "x": 1}
+
+
+def test_filter_exclude_empty_list_drops_nothing_extra():
+    """[IMPROVE-114] ``exclude=[]`` (explicit empty) is
+    equivalent to ``exclude=None`` — defence-in-depth pin."""
+    def fn(image, x: int = 0): ...
+    result = filter_kwargs_to_signature(
+        fn, {"image": "img", "x": 1}, exclude=[],
+    )
+    assert result == {"image": "img", "x": 1}
+
+
+def test_filter_permissive_on_var_keyword():
+    """[IMPROVE-114] **kwargs functions accept any key — the
+    filter returns a SHALLOW COPY of payload (modulo
+    exclude). Mirror of the validate-permissive semantic."""
+    result = filter_kwargs_to_signature(
+        _kwargs_fn, {"any_key": 1, "another": 2},
+    )
+    assert result == {"any_key": 1, "another": 2}
+
+
+def test_filter_var_keyword_respects_exclude():
+    """[IMPROVE-114] Even on **kwargs functions, ``exclude``
+    still drops the named keys (the editor callsite needs
+    this — image is positional even when the operation
+    function has **kwargs)."""
+    result = filter_kwargs_to_signature(
+        _kwargs_fn, {"image": "img", "x": 1}, exclude=["image"],
+    )
+    assert result == {"x": 1}
+
+
+def test_filter_args_kwargs_combo_is_permissive():
+    """[IMPROVE-114] *args + **kwargs combo — same as **kwargs
+    only, returns shallow copy (the *args bit doesn't
+    constrain kwargs)."""
+    result = filter_kwargs_to_signature(
+        _args_kwargs_fn, {"any_key": 1},
+    )
+    assert result == {"any_key": 1}
+
+
+def test_filter_star_args_only_filters_strictly():
+    """[IMPROVE-114] *args alone (no **kwargs) → no kwargs
+    accepted. All keys are dropped. Pin that *args alone
+    does NOT enable permissive mode (mirror of the validate
+    helper's same-named test)."""
+    result = filter_kwargs_to_signature(
+        _star_args_only_fn, {"x": 1, "y": 2},
+    )
+    assert result == {}
+
+
+def test_filter_no_params_fn_drops_everything():
+    """[IMPROVE-114] No parameters → empty dict regardless of
+    payload."""
+    result = filter_kwargs_to_signature(
+        _no_params_fn, {"x": 1, "y": 2},
+    )
+    assert result == {}
+
+
+def test_filter_returns_new_dict_not_payload_alias():
+    """[IMPROVE-114] The returned dict is a NEW object —
+    mutating it must NOT affect the input payload. This
+    matters at the processors.py:1243 callsite which
+    iterates the filtered dict + builds a coerced-types
+    second-pass dict separately."""
+    payload = {"x": 1, "y": 2, "unknown": 99}
+    result = filter_kwargs_to_signature(_three_param_fn, payload)
+    result["new_key"] = "added"
+    assert "new_key" not in payload
+    # Conversely, mutating payload after filtering does NOT
+    # affect result.
+    payload["x"] = 999
+    assert result["x"] == 1
+
+
+def test_filter_does_not_mutate_payload():
+    """[IMPROVE-114] Belt-and-braces: payload is unchanged
+    after the filter call. Pin that the helper has no
+    side effects on its input."""
+    payload = {"x": 1, "y": 2, "unknown": 99, "image": "img"}
+    snapshot = dict(payload)
+    _ = filter_kwargs_to_signature(
+        _three_param_fn, payload, exclude=["image"],
+    )
+    assert payload == snapshot
+
+
+# ── Migration pins for the 3 callsites ───────────────────────
+
+
+def test_filter_matches_editor_ai_enhance_dispatch_shape():
+    """[IMPROVE-114] Pin the editor.py:713 (ai_enhance branch)
+    callsite shape: filter against fn's signature, drop
+    ``image`` even though it's the first positional arg, get
+    a kwargs-only dict ready for ``fn(image, **valid)``."""
+    # Canonical editor.py:713 callsite: an AI op function
+    # whose signature includes ``image`` as positional + a
+    # few keyword params.
+    def upscale(image, scale: int = 2, denoise: float = 0.0):
+        return image
+
+    valid = filter_kwargs_to_signature(
+        upscale,
+        {"image": "ignored", "scale": 4, "denoise": 0.5,
+         "stale_unrelated_param": "drop me"},
+        exclude=["image"],
+    )
+    assert valid == {"scale": 4, "denoise": 0.5}
+
+
+def test_filter_matches_processors_apply_operation_shape():
+    """[IMPROVE-114] Pin the processors.py:1243 callsite
+    shape: same filter step, then a SECOND pass for type
+    coercion uses the filtered dict's keys as the iteration
+    set (so the type-coercion logic only sees keys that
+    survived the filter)."""
+    def adjust(image, brightness: float = 1.0, contrast: float = 1.0):
+        return image
+
+    filtered = filter_kwargs_to_signature(
+        adjust,
+        {"image": "ignored", "brightness": "1.5", "stale": "x"},
+        exclude=["image"],
+    )
+    # Only "brightness" survives — "image" excluded, "stale"
+    # not in signature, "contrast" defaulted away.
+    assert set(filtered.keys()) == {"brightness"}
+    # The processors.py callsite then iterates filtered.items()
+    # for type coercion. Pin that the value is the raw input
+    # (the helper does NOT coerce — that's the second-pass
+    # callsite's responsibility).
+    assert filtered["brightness"] == "1.5"

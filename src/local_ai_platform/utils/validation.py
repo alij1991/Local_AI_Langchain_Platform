@@ -1,4 +1,4 @@
-"""[IMPROVE-111] Signature-based + explicit-keys kwarg validators.
+"""[IMPROVE-111+114] Signature-based + explicit-keys kwarg helpers.
 
 Wave 10 [IMPROVE-98] introduced ``_validate_decay_config_keys``
 in ``partner/export.py`` to validate dry-run JSON payload keys
@@ -30,8 +30,17 @@ The Wave 12 plan (Q5=A) promoted the helper extraction to
     ``_DECAY_CONFIG`` dict's keys internally — the
     signature-based variant doesn't capture this.
 
-Per Q5=A clean-separation: this module is leaf
-(``utils.validation`` imports nothing from
+  * ``filter_kwargs_to_signature(fn, payload, exclude=None)``
+    — [IMPROVE-114] sibling that returns a NEW filtered dict
+    instead of raising. Used at the diffusers-pipeline-kwarg
+    + classical-image-op callsites in ``images/processors.py``
+    + ``images/editor.py`` where unknown keys should be
+    DROPPED (not raised) because the user's params dict is
+    a freeform UI payload that may carry stale keys after a
+    pipeline / operation signature change.
+
+Per Q5=A (W12) + Q2=A (W13) clean-separation: this module is
+leaf (``utils.validation`` imports nothing from
 ``local_ai_platform.*``) so it can safely be imported from
 anywhere.
 
@@ -184,3 +193,101 @@ def validate_kwargs_against_keys(
             f"unknown {label}(s): {sorted(unknown)}; "
             f"accepted: {sorted(accepted_set)}"
         )
+
+
+def filter_kwargs_to_signature(
+    fn: Callable[..., Any],
+    payload: dict[str, Any],
+    *,
+    exclude: Iterable[str] | None = None,
+) -> dict[str, Any]:
+    """Return a NEW dict containing only ``payload`` entries
+    whose keys are accepted by ``fn``'s signature, MINUS any
+    keys in ``exclude``.
+
+    Mirror of ``validate_kwargs_against_signature`` but RETURNS
+    a filtered dict instead of raising on unknowns. Use this at
+    callsites that want to DROP unknown keys silently rather
+    than reject — typically a freeform user payload (Flutter
+    UI dict, JSON config) being passed into a third-party
+    function whose signature varies between versions.
+
+    Common callsite shape pre-IMPROVE-114:
+
+        sig = inspect.signature(fn)
+        valid = {
+            k: v for k, v in payload.items()
+            if k in sig.parameters and k != "image"
+        }
+        result = fn(image, **valid)
+
+    Post-IMPROVE-114:
+
+        valid = filter_kwargs_to_signature(fn, payload, exclude=["image"])
+        result = fn(image, **valid)
+
+    For functions with ``**kwargs``, this helper returns a
+    SHALLOW COPY of ``payload`` (modulo ``exclude``) — the
+    function accepts any key so there's nothing to filter
+    based on the signature. This matches the
+    ``validate_kwargs_against_signature`` "permissive on
+    **kwargs" semantic.
+
+    ``*args`` is excluded automatically (not name-addressable).
+
+    The returned dict is a NEW object — mutating it doesn't
+    affect ``payload``. Use this property at callsites that
+    need to also pre-process the filtered values (e.g.
+    ``images/processors.py``'s type-coercion second pass).
+
+    Args:
+        fn: The callable whose signature defines accepted keys.
+        payload: Source dict; not mutated.
+        exclude: Optional iterable of keys to drop EVEN IF
+            present in ``fn``'s signature. Use for
+            positional-required params already supplied
+            elsewhere (typically ``"image"`` at the editor /
+            processor callsites where image is the first
+            positional arg). ``None`` means drop nothing
+            extra; pass ``[]`` for the same effect.
+
+    Returns:
+        New dict containing the accepted keys from ``payload``.
+        Empty dict if no key matches.
+
+    Example:
+        >>> def f(image, x: int, y: int = 0): ...
+        >>> filter_kwargs_to_signature(
+        ...     f, {"x": 1, "y": 2, "image": "img", "z": 3},
+        ...     exclude=["image"],
+        ... )
+        {'x': 1, 'y': 2}
+
+    Sources (2025-2026):
+      * Wave 12 [IMPROVE-111] commit (4e7ce54) — sibling
+        ``validate_kwargs_against_signature`` this helper
+        complements with the filter-instead-of-raise variant.
+      * Wave 13 plan (Q2=A) — promoted the filter helper +
+        3-callsite migration (processors.py:1243 +
+        editor.py:713 + editor.py:725) into IMPROVE-114.
+    """
+    excluded: set[str] = set(exclude) if exclude is not None else set()
+    sig = inspect.signature(fn)
+    accepted: set[str] = set()
+    has_var_keyword = False
+    for name, param in sig.parameters.items():
+        if param.kind == inspect.Parameter.VAR_KEYWORD:
+            has_var_keyword = True
+        elif param.kind == inspect.Parameter.VAR_POSITIONAL:
+            continue
+        else:
+            accepted.add(name)
+    if has_var_keyword:
+        # Function accepts any key — return shallow copy minus
+        # excluded. Mirrors the validate_against_signature
+        # "permissive on **kwargs" semantic.
+        return {k: v for k, v in payload.items() if k not in excluded}
+    return {
+        k: v for k, v in payload.items()
+        if k in accepted and k not in excluded
+    }

@@ -709,9 +709,17 @@ class ImageEditorService:
                 _edit_ctx["dispatch"] = "ai_enhance"
                 op_info = ai_enhance.AI_OPERATIONS[operation]
                 fn = op_info["fn"]
-                import inspect
-                sig = inspect.signature(fn)
-                valid = {k: v for k, v in params.items() if k in sig.parameters and k != "image"}
+                # [IMPROVE-114] Was: inline inspect.signature +
+                # dict-comprehension filter. Now uses the shared
+                # ``filter_kwargs_to_signature`` helper so the
+                # filter shape stays consistent with the sibling
+                # callsites in editor.py:725 + processors.py:1243.
+                from local_ai_platform.utils.validation import (
+                    filter_kwargs_to_signature,
+                )
+                valid = filter_kwargs_to_signature(
+                    fn, params, exclude=["image"],
+                )
                 result = fn(image, **valid)
             else:
                 # Try AI/CV composite operations
@@ -721,9 +729,15 @@ class ImageEditorService:
                         _edit_ctx["dispatch"] = "ai_cv"
                         op_info = ai_models.AI_CV_OPERATIONS[operation]
                         fn = op_info["fn"]
-                        import inspect
-                        sig = inspect.signature(fn)
-                        valid = {k: v for k, v in params.items() if k in sig.parameters and k != "image"}
+                        # [IMPROVE-114] Same migration as the
+                        # ai_enhance branch above + the classical
+                        # branch in processors.py:1243.
+                        from local_ai_platform.utils.validation import (
+                            filter_kwargs_to_signature,
+                        )
+                        valid = filter_kwargs_to_signature(
+                            fn, params, exclude=["image"],
+                        )
                         result = fn(image, **valid)
                     elif operation == "analyze":
                         # Special: analyze returns dict, not image

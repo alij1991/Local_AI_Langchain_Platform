@@ -1239,13 +1239,25 @@ def apply_operation(image: Image.Image, operation: str, params: dict[str, Any]) 
     if not op:
         raise ValueError(f"Unknown operation: {operation}")
     fn = op["fn"]
+    # [IMPROVE-114] First pass — drop unknown keys + the "image"
+    # positional-required arg via the shared helper. Same shape
+    # as the sibling callsites in editor.py:713 + 725.
+    from local_ai_platform.utils.validation import (
+        filter_kwargs_to_signature,
+    )
+    filtered = filter_kwargs_to_signature(
+        fn, params, exclude=["image"],
+    )
+    # Second pass — type coercion. Pre-IMPROVE-114 the filter +
+    # coercion ran in one for-loop; splitting them makes the
+    # filter step shareable across editor.py + processors.py
+    # while keeping the type-coercion logic local (only this
+    # callsite has the int/float/bool annotation read-and-cast
+    # path; editor.py forwards values verbatim).
     import inspect
     sig = inspect.signature(fn)
-    # Type coercion for safety
     valid_params: dict[str, Any] = {}
-    for k, v in params.items():
-        if k not in sig.parameters or k == "image":
-            continue
+    for k, v in filtered.items():
         param = sig.parameters[k]
         ann = param.annotation
         try:
