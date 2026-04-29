@@ -66,9 +66,23 @@ Sources (2025-2026):
     (PEP 586 + PEP 484, plus 2025 typing-extensions notes):
     https://docs.python.org/3/library/typing.html#typing.Literal
 """
-from __future__ import annotations
+# [IMPROVE-92] No ``from __future__ import annotations`` —
+# deferred annotation strings break ``TypedDict.__required_keys__``
+# / ``__optional_keys__`` introspection of ``NotRequired[...]``
+# wrappers used by the per-event context schemas below. Python
+# 3.11+ PEP 604 union syntax (``int | None``) and PEP 585
+# generic-types (``dict[str, X]``) work in this module without
+# the future import.
 
 from typing import Any, Literal, get_args, overload
+
+# [IMPROVE-92] ``typing_extensions.TypedDict`` is required for
+# pydantic 2.x ``TypeAdapter`` support on Python < 3.12 (the
+# stdlib version isn't fully introspectable). Importing here keeps
+# the schema section below clean and centralised.
+from typing_extensions import NotRequired, TypedDict
+
+from pydantic import ConfigDict
 
 from .observability import emit as _emit
 
@@ -545,3 +559,156 @@ def emit_typed(
         context=context,
         perf=perf,
     )
+
+
+# ── [IMPROVE-92] Per-event context schemas ─────────────────────
+
+# Per Q2=C in the Wave 9 plan: TypedDict for the static front,
+# pydantic ``TypeAdapter`` validation in the audit test only —
+# never on the emit hot path. Callers who want runtime validation
+# can opt in by importing the relevant TypedDict and constructing
+# their context dict against it; the schemas themselves do NOT
+# add per-emit overhead (they only run when a test imports them).
+#
+# Why a subset, not all 54 events: each schema is one source of
+# truth for a callsite shape. Pinning ALL events would require
+# spelunking every callsite to enumerate its keys — bulk work
+# better suited to incremental commits as schemas mature. This
+# commit pins six well-shaped events that surfaced from Wave 8/9
+# typed-event work; future commits add more opportunistically.
+# The audit test
+# ``test_emit_typed_callsite_keys_match_pinned_schema`` enforces
+# that EVERY callsite for an event WITH a schema matches; events
+# WITHOUT a pinned schema are silently skipped (no regression).
+#
+# ``__pydantic_config__ = ConfigDict(extra="forbid")`` on each
+# TypedDict makes pydantic's ``TypeAdapter`` reject unknown keys
+# at runtime (used by the audit test). Without it pydantic
+# defaults to allowing extras, which would let typo'd context
+# keys slip through.
+
+_FORBID_EXTRA = ConfigDict(extra="forbid")
+
+
+class AgentValidationRejectedContext(TypedDict):
+    """[IMPROVE-92] Context schema for ``agent.validation_rejected``.
+
+    Wave 7 [IMPROVE-82] introduced this event with three
+    distinct shapes depending on which validator rejected the
+    request: ``invalid_tool`` (rejected_tool_ids + submitted_tool_ids
+    + known_tool_count), ``protected_delete_blocked``
+    (agent_name + reason), and ``DuplicateAgent``-style
+    conflicts. Total=False with NotRequired captures the union
+    so each callsite type-checks under the same schema.
+    """
+    __pydantic_config__ = _FORBID_EXTRA  # type: ignore[misc]
+    rejected_tool_ids: NotRequired[list[str]]
+    submitted_tool_ids: NotRequired[list[str]]
+    known_tool_count: NotRequired[int]
+    agent_name: NotRequired[str]
+    reason: NotRequired[str]
+    conflict: NotRequired[str]
+
+
+class SystemValidationRejectedContext(TypedDict):
+    """[IMPROVE-92] Context schema for ``system.validation_rejected``.
+
+    Wave 8 [IMPROVE-85] / [IMPROVE-88] fire this event with
+    three error_code variants: SchemaInvalid (errors list +
+    node_count + edge_count), CycleDetected (cyclic_nodes), and
+    OrphanLlmRouterEdge (errors). ``system_name`` is the only
+    always-present key.
+    """
+    __pydantic_config__ = _FORBID_EXTRA  # type: ignore[misc]
+    system_name: str
+    errors: NotRequired[list[Any]]
+    cyclic_nodes: NotRequired[list[str]]
+    node_count: NotRequired[int]
+    edge_count: NotRequired[int]
+
+
+class ImageVramProbeContext(TypedDict):
+    """[IMPROVE-92] Context schema for ``image.vram_probe``.
+
+    Wave 8 [IMPROVE-87] introduced this event at all 5 probe
+    exit paths with a uniform shape — every key is always
+    present (no NotRequired). Strict TypedDict.
+    """
+    __pydantic_config__ = _FORBID_EXTRA  # type: ignore[misc]
+    method: str
+    available_gb: float
+    required_gb: float
+    reason: str
+    ok: bool
+
+
+class SystemWaveParallelContext(TypedDict):
+    """[IMPROVE-92] Context schema for ``system.wave_parallel``.
+
+    Wave 5 [IMPROVE-36] / Wave 8 [IMPROVE-83] fire this event
+    when a parallel-wave runs. ``streaming`` distinguishes
+    sync vs. streaming executor paths (added by IMPROVE-83 so
+    dashboards can chart parallel engagement separately).
+    """
+    __pydantic_config__ = _FORBID_EXTRA  # type: ignore[misc]
+    run_id: str
+    system_name: str
+    step: int
+    node_count: int
+    agents: list[str]
+    errors: int
+    streaming: NotRequired[bool]
+
+
+class SystemWaveParallelFallbackContext(TypedDict):
+    """[IMPROVE-92] Context schema for ``system.wave_parallel_fallback``.
+
+    Fires when the parallel-wave pre-pass detects duplicate
+    agents in the same wave — falls back to sequential to
+    protect shared ``_smart_memories[agent]`` state per the
+    [IMPROVE-36] safety constraint. The ``streaming`` flag
+    mirrors the parallel event's sync vs. streaming
+    distinction added by [IMPROVE-83]. ``agents`` lists the
+    duplicated agent names; ``reason`` carries the bypass
+    cause string (today always ``"duplicate_agents"`` but
+    future fallback reasons will land here).
+    """
+    __pydantic_config__ = _FORBID_EXTRA  # type: ignore[misc]
+    run_id: str
+    system_name: str
+    step: int
+    node_count: int
+    agents: list[str]
+    reason: str
+    streaming: NotRequired[bool]
+
+
+class PartnerMem0InitContext(TypedDict):
+    """[IMPROVE-92] Context schema for ``partner.mem0_init``.
+
+    Fires on Mem0/ChromaDB cold-start (success + failure paths
+    via [IMPROVE-89]'s migration to emit_typed).
+    Status='ok' carries llm_model + embed_model + retry;
+    status='error' carries retry + retry_in_sec.
+    """
+    __pydantic_config__ = _FORBID_EXTRA  # type: ignore[misc]
+    retry: bool
+    llm_model: NotRequired[str]
+    embed_model: NotRequired[str]
+    retry_in_sec: NotRequired[float]
+
+
+# Map (subsystem, action) → TypedDict schema class. The audit
+# test ``test_emit_typed_callsite_keys_match_pinned_schema``
+# walks emit_typed callsites and validates each against the
+# corresponding schema's ``__required_keys__`` /
+# ``__optional_keys__`` introspection. New schemas land here
+# alongside their TypedDict definition above.
+EVENT_CONTEXT_SCHEMAS: dict[tuple[str, str], type] = {
+    ("agent", "validation_rejected"): AgentValidationRejectedContext,
+    ("image", "vram_probe"): ImageVramProbeContext,
+    ("partner", "mem0_init"): PartnerMem0InitContext,
+    ("system", "validation_rejected"): SystemValidationRejectedContext,
+    ("system", "wave_parallel"): SystemWaveParallelContext,
+    ("system", "wave_parallel_fallback"): SystemWaveParallelFallbackContext,
+}
