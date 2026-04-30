@@ -9,9 +9,9 @@ Wave 14's audit surfaced the cross-endpoint shape variance:
     error_code_prefix, fill_zero_dim). Shipped W13 [IMPROVE-115]
     (grew the original 2-key W12 [IMPROVE-108] echo with
     fill_zero_dim).
-  * /observability/timeseries — 5 keys (subsystem, action,
-    error_code, error_code_prefix, fill_zeros). Shipped W12
-    [IMPROVE-110].
+  * /observability/timeseries — 6 keys (subsystem, action,
+    error_code, error_code_prefix, fill_zeros, fill_zero_time).
+    Shipped W12 [IMPROVE-110]; grew to 6 in W14 [IMPROVE-124].
   * /observability/rejections — 4 keys (subsystem, action,
     error_code, error_code_prefix). Shipped W11 [IMPROVE-103].
 
@@ -25,6 +25,16 @@ endpoint (4 dict literals here). Simple, explicit — vs the
 alternative of a centralised registry in ``observability.py``
 (B; higher abstraction) or auto-introspection from each
 endpoint's signature (C; most decoupled but most fragile).
+
+[IMPROVE-129] update (Wave 15): the deferred-queue option B
+shipped — production code now sources its filters echo dicts
+from ``observability.FILTERS_ECHO_SCHEMA`` (a centralised
+registry) via the ``_build_filters_echo`` helper. The test-
+side ``EXPECTED_*_FILTERS`` constants here STAY (they pin the
+schema as test-side documentation); a NEW cross-pin test
+asserts the production-side schema matches each endpoint's
+test-side expectation. Drift between the two surfaces in a
+single failing test rather than at silent dashboard runtime.
 
 This file exists ALONGSIDE the per-endpoint test files (which
 already test individual filter behaviour); the schema pins
@@ -49,6 +59,11 @@ Sources (2025-2026):
 from __future__ import annotations
 
 import pytest
+
+from local_ai_platform.api.routers.observability import (
+    FILTERS_ECHO_SCHEMA,
+    _build_filters_echo,
+)
 
 
 # ── Expected schemas (4 dict literals per Q4=A) ──────────────
@@ -301,3 +316,169 @@ def test_timeseries_fill_zeros_defaults_to_false(obs_test_client):
         f"/timeseries filters['fill_zeros'] default changed: "
         f"got {filters['fill_zeros']!r}, expected False"
     )
+
+
+# ── [IMPROVE-129] Centralised registry pins ──────────────────
+
+
+def test_filters_echo_schema_has_all_4_endpoints():
+    """[IMPROVE-129] The production-side registry registers
+    exactly the 4 obs endpoints. A future endpoint addition
+    bumps this count + grows the registry."""
+    assert set(FILTERS_ECHO_SCHEMA.keys()) == {
+        "/observability/recent",
+        "/observability/summary",
+        "/observability/timeseries",
+        "/observability/rejections",
+    }
+
+
+def test_filters_echo_schema_recent_matches_test_side_expected():
+    """[IMPROVE-129] Cross-pin: production-side schema for
+    /recent matches the test-side EXPECTED_RECENT_FILTERS.
+    A future commit changing one without the other surfaces
+    here as a deliberate update, not silent drift."""
+    schema_keys = set(FILTERS_ECHO_SCHEMA["/observability/recent"])
+    assert schema_keys == EXPECTED_RECENT_FILTERS, (
+        f"production schema drift on /recent: "
+        f"got {sorted(schema_keys)}, "
+        f"test expects {sorted(EXPECTED_RECENT_FILTERS)}"
+    )
+
+
+def test_filters_echo_schema_summary_matches_test_side_expected():
+    """[IMPROVE-129] Cross-pin for /summary."""
+    schema_keys = set(FILTERS_ECHO_SCHEMA["/observability/summary"])
+    assert schema_keys == EXPECTED_SUMMARY_FILTERS, (
+        f"production schema drift on /summary: "
+        f"got {sorted(schema_keys)}, "
+        f"test expects {sorted(EXPECTED_SUMMARY_FILTERS)}"
+    )
+
+
+def test_filters_echo_schema_timeseries_matches_test_side_expected():
+    """[IMPROVE-129] Cross-pin for /timeseries (6-key shape
+    post-IMPROVE-124's fill_zero_time alias)."""
+    schema_keys = set(FILTERS_ECHO_SCHEMA["/observability/timeseries"])
+    assert schema_keys == EXPECTED_TIMESERIES_FILTERS, (
+        f"production schema drift on /timeseries: "
+        f"got {sorted(schema_keys)}, "
+        f"test expects {sorted(EXPECTED_TIMESERIES_FILTERS)}"
+    )
+
+
+def test_filters_echo_schema_rejections_matches_test_side_expected():
+    """[IMPROVE-129] Cross-pin for /rejections."""
+    schema_keys = set(FILTERS_ECHO_SCHEMA["/observability/rejections"])
+    assert schema_keys == EXPECTED_REJECTIONS_FILTERS, (
+        f"production schema drift on /rejections: "
+        f"got {sorted(schema_keys)}, "
+        f"test expects {sorted(EXPECTED_REJECTIONS_FILTERS)}"
+    )
+
+
+def test_filters_echo_schema_keys_are_unique_per_endpoint():
+    """[IMPROVE-129] No duplicate keys within an endpoint's
+    schema list (insertion-order list shouldn't have repeats —
+    a duplicate would let _build_filters_echo silently shadow
+    one of them in the resulting dict)."""
+    for endpoint, keys in FILTERS_ECHO_SCHEMA.items():
+        assert len(keys) == len(set(keys)), (
+            f"{endpoint} has duplicate keys in schema: {keys}"
+        )
+
+
+def test_build_filters_echo_recent_uses_kwargs():
+    """[IMPROVE-129] Helper assembles the dict from kwargs;
+    each schema key takes its value from the matching kwarg."""
+    result = _build_filters_echo(
+        "/observability/recent",
+        subsystem="kontext",
+        status="error",
+        action="generate",
+        error_code="cuda_oom",
+        error_code_prefix=None,
+    )
+    assert result == {
+        "subsystem": "kontext",
+        "status": "error",
+        "action": "generate",
+        "error_code": "cuda_oom",
+        "error_code_prefix": None,
+    }
+
+
+def test_build_filters_echo_missing_kwargs_default_to_none():
+    """[IMPROVE-129] When a kwarg matching a schema key is
+    NOT passed, the value defaults to None — preserves the
+    always-present-key contract (key is in the dict, value
+    is None)."""
+    result = _build_filters_echo("/observability/recent")
+    # All 5 keys present, all values None.
+    assert set(result.keys()) == EXPECTED_RECENT_FILTERS
+    for v in result.values():
+        assert v is None
+
+
+def test_build_filters_echo_extra_kwargs_silently_dropped():
+    """[IMPROVE-129] Kwargs NOT in the schema are silently
+    dropped — the schema is the source of truth, not the
+    caller's kwarg list. Pin so a typo'd kwarg like
+    ``fill_zeros_typo=True`` doesn't slip into the response."""
+    result = _build_filters_echo(
+        "/observability/summary",
+        error_code="x",
+        error_code_prefix=None,
+        fill_zero_dim=True,
+        bogus_extra_key="should be dropped",
+    )
+    assert "bogus_extra_key" not in result
+    assert set(result.keys()) == EXPECTED_SUMMARY_FILTERS
+
+
+def test_build_filters_echo_unknown_endpoint_raises():
+    """[IMPROVE-129] An endpoint NOT in the registry raises
+    KeyError. Pin the strict-lookup behaviour — catches typos
+    at the production boundary instead of silently emitting
+    a malformed dict."""
+    with pytest.raises(KeyError):
+        _build_filters_echo("/observability/notreal")
+
+
+def test_build_filters_echo_preserves_schema_insertion_order():
+    """[IMPROVE-129] Per Q4=A: the registry uses ``list[str]``
+    (ordered) so dashboards display keys in the schema-defined
+    order. Pin that the helper preserves that order — Python
+    dicts preserve insertion order since 3.7, so as long as the
+    helper builds via dict-comp over the list, this holds."""
+    result = _build_filters_echo(
+        "/observability/timeseries",
+        subsystem="x",
+        action="y",
+        error_code="z",
+        error_code_prefix="p",
+        fill_zeros=True,
+        fill_zero_time=False,
+    )
+    assert list(result.keys()) == FILTERS_ECHO_SCHEMA[
+        "/observability/timeseries"
+    ]
+
+
+def test_endpoints_consume_centralised_schema(obs_test_client):
+    """[IMPROVE-129] Live integration pin: each endpoint's
+    response ``filters`` keys match the centralised schema
+    exactly (no inline-dict drift). This pins the post-
+    IMPROVE-129 migration: production runs through
+    _build_filters_echo for all 4 endpoints."""
+    for endpoint, schema_keys in FILTERS_ECHO_SCHEMA.items():
+        resp = obs_test_client.get(endpoint)
+        assert resp.status_code == 200, (
+            f"{endpoint} returned {resp.status_code}"
+        )
+        filters = resp.json().get("filters", {})
+        assert set(filters.keys()) == set(schema_keys), (
+            f"{endpoint} response filters keys {sorted(filters.keys())} "
+            f"diverge from FILTERS_ECHO_SCHEMA {sorted(schema_keys)} "
+            f"— [IMPROVE-129] centralised-registry contract broken"
+        )

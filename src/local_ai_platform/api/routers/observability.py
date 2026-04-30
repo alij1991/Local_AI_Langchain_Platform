@@ -301,6 +301,97 @@ async def get_trace(
     return trace
 
 
+# ── [IMPROVE-129] Centralised filters-echo schema registry ───
+#
+# Pre-IMPROVE-129 each obs endpoint composed its own ``filters``
+# dict inline (4 endpoints, 4 dict literals). That made it hard
+# to keep the per-endpoint shape consistent with the test-side
+# expectations in tests/test_observability_filters_echo_schema.py
+# — a future commit could add a key to one place and forget the
+# other, with the silent-drift gap only catching at the
+# IMPROVE-123 cross-pin assertions if they ALSO included that
+# endpoint.
+#
+# Per Q4=A in the Wave 15 plan: ``dict[str, list[str]]`` (path →
+# ordered keys list). Order matters for dashboard display
+# (insertion-order is the operator-friendly grouping). Tests
+# can ``set()``-compare when order isn't relevant.
+#
+# Production code uses _build_filters_echo(endpoint, **values)
+# which looks up the schema and assembles the always-present-
+# key dict. Adding / removing a key = updating the registry +
+# the consumer kwargs. Tests can directly assert against the
+# schema OR introspect via FILTERS_ECHO_SCHEMA.
+
+FILTERS_ECHO_SCHEMA: dict[str, list[str]] = {
+    "/observability/recent": [
+        "subsystem",
+        "status",
+        "action",
+        "error_code",
+        "error_code_prefix",
+    ],
+    "/observability/summary": [
+        "error_code",
+        "error_code_prefix",
+        "fill_zero_dim",
+    ],
+    "/observability/timeseries": [
+        "subsystem",
+        "action",
+        "error_code",
+        "error_code_prefix",
+        # [IMPROVE-110] legacy name + [IMPROVE-124] canonical
+        # name. Both keys always-present so dashboards can
+        # verify which the operator used.
+        "fill_zeros",
+        "fill_zero_time",
+    ],
+    "/observability/rejections": [
+        "subsystem",
+        "action",
+        "error_code",
+        "error_code_prefix",
+    ],
+}
+
+
+def _build_filters_echo(
+    endpoint: str,
+    /,
+    **values: Any,
+) -> dict[str, Any]:
+    """Build the always-present-key ``filters`` echo dict for
+    an observability endpoint.
+
+    Looks up ``endpoint`` in ``FILTERS_ECHO_SCHEMA`` and returns
+    a dict with each schema key mapped to its corresponding
+    value from ``**values`` (or None if the caller didn't pass
+    that kwarg — preserves the always-present-key contract
+    that dashboards rely on).
+
+    Args:
+        endpoint: Path of the obs endpoint (must be a key in
+            ``FILTERS_ECHO_SCHEMA``). Positional-only.
+        **values: Filter values keyed by schema-defined names.
+            Missing values default to None. Extra values (not in
+            the schema) are silently dropped — pin the schema
+            as the source of truth, not the kwarg list.
+
+    Returns:
+        Dict[str, Any] keyed by the schema's ordered keys.
+        Insertion order matches the schema list (Python dict
+        preserves insertion order since 3.7).
+
+    Raises:
+        KeyError: If ``endpoint`` isn't a registered path.
+        Catches typos at the production boundary instead of
+        silently emitting a malformed dict.
+    """
+    schema = FILTERS_ECHO_SCHEMA[endpoint]
+    return {key: values.get(key) for key in schema}
+
+
 # ── Observability review endpoints (Phase 0) ─────────────────────
 
 
@@ -368,16 +459,17 @@ async def obs_recent(
         "count": len(items),
         # [IMPROVE-113] Filters echo — five-key dict matching the
         # four-axis filter set + error_code_prefix. Always-present
-        # so consumers don't need a key-existence check. Pin the
-        # 5-key shape so a future addition lands as a deliberate
-        # +1 (mirrors IMPROVE-110's fill_zeros echo on /timeseries).
-        "filters": {
-            "subsystem": subsystem,
-            "status": status,
-            "action": action,
-            "error_code": error_code,
-            "error_code_prefix": error_code_prefix,
-        },
+        # so consumers don't need a key-existence check.
+        # [IMPROVE-129] Schema sourced from FILTERS_ECHO_SCHEMA
+        # so production + test pin one source of truth.
+        "filters": _build_filters_echo(
+            "/observability/recent",
+            subsystem=subsystem,
+            status=status,
+            action=action,
+            error_code=error_code,
+            error_code_prefix=error_code_prefix,
+        ),
     }
 
 
@@ -620,19 +712,16 @@ async def obs_summary(
         "window_hours": window_hours,
         # [IMPROVE-108] ``filters`` echoes the per-rejection
         # filters so dashboards can render a "showing: prefix=X"
-        # badge without re-parsing the URL. Always-present so
-        # consumers don't need a key-existence check.
-        # [IMPROVE-115] ``fill_zero_dim`` joins the echo so a
-        # dashboard rendering "Showing all registered events
-        # (zero-fill)" badge can read the flag without re-
-        # parsing the URL. Pin the 3-key shape so a future
-        # addition lands as a deliberate +1 (mirror of
-        # /timeseries' 5-key echo).
-        "filters": {
-            "error_code": error_code,
-            "error_code_prefix": error_code_prefix,
-            "fill_zero_dim": fill_zero_dim,
-        },
+        # badge without re-parsing the URL.
+        # [IMPROVE-115] ``fill_zero_dim`` joins the echo for
+        # the zero-fill dashboard badge.
+        # [IMPROVE-129] Schema sourced from FILTERS_ECHO_SCHEMA.
+        "filters": _build_filters_echo(
+            "/observability/summary",
+            error_code=error_code,
+            error_code_prefix=error_code_prefix,
+            fill_zero_dim=fill_zero_dim,
+        ),
     }
 
 
@@ -875,25 +964,23 @@ async def obs_timeseries(
         "buckets": buckets,
         "bucket_minutes": bucket_minutes,
         "window_hours": window_hours,
-        "filters": {
-            "subsystem": subsystem,
-            "action": action,
-            "error_code": error_code,
-            "error_code_prefix": error_code_prefix,
-            # [IMPROVE-110] legacy name; [IMPROVE-124]
-            # canonical name. Both surface as always-present
-            # keys so dashboards can verify which was passed.
-            # The legacy ``fill_zeros`` echoes the operator's
-            # value verbatim; the new ``fill_zero_time``
-            # echoes either the operator's value (when passed)
-            # or None (when not passed — distinguishing
-            # "operator omitted" from "operator passed
-            # False"). Future Wave 15+ commits may add a
-            # deprecation date to ``fill_zeros`` once usage
-            # data confirms most callers have migrated.
-            "fill_zeros": fill_zeros,
-            "fill_zero_time": fill_zero_time,
-        },
+        # [IMPROVE-110] legacy ``fill_zeros`` + [IMPROVE-124]
+        # canonical ``fill_zero_time`` both surface as always-
+        # present keys so dashboards can verify which was passed.
+        # The legacy echoes the operator's value verbatim; the
+        # canonical echoes either the operator's value (when
+        # passed) or None (when not passed — distinguishing
+        # "operator omitted" from "operator passed False").
+        # [IMPROVE-129] Schema sourced from FILTERS_ECHO_SCHEMA.
+        "filters": _build_filters_echo(
+            "/observability/timeseries",
+            subsystem=subsystem,
+            action=action,
+            error_code=error_code,
+            error_code_prefix=error_code_prefix,
+            fill_zeros=fill_zeros,
+            fill_zero_time=fill_zero_time,
+        ),
     }
 
 
@@ -989,10 +1076,12 @@ async def obs_rejections(
     return {
         "rejections": rejections,
         "window_hours": window_hours,
-        "filters": {
-            "subsystem": subsystem,
-            "action": action,
-            "error_code": error_code,
-            "error_code_prefix": error_code_prefix,
-        },
+        # [IMPROVE-129] Schema sourced from FILTERS_ECHO_SCHEMA.
+        "filters": _build_filters_echo(
+            "/observability/rejections",
+            subsystem=subsystem,
+            action=action,
+            error_code=error_code,
+            error_code_prefix=error_code_prefix,
+        ),
     }
