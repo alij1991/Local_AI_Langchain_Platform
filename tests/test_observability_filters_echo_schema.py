@@ -36,6 +36,16 @@ asserts the production-side schema matches each endpoint's
 test-side expectation. Drift between the two surfaces in a
 single failing test rather than at silent dashboard runtime.
 
+[IMPROVE-134] update (Wave 16): the four ``EXPECTED_*_FILTERS``
+constants now DERIVE from ``FILTERS_ECHO_SCHEMA`` at module
+load (frozenset wrappers — immutable to prevent mutation
+drift). Cross-pin tests stay as identity assertions (now
+tautological by construction). Source-of-truth eliminated
+from two places (production registry + test-side literals)
+to one (production registry only). The historical context
+for each endpoint's shape lives in the production-side
+comments at observability.py:326+.
+
 This file exists ALONGSIDE the per-endpoint test files (which
 already test individual filter behaviour); the schema pins
 here cross-cut to catch drift at the boundary.
@@ -66,58 +76,46 @@ from local_ai_platform.api.routers.observability import (
 )
 
 
-# ── Expected schemas (4 dict literals per Q4=A) ──────────────
+# ── Expected schemas — derived from FILTERS_ECHO_SCHEMA ──────
 
 
-# /observability/recent filters echo (post-IMPROVE-113):
-# 5-key always-present dict. The ``limit`` query param is
-# pagination not a filter, so it stays OUT of the echo.
-EXPECTED_RECENT_FILTERS = {
-    "subsystem",
-    "status",
-    "action",
-    "error_code",
-    "error_code_prefix",
-}
+# [IMPROVE-134] Wave 16 update (was: 4 hardcoded dict literals
+# per Q4=A in the Wave 14 plan): derive from the production
+# registry at module load. Cross-pin tests below stay as
+# identity assertions (now tautological by construction —
+# drift between test-side and production-side is impossible).
+#
+# frozenset (vs set) prevents accidental .add() mutations
+# from drifting the test-side away from the production-side.
+# The historical context for each endpoint's shape lives in
+# the production-side comments at observability.py:326+.
 
+EXPECTED_RECENT_FILTERS = frozenset(
+    FILTERS_ECHO_SCHEMA["/observability/recent"],
+)
+"""[IMPROVE-134] Derived from FILTERS_ECHO_SCHEMA. 5-key
+always-present shape established by [IMPROVE-113]."""
 
-# /observability/summary filters echo (post-IMPROVE-115):
-# 3-key always-present dict. Grew from the original 2-key
-# IMPROVE-108 echo (added fill_zero_dim in W13).
-EXPECTED_SUMMARY_FILTERS = {
-    "error_code",
-    "error_code_prefix",
-    "fill_zero_dim",
-}
+EXPECTED_SUMMARY_FILTERS = frozenset(
+    FILTERS_ECHO_SCHEMA["/observability/summary"],
+)
+"""[IMPROVE-134] Derived from FILTERS_ECHO_SCHEMA. 3-key shape
+established by [IMPROVE-115]'s fill_zero_dim addition (grew
+from the 2-key [IMPROVE-108] echo)."""
 
+EXPECTED_TIMESERIES_FILTERS = frozenset(
+    FILTERS_ECHO_SCHEMA["/observability/timeseries"],
+)
+"""[IMPROVE-134] Derived from FILTERS_ECHO_SCHEMA. 6-key shape
+established by [IMPROVE-124]'s fill_zero_time canonical alias
+(coexists with [IMPROVE-110]'s legacy fill_zeros key)."""
 
-# /observability/timeseries filters echo (post-IMPROVE-124):
-# 6-key always-present dict. ``fill_zeros`` (legacy from
-# IMPROVE-110) coexists with ``fill_zero_time`` (canonical
-# from IMPROVE-124) — deprecation alias relationship per
-# Q5=A in the Wave 14 plan. No removal date set; both keys
-# echo independently so dashboards can verify which name was
-# in play.
-EXPECTED_TIMESERIES_FILTERS = {
-    "subsystem",
-    "action",
-    "error_code",
-    "error_code_prefix",
-    "fill_zeros",
-    "fill_zero_time",
-}
-
-
-# /observability/rejections filters echo (post-IMPROVE-108
-# extension to /rejections from IMPROVE-103): 4-key dict.
-# No fill_zeros / fill_zero_dim — rejections are filter-scoped
-# events, not aggregations.
-EXPECTED_REJECTIONS_FILTERS = {
-    "subsystem",
-    "action",
-    "error_code",
-    "error_code_prefix",
-}
+EXPECTED_REJECTIONS_FILTERS = frozenset(
+    FILTERS_ECHO_SCHEMA["/observability/rejections"],
+)
+"""[IMPROVE-134] Derived from FILTERS_ECHO_SCHEMA. 4-key shape
+established by [IMPROVE-108]'s axis extension to the
+[IMPROVE-103] /rejections endpoint."""
 
 
 # ── Per-endpoint pins ────────────────────────────────────────
@@ -386,6 +384,61 @@ def test_filters_echo_schema_keys_are_unique_per_endpoint():
         assert len(keys) == len(set(keys)), (
             f"{endpoint} has duplicate keys in schema: {keys}"
         )
+
+
+# ── [IMPROVE-134] Architectural pins for derivation ──────────
+
+
+def test_expected_constants_derived_from_filters_echo_schema():
+    """[IMPROVE-134] Pin: the four EXPECTED_*_FILTERS constants
+    derive directly from FILTERS_ECHO_SCHEMA at module load.
+    Drift between test-side and production-side is impossible
+    by construction (vs the pre-IMPROVE-134 hardcoded literals
+    that required cross-pin tests to catch divergence)."""
+    assert EXPECTED_RECENT_FILTERS == frozenset(
+        FILTERS_ECHO_SCHEMA["/observability/recent"],
+    )
+    assert EXPECTED_SUMMARY_FILTERS == frozenset(
+        FILTERS_ECHO_SCHEMA["/observability/summary"],
+    )
+    assert EXPECTED_TIMESERIES_FILTERS == frozenset(
+        FILTERS_ECHO_SCHEMA["/observability/timeseries"],
+    )
+    assert EXPECTED_REJECTIONS_FILTERS == frozenset(
+        FILTERS_ECHO_SCHEMA["/observability/rejections"],
+    )
+
+
+def test_expected_constants_are_frozenset_immutable():
+    """[IMPROVE-134] Pin: derived constants are frozenset
+    (immutable) rather than set. Prevents accidental .add() /
+    .discard() mutations from drifting the test-side away from
+    the production-side at runtime."""
+    assert isinstance(EXPECTED_RECENT_FILTERS, frozenset)
+    assert isinstance(EXPECTED_SUMMARY_FILTERS, frozenset)
+    assert isinstance(EXPECTED_TIMESERIES_FILTERS, frozenset)
+    assert isinstance(EXPECTED_REJECTIONS_FILTERS, frozenset)
+
+
+def test_expected_constants_cover_all_filters_echo_schema_endpoints():
+    """[IMPROVE-134] Pin: every endpoint in FILTERS_ECHO_SCHEMA
+    has a corresponding EXPECTED_* constant. A future endpoint
+    addition without a matching test-side constant surfaces
+    here — operator either adds the constant or removes the
+    endpoint from the schema."""
+    derived_endpoints = {
+        "/observability/recent",
+        "/observability/summary",
+        "/observability/timeseries",
+        "/observability/rejections",
+    }
+    schema_endpoints = set(FILTERS_ECHO_SCHEMA.keys())
+    missing_constant = schema_endpoints - derived_endpoints
+    assert not missing_constant, (
+        f"FILTERS_ECHO_SCHEMA endpoint(s) lack a test-side "
+        f"EXPECTED_* constant: {missing_constant}. Add a "
+        f"frozenset derivation alongside the others."
+    )
 
 
 def test_build_filters_echo_recent_uses_kwargs():
