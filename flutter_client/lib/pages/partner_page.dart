@@ -6,6 +6,7 @@ import 'package:flutter/material.dart';
 import 'package:audioplayers/audioplayers.dart';
 import 'package:http/http.dart' as http_pkg;
 import 'package:local_ai_flutter_client/services/api_client.dart';
+import 'package:local_ai_flutter_client/widgets/decay_preset_picker.dart';
 import 'package:url_launcher/url_launcher.dart';
 import 'package:record/record.dart';
 import 'package:path_provider/path_provider.dart';
@@ -39,6 +40,21 @@ class _PartnerPageState extends State<PartnerPage> {
 
   // Memories state
   Map<String, dynamic> _memories = {};
+
+  // [IMPROVE-141] Memory-decay preset picker state. Map of
+  // preset name → full decay-config dict, fetched lazily on
+  // first Memories-tab open via GET
+  // /partner/memory/decay/presets ([IMPROVE-78] / NEW-13). Null
+  // = not yet loaded (renders loading affordance);
+  // empty map = backend returned no presets (renders nothing).
+  Map<String, dynamic>? _decayPresets;
+  // Currently active preset name, computed by comparing the
+  // current decay config against each preset. Null = no exact
+  // match (operator tweaked individual fields via the
+  // /partner/memory/decay POST endpoint).
+  String? _activeDecayPreset;
+  // Disables the picker while a POST is in flight.
+  bool _decayPresetBusy = false;
 
   // User profile (insights) state
   Map<String, dynamic> _userProfile = {};
@@ -907,6 +923,89 @@ class _PartnerPageState extends State<PartnerPage> {
     } catch (_) {}
   }
 
+  /// [IMPROVE-141] Fetch the named decay presets ([IMPROVE-78] /
+  /// NEW-13) + the current decay config in parallel, then
+  /// determine which preset (if any) matches the current config.
+  /// "Match" = every numeric/bool field on the preset equals the
+  /// corresponding field on the current config; extra fields on
+  /// either side don't break the match.
+  ///
+  /// Best-effort: any failure leaves _decayPresets null which
+  /// the widget renders as a loading state. The Memories tab
+  /// stays usable for Core Facts / Key Memories / Journal even
+  /// when the preset picker is unavailable.
+  Future<void> _loadDecayPresets() async {
+    try {
+      final results = await Future.wait([
+        widget.api.get('/partner/memory/decay/presets'),
+        widget.api.get('/partner/memory/decay'),
+      ]);
+      if (!mounted) return;
+      final presets = results[0] as Map<String, dynamic>;
+      final current = results[1] as Map<String, dynamic>;
+      String? active;
+      for (final entry in presets.entries) {
+        final preset = entry.value;
+        if (preset is! Map<String, dynamic>) continue;
+        bool matches = true;
+        for (final field in preset.entries) {
+          if (current[field.key] != field.value) {
+            matches = false;
+            break;
+          }
+        }
+        if (matches) {
+          active = entry.key;
+          break;
+        }
+      }
+      setState(() {
+        _decayPresets = presets;
+        _activeDecayPreset = active;
+      });
+    } catch (_) {
+      // Leave _decayPresets null → widget renders loading
+      // affordance. Reload on next tab open.
+    }
+  }
+
+  /// [IMPROVE-141] POST a chosen preset name to
+  /// /partner/memory/decay/preset, then refresh state. Errors
+  /// are swallowed silently — the SnackBar below in the host
+  /// surface gives operator feedback when the call fails.
+  Future<void> _applyDecayPreset(String name) async {
+    if (_decayPresetBusy) return;
+    setState(() => _decayPresetBusy = true);
+    try {
+      await widget.api.post('/partner/memory/decay/preset', {'name': name});
+      if (!mounted) return;
+      // Re-fetch to recompute active state from server-side
+      // truth (in case the backend coerced the value or the
+      // preset names changed since the first load).
+      await _loadDecayPresets();
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text(
+            'Memory persistence preset applied: '
+            '${DecayPresetPicker.displayName(name)}',
+          ),
+          duration: const Duration(seconds: 2),
+        ),
+      );
+    } catch (e) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text('Failed to apply preset: $e'),
+          backgroundColor: Theme.of(context).colorScheme.error,
+        ),
+      );
+    } finally {
+      if (mounted) setState(() => _decayPresetBusy = false);
+    }
+  }
+
   Future<void> _loadStats() async {
     try {
       final res = await widget.api.get('/partner/stats') as Map<String, dynamic>;
@@ -1061,7 +1160,15 @@ class _PartnerPageState extends State<PartnerPage> {
               selected: {_tab},
               onSelectionChanged: (s) {
                 setState(() => _tab = s.first);
-                if (s.first == _Tab.memories) _loadMemories();
+                if (s.first == _Tab.memories) {
+                  _loadMemories();
+                  // [IMPROVE-141] Lazy-load presets on first
+                  // memories-tab open. _loadDecayPresets is a
+                  // no-op once _decayPresets is non-null (no
+                  // re-fetch on tab toggle); failures leave
+                  // _decayPresets null so a re-tab retries.
+                  if (_decayPresets == null) _loadDecayPresets();
+                }
                 if (s.first == _Tab.profile) _loadProfile();
                 if (s.first == _Tab.insights) _loadUserProfile();
               },
@@ -1818,6 +1925,47 @@ class _PartnerPageState extends State<PartnerPage> {
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
+          // [IMPROVE-141] Memory persistence preset picker
+          // (consumes [IMPROVE-78] / NEW-13 backend bundles).
+          // Sits above Core Facts so it's visible without
+          // scrolling — the operator's first decision when
+          // tuning memory behaviour is "how aggressive should
+          // the decay be?", which the preset picker answers in
+          // one tap.
+          Card(
+            child: Padding(
+              padding: const EdgeInsets.all(16),
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Row(
+                    children: [
+                      Icon(Icons.tune, size: 18, color: colors.primary),
+                      const SizedBox(width: 8),
+                      const Text(
+                        'Memory Persistence',
+                        style: TextStyle(
+                          fontWeight: FontWeight.w600, fontSize: 16,
+                        ),
+                      ),
+                    ],
+                  ),
+                  const SizedBox(height: 8),
+                  DecayPresetPicker(
+                    presets: _decayPresets,
+                    selectedPreset: _activeDecayPreset,
+                    enabled: !_decayPresetBusy,
+                    label: 'Decay preset',
+                    helperText:
+                        'Pick how aggressively old memories fade. '
+                        'Low = remembers everything; High = forgets quickly.',
+                    onApply: _applyDecayPreset,
+                  ),
+                ],
+              ),
+            ),
+          ),
+          const SizedBox(height: 12),
           // Core Facts
           Card(
             child: Padding(
