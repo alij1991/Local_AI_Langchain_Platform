@@ -70,7 +70,7 @@ import re
 
 import pytest
 
-from _lint_helpers import (
+from tests._lint_helpers import (
     get_head_commit_body,
     get_recent_commit_titles,
     get_repo_doc_path,

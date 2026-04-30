@@ -24,7 +24,7 @@ import re
 
 import pytest
 
-from _lint_helpers import (
+from tests._lint_helpers import (
     get_head_commit_body,
     get_recent_commit_titles,
     get_repo_doc_path,
@@ -136,7 +136,7 @@ def test_is_ancestor_sha_returns_value_in_contract():
       * False → real SHA but not in HEAD's history.
       * None  → not a real object (or no git available).
     """
-    from _lint_helpers import is_ancestor_sha
+    from tests._lint_helpers import is_ancestor_sha
     result = is_ancestor_sha("abc1234")
     assert result in (True, False, None)
 
@@ -145,7 +145,7 @@ def test_is_ancestor_sha_returns_true_for_known_ancestor():
     """A real ancestor returns True. Uses the [IMPROVE-126]
     SHA which is registered in §10.4 + always an ancestor of
     HEAD on main going forward."""
-    from _lint_helpers import is_ancestor_sha
+    from tests._lint_helpers import is_ancestor_sha
     # 033b54a = [IMPROVE-126] (Wave 15 first numbered item).
     # Always an ancestor of HEAD on main.
     result = is_ancestor_sha("033b54a")
@@ -157,7 +157,7 @@ def test_is_ancestor_sha_returns_true_for_known_ancestor():
 def test_is_ancestor_sha_returns_none_for_non_object():
     """A 7-char hex string that doesn't resolve to a real
     object returns None (the false-positive skip path)."""
-    from _lint_helpers import is_ancestor_sha
+    from tests._lint_helpers import is_ancestor_sha
     # 7 zeroes — extremely unlikely to be a real SHA.
     result = is_ancestor_sha("0000000")
     # Either None (not a real object) OR True (extremely
@@ -167,7 +167,7 @@ def test_is_ancestor_sha_returns_none_for_non_object():
 
 def test_is_ancestor_sha_returns_none_on_empty_string():
     """Edge case: empty string isn't a valid SHA → None."""
-    from _lint_helpers import is_ancestor_sha
+    from tests._lint_helpers import is_ancestor_sha
     assert is_ancestor_sha("") is None
 
 

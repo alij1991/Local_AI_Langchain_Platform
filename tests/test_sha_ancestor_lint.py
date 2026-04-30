@@ -101,7 +101,7 @@ from __future__ import annotations
 import re
 from typing import Final
 
-from _lint_helpers import (
+from tests._lint_helpers import (
     get_head_commit_body,
     is_ancestor_sha,
 )

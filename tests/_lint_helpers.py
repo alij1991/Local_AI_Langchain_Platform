@@ -12,11 +12,18 @@ ship with ~50 LoC of glue rather than ~150 LoC of boilerplate.
 The helpers here are PUBLIC (no leading underscore) — they're
 intended to be imported by ``tests/test_*_lint.py`` files. No
 production code consumes them; this module lives in tests/ for
-test-only utility status. Pytest discovers tests/ (via the
-default rootdir-based collection mode) so direct imports like
-``from _lint_helpers import get_head_commit_body`` work without
-``tests/__init__.py`` (consistent with this codebase's
-"tests-not-a-package" pattern).
+test-only utility status.
+
+[IMPROVE-137] Wave 16 update: ``tests/`` is now a Python
+package (``tests/__init__.py`` shipped), so the canonical
+import form is ``from tests._lint_helpers import ...``. Pre-
+IMPROVE-137 (Wave 15 [IMPROVE-126] ship), the module relied
+on pytest's rootdir-based collection mode to make
+``from _lint_helpers import ...`` work without an __init__.py.
+The package promotion rounds out the lint family architecture
+as the test count grew to 5 sibling lint files (route +
+IMPROVE-N + Wave-N + cross-endpoint naming-drift + SHA
+ancestry).
 
 Sources (2025-2026):
   * Wave 13 [IMPROVE-118] commit (de52308) — route-mention lint
@@ -66,6 +73,7 @@ def get_head_commit_body() -> str:
             ["git", "log", "-1", "--format=%B", "HEAD"],
             capture_output=True,
             text=True,
+            encoding="utf-8",
             timeout=5.0,
             check=False,
         )
@@ -112,6 +120,7 @@ def get_recent_commit_titles(*, depth: int = 10) -> list[str]:
             ["git", "log", f"-{depth}", "--format=%s", "HEAD"],
             capture_output=True,
             text=True,
+            encoding="utf-8",
             timeout=5.0,
             check=False,
         )
@@ -157,6 +166,7 @@ def is_ancestor_sha(sha: str) -> bool | None:
             ["git", "merge-base", "--is-ancestor", sha, "HEAD"],
             capture_output=True,
             text=True,
+            encoding="utf-8",
             timeout=5.0,
             check=False,
         )

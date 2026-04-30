@@ -59,7 +59,7 @@ import re
 
 import pytest
 
-from _lint_helpers import get_head_commit_body
+from tests._lint_helpers import get_head_commit_body
 
 
 # Match VERB followed by whitespace and a /path. Path chars
