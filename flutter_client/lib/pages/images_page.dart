@@ -8,6 +8,7 @@ import 'package:flutter/services.dart';
 import 'package:local_ai_flutter_client/services/api_client.dart';
 import 'package:local_ai_flutter_client/widgets/tile_mode_badge.dart';
 import 'package:local_ai_flutter_client/widgets/tile_size_override_field.dart';
+import 'package:local_ai_flutter_client/widgets/tile_stride_override_field.dart';
 
 class ImagesPage extends StatefulWidget {
   const ImagesPage({super.key, required this.api});
@@ -46,6 +47,16 @@ class _ImagesPageState extends State<ImagesPage> with TickerProviderStateMixin {
   // Power-user knob silently ignored on realesrgan / lanczos
   // methods; honored on latent / sdxl_x4.
   int? _tileSizeOverride;
+  // [IMPROVE-140] Sibling tile_stride_override knob — float in
+  // (0, 1) representing the tile_overlap_factor for diffusers
+  // VAE-tile decode. ``null`` = fall through to the
+  // [IMPROVE-133] tile_overlap_factor_default (0.25) on the
+  // backend. Honored on latent / sdxl_x4 paths only; silently
+  // ignored on realesrgan / lanczos. Operator's intent is
+  // recorded in the response metadata regardless of whether
+  // the underlying VAE accepted the kwarg (per [IMPROVE-130]
+  // tile_stride_honored flag).
+  double? _tileStrideOverride;
   int _width = 1024;
   int _height = 1024;
   int _steps = 20;
@@ -802,6 +813,13 @@ class _ImagesPageState extends State<ImagesPage> with TickerProviderStateMixin {
       };
       if (_tileSizeOverride != null) {
         body['tile_size_override'] = _tileSizeOverride;
+      }
+      // [IMPROVE-140] Thread the sibling tile_stride_override
+      // knob through the same body-build path. Backend silently
+      // ignores on non-diffusers methods; honors on latent /
+      // sdxl_x4 per [IMPROVE-121].
+      if (_tileStrideOverride != null) {
+        body['tile_stride_override'] = _tileStrideOverride;
       }
       await widget.api.post('/images/upscale', body);
       if (!mounted) return;
@@ -2034,6 +2052,17 @@ class _ImagesPageState extends State<ImagesPage> with TickerProviderStateMixin {
                     helperText: 'Override band calibration. '
                         'Honored on latent / sdxl_x4 methods only.',
                     onChanged: (v) => setState(() => _tileSizeOverride = v),
+                  ),
+                  const SizedBox(height: 8),
+                  // [IMPROVE-140] tile_stride_override sibling.
+                  // Float in (0, 1) controlling tile overlap.
+                  TileStrideOverrideField(
+                    value: _tileStrideOverride,
+                    enabled: !_busy,
+                    helperText: 'Tile overlap fraction (0, 1). '
+                        'Default 0.25. Honored if VAE accepts the '
+                        'tile_overlap_factor kwarg.',
+                    onChanged: (v) => setState(() => _tileStrideOverride = v),
                   ),
                 ],
               ),
