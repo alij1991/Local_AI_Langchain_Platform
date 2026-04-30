@@ -6524,7 +6524,7 @@ class ImageGenerationService:
     def _enable_vae_tiling_with_calibration(
         pipe: Any, tile_size: int | None, method: str,
         tile_stride: float | None = None,
-    ) -> None:
+    ) -> dict[str, Any]:
         """[IMPROVE-100] Call ``pipe.enable_vae_tiling`` with the
         calibrated tile_sample_min_size kwarg if supported.
 
@@ -6547,7 +6547,25 @@ class ImageGenerationService:
         stride override" independent of "% where the VAE class
         supported the kwarg").
 
-        Compatibility strategy:
+        [IMPROVE-130] Returns the WINNING kwargs dict so callers
+        can derive ``tile_stride_honored`` (and any future
+        per-kwarg honored flags) without having to re-introspect
+        which attempt won. Empty dict means either:
+          * No kwargs were requested (both tile_size + tile_stride
+            were None — bare ``enable_vae_tiling()`` ran), OR
+          * The bare fallback won (all TypeErrors), OR
+          * Outer exception fired (helper bailed entirely).
+
+        Caller pattern:
+            winning = self._enable_vae_tiling_with_calibration(
+                pipe, tile_size, method, tile_stride=tile_stride,
+            )
+            tile_stride_honored = (
+                None if tile_stride is None
+                else "tile_overlap_factor" in winning
+            )
+
+        Compatibility strategy (4-attempt chain):
           1. If neither tile_size nor tile_stride is set →
              ``enable_vae_tiling()``.
           2. If tile_size is set + tile_stride is set → try with
@@ -6566,11 +6584,21 @@ class ImageGenerationService:
         Logs at DEBUG so successful tiling doesn't spam logs;
         the calibration / override values land in metadata via
         the caller.
+
+        Args:
+            pipe: Diffusers pipeline with enable_vae_tiling method.
+            tile_size: Calibrated min-size, or None.
+            method: Method name for logging context.
+            tile_stride: Override overlap factor, or None.
+
+        Returns:
+            Winning kwargs dict. Empty dict on bare-fallback
+            success or outer-exception bailout.
         """
         try:
             if tile_size is None and tile_stride is None:
                 pipe.enable_vae_tiling()
-                return
+                return {}
             # Build the kwarg attempts in priority order:
             # 1. Both kwargs (most specific) → may TypeError on
             #    VAEs supporting only one or neither.
@@ -6594,11 +6622,16 @@ class ImageGenerationService:
             for kwargs in attempts:
                 try:
                     pipe.enable_vae_tiling(**kwargs)
-                    return
+                    # [IMPROVE-130] Return the winning kwargs so
+                    # the caller can derive tile_stride_honored
+                    # without re-running the chain.
+                    return kwargs
                 except TypeError as exc:
                     last_typeerror = exc
                     continue
             # All TypeErrors — log the last one for diagnostics.
+            # Defensive: the bare {} attempt should always succeed
+            # so this branch is unreachable in practice.
             if last_typeerror is not None:
                 logger.debug(
                     "[IMPROVE-100/121] enable_vae_tiling kwargs all "
@@ -6606,12 +6639,14 @@ class ImageGenerationService:
                     "tile_stride=%s); last error: %s",
                     method, tile_size, tile_stride, last_typeerror,
                 )
+            return {}
         except Exception:
             logger.debug(
                 "[IMPROVE-100] enable_vae_tiling failed for %s "
                 "pipeline; continuing without tiling",
                 method, exc_info=True,
             )
+            return {}
 
     def _probe_vram_for_method(
         self, method: str, *, tile_mode: bool = False,
@@ -6834,9 +6869,23 @@ class ImageGenerationService:
                     tile_stride = self._resolve_tile_stride_with_override(
                         tile_stride_override,
                     )
-                    self._enable_vae_tiling_with_calibration(
-                        pipe, tile_size, "latent",
-                        tile_stride=tile_stride,
+                    # [IMPROVE-130] Capture winning kwargs +
+                    # attach the tile_stride_honored flag to
+                    # the pipe so metadata composition (which
+                    # may run on cached pipes) can read the
+                    # ACTUAL VAE config state, not just operator
+                    # intent. Cached pipe → honored flag inherits
+                    # the first call's result; consistent with
+                    # "tile_overlap_factor" metadata which already
+                    # records operator intent regardless of cache.
+                    _winning_tiling_kwargs = (
+                        self._enable_vae_tiling_with_calibration(
+                            pipe, tile_size, "latent",
+                            tile_stride=tile_stride,
+                        )
+                    )
+                    pipe._tile_stride_kwarg_honored = (
+                        "tile_overlap_factor" in _winning_tiling_kwargs
                     )
                     try:
                         pipe.enable_vae_slicing()
@@ -6914,6 +6963,23 @@ class ImageGenerationService:
                     # override-vs-default rate per method.
                     "tile_overlap_factor": effective_tile_stride,
                     "tile_stride_overridden": tile_stride_override is not None,
+                    # [IMPROVE-130] tile_stride_honored — None
+                    # when no override was requested AND tile_mode
+                    # is False; True when the underlying VAE
+                    # accepted the tile_overlap_factor kwarg;
+                    # False when the operator requested an override
+                    # OR tile_mode engaged but the VAE class doesn't
+                    # accept the kwarg (fell back to no-args).
+                    # Surfaces the best-effort vs honored asymmetry
+                    # at the VAE call site (AutoencoderKL, used by
+                    # this latent upscaler today, doesn't accept
+                    # tile_overlap_factor; future diffusers
+                    # versions backporting the kwarg will flip
+                    # this to True transparently).
+                    "tile_stride_honored": (
+                        None if not tile_mode
+                        else getattr(pipe, "_tile_stride_kwarg_honored", False)
+                    ),
                 },
             )
         except ImportError as exc:
@@ -6996,9 +7062,17 @@ class ImageGenerationService:
                     tile_stride = self._resolve_tile_stride_with_override(
                         tile_stride_override,
                     )
-                    self._enable_vae_tiling_with_calibration(
-                        pipe, tile_size, "sdxl_x4",
-                        tile_stride=tile_stride,
+                    # [IMPROVE-130] Same flag-attachment pattern
+                    # as the latent path — see _upscale_latent
+                    # for the full rationale.
+                    _winning_tiling_kwargs = (
+                        self._enable_vae_tiling_with_calibration(
+                            pipe, tile_size, "sdxl_x4",
+                            tile_stride=tile_stride,
+                        )
+                    )
+                    pipe._tile_stride_kwarg_honored = (
+                        "tile_overlap_factor" in _winning_tiling_kwargs
                     )
                     try:
                         pipe.enable_vae_slicing()
@@ -7062,6 +7136,13 @@ class ImageGenerationService:
                     # path.
                     "tile_overlap_factor": effective_tile_stride,
                     "tile_stride_overridden": tile_stride_override is not None,
+                    # [IMPROVE-130] Same tile_stride_honored pin
+                    # as the latent path — see _upscale_latent
+                    # for the full rationale.
+                    "tile_stride_honored": (
+                        None if not tile_mode
+                        else getattr(pipe, "_tile_stride_kwarg_honored", False)
+                    ),
                 },
             )
         except ImportError as exc:

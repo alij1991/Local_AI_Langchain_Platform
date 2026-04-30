@@ -1625,3 +1625,220 @@ def test_upscale_image_metadata_stride_overridden_false_when_not_set(
     assert result.ok is True
     assert result.metadata["tile_stride_overridden"] is False
     assert result.metadata["tile_overlap_factor"] is None
+
+
+# ── [IMPROVE-130] tile_stride_honored metadata + helper return ──
+
+
+def test_helper_returns_winning_kwargs_when_both_supported():
+    """[IMPROVE-130] When the VAE accepts both tile_sample_min_size
+    AND tile_overlap_factor (MagicMock accepts anything), the
+    first attempt wins and the helper returns those kwargs."""
+    s = _make_service()
+    fake_pipe = MagicMock()
+    fake_pipe.enable_vae_tiling = MagicMock()
+    winning = s._enable_vae_tiling_with_calibration(
+        fake_pipe, tile_size=256, method="latent",
+        tile_stride=0.25,
+    )
+    assert winning == {
+        "tile_sample_min_size": 256,
+        "tile_overlap_factor": 0.25,
+    }
+
+
+def test_helper_returns_size_only_when_stride_kwarg_rejected():
+    """[IMPROVE-130] When the VAE rejects tile_overlap_factor
+    (TypeError) but accepts tile_sample_min_size alone, the
+    helper falls through to attempt 2 (size-only) and returns
+    those kwargs. Pins the chained-fallback's per-attempt
+    granularity."""
+    s = _make_service()
+    fake_pipe = MagicMock()
+
+    # Reject any kwargs containing tile_overlap_factor.
+    def _stride_rejecting_enable_vae_tiling(**kwargs):
+        if "tile_overlap_factor" in kwargs:
+            raise TypeError(
+                "got an unexpected keyword argument "
+                "'tile_overlap_factor'"
+            )
+        # Accept size-only or bare.
+        return None
+
+    fake_pipe.enable_vae_tiling = _stride_rejecting_enable_vae_tiling
+    winning = s._enable_vae_tiling_with_calibration(
+        fake_pipe, tile_size=256, method="latent",
+        tile_stride=0.25,
+    )
+    # Attempt 1 (both) → TypeError on stride.
+    # Attempt 2 (size only) → succeeds.
+    assert winning == {"tile_sample_min_size": 256}
+
+
+def test_helper_returns_empty_dict_when_no_kwargs_requested():
+    """[IMPROVE-130] When neither tile_size nor tile_stride is
+    set, the helper calls bare ``enable_vae_tiling()`` and
+    returns an empty dict."""
+    s = _make_service()
+    fake_pipe = MagicMock()
+    fake_pipe.enable_vae_tiling = MagicMock()
+    winning = s._enable_vae_tiling_with_calibration(
+        fake_pipe, tile_size=None, method="latent",
+        tile_stride=None,
+    )
+    assert winning == {}
+    fake_pipe.enable_vae_tiling.assert_called_once_with()
+
+
+def test_helper_returns_empty_dict_when_outer_exception():
+    """[IMPROVE-130] When the pipe lacks enable_vae_tiling
+    entirely (or raises a non-TypeError), the outer try/except
+    catches and the helper returns an empty dict — preserves
+    the [IMPROVE-93] failure-tolerance contract."""
+    s = _make_service()
+    fake_pipe = MagicMock()
+    # AttributeError fires for missing attribute (not a TypeError),
+    # so the outer except catches it.
+    fake_pipe.enable_vae_tiling = MagicMock(
+        side_effect=AttributeError("no such method"),
+    )
+    winning = s._enable_vae_tiling_with_calibration(
+        fake_pipe, tile_size=256, method="latent",
+        tile_stride=0.25,
+    )
+    assert winning == {}
+
+
+def test_helper_returns_stride_only_when_size_kwarg_rejected():
+    """[IMPROVE-130] When the VAE accepts tile_overlap_factor
+    but rejects tile_sample_min_size (rare; future-proofing),
+    attempts 1+2 fail and attempt 3 (stride only) wins."""
+    s = _make_service()
+    fake_pipe = MagicMock()
+
+    def _size_rejecting_enable_vae_tiling(**kwargs):
+        if "tile_sample_min_size" in kwargs:
+            raise TypeError(
+                "got an unexpected keyword argument "
+                "'tile_sample_min_size'"
+            )
+        # Accept stride-only or bare.
+        return None
+
+    fake_pipe.enable_vae_tiling = _size_rejecting_enable_vae_tiling
+    winning = s._enable_vae_tiling_with_calibration(
+        fake_pipe, tile_size=256, method="latent",
+        tile_stride=0.25,
+    )
+    assert winning == {"tile_overlap_factor": 0.25}
+
+
+def test_metadata_tile_stride_honored_true_when_kwarg_accepted(
+    monkeypatch, tmp_path,
+):
+    """[IMPROVE-130] When tile_mode engages + the VAE accepts
+    tile_overlap_factor (MagicMock case), metadata.tile_stride_honored
+    is True. Sibling pin to [IMPROVE-121]'s tile_stride_overridden:
+    operator intent + VAE state both surface independently."""
+    import sys
+    s = _make_service()
+    src = _write_png(tmp_path)
+    _patch_torch_with_vram(monkeypatch, free_gb=2.0)
+
+    fake_pipe = MagicMock()
+    fake_pipe.return_value.images = [Image.new("RGB", (256, 256))]
+    fake_pipe.enable_sequential_cpu_offload = MagicMock()
+    fake_pipe.enable_vae_tiling = MagicMock()
+    fake_pipe.enable_vae_slicing = MagicMock()
+    fake_pipeline_class = MagicMock()
+    fake_pipeline_class.from_pretrained = MagicMock(return_value=fake_pipe)
+    fake_diffusers = MagicMock()
+    fake_diffusers.StableDiffusionLatentUpscalePipeline = fake_pipeline_class
+    monkeypatch.setitem(sys.modules, "diffusers", fake_diffusers)
+
+    result = s.upscale_image(
+        image_path=src, prompt="x", method="latent",
+        tile_stride_override=0.4,
+    )
+    assert result.ok is True
+    assert result.metadata["tile_mode"] is True
+    # MagicMock accepts both kwargs → tile_overlap_factor was
+    # in the winning attempt → honored=True.
+    assert result.metadata["tile_stride_honored"] is True
+
+
+def test_metadata_tile_stride_honored_false_when_kwarg_rejected(
+    monkeypatch, tmp_path,
+):
+    """[IMPROVE-130] When tile_mode engages + the VAE rejects
+    tile_overlap_factor (TypeError on stride kwarg, common today
+    for AutoencoderKL), metadata.tile_stride_honored is False —
+    the override was operator-requested but not applied. Surfaces
+    the asymmetry IMPROVE-130 closes."""
+    import sys
+    s = _make_service()
+    src = _write_png(tmp_path)
+    _patch_torch_with_vram(monkeypatch, free_gb=2.0)
+
+    fake_pipe = MagicMock()
+    fake_pipe.return_value.images = [Image.new("RGB", (256, 256))]
+    fake_pipe.enable_sequential_cpu_offload = MagicMock()
+    fake_pipe.enable_vae_slicing = MagicMock()
+
+    # Reject any kwargs containing tile_overlap_factor.
+    def _reject_stride(**kwargs):
+        if "tile_overlap_factor" in kwargs:
+            raise TypeError("no tile_overlap_factor support")
+        return None
+
+    fake_pipe.enable_vae_tiling = _reject_stride
+    fake_pipeline_class = MagicMock()
+    fake_pipeline_class.from_pretrained = MagicMock(return_value=fake_pipe)
+    fake_diffusers = MagicMock()
+    fake_diffusers.StableDiffusionLatentUpscalePipeline = fake_pipeline_class
+    monkeypatch.setitem(sys.modules, "diffusers", fake_diffusers)
+
+    result = s.upscale_image(
+        image_path=src, prompt="x", method="latent",
+        tile_stride_override=0.4,
+    )
+    assert result.ok is True
+    assert result.metadata["tile_mode"] is True
+    # Operator intent: override was set + value recorded.
+    assert result.metadata["tile_stride_overridden"] is True
+    assert result.metadata["tile_overlap_factor"] == 0.4
+    # VAE state: kwarg rejected → honored=False.
+    assert result.metadata["tile_stride_honored"] is False
+
+
+def test_metadata_tile_stride_honored_none_when_no_tile_mode(
+    monkeypatch, tmp_path,
+):
+    """[IMPROVE-130] When tile_mode is False (no override
+    requested + small-input fast path), tile_stride_honored is
+    None — the flag is meaningful only when tile_mode engages.
+    Pin so dashboards can render "n/a" for non-tile-mode runs."""
+    import sys
+    s = _make_service()
+    src = _write_png(tmp_path)
+    _patch_torch_with_vram(monkeypatch, free_gb=8.0)  # plenty
+
+    fake_pipe = MagicMock()
+    fake_pipe.return_value.images = [Image.new("RGB", (256, 256))]
+    fake_pipe.enable_sequential_cpu_offload = MagicMock()
+    fake_pipe.enable_vae_tiling = MagicMock()
+    fake_pipe.enable_vae_slicing = MagicMock()
+    fake_pipeline_class = MagicMock()
+    fake_pipeline_class.from_pretrained = MagicMock(return_value=fake_pipe)
+    fake_diffusers = MagicMock()
+    fake_diffusers.StableDiffusionLatentUpscalePipeline = fake_pipeline_class
+    monkeypatch.setitem(sys.modules, "diffusers", fake_diffusers)
+
+    # No override + plenty of VRAM → tile_mode stays False.
+    result = s.upscale_image(
+        image_path=src, prompt="x", method="latent",
+    )
+    assert result.ok is True
+    assert result.metadata["tile_mode"] is False
+    assert result.metadata["tile_stride_honored"] is None
