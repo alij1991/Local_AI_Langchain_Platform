@@ -76,6 +76,52 @@ def get_head_commit_body() -> str:
         return ""
 
 
+def get_recent_commit_titles(*, depth: int = 10) -> list[str]:
+    """Return commit TITLES (subject lines) for the last ``depth``
+    commits via ``git log -<depth> --format=%s``.
+
+    Added in IMPROVE-128 to support the wave-internal cross-
+    reference quirk fix: ``[IMPROVE-N]`` references in HEAD's body
+    to commits shipped EARLIER in the same wave (but not yet in
+    §10.4 of the doc) need a universe extension. The recent
+    ancestry is exactly the right shape — ``git log HEAD~10..HEAD``
+    gives the wave's earlier numbered commits whose title self-
+    tags qualify.
+
+    Per Q3=A in the Wave 15 plan: depth=10 by default. Wave-sized
+    cross-refs typically span 6-9 commits (Wave 7-13 had 6 each;
+    Wave 14 had 9). 10 is comfortable headroom; deeper history is
+    rarely cited as ``[IMPROVE-N]`` in commit bodies.
+
+    The 5-second timeout matches ``get_head_commit_body``'s
+    contract. ``check=False`` keeps the helper tolerant of
+    edge cases (shallow clones with fewer than ``depth``
+    commits, detached HEAD, etc.).
+
+    Args:
+        depth: Number of commits to include. Default 10.
+
+    Returns:
+        List of title strings (each is one commit's subject line,
+        no trailing newline). Empty list on any failure (no git,
+        not a repo, timeout, OS error). Caller treats as "no
+        ancestry to extend the universe with".
+    """
+    try:
+        result = subprocess.run(
+            ["git", "log", f"-{depth}", "--format=%s", "HEAD"],
+            capture_output=True,
+            text=True,
+            timeout=5.0,
+            check=False,
+        )
+        if result.returncode != 0:
+            return []
+        return result.stdout.splitlines()
+    except (FileNotFoundError, subprocess.TimeoutExpired, OSError):
+        return []
+
+
 def read_doc_section_universe(
     md_path: Path,
     *,

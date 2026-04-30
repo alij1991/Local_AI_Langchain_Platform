@@ -26,6 +26,7 @@ import pytest
 
 from _lint_helpers import (
     get_head_commit_body,
+    get_recent_commit_titles,
     get_repo_doc_path,
     read_doc_section_universe,
 )
@@ -60,6 +61,69 @@ def test_get_head_commit_body_contains_subject_in_real_repo():
         pytest.skip("Not in a git repo — helper returned empty")
     first_line = body.splitlines()[0] if body.splitlines() else ""
     assert first_line, "HEAD body has no title line"
+
+
+# ── get_recent_commit_titles (IMPROVE-128) ─────────────────
+
+
+def test_get_recent_commit_titles_returns_list():
+    """Helper returns list[str] — never None. Pin the type
+    contract; callers iterate over titles."""
+    titles = get_recent_commit_titles()
+    assert isinstance(titles, list)
+    for t in titles:
+        assert isinstance(t, str)
+
+
+def test_get_recent_commit_titles_respects_depth():
+    """``depth`` parameter limits the number of titles returned.
+    In a real repo we have many commits; pin that depth=3 returns
+    AT MOST 3 (could be fewer if shallow clone)."""
+    titles = get_recent_commit_titles(depth=3)
+    if not titles:
+        pytest.skip("No git history available")
+    assert len(titles) <= 3, (
+        f"depth=3 returned {len(titles)} titles, expected <= 3"
+    )
+
+
+def test_get_recent_commit_titles_default_depth_is_10():
+    """Default depth = 10 (per Q3=A in the Wave 15 plan).
+    Pin that the helper without arguments returns AT MOST 10."""
+    titles = get_recent_commit_titles()
+    if not titles:
+        pytest.skip("No git history available")
+    assert len(titles) <= 10, (
+        f"Default depth returned {len(titles)} titles, expected <= 10"
+    )
+
+
+def test_get_recent_commit_titles_no_trailing_newlines():
+    """Each title is a clean subject line — no trailing
+    newline. The helper uses splitlines() which strips the
+    line terminators."""
+    titles = get_recent_commit_titles(depth=5)
+    if not titles:
+        pytest.skip("No git history available")
+    for t in titles:
+        assert not t.endswith("\n"), (
+            f"Title has trailing newline: {t!r}"
+        )
+
+
+def test_get_recent_commit_titles_first_is_head():
+    """``git log -<depth> HEAD`` returns commits in REVERSE
+    chronological order — the first entry is HEAD's title."""
+    titles = get_recent_commit_titles(depth=2)
+    if not titles:
+        pytest.skip("No git history available")
+    head_body = get_head_commit_body()
+    if not head_body:
+        pytest.skip("No HEAD body to compare")
+    head_title = head_body.splitlines()[0] if head_body else ""
+    assert titles[0] == head_title, (
+        f"First ancestry title {titles[0]!r} != HEAD title {head_title!r}"
+    )
 
 
 # ── read_doc_section_universe ──────────────────────────────
