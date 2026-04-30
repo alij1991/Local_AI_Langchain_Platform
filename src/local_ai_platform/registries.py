@@ -139,11 +139,30 @@ _REGISTRIES_DIR: Path = (
 _SCHEMAS_DIR: Path = _REGISTRIES_DIR / "schemas"
 
 
+# [IMPROVE-136] Cache of schema filenames already validated as
+# valid JSON Schema 2020-12 documents via ``check_schema``. The
+# cache is per-process — the first call to
+# ``_validate_against_schema`` for a given filename triggers
+# ``check_schema`` once, subsequent calls reuse the result.
+# Module-level ``set`` (vs lru_cache) so a future test harness
+# can clear it via ``_CHECKED_SCHEMAS.clear()`` for synthetic-
+# schema testing.
+_CHECKED_SCHEMAS: set[str] = set()
+
+
 def _validate_against_schema(
     data: Any, schema_filename: str,
 ) -> None:
     """[IMPROVE-131] Validate ``data`` against the JSON Schema
     in ``data/registries/schemas/<schema_filename>``.
+
+    [IMPROVE-136] Wave 16 update: also validates the schema
+    ITSELF as a valid JSON Schema 2020-12 document via
+    ``Draft202012Validator.check_schema(schema)`` on first
+    encounter (cached per filename in ``_CHECKED_SCHEMAS``).
+    Catches schema-side typos like ``"required": "id"`` (string
+    instead of array) at module import time — before the consumer
+    module's loader runs against the broken schema.
 
     Best-effort: if ``jsonschema`` isn't importable (rare —
     it's a transitive dep of FastAPI / pydantic), skips
@@ -165,9 +184,13 @@ def _validate_against_schema(
         jsonschema.ValidationError: when ``data`` doesn't conform
             to the schema. Caller handles by re-raising up the
             module-import chain (failing the import loudly).
+        jsonschema.exceptions.SchemaError: [IMPROVE-136] when the
+            schema itself isn't a valid JSON Schema 2020-12
+            document (operator typo class). First-call only —
+            cached thereafter.
     """
     try:
-        from jsonschema import validate
+        from jsonschema import Draft202012Validator, validate
     except ImportError:
         # jsonschema not available; skip validation. Consumer
         # tests will catch shape regressions even without
@@ -180,6 +203,15 @@ def _validate_against_schema(
         return
     with schema_path.open("r", encoding="utf-8") as fh:
         schema = json.load(fh)
+    # [IMPROVE-136] Validate the schema itself on first
+    # encounter. Raises SchemaError if the schema document
+    # is malformed (e.g. ``"required": "id"`` with string
+    # instead of list, or ``"type": "blah"`` with non-
+    # standard type name). Cached per filename — subsequent
+    # calls for the same schema skip the check.
+    if schema_filename not in _CHECKED_SCHEMAS:
+        Draft202012Validator.check_schema(schema)
+        _CHECKED_SCHEMAS.add(schema_filename)
     validate(instance=data, schema=schema)
 
 
