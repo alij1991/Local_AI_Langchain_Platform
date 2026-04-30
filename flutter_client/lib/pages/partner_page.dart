@@ -2,12 +2,14 @@ import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
 import 'dart:typed_data';
+import 'package:file_picker/file_picker.dart';
 import 'package:flutter/material.dart';
 import 'package:audioplayers/audioplayers.dart';
 import 'package:http/http.dart' as http_pkg;
 import 'package:local_ai_flutter_client/pages/partner_import_page.dart';
 import 'package:local_ai_flutter_client/services/api_client.dart';
 import 'package:local_ai_flutter_client/widgets/decay_preset_picker.dart';
+import 'package:local_ai_flutter_client/widgets/partner_export_button.dart';
 import 'package:url_launcher/url_launcher.dart';
 import 'package:record/record.dart';
 import 'package:path_provider/path_provider.dart';
@@ -56,6 +58,12 @@ class _PartnerPageState extends State<PartnerPage> {
   String? _activeDecayPreset;
   // Disables the picker while a POST is in flight.
   bool _decayPresetBusy = false;
+
+  // [IMPROVE-146] Disables the export button while the bundle
+  // download round-trips through GET /partner/export +
+  // File.writeAsBytes. The button widget consumes this via its
+  // ``busy`` prop to show a spinner overlay.
+  bool _exportBusy = false;
 
   // User profile (insights) state
   Map<String, dynamic> _userProfile = {};
@@ -967,6 +975,53 @@ class _PartnerPageState extends State<PartnerPage> {
     } catch (_) {
       // Leave _decayPresets null → widget renders loading
       // affordance. Reload on next tab open.
+    }
+  }
+
+  /// [IMPROVE-146] Bundle-download handler for the Backup &
+  /// Restore card.
+  ///
+  /// Opens a Save As dialog (file_picker), GETs
+  /// /partner/export, and writes the bytes to the picked path.
+  /// SnackBar surfaces success / failure. Cancelling the dialog
+  /// is a no-op (no SnackBar — operator chose to abort).
+  ///
+  /// Wave 18 host-vs-widget split: this method lives on the host
+  /// (partner_page.dart) so the [PartnerExportButton] widget
+  /// stays pure presentation.
+  Future<void> _handleExport() async {
+    if (_exportBusy) return;
+    final outputPath = await FilePicker.platform.saveFile(
+      fileName: defaultExportFilename(DateTime.now()),
+      type: FileType.custom,
+      allowedExtensions: const ['zip'],
+    );
+    if (outputPath == null) return;
+    if (!mounted) return;
+    setState(() => _exportBusy = true);
+    try {
+      final url = Uri.parse('${widget.api.baseUrl}/partner/export');
+      final response = await http_pkg.get(url);
+      if (response.statusCode != 200) {
+        throw Exception(
+          'export failed (${response.statusCode}): ${response.body}',
+        );
+      }
+      await File(outputPath).writeAsBytes(response.bodyBytes);
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text('Saved bundle to $outputPath')),
+      );
+    } catch (e) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text('Export failed: $e'),
+          backgroundColor: Theme.of(context).colorScheme.errorContainer,
+        ),
+      );
+    } finally {
+      if (mounted) setState(() => _exportBusy = false);
     }
   }
 
@@ -1967,12 +2022,16 @@ class _PartnerPageState extends State<PartnerPage> {
             ),
           ),
           const SizedBox(height: 12),
-          // [IMPROVE-145] Backup & Restore entry. Pushes the
-          // PartnerImportPage host that composes the [IMPROVE-143]
-          // PerRowDiffOverlay + [IMPROVE-144] ScopeMultiSelect
-          // widgets shipped in Wave 18 into the full
-          // dry-run-then-restore flow against the [IMPROVE-94] +
-          // [IMPROVE-98] backend endpoints.
+          // [IMPROVE-145] Backup & Restore card. Houses the
+          // partner-export download ([IMPROVE-146]
+          // PartnerExportButton) and the partner-import host
+          // entry-point ([IMPROVE-145] PartnerImportPage).
+          // Closes the GDPR Article 20 round-trip in the UI:
+          // export → store offline → import on a fresh install.
+          // Both buttons consume existing backend endpoints
+          // (GET /partner/export from [IMPROVE-67], plus
+          // POST /partner/import + dry-run from [IMPROVE-94] /
+          // [IMPROVE-98]).
           Card(
             child: Padding(
               padding: const EdgeInsets.all(16),
@@ -1993,27 +2052,38 @@ class _PartnerPageState extends State<PartnerPage> {
                   ),
                   const SizedBox(height: 8),
                   Text(
-                    'Restore your partner\'s memory, profile, and '
-                    'journal from a partner-export.zip bundle. '
-                    'Preview the diff before committing.',
+                    'Download your partner\'s memory, profile, '
+                    'and journal as a partner-export.zip bundle, '
+                    'or restore from one. Preview the diff before '
+                    'committing the restore.',
                     style: TextStyle(
                       fontSize: 12, color: colors.onSurfaceVariant,
                     ),
                   ),
                   const SizedBox(height: 8),
-                  Align(
-                    alignment: Alignment.centerLeft,
-                    child: FilledButton.tonalIcon(
-                      onPressed: () {
-                        Navigator.of(context).push(
-                          MaterialPageRoute(
-                            builder: (_) => PartnerImportPage(api: widget.api),
-                          ),
-                        );
-                      },
-                      icon: const Icon(Icons.restore, size: 18),
-                      label: const Text('Restore from bundle'),
-                    ),
+                  Wrap(
+                    spacing: 8,
+                    runSpacing: 8,
+                    children: [
+                      PartnerExportButton(
+                        onTap: _handleExport,
+                        busy: _exportBusy,
+                      ),
+                      FilledButton.tonalIcon(
+                        onPressed: _exportBusy
+                            ? null
+                            : () {
+                                Navigator.of(context).push(
+                                  MaterialPageRoute(
+                                    builder: (_) =>
+                                        PartnerImportPage(api: widget.api),
+                                  ),
+                                );
+                              },
+                        icon: const Icon(Icons.restore, size: 18),
+                        label: const Text('Restore from bundle'),
+                      ),
+                    ],
                   ),
                 ],
               ),
