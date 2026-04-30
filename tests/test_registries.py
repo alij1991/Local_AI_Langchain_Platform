@@ -282,3 +282,245 @@ def test_voice_catalog_loader_raises_on_malformed_json(
     bad.write_text("{ not valid json", encoding="utf-8")
     with pytest.raises(json.JSONDecodeError):
         reg.load_voice_catalog()
+
+
+# ── [IMPROVE-131] JSON Schema validation pins ───────────────
+
+
+def test_voices_schema_file_exists():
+    """[IMPROVE-131] data/registries/schemas/voices.schema.json
+    exists. The schema is a tracked-in-git asset, not a runtime
+    artifact — missing schema means broken install."""
+    from local_ai_platform.registries import get_registries_dir
+    schema_path = (
+        get_registries_dir() / "schemas" / "voices.schema.json"
+    )
+    assert schema_path.exists(), (
+        f"voices.schema.json missing at {schema_path}"
+    )
+
+
+def test_instruct_models_schema_file_exists():
+    """[IMPROVE-131] Sibling pin for the instruct-models schema."""
+    from local_ai_platform.registries import get_registries_dir
+    schema_path = (
+        get_registries_dir() / "schemas"
+        / "instruct_models.schema.json"
+    )
+    assert schema_path.exists(), (
+        f"instruct_models.schema.json missing at {schema_path}"
+    )
+
+
+def test_voices_schema_validates_real_data():
+    """[IMPROVE-131] The real voices.json validates against the
+    real schema. Defence-in-depth: catches a future drift where
+    the schema or the data diverge."""
+    from jsonschema import validate
+    from local_ai_platform.registries import (
+        get_registries_dir,
+        load_voice_catalog,
+    )
+    voices = load_voice_catalog()
+    schema_path = (
+        get_registries_dir() / "schemas" / "voices.schema.json"
+    )
+    schema = json.loads(schema_path.read_text(encoding="utf-8"))
+    # Should not raise — load_voice_catalog already validated,
+    # but pin against the real schema independently.
+    validate(instance=voices, schema=schema)
+
+
+def test_instruct_models_schema_validates_real_data():
+    """[IMPROVE-131] Sibling pin for instruct-models data."""
+    from jsonschema import validate
+    from local_ai_platform.registries import (
+        get_registries_dir,
+        load_instruct_models,
+    )
+    models = load_instruct_models()
+    schema_path = (
+        get_registries_dir() / "schemas"
+        / "instruct_models.schema.json"
+    )
+    schema = json.loads(schema_path.read_text(encoding="utf-8"))
+    validate(instance=models, schema=schema)
+
+
+def test_voice_loader_rejects_invalid_gender(tmp_path, monkeypatch):
+    """[IMPROVE-131] When voices.json has an invalid gender
+    (e.g. 'unknown' or a typo'd 'femal'), the loader raises
+    jsonschema.ValidationError. Pin so operator typos surface
+    at module load rather than silently slipping through to
+    the picker UI."""
+    from jsonschema import ValidationError
+    import local_ai_platform.registries as reg
+    # Point _REGISTRIES_DIR at tmp; copy the schema there.
+    schemas_dir = tmp_path / "schemas"
+    schemas_dir.mkdir()
+    real_schema_path = (
+        reg.get_registries_dir() / "schemas" / "voices.schema.json"
+    )
+    (schemas_dir / "voices.schema.json").write_text(
+        real_schema_path.read_text(encoding="utf-8"),
+        encoding="utf-8",
+    )
+    # Write an invalid voices.json with bad gender.
+    bad = tmp_path / "voices.json"
+    bad.write_text(
+        json.dumps([
+            {
+                "id": "test",
+                "display_name": "Test",
+                "gender": "femal",  # typo: NOT in ['female', 'male']
+                "language": "en-US",
+                "description": "test",
+            },
+        ]),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(reg, "_REGISTRIES_DIR", tmp_path)
+    monkeypatch.setattr(reg, "_SCHEMAS_DIR", schemas_dir)
+    with pytest.raises(ValidationError):
+        reg.load_voice_catalog()
+
+
+def test_voice_loader_rejects_missing_required_key(tmp_path, monkeypatch):
+    """[IMPROVE-131] When a voice entry is missing a required
+    key (e.g. typo'd 'displayName' instead of 'display_name'),
+    the loader raises jsonschema.ValidationError. The strict-
+    additionalProperties contract catches the typo class."""
+    from jsonschema import ValidationError
+    import local_ai_platform.registries as reg
+    schemas_dir = tmp_path / "schemas"
+    schemas_dir.mkdir()
+    real_schema_path = (
+        reg.get_registries_dir() / "schemas" / "voices.schema.json"
+    )
+    (schemas_dir / "voices.schema.json").write_text(
+        real_schema_path.read_text(encoding="utf-8"),
+        encoding="utf-8",
+    )
+    bad = tmp_path / "voices.json"
+    bad.write_text(
+        json.dumps([
+            {
+                "id": "test",
+                # Missing display_name — operator typo.
+                "displayName": "Test",  # camelCase typo
+                "gender": "female",
+                "language": "en-US",
+                "description": "test",
+            },
+        ]),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(reg, "_REGISTRIES_DIR", tmp_path)
+    monkeypatch.setattr(reg, "_SCHEMAS_DIR", schemas_dir)
+    with pytest.raises(ValidationError):
+        reg.load_voice_catalog()
+
+
+def test_instruct_models_loader_rejects_missing_default_steps(
+    tmp_path, monkeypatch,
+):
+    """[IMPROVE-131] When an instruct model entry is missing
+    default_steps (a required key), the loader raises
+    jsonschema.ValidationError."""
+    from jsonschema import ValidationError
+    import local_ai_platform.registries as reg
+    schemas_dir = tmp_path / "schemas"
+    schemas_dir.mkdir()
+    real_schema_path = (
+        reg.get_registries_dir() / "schemas"
+        / "instruct_models.schema.json"
+    )
+    (schemas_dir / "instruct_models.schema.json").write_text(
+        real_schema_path.read_text(encoding="utf-8"),
+        encoding="utf-8",
+    )
+    bad = tmp_path / "instruct_models.json"
+    bad.write_text(
+        json.dumps({
+            "test_model": {
+                "name": "Test",
+                "description": "Test model",
+                "default_guidance": 2.5,
+                # Missing default_steps.
+            },
+        }),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(reg, "_REGISTRIES_DIR", tmp_path)
+    monkeypatch.setattr(reg, "_SCHEMAS_DIR", schemas_dir)
+    with pytest.raises(ValidationError):
+        reg.load_instruct_models()
+
+
+def test_instruct_models_loader_rejects_string_default_steps(
+    tmp_path, monkeypatch,
+):
+    """[IMPROVE-131] When default_steps is a string (e.g. quoted
+    by accident in the JSON), the loader raises
+    ValidationError. The schema's ``"type": "integer"`` constraint
+    catches the type drift."""
+    from jsonschema import ValidationError
+    import local_ai_platform.registries as reg
+    schemas_dir = tmp_path / "schemas"
+    schemas_dir.mkdir()
+    real_schema_path = (
+        reg.get_registries_dir() / "schemas"
+        / "instruct_models.schema.json"
+    )
+    (schemas_dir / "instruct_models.schema.json").write_text(
+        real_schema_path.read_text(encoding="utf-8"),
+        encoding="utf-8",
+    )
+    bad = tmp_path / "instruct_models.json"
+    bad.write_text(
+        json.dumps({
+            "test_model": {
+                "name": "Test",
+                "description": "Test model",
+                "default_guidance": 2.5,
+                "default_steps": "twenty",  # type drift
+            },
+        }),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(reg, "_REGISTRIES_DIR", tmp_path)
+    monkeypatch.setattr(reg, "_SCHEMAS_DIR", schemas_dir)
+    with pytest.raises(ValidationError):
+        reg.load_instruct_models()
+
+
+def test_validation_skipped_when_schema_missing(tmp_path, monkeypatch):
+    """[IMPROVE-131] When the schema file is MISSING (operator
+    deleted it), validation skips silently — the consumer
+    module's import doesn't crash. Defence-in-depth: shape pins
+    in the rest of this test file catch real shape regressions
+    even without runtime validation."""
+    import local_ai_platform.registries as reg
+    schemas_dir = tmp_path / "schemas"
+    schemas_dir.mkdir()
+    # Schema file is INTENTIONALLY NOT created here.
+    valid = tmp_path / "voices.json"
+    valid.write_text(
+        json.dumps([
+            {
+                "id": "test",
+                "display_name": "Test",
+                "gender": "female",
+                "language": "en-US",
+                "description": "test",
+            },
+        ]),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(reg, "_REGISTRIES_DIR", tmp_path)
+    monkeypatch.setattr(reg, "_SCHEMAS_DIR", schemas_dir)
+    # Should NOT raise — validation skipped because schema is
+    # missing. Loader returns the parsed JSON.
+    voices = reg.load_voice_catalog()
+    assert isinstance(voices, list)
+    assert voices[0]["id"] == "test"

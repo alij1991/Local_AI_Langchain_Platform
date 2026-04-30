@@ -1,0 +1,43 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://local-ai-platform.local/registries/instruct_models.schema.json",
+  "title": "Instruction-edit model catalog",
+  "description": "Catalog of instruction-edit pipeline configs keyed by model ID. Loaded at module import by images/ai_enhance.py via local_ai_platform.registries.load_instruct_models. Today's IDs: kontext, nunchaku, cosxl. Adding a model = JSON edit + module re-import + a corresponding loader/inference branch in ai_enhance.py + a Flutter chip update (see images/CLAUDE.md 'Adding a new instruct-edit model').",
+  "type": "object",
+  "minProperties": 1,
+  "additionalProperties": {
+    "type": "object",
+    "additionalProperties": false,
+    "required": [
+      "name",
+      "description",
+      "default_guidance",
+      "default_steps"
+    ],
+    "properties": {
+      "name": {
+        "type": "string",
+        "minLength": 1,
+        "description": "Human-friendly label shown in the Flutter editor model picker."
+      },
+      "description": {
+        "type": "string",
+        "minLength": 1,
+        "description": "Prose summary shown alongside the name in the picker."
+      },
+      "default_guidance": {
+        "type": "number",
+        "description": "Guidance scale default (CFG) for this pipeline. Typical 2.5 (FLUX) or 7.0 (SDXL)."
+      },
+      "default_steps": {
+        "type": "integer",
+        "minimum": 1,
+        "description": "Default inference step count."
+      },
+      "default_image_guidance": {
+        "type": "number",
+        "description": "SDXL-only: image guidance scale (separate from prompt guidance). Optional — only SDXL-based pipelines like cosxl use it."
+      }
+    }
+  }
+}

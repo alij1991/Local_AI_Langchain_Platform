@@ -1,6 +1,15 @@
 """[IMPROVE-125] Loaders for the externalised data registries
 under ``data/registries/``.
 
+[IMPROVE-131] Wave 15 update: each loader now validates the
+loaded JSON against the corresponding schema in
+``data/registries/schemas/`` at module import time, surfacing
+operator-edit typos as ``jsonschema.ValidationError`` before
+the consumer module crashes on a missing/wrong-type field.
+Validation is best-effort — if ``jsonschema`` isn't importable,
+loaders skip validation gracefully (the package is a transitive
+dep of FastAPI / pydantic, so it's normally present).
+
 NEW-5 in the deferred queue named "Voice/optimization/weights →
 registry files". This module ships the voice + instruction-edit
 model registries; the optimization-rules registry is intentionally
@@ -57,6 +66,29 @@ surfaces.
                              default_guidance, default_steps,
                              plus optional default_image_guidance
                              for SDXL-based models.
+    schemas/
+      voices.schema.json   — JSON Schema (2020-12) pinning the
+                             voices.json shape (IMPROVE-131).
+      instruct_models.schema.json
+                           — JSON Schema (2020-12) pinning the
+                             instruct_models.json shape
+                             (IMPROVE-131).
+
+VS Code IDE association is operator-side opt-in (``.vscode/``
+is gitignored in this project). An operator can add to their
+own ``.vscode/settings.json`` to get inline validation at
+edit time:
+
+    "json.schemas": [
+        {
+            "fileMatch": ["data/registries/voices.json"],
+            "url": "./data/registries/schemas/voices.schema.json"
+        },
+        {
+            "fileMatch": ["data/registries/instruct_models.json"],
+            "url": "./data/registries/schemas/instruct_models.schema.json"
+        }
+    ]
 
 ## Path resolution
 
@@ -83,6 +115,10 @@ into ``data/registries/``. Same approach as the
   * "Configuration vs code" — externalising declarative data
     (Twelve-Factor App III, still relevant 2026):
     https://12factor.net/config
+  * JSON Schema 2020-12 specification (canonical 2025
+    reference): https://json-schema.org/draft/2020-12/schema
+  * jsonschema Python package (4.x reference, 2025):
+    https://python-jsonschema.readthedocs.io/en/latest/
 """
 from __future__ import annotations
 
@@ -99,6 +135,52 @@ from typing import Any
 _REGISTRIES_DIR: Path = (
     Path(__file__).resolve().parents[2] / "data" / "registries"
 )
+
+_SCHEMAS_DIR: Path = _REGISTRIES_DIR / "schemas"
+
+
+def _validate_against_schema(
+    data: Any, schema_filename: str,
+) -> None:
+    """[IMPROVE-131] Validate ``data`` against the JSON Schema
+    in ``data/registries/schemas/<schema_filename>``.
+
+    Best-effort: if ``jsonschema`` isn't importable (rare —
+    it's a transitive dep of FastAPI / pydantic), skips
+    validation silently. The check is defence-in-depth, not a
+    hard runtime requirement.
+
+    If the schema file itself is missing, also skips silently
+    — operator-deleted schemas degrade to "no validation" rather
+    than crashing the consumer module's import. The shape pins
+    in tests/test_registries.py catch missing-schema regressions
+    in CI.
+
+    Args:
+        data: Parsed JSON value to validate.
+        schema_filename: Filename inside ``schemas/``
+            (e.g. ``"voices.schema.json"``).
+
+    Raises:
+        jsonschema.ValidationError: when ``data`` doesn't conform
+            to the schema. Caller handles by re-raising up the
+            module-import chain (failing the import loudly).
+    """
+    try:
+        from jsonschema import validate
+    except ImportError:
+        # jsonschema not available; skip validation. Consumer
+        # tests will catch shape regressions even without
+        # this defence.
+        return
+    schema_path = _SCHEMAS_DIR / schema_filename
+    if not schema_path.exists():
+        # Schema file missing; skip validation rather than
+        # crash the consumer's import.
+        return
+    with schema_path.open("r", encoding="utf-8") as fh:
+        schema = json.load(fh)
+    validate(instance=data, schema=schema)
 
 
 def load_voice_catalog() -> list[dict[str, str]]:
@@ -123,10 +205,20 @@ def load_voice_catalog() -> list[dict[str, str]]:
     time, so any error there fails the whole module load with
     a clear error message rather than silently degrading the
     voice catalog at first-use.
+
+    [IMPROVE-131] Also validates against
+    ``schemas/voices.schema.json`` (best-effort — see
+    ``_validate_against_schema``). A schema-violation typo (e.g.
+    ``"genderr": "female"``) raises
+    ``jsonschema.ValidationError`` here rather than silently
+    surviving until the consumer hits a KeyError on
+    ``v["gender"]`` at first call.
     """
     path = _REGISTRIES_DIR / "voices.json"
     with path.open("r", encoding="utf-8") as fh:
-        return json.load(fh)
+        data = json.load(fh)
+    _validate_against_schema(data, "voices.schema.json")
+    return data
 
 
 def load_instruct_models() -> dict[str, dict[str, Any]]:
@@ -146,10 +238,15 @@ def load_instruct_models() -> dict[str, dict[str, Any]]:
     Raises:
         FileNotFoundError: when the JSON file is missing.
         json.JSONDecodeError: when the file is malformed.
+        jsonschema.ValidationError: when [IMPROVE-131] schema
+            validation fails (best-effort; skipped if jsonschema
+            unavailable).
     """
     path = _REGISTRIES_DIR / "instruct_models.json"
     with path.open("r", encoding="utf-8") as fh:
-        return json.load(fh)
+        data = json.load(fh)
+    _validate_against_schema(data, "instruct_models.schema.json")
+    return data
 
 
 def get_registries_dir() -> Path:
