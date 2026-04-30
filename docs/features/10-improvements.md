@@ -1,6 +1,6 @@
 # 10 — Improvement Roadmap
 
-> **Goal of this chapter:** a single consolidated view of the **70 improvement ideas** surfaced across chapters 1–9 (now **134** post Wave 15 + Wave 16 mid-wave), scored for impact and effort, grouped by theme, and laid out in a phased roadmap. Every idea here is grounded in a 2025–2026 source — the citations are in each chapter; this doc focuses on *what to do when*.
+> **Goal of this chapter:** a single consolidated view of the **70 improvement ideas** surfaced across chapters 1–9 (now **137** post Wave 16), scored for impact and effort, grouped by theme, and laid out in a phased roadmap. Every idea here is grounded in a 2025–2026 source — the citations are in each chapter; this doc focuses on *what to do when*.
 
 > **Revised 2026-04-29** — Wave 5 shipped (12 commits: IMPROVE-29/31/33/34/35/36/51/52/53/54/55/56/57/63/67). Wave 6 shipped (12 commits, 8 table-rows: IMPROVE-71/72/8 + Tranche-C 5×telemetry + IMPROVE-73/46/74/61). Wave 7 shipped (8 commits + 1 test-fix + 2 doc commits: IMPROVE-NEW-4/11/12/13/14/16/17/18 promoted to IMPROVE-75/76/77/78/79/80/81/82, plus a deterministic-counter fix for the IMPROVE-36 parallel-wave speedup test). Wave 8 shipped (6 numbered + 2 doc commits: IMPROVE-83/84/85/86/87/88 — streaming parallel-wave parity, inter-node-context migration, /systems/* rejection telemetry mirror, per-byte hf_hub_download progress, VRAM-probe telemetry + decay-export bundle, graph-time DAG validation). Wave 9 shipped (6 numbered + 2 doc commits: IMPROVE-89/90/91/92/93/94 — bulk emit_typed migration + close keystone gaps, per-rejection counter in /observability/summary, per-subsystem Literal + @overload for emit_typed action, per-event TypedDict context schemas, VRAM-probe-driven tile-based upscaling, POST /partner/import endpoint). Wave 10 shipped (6 numbered + 2 doc commits: IMPROVE-95/96/97/98/99/100 — top-12 event context schemas, Recorder enumeration test + 6 missing event registrations, asymmetric bundle versioning, POST /partner/import/dry-run, GET /observability/timeseries with ?error_code= filter, tile-size calibration per input resolution). Wave 11 shipped (6 numbered + 2 doc commits: IMPROVE-101/102/103/104/105/106 — Tier-A high-traffic schema batch, Recorder context schemas + track_event audit, sibling GET /observability/rejections endpoint, differential restore via ?scope= filter, per-row diff with ?verbose= flag, mypy strict-mode + literal-typing of derivation tuples). Wave 12 shipped (6 numbered + 2 doc commits: IMPROVE-107/108/109/110/111/112 — final-tier context schemas closing 100% coverage + mypy dev extra, ?error_code_prefix= LIKE filter + _rollup_rejections helper extraction, schema audit opt-out flip, ?fill_zeros=true bucket-padding on /timeseries, validate_kwargs helpers in NEW utils/validation.py + bug fix, bundle.json richer provenance). Wave 13 shipped (6 numbered + 2 doc commits: IMPROVE-113/114/115/116/117/118 — /observability/recent error_code + error_code_prefix filter axes, filter_kwargs_to_signature helper + 3 callsite migrations, /observability/summary ?fill_zero_dim=true dim-axis pad, bundle.json platform field gains git revision suffix, /images/upscale ?tile_size_override= power-user knob, CI lint route-mention validator). Wave 14 shipped (7 numbered + 2 doc commits: IMPROVE-119/120/121/122/123/124/125 — /timeseries fill_zeros bucket-straddle flake fix, CI lint IMPROVE-N reference validator, /images/upscale tile_stride_override sibling knob, shared obs_test_client fixture in tests/conftest.py, filters echo schema pin tests for the 4 obs endpoints, /timeseries fill_zero_time deprecation alias for fill_zeros, voice + instruct-model registries promoted to data/registries/*.json).
 
@@ -8,9 +8,9 @@
 
 ## 10.1 Summary
 
-- **134 improvements** flagged inline as `[IMPROVE-N]` in chapters 1–9 + the Wave 5/6/7/8/9/10/11/12/13/14/15/16 audits (NEW from Wave 6 audit: 71/72/73/74; NEW from Wave 7: 75/76/77/78/79/80/81/82; NEW from Wave 8: 83/84/85/86/87/88; NEW from Wave 9: 89/90/91/92/93/94; NEW from Wave 10: 95/96/97/98/99/100; NEW from Wave 11: 101/102/103/104/105/106; NEW from Wave 12: 107/108/109/110/111/112; NEW from Wave 13: 113/114/115/116/117/118; NEW from Wave 14: 119/120/121/122/123/124/125; NEW from Wave 15: 126/127/128/129/130/131; NEW from Wave 16 mid-wave: 132/133/134).
+- **137 improvements** flagged inline as `[IMPROVE-N]` in chapters 1–9 + the Wave 5/6/7/8/9/10/11/12/13/14/15/16 audits (NEW from Wave 6 audit: 71/72/73/74; NEW from Wave 7: 75/76/77/78/79/80/81/82; NEW from Wave 8: 83/84/85/86/87/88; NEW from Wave 9: 89/90/91/92/93/94; NEW from Wave 10: 95/96/97/98/99/100; NEW from Wave 11: 101/102/103/104/105/106; NEW from Wave 12: 107/108/109/110/111/112; NEW from Wave 13: 113/114/115/116/117/118; NEW from Wave 14: 119/120/121/122/123/124/125; NEW from Wave 15: 126/127/128/129/130/131; NEW from Wave 16: 132/133/134/135/136/137).
 - **10 themes** — security, architecture, observability, tracing, UX, memory & context, model & inference, background tasks, voice, and tools/MCP.
-- **15 waves** fully shipped (Waves 1-15); Wave 16 in progress (3 of 6 numbered items shipped).
+- **16 waves** fully shipped (Waves 1-16); **1** standing in deferred queues (post-Wave-16 backlog → Wave 17).
 
 All improvements are traceable back to a chapter + a 2025–2026 citation. This chapter is pure planning — *what* + *why this order*; *how* is in each origin chapter.
 
@@ -178,7 +178,7 @@ Smaller items that improve day-to-day use.
 
 ---
 
-## 10.4 The complete table (all 134)
+## 10.4 The complete table (all 137)
 
 Sortable if you paste into a spreadsheet. Chapter column links back to the originating doc.
 
@@ -318,10 +318,13 @@ Sortable if you paste into a spreadsheet. Chapter column links back to the origi
 | 132 | 17 | ✓ Cross-endpoint naming-drift lint on FILTERS_ECHO_SCHEMA (4-lint family extension) | ⋆⋆⋆ | 🔨 | Architecture |
 | 133 | 17 | ✓ v=2 metadata schema for /images/upscale: tile_overlap_factor_default | ⋆⋆ | 🔨 | Image |
 | 134 | 17 | ✓ EXPECTED_*_FILTERS derive from FILTERS_ECHO_SCHEMA at module load (single source of truth) | ⋆⋆ | 🔨 | Observability |
+| 135 | 17 | ✓ SHA-ancestor reference lint — 4-lint family complete | ⋆⋆⋆ | 🔨 | Architecture |
+| 136 | 17 | ✓ check_schema() validation for IMPROVE-131 schemas (defence-in-depth) | ⋆⋆ | 🔨 | Architecture |
+| 137 | 17 | ✓ Promote tests/ to Python package + UTF-8 subprocess encoding fix | ⋆⋆ | 🔨 | Architecture |
 
 *Impact for [IMPROVE-59] is ⋆⋆⋆⋆⋆ if the app is ever distributed, ⋆⋆ if it stays local-only.
 
-**Legend:** A ``✓`` prefix marks items that have shipped. See §10.6 for the Wave 5 / 6 / 7 / 8 / 9 / 10 / 11 / 12 / 13 / 14 / 15 retrospective.
+**Legend:** A ``✓`` prefix marks items that have shipped. See §10.6 for the Wave 5 / 6 / 7 / 8 / 9 / 10 / 11 / 12 / 13 / 14 / 15 / 16 retrospective.
 
 ---
 
@@ -736,12 +739,12 @@ defaults locked across Q1-Q9 at the wave plan delivery.
 | 5 | [IMPROVE-129] | 5283e32 | Centralised ``FILTERS_ECHO_SCHEMA`` registry in observability.py. Production code AND tests reference one source of truth for per-endpoint always-present filter keys. Per Q4=A: ``dict[str, list[str]]`` (path → ordered keys). New ``_build_filters_echo`` helper replaces 4 inline dict literals. Cross-pin tests assert test-side EXPECTED constants match production-side schema. | +12 |
 | 6 | [IMPROVE-130] | ae97c32 | ``tile_stride_honored`` metadata flag at the VAE call site. Mirror of IMPROVE-121's tile_stride_overridden but for ACTUAL VAE state vs operator intent. Per Q5=A: helper returns winning kwargs dict; caller derives honored flag. Pipe-attribute attachment handles cached-pipe case. AutoencoderKL today reports honored=False (kwarg unsupported, fell back to bare). | +8 |
 | 7 | [IMPROVE-131] | 0dd31d7 | JSON Schema validation for data/registries/*.json at module load time. NEW data/registries/schemas/voices.schema.json + instruct_models.schema.json (Draft 2020-12). Per Q6=A: schemas alongside data + load-time validation via jsonschema. ``additionalProperties=false`` catches operator typos like "displayName" instead of "display_name". | +9 |
-| 8 | (doc) | this | Wave 15 retrospective + Wave 16 deferred queue. | 0 |
+| 8 | (doc) | 2ee34ec | Wave 15 retrospective + Wave 16 deferred queue. | 0 |
 
 Net: +62 tests over Wave 15 (1731 → 1793). 8 commits including
 the two doc commits; 6 numbered IMPROVE-N items.
 
-### Wave 16 — CI lint family completion + metadata schema v=2 + obs schema dedup (in progress, 3 of 6 numbered + mid-wave doc shipped)
+### Wave 16 — CI lint family completion + metadata schema v=2 + obs schema dedup (✓ shipped 2026-04-30)
 
 Theme: build directly on Wave 15's substrates — IMPROVE-129's
 ``FILTERS_ECHO_SCHEMA`` registry powers IMPROVE-132's cross-
@@ -764,15 +767,21 @@ count = 0).
 | 1 | [IMPROVE-132] | e482691 | Cross-endpoint naming-drift lint on FILTERS_ECHO_SCHEMA. Per Q2=A: hardcoded prefix-allowlist (vs Levenshtein or curated alternatives). Iterates the schema, groups keys by 3+ char shared prefix (rstrip trailing underscore), checks each group against the allowlist. Today's allowlist has error_code (axis vs filter-by-prefix) + fill_zero (deprecation alias trio). Drift = empty today. | +16 |
 | 2 | [IMPROVE-133] | 78e17b2 | v=2 metadata schema for /images/upscale: tile_overlap_factor_default. Per Q3=A: stride-only v=2 (mirror of IMPROVE-130's stride focus). NEW class constant ``_DIFFUSERS_DEFAULT_TILE_OVERLAP_FACTOR = 0.25`` (cited from diffusers AutoencoderKLCogVideoX). Both _upscale_latent + _upscale_sdxl_x4 metadata blocks gain ``metadata_schema_version: 2`` + ``tile_overlap_factor_default``. | +6 |
 | 3 | [IMPROVE-134] | 764a1ef | EXPECTED_*_FILTERS derive from FILTERS_ECHO_SCHEMA at module load. Per Q4=A: derive at module load + identity cross-pins. The 4 hardcoded test-side dict literals become frozenset wrappers around the production registry. Cross-pin tests stay as architectural pins (now tautological by construction). | +3 |
-| 4 | (doc)         | this    | Wave 16 mid-wave status — IMPROVE-132/133/134 shipped (per Q7=A mid + end-wave doc cadence) | 0 |
+| 4 | (doc)         | 12aaf4f | Wave 16 mid-wave status — IMPROVE-132/133/134 shipped (per Q7=A mid + end-wave doc cadence). | 0 |
+| 5 | [IMPROVE-135] | 180c1bd | SHA-ancestor reference lint — 4-lint family complete. Per Q5=A: ``\bWave\s+(\d+)(?!\+)\b`` regex (short-SHA only). NEW ``is_ancestor_sha`` helper in tests/_lint_helpers.py wrapping ``git merge-base --is-ancestor``. Returns True/False/None — fails only on real-but-not-ancestor (force-push drift, cross-repo paste); None case (non-resolvable hex) skips silently. | +13 |
+| 6 | [IMPROVE-136] | a24d896 | check_schema() validation for IMPROVE-131 schemas. Calls ``Draft202012Validator.check_schema(schema)`` on first encounter (cached per filename in NEW ``_CHECKED_SCHEMAS`` set). Defence-in-depth on top of [IMPROVE-131] — catches schema-side typos (e.g. ``"required": "id"`` string instead of array) at module import vs the opaque ValidationError that would surface from the loader. | +3 |
+| 7 | [IMPROVE-137] | e5e1c32 | Promote tests/ to Python package + UTF-8 subprocess encoding fix. Per Q6=A: minimal change — add tests/__init__.py + update 5 lint files' imports to ``from tests._lint_helpers import ...``. Collateral: explicit ``encoding="utf-8"`` on 3 subprocess.run callsites (latent bug in helpers exposed by IMPROVE-136's commit body containing UTF-8 chars). | 0 |
+| 8 | (doc)         | this    | Wave 16 retrospective + Wave 17 deferred queue. | 0 |
 
-Tier 1 1793 → 1818 across the 3 numbered items (+25 net).
-The remaining 3 numbered slots target IMPROVE-135 (SHA-
-ancestor reference lint), IMPROVE-136 (check_schema()
-validation of IMPROVE-131 schemas), IMPROVE-137 (promote
-tests/ to Python package).
+Net: +41 tests over Wave 16 (1793 → 1834). 8 commits including
+the two doc commits; 6 numbered IMPROVE-N items. The lower
+test count vs Wave 15's +62 reflects the wave's lighter
+implementation footprint — IMPROVE-134 (3 architectural
+pin tests after migration) + IMPROVE-136 (3 schema-validation
+pins) + IMPROVE-137 (zero net delta — purely import-form
+refactor) all shipped in <0.2d each.
 
-#### Wave 16 deferred queue
+### Wave 17 — Deferred (queued for next iteration)
 
 Carried-over NEW candidates that didn't promote in Wave 14:
 - [IMPROVE-NEW-2] Unify token-budget primitive (waits for Tranche D)
@@ -808,13 +817,10 @@ Wave-13-audit items (still queued):
   short-SHA) + dirty-tree marker for deeper provenance.
   Marginal — short SHA is sufficient. Hold.
 
-Wave-14-audit items NOT promoted in Wave 15:
+Wave-14-audit items NOT promoted in Wave 15/16:
 - Per-band stride CALIBRATION (vs IMPROVE-121's override-
   only ship). Waits for real-hardware sensitivity data
   (8GB 30xx benchmark suite). ~0.5d. Hold.
-- SHA-ancestor reference lint (verifies SHA mentions are
-  real ancestors of HEAD). Hold; SHA mentions are
-  copy-pasted from git log so unlikely to drift.
 - Sibling fixture ``obs_test_client_with_events`` with
   prepopulated event templates. Hold; today's 2 callsites
   don't justify the parameterisation.
@@ -832,23 +838,22 @@ Wave-14-audit items NOT promoted in Wave 15:
 - ``reload_voice_catalog()`` / ``reload_instruct_models()``
   hot-reload helpers for operator-driven JSON edits without
   module restart. ~0.25d. Hold; no use case today.
+
 (Cross-endpoint naming-drift sibling lint shipped in Wave 16
-as [IMPROVE-132].)
+as IMPROVE-132. SHA-ancestor reference lint shipped in
+Wave 16 as IMPROVE-135.)
 
 (Wave-N reference lint, JSON Schema for registries, and the
 wave-internal cross-reference quirk fix all shipped in Wave 15
 as IMPROVE-127/131/128 respectively.)
 
-Wave-15-audit items (NEW from this wave):
+Wave-15-audit items NOT promoted in Wave 16 (3 of 14 shipped
+this wave as IMPROVE-132/136/137; 11 carry forward):
 - Symmetric ``tile_size_honored`` metadata flag (sibling of
   IMPROVE-117's tile_size_overridden). Marginal — AutoencoderKL
   DOES accept tile_sample_min_size, so the flag would
   essentially always be True when set. The asymmetry IMPROVE-130
   surfaces is stride-specific. Hold.
-- Promote ``tests/`` to a Python package (add ``__init__.py``)
-  and use ``from tests._lint_helpers import ...`` instead of
-  the implicit pytest-rootdir path. ~0.15d. Hold; one helper
-  module doesn't justify the architectural change.
 - ``Waves`` plural reference lint variant (currently the
   IMPROVE-127 regex requires singular ``Wave``; ranges like
   "Waves 1-14" don't match). Add ``[Ww]aves?`` for inclusivity.
@@ -867,18 +872,9 @@ Wave-15-audit items (NEW from this wave):
 - Pre-commit hook variant of IMPROVE-118 / IMPROVE-120 /
   IMPROVE-127. Marginal — Tier 1 already catches drift; pre-
   commit adds install friction. Hold.
-- ``check_schema()`` validation of the schema files
-  themselves at module import (verifies the schemas ARE valid
-  JSON Schema 2020-12 documents). ~5 LoC. Hold; the
-  test_*_schema_validates_real_data tests catch schema-side
-  regressions in CI.
 - LRU cache for the IMPROVE-131 schema-file parses (today
   re-parsed on every loader call; loaders run once at module
   import so the cost is fine today). Hold.
-- v=2 metadata schema for /images/upscale (Wave 13 audit
-  candidate, still queued) gains a 3rd dimension with
-  IMPROVE-130's honored flag — operator intent vs default
-  vs actual VAE state. Hold until v=2 schema work surfaces.
 - Wave-internal cross-reference quirk for ROUTES (analogous
   to the IMPROVE-128 fix for IMPROVE-120 references). Today
   IMPROVE-118 doesn't have the same quirk because routes
@@ -895,6 +891,73 @@ Wave-15-audit items (NEW from this wave):
   ``GitPython`` for in-process traversal. Marginal — the
   subprocess shape is consistent with sibling helpers and
   has zero install friction. Hold.
+
+(v=2 metadata schema shipped Wave 16 as IMPROVE-133 —
+stride-only per Q3=A. Symmetric tile_size dimensions held
+for v=3 if a similar asymmetry surfaces.)
+
+Wave-16-audit items (NEW from this wave):
+- ``$defs`` shared types in voices.schema.json +
+  instruct_models.schema.json — DRY the duplicated string-
+  with-minLength type definitions. Marginal — both schemas
+  are tiny (<50 LoC each). Hold.
+- VS Code .vscode/settings.example.json template (tracked
+  in git) so operators can copy-paste the json.schemas
+  mapping for IDE-time validation of data/registries/
+  *.json. Today's IMPROVE-131 docstring documents the
+  config but operators have to type it manually. ~0.05d.
+  Hold; .vscode/ stays gitignored, the example file
+  doesn't.
+- Tests/lints/ sub-package restructure — move the 5 lint
+  test files + helpers into ``tests/lints/`` for stronger
+  cohesion. Held per Q6=A — flat structure works for the
+  current count.
+- ``_extract_title_tag`` regex promotion to _lint_helpers.py
+  (currently lives in test_improve_reference_lint.py). Hold
+  until 2nd consumer surfaces (today only the IMPROVE-120
+  lint uses it).
+- ``get_recent_commit_bodies(depth)`` extension (sibling of
+  get_recent_commit_titles): walks ancestor BODIES not just
+  titles, catching bracketed refs cited in upstream commit
+  bodies. Marginal — title self-tags handle the wave-
+  internal case fully today. Hold.
+- Production-side reuse of the encoding="utf-8" subprocess
+  pattern (IMPROVE-137 collateral fix). Today's only
+  consumer is _lint_helpers; a grep for ``subprocess.run
+  (["git",`` would surface other callsites if they exist.
+  Hold; no observed instance.
+- Stricter SHA-ancestor lint (fails on None case): catches
+  typos at the cost of false-positives on hex-shaped non-
+  SHA strings. Held per Q5=A — current "skip None" policy
+  is the conservative pick.
+- Full-SHA (40 char) bypass fix for IMPROVE-135: a future
+  variant could add a separate ``\b[0-9a-f]{40}\b``
+  extractor + validator pair. Marginal — full-SHA refs
+  are typically intentional. Hold.
+- Cross-commit drift variant of IMPROVE-135 / IMPROVE-118 /
+  IMPROVE-120 / IMPROVE-127: walks ``git log --since=<N
+  days>`` to catch refs drifted across multiple recent
+  commits' bodies. Held; HEAD-only scope is sufficient
+  today.
+- Allowlist-staleness check for IMPROVE-132: fail if the
+  _NAMING_DRIFT_ALLOWLIST has entries for prefixes no
+  longer in any endpoint (stale allowlist). ~5 LoC. Hold;
+  allowlist has no stale entries today.
+- IMPROVE-136 cache reset helper (``reset_schema_cache()``
+  sibling of the proposed reload_voice_catalog /
+  reload_instruct_models helpers). Lets operators force
+  re-validation after editing schemas. Hold; no use case
+  today.
+- Multiple-validator support for IMPROVE-136: future
+  schemas might use a different draft (e.g. Draft 2026
+  when finalised). The hardcoded Draft202012Validator
+  could become a lookup based on the schema's ``$schema``
+  URL. Hold; Draft 2020-12 is stable and the existing
+  schemas pin it explicitly.
+- v=3 metadata schema for /images/upscale: the Wave 16
+  IMPROVE-133 v=2 ship surfaces tile_overlap_factor_default
+  for stride; v=3 could mirror for the size axis when its
+  asymmetry surfaces. Speculative. Hold.
 
 Wave-11-audit items NOT promoted in Wave 12/13/14:
 - Tile_sample_stride calibration paired with ``min_size``
@@ -957,9 +1020,9 @@ Original carry-overs (still demoted):
 
 ---
 
-## 10.6 Wave 5 + Wave 6 + Wave 7 + Wave 8 + Wave 9 + Wave 10 + Wave 11 + Wave 12 + Wave 13 + Wave 14 + Wave 15 retrospective
+## 10.6 Wave 5 + Wave 6 + Wave 7 + Wave 8 + Wave 9 + Wave 10 + Wave 11 + Wave 12 + Wave 13 + Wave 14 + Wave 15 + Wave 16 retrospective
 
-> **Status as of 2026-04-29:** Wave 5 fully shipped (12 commits, +216
+> **Status as of 2026-04-30:** Wave 5 fully shipped (12 commits, +216
 > tests). Wave 6 fully shipped (12 commits, +118 tests across 8
 > table-rows; Tranche C compresses 5 sub-commits into row 4).
 > Wave 7 fully shipped (8 numbered + 1 test-fix + 2 doc commits =
@@ -972,10 +1035,12 @@ Original carry-overs (still demoted):
 > Wave 13 fully shipped (6 numbered + 2 doc commits = 8 total, +63
 > tests). Wave 14 fully shipped (7 numbered + 2 doc commits = 9
 > total, +65 tests). Wave 15 fully shipped (6 numbered + 2 doc
-> commits = 8 total, +62 tests). Tier 1 baseline grew 875 → 1530
-> passes over Waves 5-11; Wave 12 brought it to 1602; Wave 13 brought
-> it to 1665; Wave 14 brought it to 1731; Wave 15 brought it to
-> 1793. All 4 xfailed agent tests resolved post-IMPROVE-71.
+> commits = 8 total, +62 tests). Wave 16 fully shipped (6 numbered
+> + 2 doc commits = 8 total, +41 tests). Tier 1 baseline grew
+> 875 → 1530 passes over Waves 5-11; Wave 12 brought it to 1602;
+> Wave 13 brought it to 1665; Wave 14 brought it to 1731; Wave 15
+> brought it to 1793; Wave 16 brought it to 1834. All 4 xfailed
+> agent tests resolved post-IMPROVE-71.
 
 ### Wave 5 (✓ shipped)
 
@@ -1155,7 +1220,7 @@ commit body but as two by pytest (mirror of Wave 13's same
 | 5 | [IMPROVE-129] | 5283e32 | Centralised ``FILTERS_ECHO_SCHEMA`` registry in observability.py. Per Q4=A: ``dict[str, list[str]]``. NEW ``_build_filters_echo`` helper replaces 4 inline dict literals. Cross-pin tests assert test-side EXPECTED matches production-side schema. | +12 |
 | 6 | [IMPROVE-130] | ae97c32 | ``tile_stride_honored`` metadata flag at the VAE call site. Mirror of IMPROVE-121's tile_stride_overridden but for ACTUAL VAE state vs operator intent. Per Q5=A: helper returns winning kwargs dict; pipe-attribute attachment handles cached-pipe case. | +8 |
 | 7 | [IMPROVE-131] | 0dd31d7 | JSON Schema validation for data/registries/*.json at module load. NEW data/registries/schemas/voices.schema.json + instruct_models.schema.json (Draft 2020-12). Per Q6=A: schemas alongside data + load-time validation via jsonschema. | +9 |
-| 8 | (doc)         | this    | Wave 15 retrospective + Wave 16 deferred queue. | 0 |
+| 8 | (doc)         | 2ee34ec | Wave 15 retrospective + Wave 16 deferred queue. | 0 |
 
 Net: +62 tests over Wave 15 (1731 → 1793). 8 commits including
 the two doc commits; 6 numbered IMPROVE-N items. The -3 vs the
@@ -1164,6 +1229,25 @@ delta — moved 5 synthetic-markdown tests from
 test_improve_reference_lint.py to test_lint_helpers.py while
 adding 13 new helper tests; counted +8 net rather than +13 +5
 that would double-count the migrated tests.
+
+### Wave 16 (✓ shipped)
+
+| # | Tag | SHA | What landed | Tests |
+|---|---|---|---|---:|
+| 1 | [IMPROVE-132] | e482691 | Cross-endpoint naming-drift lint on FILTERS_ECHO_SCHEMA. Per Q2=A: hardcoded prefix-allowlist. Iterates the schema, groups keys by 3+ char shared prefix (rstrip trailing underscore), checks each group against the allowlist. Today's allowlist has error_code (axis vs filter-by-prefix) + fill_zero (deprecation alias trio). | +16 |
+| 2 | [IMPROVE-133] | 78e17b2 | v=2 metadata schema for /images/upscale: tile_overlap_factor_default. Per Q3=A: stride-only v=2. NEW class constant ``_DIFFUSERS_DEFAULT_TILE_OVERLAP_FACTOR = 0.25``. Both upscale paths gain ``metadata_schema_version: 2`` + ``tile_overlap_factor_default``. | +6 |
+| 3 | [IMPROVE-134] | 764a1ef | EXPECTED_*_FILTERS derive from FILTERS_ECHO_SCHEMA at module load. Per Q4=A. The 4 hardcoded test-side dict literals become frozenset wrappers around the production registry. Cross-pin tests stay as architectural pins (now tautological by construction). | +3 |
+| 4 | (doc)         | 12aaf4f | Wave 16 mid-wave status — IMPROVE-132/133/134 shipped. | 0 |
+| 5 | [IMPROVE-135] | 180c1bd | SHA-ancestor reference lint — 4-lint family complete. Per Q5=A: ``\b[0-9a-f]{7}\b`` (short-SHA only). NEW ``is_ancestor_sha`` helper wrapping ``git merge-base --is-ancestor``. Returns True/False/None — fails only on real-but-not-ancestor; None case skips silently. | +13 |
+| 6 | [IMPROVE-136] | a24d896 | check_schema() validation for IMPROVE-131 schemas. Calls ``Draft202012Validator.check_schema(schema)`` on first encounter (cached per filename in NEW ``_CHECKED_SCHEMAS`` set). Defence-in-depth on top of IMPROVE-131. | +3 |
+| 7 | [IMPROVE-137] | e5e1c32 | Promote tests/ to Python package + UTF-8 subprocess encoding fix. Per Q6=A: minimal change — add tests/__init__.py + update 5 lint files' imports. Collateral: explicit ``encoding="utf-8"`` on 3 subprocess.run callsites (latent bug exposed by IMPROVE-136's commit body). | 0 |
+| 8 | (doc)         | this    | Wave 16 retrospective + Wave 17 deferred queue. | 0 |
+
+Net: +41 tests over Wave 16 (1793 → 1834). 8 commits including
+the two doc commits; 6 numbered IMPROVE-N items. The lower test
+count vs Wave 15's +62 reflects Wave 16's lighter implementation
+footprint (IMPROVE-134 / 136 / 137 each shipped in <0.2d as
+architectural cleanups + defence-in-depth additions).
 
 ### Wave 14 architectural impact
 
@@ -1295,6 +1379,69 @@ that would double-count the migrated tests.
 
   * Tier 1 baseline 1731 → 1793 over Wave 15 (+62 tests).
     Total since Wave 5: 875 → 1793 (+918 over 11 waves).
+
+### Wave 16 architectural impact
+
+  * CI lint family COMPLETED at 5 siblings: [IMPROVE-118]
+    routes + [IMPROVE-120] [IMPROVE-N] refs + [IMPROVE-127]
+    Wave-N refs + [IMPROVE-132] cross-endpoint naming-drift
+    + [IMPROVE-135] SHA-ancestor refs. The 4-lint family
+    Wave 14's audit named ([IMPROVE-118]/120/127 + a SHA
+    sibling) closed; the 5th ([IMPROVE-132]) was a Wave 14
+    audit candidate that gained substrate from Wave 15's
+    [IMPROVE-129] FILTERS_ECHO_SCHEMA registry. Test file
+    count 87 → 89 (test_endpoint_naming_drift_lint.py +
+    test_sha_ancestor_lint.py).
+
+  * v=2 metadata schema for /images/upscale shipped:
+    [IMPROVE-133] surfaces ``tile_overlap_factor_default``
+    (the diffusers default, 0.25) alongside the existing
+    intent flag ([IMPROVE-121] tile_stride_overridden) +
+    actual VAE state flag ([IMPROVE-130] tile_stride_honored).
+    Together the four fields decompose the upscale
+    metadata into a clear 4-axis matrix dashboards can
+    chart. ``metadata_schema_version: 2`` field signals
+    consumers to expect the new dimensions. Per Q3=A:
+    stride-only (size-axis symmetry held for v=3 if its
+    asymmetry surfaces).
+
+  * Source-of-truth elimination for filters echo:
+    [IMPROVE-134] migrated the 4 test-side
+    ``EXPECTED_*_FILTERS`` constants from hardcoded dict
+    literals (Wave 14 [IMPROVE-123]'s shape) to frozenset
+    derivations from [IMPROVE-129]'s production
+    FILTERS_ECHO_SCHEMA registry. Cross-pin tests stay as
+    architectural pins (tautological by construction) but
+    drift between test-side and production-side is now
+    impossible by construction.
+
+  * Schema-itself defence-in-depth for IMPROVE-131:
+    [IMPROVE-136] added Draft202012Validator.check_schema()
+    on first encounter (cached per filename in NEW
+    ``_CHECKED_SCHEMAS`` set). Catches schema-side typos
+    (e.g. ``"required": "id"`` string instead of array)
+    at module import — before the consumer's loader
+    raises an opaque ValidationError against the broken
+    schema.
+
+  * tests/ promoted to a Python package: [IMPROVE-137]
+    added ``tests/__init__.py`` + migrated 5 lint files'
+    imports from ``from _lint_helpers import ...`` (rootdir
+    mode) to ``from tests._lint_helpers import ...``
+    (package-relative). The migration also fixed a latent
+    UTF-8 subprocess encoding bug exposed by [IMPROVE-136]'s
+    commit body — explicit ``encoding="utf-8"`` on 3
+    subprocess.run callsites in _lint_helpers.py.
+
+  * Routes 187 unchanged from Wave 15 close. Wave 16 items
+    were test-only consolidation (cross-endpoint lint +
+    SHA-ancestor lint + EXPECTED migration + tests/__init__.py)
+    + image metadata addition (v=2 schema fields) + schema-
+    itself validation — no new endpoints — confirmed by
+    IMPROVE-118's lint.
+
+  * Tier 1 baseline 1793 → 1834 over Wave 16 (+41 tests).
+    Total since Wave 5: 875 → 1834 (+959 over 12 waves).
 
 ### Wave 7 architectural impact
 
@@ -1715,7 +1862,7 @@ that would double-count the migrated tests.
 
 ### Where to start today
 
-Wave 1-15 is shipped — pick up an item from §10.5 Wave 16
+Wave 1-16 is shipped — pick up an item from §10.5 Wave 17
 (the deferred queue: IMPROVE-NEW-* carry-overs 2/7/8/10 +
 Wave-10-spawned carry-overs (AST walker generalisation +
 per-tier benchmarks + rules_suppressed_by narrowing) +
@@ -1723,18 +1870,24 @@ Wave-11-audit tile_sample_stride calibration paired with
 min_size + Wave-12-audit RejectionRow TypedDict + Wave-13-
 audit-spawned items (is_kwarg_accepted probe-helper sibling,
 lint variants, upscale auto-tune, full-SHA bundle metadata)
-+ Wave-14-audit-spawned items NOT promoted in Wave 15 (per-
-band stride calibration, SHA-ancestor lint sibling,
-optimization-rules metadata registry, hot-reload helpers,
-obs_test_client_with_events sibling, _attempt_enable_vae_tiling
-extraction, cross-fixture extraction, cross-endpoint naming-
-drift lint) + Wave-15-audit-spawned items (tile_size_honored
-sibling, plural Waves lint variant, lowercase wave variant,
++ Wave-14-audit-spawned items NOT promoted in Wave 15/16
+(per-band stride calibration, optimization-rules metadata
+registry, hot-reload helpers, obs_test_client_with_events
+sibling, _attempt_enable_vae_tiling extraction, cross-
+fixture extraction) + Wave-15-audit-spawned items NOT
+promoted in Wave 16 (tile_size_honored sibling, plural
+Waves lint variant, lowercase wave variant,
 FILTER_AXIS_TYPES registry, strict _build_filters_echo,
-pre-commit-hook lint, check_schema validation, LRU-cached
-schema parse, v=2 metadata schema with honored dimension,
-forward-route quirk fix, depth-from-wave-doc, in-process
-git traversal) + themed tranches A/B/D/E/F/G).
+pre-commit-hook lint, LRU-cached schema parse, forward-
+route quirk fix, depth-from-wave-doc, in-process git
+traversal) + Wave-16-audit-spawned items NEW (schemas
+$defs, .vscode/settings.example.json template, tests/lints/
+sub-package, _extract_title_tag promotion,
+get_recent_commit_bodies extension, prod-side encoding="utf-8"
+audit, stricter SHA-ancestor lint, full-SHA bypass, cross-
+commit drift variant, allowlist-staleness check, schema
+cache reset helper, multi-validator support, v=3 metadata
+schema) + themed tranches A/B/D/E/F/G).
 
 ---
 
@@ -1785,11 +1938,11 @@ Answer whichever are easy. The roadmap is shaped enough to make progress on Wave
 
 - **Read chapter 1 → 9 if you haven't.** This chapter is the index; the others have the details.
 - **Pick a Wave 16 item and ship it** — see §10.5 Wave 16 deferred queue (NEW candidates IMPROVE-NEW-2/7/8/10 + Wave-15-audit-spawned items + Wave-14-audit-spawned items + Wave-13-audit-spawned items + Wave-12-audit-spawned items + Wave-11-audit-spawned items + Wave-10-spawned items still queued + themed tranches A/B/D/E/F/G + carry-overs).
-- **Keep `[IMPROVE-N]` references alive.** When you fix one, grep `docs/features/` for that ID and cross out. If you add new ones in future work, number them IMPROVE-132+ (1-131 are taken; the IMPROVE-NEW-* tags graduate to permanent numbers on acceptance) and note them in the originating chapter.
+- **Keep `[IMPROVE-N]` references alive.** When you fix one, grep `docs/features/` for that ID and cross out. If you add new ones in future work, number them IMPROVE-138+ (1-137 are taken; the IMPROVE-NEW-* tags graduate to permanent numbers on acceptance) and note them in the originating chapter.
 - **The `MEMORY.md` in `~/.claude/projects/...` contains the feedback rule** that improvement suggestions should cite 2025–2026 sources. Every item here has citations in its origin chapter.
 
 ---
 
 **Guide complete.** `docs/features/README.md` → `01-architecture.md` → `02-llm-infrastructure.md` → `03-chat.md` → `04-agents-tools.md` → `05-systems.md` → `06-image-generation.md` → `07-image-editor.md` → `08-partner.md` → `09-observability.md` → `10-improvements.md` *(this file)*.
 
-Every major feature of the Local AI Platform is now documented end-to-end, with **131** research-backed improvement ideas cross-referenced into one prioritized plan. Waves 1-15 fully shipped; Wave 16 in deferred queue.
+Every major feature of the Local AI Platform is now documented end-to-end, with **137** research-backed improvement ideas cross-referenced into one prioritized plan. Waves 1-16 fully shipped; Wave 17 in deferred queue.
