@@ -1,6 +1,6 @@
 # 10 — Improvement Roadmap
 
-> **Goal of this chapter:** a single consolidated view of the **70 improvement ideas** surfaced across chapters 1–9 (now **145** post Wave 19 mid-wave), scored for impact and effort, grouped by theme, and laid out in a phased roadmap. Every idea here is grounded in a 2025–2026 source — the citations are in each chapter; this doc focuses on *what to do when*.
+> **Goal of this chapter:** a single consolidated view of the **70 improvement ideas** surfaced across chapters 1–9 (now **146** post Wave 19), scored for impact and effort, grouped by theme, and laid out in a phased roadmap. Every idea here is grounded in a 2025–2026 source — the citations are in each chapter; this doc focuses on *what to do when*.
 
 > **Revised 2026-04-29** — Wave 5 shipped (12 commits: IMPROVE-29/31/33/34/35/36/51/52/53/54/55/56/57/63/67). Wave 6 shipped (12 commits, 8 table-rows: IMPROVE-71/72/8 + Tranche-C 5×telemetry + IMPROVE-73/46/74/61). Wave 7 shipped (8 commits + 1 test-fix + 2 doc commits: IMPROVE-NEW-4/11/12/13/14/16/17/18 promoted to IMPROVE-75/76/77/78/79/80/81/82, plus a deterministic-counter fix for the IMPROVE-36 parallel-wave speedup test). Wave 8 shipped (6 numbered + 2 doc commits: IMPROVE-83/84/85/86/87/88 — streaming parallel-wave parity, inter-node-context migration, /systems/* rejection telemetry mirror, per-byte hf_hub_download progress, VRAM-probe telemetry + decay-export bundle, graph-time DAG validation). Wave 9 shipped (6 numbered + 2 doc commits: IMPROVE-89/90/91/92/93/94 — bulk emit_typed migration + close keystone gaps, per-rejection counter in /observability/summary, per-subsystem Literal + @overload for emit_typed action, per-event TypedDict context schemas, VRAM-probe-driven tile-based upscaling, POST /partner/import endpoint). Wave 10 shipped (6 numbered + 2 doc commits: IMPROVE-95/96/97/98/99/100 — top-12 event context schemas, Recorder enumeration test + 6 missing event registrations, asymmetric bundle versioning, POST /partner/import/dry-run, GET /observability/timeseries with ?error_code= filter, tile-size calibration per input resolution). Wave 11 shipped (6 numbered + 2 doc commits: IMPROVE-101/102/103/104/105/106 — Tier-A high-traffic schema batch, Recorder context schemas + track_event audit, sibling GET /observability/rejections endpoint, differential restore via ?scope= filter, per-row diff with ?verbose= flag, mypy strict-mode + literal-typing of derivation tuples). Wave 12 shipped (6 numbered + 2 doc commits: IMPROVE-107/108/109/110/111/112 — final-tier context schemas closing 100% coverage + mypy dev extra, ?error_code_prefix= LIKE filter + _rollup_rejections helper extraction, schema audit opt-out flip, ?fill_zeros=true bucket-padding on /timeseries, validate_kwargs helpers in NEW utils/validation.py + bug fix, bundle.json richer provenance). Wave 13 shipped (6 numbered + 2 doc commits: IMPROVE-113/114/115/116/117/118 — /observability/recent error_code + error_code_prefix filter axes, filter_kwargs_to_signature helper + 3 callsite migrations, /observability/summary ?fill_zero_dim=true dim-axis pad, bundle.json platform field gains git revision suffix, /images/upscale ?tile_size_override= power-user knob, CI lint route-mention validator). Wave 14 shipped (7 numbered + 2 doc commits: IMPROVE-119/120/121/122/123/124/125 — /timeseries fill_zeros bucket-straddle flake fix, CI lint IMPROVE-N reference validator, /images/upscale tile_stride_override sibling knob, shared obs_test_client fixture in tests/conftest.py, filters echo schema pin tests for the 4 obs endpoints, /timeseries fill_zero_time deprecation alias for fill_zeros, voice + instruct-model registries promoted to data/registries/*.json).
 
@@ -8,9 +8,9 @@
 
 ## 10.1 Summary
 
-- **145 improvements** flagged inline as `[IMPROVE-N]` in chapters 1–9 + the Wave 5/6/7/8/9/10/11/12/13/14/15/16/18/19 audits (NEW from Wave 6 audit: 71/72/73/74; NEW from Wave 7: 75/76/77/78/79/80/81/82; NEW from Wave 8: 83/84/85/86/87/88; NEW from Wave 9: 89/90/91/92/93/94; NEW from Wave 10: 95/96/97/98/99/100; NEW from Wave 11: 101/102/103/104/105/106; NEW from Wave 12: 107/108/109/110/111/112; NEW from Wave 13: 113/114/115/116/117/118; NEW from Wave 14: 119/120/121/122/123/124/125; NEW from Wave 15: 126/127/128/129/130/131; NEW from Wave 16: 132/133/134/135/136/137; NEW from Wave 18: 138/139/140/141/142/143/144; NEW from Wave 19 Tranche A: 145).
+- **146 improvements** flagged inline as `[IMPROVE-N]` in chapters 1–9 + the Wave 5/6/7/8/9/10/11/12/13/14/15/16/18/19 audits (NEW from Wave 6 audit: 71/72/73/74; NEW from Wave 7: 75/76/77/78/79/80/81/82; NEW from Wave 8: 83/84/85/86/87/88; NEW from Wave 9: 89/90/91/92/93/94; NEW from Wave 10: 95/96/97/98/99/100; NEW from Wave 11: 101/102/103/104/105/106; NEW from Wave 12: 107/108/109/110/111/112; NEW from Wave 13: 113/114/115/116/117/118; NEW from Wave 14: 119/120/121/122/123/124/125; NEW from Wave 15: 126/127/128/129/130/131; NEW from Wave 16: 132/133/134/135/136/137; NEW from Wave 18: 138/139/140/141/142/143/144; NEW from Wave 19 Tranche A: 145/146).
 - **10 themes** — security, architecture, observability, tracing, UX, memory & context, model & inference, background tasks, voice, and tools/MCP.
-- **18 waves** fully shipped (Waves 1-16 numbered + Wave 17 doc-only cleanup + Wave 18 Tranche A Flutter editor v2); Wave 19 Tranche A partner-import host in progress (1 numbered shipped: IMPROVE-145); **1** standing in deferred queues (post-Wave-19 backlog).
+- **19 waves** fully shipped (Waves 1-16 numbered + Wave 17 doc-only cleanup + Wave 18 Tranche A Flutter editor v2 + Wave 19 Tranche A partner-import host); **1** standing in deferred queues (post-Wave-19 backlog).
 
 All improvements are traceable back to a chapter + a 2025–2026 citation. This chapter is pure planning — *what* + *why this order*; *how* is in each origin chapter.
 
@@ -178,7 +178,7 @@ Smaller items that improve day-to-day use.
 
 ---
 
-## 10.4 The complete table (all 145)
+## 10.4 The complete table (all 146)
 
 Sortable if you paste into a spreadsheet. Chapter column links back to the originating doc.
 
@@ -329,6 +329,7 @@ Sortable if you paste into a spreadsheet. Chapter column links back to the origi
 | 143 | 17 | ✓ Flutter PerRowDiffOverlay consuming IMPROVE-105 tables_diff response | ⋆⋆ | 🔨 | UX |
 | 144 | 17 | ✓ Flutter ScopeMultiSelect consuming IMPROVE-104 RESTORE_SCOPES vocabulary | ⋆⋆ | 🔨 | UX |
 | 145 | 19 | ✓ Flutter PartnerImportPage host composing IMPROVE-143/144 (Wave 19 Tranche A first) | ⋆⋆⋆ | 🔨 | UX |
+| 146 | 19 | ✓ Flutter PartnerExportButton + Backup & Restore export wiring (Wave 19 Tranche A close) | ⋆⋆ | 🔨 | UX |
 
 *Impact for [IMPROVE-59] is ⋆⋆⋆⋆⋆ if the app is ever distributed, ⋆⋆ if it stays local-only.
 
@@ -867,34 +868,46 @@ future Wave 19+ partner-import host compose [IMPROVE-143] +
 [IMPROVE-144] into a full preview flow without re-writing
 either widget.
 
-### Wave 19 — Tranche A Partner-import host (in progress)
+### Wave 19 — Tranche A Partner-import host (✓ shipped 2026-04-30)
 
 Theme: ship the partner-import host page that composes the
 Wave 18 [IMPROVE-143] PerRowDiffOverlay + [IMPROVE-144]
 ScopeMultiSelect widgets into a working preview/restore UI,
 plus the [IMPROVE-67] bundle-export download counterpart
 shipping in the same Memory-tab Backup & Restore card.
-Closes the round-trip Wave 18 deliberately deferred (host
+Closed the round-trip Wave 18 deliberately deferred (host
 wiring left out so Wave 18 could focus on widget-shape
 testability).
 
 Per Q2=A in the Wave 19 Tranche A plan: zero new routes —
 all four import contracts ([IMPROVE-94] partner-import,
 [IMPROVE-98] dry-run, [IMPROVE-104] scope filter,
-[IMPROVE-105] verbose tables_diff) ship-tested. Per Q3=A
-modified: hosts skip widget tests (Wave 18 host convention)
-but extract public helpers for direct test pinning. Per
-Q5=A: mid + end-wave doc cadence.
+[IMPROVE-105] verbose tables_diff) plus [IMPROVE-67]
+partner-export ship-tested. Per Q3=A modified: hosts skip
+widget tests (Wave 18 host convention) but extract public
+helpers for direct test pinning. Per Q5=A: mid + end-wave
+doc cadence (the end-wave doc commit closes out the wave
+with a 4-row table covering 2 numbered IMPROVE-N items + 2
+doc commits).
 
 | # | Tag | SHA | What landed | Tests |
 |---|---|---|---|---:|
 | 1 | [IMPROVE-145] | a5922af | Flutter PartnerImportPage host composing [IMPROVE-143] + [IMPROVE-144] into a 4-step linear flow (file pick → scope → dry-run preview → confirm + restore) consuming [IMPROVE-94] / [IMPROVE-98] / [IMPROVE-104] / [IMPROVE-105]. Public ``summariseRestoreResponse`` + ``formatBundleSize`` helpers. NEW Backup & Restore card in partner_page.dart Memory tab. 16 helper tests. | 0 |
-| 2 | (doc)         | this    | Wave 19 mid-wave status — IMPROVE-145 shipped (per Q5=A mid + end-wave doc cadence). Bumps 144 → 145 in §10.1 + §10.4. Fills in Wave 18 end-wave SHA placeholder (3b509dc). SHA filled in by Wave 19 end-wave doc commit. | 0 |
+| 2 | (doc)         | 19b7d17 | Wave 19 mid-wave status — IMPROVE-145 shipped (per Q5=A mid + end-wave doc cadence). Bumps 144 → 145 in §10.1 + §10.4. Fills in Wave 18 end-wave SHA placeholder (3b509dc). SHA filled in by Wave 19 end-wave doc commit. | 0 |
+| 3 | [IMPROVE-146] | 77ae42b | Flutter PartnerExportButton + Backup & Restore export wiring. Pure-presentation FilledButton.tonalIcon with idle / busy / disabled states; public ``defaultExportFilename(DateTime)`` helper produces ISO-8601-style ``partner-export-YYYY-MM-DD.zip`` filenames. partner_page.dart ``_handleExport()`` opens FilePicker.saveFile + http.get + File.writeAsBytes; SnackBar surfaces success / failure. Pairs with [IMPROVE-145] restore button to close the GDPR Article 20 round-trip in the UI. 16 widget tests. | 0 |
+| 4 | (doc)         | this    | Wave 19 end-wave retrospective. Bumps 145 → 146 in §10.1 + §10.4. Fills in Wave 19 mid-wave SHA placeholder (19b7d17). Adds Wave 19 architectural impact subsection in §10.6. Updates §10.8 "where to start today" + closing line. | 0 |
 
-In flight: IMPROVE-146 PartnerExportButton — bundle-download
-counterpart in the same Backup & Restore card, pairing with
-IMPROVE-145's restore button to make the Memory tab the
-canonical Backup & Restore entry point.
+Net: +0 tests on the Tier 1 Python sweep (Wave 19 Tranche A
+is pure Flutter consumption — no backend changes). The
+Flutter widget test surface gained 32 tests (141 → 173)
+across two helper-test files
+(``partner_import_helpers_test.dart`` for [IMPROVE-145]'s
+helpers + ``partner_export_button_test.dart`` for
+[IMPROVE-146]'s widget + helper). 4 commits (2 numbered + 2
+doc) — focused mini-wave shape per Q1=A. The wave's natural
+unit was the host-page-plus-wiring pair: import
+([IMPROVE-145]) + export ([IMPROVE-146]) in the same
+Backup & Restore card.
 
 ### Wave 18 — Deferred (queued for next iteration)
 
@@ -1227,18 +1240,19 @@ Rejection criteria (per the Wave 17 cleanup pass):
 > tests + 141 Flutter widget tests — Tranche A Flutter editor
 > v2: TileModeBadge / TileSizeOverrideField /
 > TileStrideOverrideField / DecayPresetPicker / DagLintPanel /
-> PerRowDiffOverlay / ScopeMultiSelect). Wave 19 Tranche A
-> in progress (1 numbered shipped + 1 doc commit = 2 total
-> so far, +0 backend tests + 16 Flutter helper tests):
-> IMPROVE-145 partner-import host composing IMPROVE-143/144;
-> IMPROVE-146 export-download counterpart in flight. Tier 1
+> PerRowDiffOverlay / ScopeMultiSelect). Wave 19 fully
+> shipped (2 numbered + 2 doc commits = 4 total,
+> +0 backend tests + 32 Flutter helper tests — Tranche A
+> Partner-import host: PartnerImportPage composing
+> IMPROVE-143/144 + PartnerExportButton + Backup & Restore
+> card wiring in partner_page.dart). Tier 1
 > baseline grew 875 → 1530 passes over Waves 5-11; Wave 12
 > brought it to 1602; Wave 13 brought it to 1665; Wave 14
 > brought it to 1731; Wave 15 brought it to 1793; Wave 16
 > brought it to 1834; Wave 17 doc-only (1834 unchanged);
 > Wave 18 brought it to 1836 (+2 from [IMPROVE-138] backend
-> persistence pin tests); Wave 19 unchanged so far (Flutter-
-> only consumption). All 4 xfailed agent tests resolved
+> persistence pin tests); Wave 19 unchanged at 1836
+> (Flutter-only consumption). All 4 xfailed agent tests resolved
 > post-IMPROVE-71.
 
 ### Wave 5 (✓ shipped)
@@ -1482,23 +1496,29 @@ run outside the Tier 1 Python sweep but are pinned per-commit
 and validated via the companion ``flutter analyze`` clean
 check.
 
-### Wave 19 (in progress)
+### Wave 19 (✓ shipped)
 
 | # | Tag | SHA | What landed | Tests |
 |---|---|---|---|---:|
 | 1 | [IMPROVE-145] | a5922af | Flutter PartnerImportPage host composing [IMPROVE-143] + [IMPROVE-144] into a 4-step linear flow (file pick → scope → dry-run preview → confirm + restore) consuming [IMPROVE-94] / [IMPROVE-98] / [IMPROVE-104] / [IMPROVE-105]. Public ``summariseRestoreResponse`` + ``formatBundleSize`` helpers. NEW Backup & Restore card in partner_page.dart Memory tab. 16 helper tests. | 0 |
-| 2 | (doc)         | this    | Wave 19 mid-wave status — IMPROVE-145 shipped (per Q5=A mid + end-wave doc cadence). Bumps 144 → 145 in §10.1 + §10.4. Fills in Wave 18 end-wave SHA placeholder (3b509dc). SHA filled in by Wave 19 end-wave doc commit. | 0 |
+| 2 | (doc)         | 19b7d17 | Wave 19 mid-wave status — IMPROVE-145 shipped (per Q5=A mid + end-wave doc cadence). Bumps 144 → 145 in §10.1 + §10.4. Fills in Wave 18 end-wave SHA placeholder (3b509dc). | 0 |
+| 3 | [IMPROVE-146] | 77ae42b | Flutter PartnerExportButton — pure-presentation tonal-button widget with idle / busy / disabled states + public ``defaultExportFilename`` helper for ISO-8601-style filenames. partner_page.dart ``_handleExport`` wires the file-picker saveFile + http.get on /partner/export + File.writeAsBytes. Closes the GDPR Article 20 round-trip in the UI alongside [IMPROVE-145]. 16 widget tests. | 0 |
+| 4 | (doc)         | this    | Wave 19 end-wave retrospective. Bumps 145 → 146 in §10.1 + §10.4. Fills in Wave 19 mid-wave SHA placeholder (19b7d17). Adds Wave 19 architectural impact subsection. Updates §10.8 closing line. | 0 |
 
-Net so far: +0 tests on the Tier 1 Python sweep (Wave 19
-Tranche A is pure Flutter consumption — no backend
-changes). The Flutter widget test surface gained 16 tests
-(141 → 157) via the ``summariseRestoreResponse`` +
-``formatBundleSize`` helpers under
-``test/widgets/partner_import_helpers_test.dart``. Pure
-host-vs-widget split per the Wave 18 convention: the host
-page itself doesn't ship a widget test (verified by hand
-against a live backend); only the public top-level
-helpers extracted for testability ship pinned tests.
+Net: +0 tests on the Tier 1 Python sweep (Wave 19 Tranche
+A is pure Flutter consumption — no backend changes). The
+Flutter widget test surface gained 32 tests (141 → 173) —
+16 from [IMPROVE-145]'s helper file
+(``partner_import_helpers_test.dart``) covering
+``summariseRestoreResponse`` + ``formatBundleSize`` and 16
+from [IMPROVE-146]'s widget-plus-helper file
+(``partner_export_button_test.dart``) covering
+``defaultExportFilename`` + every PartnerExportButton
+render state + tap behaviour. Host-vs-widget split per
+the Wave 18 convention: hosts (PartnerImportPage,
+partner_page.dart's _handleExport) skip widget tests and
+are verified by hand against a live backend; only the
+public widget + top-level helpers ship pinned tests.
 
 ### Wave 14 architectural impact
 
@@ -1805,6 +1825,73 @@ helpers extracted for testability ship pinned tests.
   * Routes 187 unchanged from Wave 16 close. Wave 18
     is pure Flutter consumption — confirmed by
     [IMPROVE-118]'s route-mention lint.
+
+### Wave 19 architectural impact
+
+  * Round-trip closure for partner-export: the
+    [IMPROVE-67] export endpoint shipped Wave 5
+    (commit 41cfbee), [IMPROVE-94] partner-import shipped
+    Wave 9, [IMPROVE-98] dry-run shipped Wave 10,
+    [IMPROVE-104] scope filter shipped Wave 11,
+    [IMPROVE-105] verbose tables_diff shipped Wave 11. The
+    UI surface lagged the backend by 8 waves; Wave 19
+    Tranche A closed the gap with [IMPROVE-145]
+    PartnerImportPage host + [IMPROVE-146]
+    PartnerExportButton co-resident in the new Backup &
+    Restore card on partner_page.dart's Memory tab. GDPR
+    Article 20 (Right to data portability) is now fulfilled
+    in-app rather than only via shell access.
+
+  * Host-vs-widget split convention extended to host work:
+    Wave 18 established the pattern with 7 widgets having
+    hosts wired in pages (TileModeBadge in images_page,
+    DecayPresetPicker in partner_page, DagLintPanel in
+    systems_page) but the hosts were thin —
+    decoration-around-the-widget. Wave 19 ships the first
+    LARGE host (PartnerImportPage's 4-step linear flow with
+    file picker + scope picker + dry-run + restore +
+    confirm) under the same convention: the host owns API +
+    state and skips its own widget tests, while public
+    helpers extracted for testability ship pinned tests
+    (summariseRestoreResponse / formatBundleSize for
+    [IMPROVE-145]; defaultExportFilename for [IMPROVE-146]).
+    Demonstrates the convention scales from small widgets
+    to full pages without breaking shape.
+
+  * Focused mini-wave shape: 2 numbered IMPROVE-N items +
+    2 doc commits = 4 total. Smaller than Wave 18's
+    9-commit Tranche A (7 numbered + 2 doc) but same
+    structure (host-vs-widget split + Q5=A mid + end-wave
+    doc cadence + Q2=A no new routes). Wave 19 is the
+    smallest "real" wave (excluding Wave 17 cleanup which
+    was 1 doc commit) — natural unit was the host-page-
+    plus-wiring pair, neither item justified further split.
+
+  * Pure Flutter consumption (zero Python touched): Tier 1
+    baseline holds at 1836 from Wave 18 close. The 32 new
+    Flutter widget tests (141 → 173) run via flutter test
+    test/widgets/ outside Tier 1 but are pinned per-commit
+    alongside flutter analyze clean checks on the new +
+    modified Dart files.
+
+  * Public-helper pattern continues from Wave 18: every
+    Wave 19 commit exports its predicate / formatter /
+    serialiser as public top-level functions. [IMPROVE-145]
+    ships ``summariseRestoreResponse`` (response →
+    one-line summary string for SnackBar + confirm dialog
+    body) + ``formatBundleSize`` (bytes → "3.4 MB" /
+    "456 KB" / "789 B"). [IMPROVE-146] ships
+    ``defaultExportFilename`` (DateTime →
+    "partner-export-2026-04-30.zip"). Tests pin these
+    directly without driving the host widget tree.
+
+  * Tier 1 baseline 1836 unchanged over Wave 19 (Flutter-
+    only consumption). Total since Wave 5: 875 → 1836
+    (+961 over 15 waves counting Waves 17/18/19).
+
+  * Routes 187 unchanged from Wave 16 close. Wave 19 is
+    pure Flutter consumption — confirmed by [IMPROVE-118]'s
+    route-mention lint.
 
 ### Wave 7 architectural impact
 
@@ -2349,12 +2436,12 @@ Answer whichever are easy. The roadmap is shaped enough to make progress on Wave
 ## 10.8 Where to go from here
 
 - **Read chapter 1 → 9 if you haven't.** This chapter is the index; the others have the details.
-- **Pick a Wave 19+ item and ship it** — see §10.5 Wave 18 deferred queue (the trimmed Wave 17 cleanup output: NEW candidates IMPROVE-NEW-2/7/8/10 + Wave-15-audit FILTER_AXIS_TYPES registry + 7 Wave-16-audit-spawned items + Wave-13/12/11/10-audit triggered items + themed tranches B/D/E/F/G + carry-overs gated on §10.7 questions). Tranche A (Flutter editor v2) shipped fully in Wave 18 — IMPROVE-138 through IMPROVE-144 (7 widgets covering 11 backend contracts). The natural next ship is the partner-import host that composes [IMPROVE-143] + [IMPROVE-144] into a preview flow. Items previously considered + rejected are archived in §10.5.1.
-- **Keep `[IMPROVE-N]` references alive.** When you fix one, grep `docs/features/` for that ID and cross out. If you add new ones in future work, number them IMPROVE-145+ (1-144 are taken; the IMPROVE-NEW-* tags graduate to permanent numbers on acceptance) and note them in the originating chapter.
+- **Pick a Wave 20+ item and ship it** — see §10.5 Wave 18 deferred queue (the trimmed Wave 17 cleanup output: NEW candidates IMPROVE-NEW-2/7/8/10 + Wave-15-audit FILTER_AXIS_TYPES registry + 7 Wave-16-audit-spawned items + Wave-13/12/11/10-audit triggered items + themed tranches B/D/E/F/G + carry-overs gated on §10.7 questions). Tranche A (Flutter editor v2) shipped fully in Wave 18 — IMPROVE-138 through IMPROVE-144 (7 widgets covering 11 backend contracts). Wave 19 Tranche A closed the round-trip with the partner-import host ([IMPROVE-145]) + export button ([IMPROVE-146]) co-resident in the new Backup & Restore card. The natural next ship is either (a) Wave 20 cleanup wave resolving §10.7 STILL OPEN gating questions and activating deletion candidates, (b) themed Tranche B/D/E/F/G work, or (c) deferred-queue picks (NEW carry-overs / Wave-N-audit items). Items previously considered + rejected are archived in §10.5.1.
+- **Keep `[IMPROVE-N]` references alive.** When you fix one, grep `docs/features/` for that ID and cross out. If you add new ones in future work, number them IMPROVE-147+ (1-146 are taken; the IMPROVE-NEW-* tags graduate to permanent numbers on acceptance) and note them in the originating chapter.
 - **The `MEMORY.md` in `~/.claude/projects/...` contains the feedback rule** that improvement suggestions should cite 2025–2026 sources. Every item here has citations in its origin chapter.
 
 ---
 
 **Guide complete.** `docs/features/README.md` → `01-architecture.md` → `02-llm-infrastructure.md` → `03-chat.md` → `04-agents-tools.md` → `05-systems.md` → `06-image-generation.md` → `07-image-editor.md` → `08-partner.md` → `09-observability.md` → `10-improvements.md` *(this file)*.
 
-Every major feature of the Local AI Platform is now documented end-to-end, with **144** research-backed improvement ideas cross-referenced into one prioritized plan. Waves 1-18 fully shipped; post-Wave-18 backlog in deferred queue.
+Every major feature of the Local AI Platform is now documented end-to-end, with **146** research-backed improvement ideas cross-referenced into one prioritized plan. Waves 1-19 fully shipped; post-Wave-19 backlog in deferred queue.
