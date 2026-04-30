@@ -5,6 +5,7 @@ import 'dart:typed_data';
 import 'package:flutter/material.dart';
 import 'package:audioplayers/audioplayers.dart';
 import 'package:http/http.dart' as http_pkg;
+import 'package:local_ai_flutter_client/pages/partner_import_page.dart';
 import 'package:local_ai_flutter_client/services/api_client.dart';
 import 'package:local_ai_flutter_client/widgets/decay_preset_picker.dart';
 import 'package:url_launcher/url_launcher.dart';
@@ -1960,6 +1961,59 @@ class _PartnerPageState extends State<PartnerPage> {
                         'Pick how aggressively old memories fade. '
                         'Low = remembers everything; High = forgets quickly.',
                     onApply: _applyDecayPreset,
+                  ),
+                ],
+              ),
+            ),
+          ),
+          const SizedBox(height: 12),
+          // [IMPROVE-145] Backup & Restore entry. Pushes the
+          // PartnerImportPage host that composes the [IMPROVE-143]
+          // PerRowDiffOverlay + [IMPROVE-144] ScopeMultiSelect
+          // widgets shipped in Wave 18 into the full
+          // dry-run-then-restore flow against the [IMPROVE-94] +
+          // [IMPROVE-98] backend endpoints.
+          Card(
+            child: Padding(
+              padding: const EdgeInsets.all(16),
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Row(
+                    children: [
+                      Icon(Icons.backup_outlined, size: 18, color: colors.primary),
+                      const SizedBox(width: 8),
+                      const Text(
+                        'Backup & Restore',
+                        style: TextStyle(
+                          fontWeight: FontWeight.w600, fontSize: 16,
+                        ),
+                      ),
+                    ],
+                  ),
+                  const SizedBox(height: 8),
+                  Text(
+                    'Restore your partner\'s memory, profile, and '
+                    'journal from a partner-export.zip bundle. '
+                    'Preview the diff before committing.',
+                    style: TextStyle(
+                      fontSize: 12, color: colors.onSurfaceVariant,
+                    ),
+                  ),
+                  const SizedBox(height: 8),
+                  Align(
+                    alignment: Alignment.centerLeft,
+                    child: FilledButton.tonalIcon(
+                      onPressed: () {
+                        Navigator.of(context).push(
+                          MaterialPageRoute(
+                            builder: (_) => PartnerImportPage(api: widget.api),
+                          ),
+                        );
+                      },
+                      icon: const Icon(Icons.restore, size: 18),
+                      label: const Text('Restore from bundle'),
+                    ),
                   ),
                 ],
               ),
