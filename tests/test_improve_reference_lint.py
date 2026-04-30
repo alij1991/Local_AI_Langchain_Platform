@@ -31,7 +31,18 @@ Convention reinforced by this lint:
 Per Q1=A in the Wave 14 plan: scope the lint to bracketed
 ``[IMPROVE-N]`` references only. Wave-N and SHA references
 could grow as sibling lints if drift surfaces in those
-vocabularies (Wave 15+ candidates).
+vocabularies (Wave 15+ candidates; IMPROVE-127 ships the
+Wave-N sibling).
+
+Wave 15 update: the ``_get_head_commit_body`` helper +
+``_read_section_10_4_universe`` walker migrated to
+``tests/_lint_helpers.py`` per IMPROVE-126 (consolidation
+across the IMPROVE-118 + IMPROVE-120 sibling lints). The
+[IMPROVE-120]-specific extractors (``_extract_improve_references``
++ ``_extract_title_tag``) stay local — they're not shared by
+the route-mention lint. The synthetic-markdown tests for the
+generic walker also moved to ``test_lint_helpers.py``; this
+file keeps only the [IMPROVE-120]-specific behaviour pins.
 
 Sources (2025-2026):
   * Wave 13 [IMPROVE-118] commit (de52308) — sibling lint that
@@ -46,10 +57,14 @@ Sources (2025-2026):
 from __future__ import annotations
 
 import re
-import subprocess
-from pathlib import Path
 
 import pytest
+
+from _lint_helpers import (
+    get_head_commit_body,
+    get_repo_doc_path,
+    read_doc_section_universe,
+)
 
 
 # Match bracketed ``[IMPROVE-N]`` references only. Bare prose
@@ -61,18 +76,16 @@ _IMPROVE_REF_RE = re.compile(r"\[IMPROVE-(\d+)\]")
 
 # Match a §10.4 table data row: ``| N | ...`` where N is the
 # IMPROVE-N. Excludes the column-header row which has ``ID``
-# in the first column rather than a digit.
+# in the first column rather than a digit. Passed to the
+# shared ``read_doc_section_universe`` helper.
 _TABLE_ROW_RE = re.compile(r"^\|\s*(\d+)\s*\|")
 
 # Match the §10.4 section start. The exact heading at landing
-# time is "## 10.4 The complete table (all 118)" — match the
+# time is "## 10.4 The complete table (all 125)" — match the
 # stable prefix so the count-suffix can grow each wave without
-# the lint needing updates.
+# the lint needing updates. Passed to the shared
+# ``read_doc_section_universe`` helper.
 _SECTION_10_4_RE = re.compile(r"^## 10\.4\b")
-
-# Match any subsequent ``## `` heading — used to find the end
-# of §10.4 when iterating lines.
-_NEXT_SECTION_RE = re.compile(r"^## ")
 
 # Match the title's own IMPROVE-N tag. Title must START with
 # ``[IMPROVE-N]`` to qualify (mid-line bracketed mentions in
@@ -112,75 +125,6 @@ def _extract_title_tag(body: str) -> int | None:
         match = _TITLE_TAG_RE.match(line)
         return int(match.group(1)) if match else None
     return None
-
-
-def _read_section_10_4_universe(
-    md_path: Path,
-) -> set[int]:
-    """Parse ``docs/features/10-improvements.md`` and return
-    the set of IMPROVE-N row IDs registered in §10.4.
-
-    The §10.4 table format (since the doc was first written):
-
-        | ID | Ch | Title | Impact | Effort | Theme |
-        |---:|:---:|---|:---:|:---:|---|
-        | 1 | 1 | Split api_server.py into APIRouters | ... |
-        | 2 | 1 | Explicit CORS origins + bind 127.0.0.1 | ... |
-        ...
-
-    The ``ID`` column IS the IMPROVE-N. The first column-header
-    row (``| ID | Ch | ...``) does not match the digits-first
-    regex so it's auto-skipped.
-
-    Args:
-        md_path: Absolute path to ``10-improvements.md``.
-
-    Returns:
-        Set of integer N values registered in §10.4. Empty set
-        if the file is missing or §10.4 isn't found (caller
-        treats empty universe as "skip the lint").
-    """
-    if not md_path.exists():
-        return set()
-    universe: set[int] = set()
-    in_section = False
-    with md_path.open(encoding="utf-8") as fh:
-        for line in fh:
-            if not in_section:
-                if _SECTION_10_4_RE.match(line):
-                    in_section = True
-                continue
-            # In section: stop at next ``## `` heading.
-            if _NEXT_SECTION_RE.match(line):
-                break
-            match = _TABLE_ROW_RE.match(line)
-            if match:
-                universe.add(int(match.group(1)))
-    return universe
-
-
-def _get_head_commit_body() -> str:
-    """Return HEAD's commit body via ``git log -1 --format=%B``.
-
-    Returns empty string on any failure (no git, not a repo,
-    timeout). Caller should skip the lint test when the body
-    is empty rather than fail — the lint is a defence-in-depth
-    check, not a requirement that git is installed (mirrors the
-    [IMPROVE-118] _get_head_commit_body contract).
-    """
-    try:
-        result = subprocess.run(
-            ["git", "log", "-1", "--format=%B", "HEAD"],
-            capture_output=True,
-            text=True,
-            timeout=5.0,
-            check=False,
-        )
-        if result.returncode != 0:
-            return ""
-        return result.stdout
-    except (FileNotFoundError, subprocess.TimeoutExpired, OSError):
-        return ""
 
 
 # ── Helper unit tests ───────────────────────────────────────
@@ -281,94 +225,12 @@ def test_title_tag_returns_none_for_empty_body():
     assert _extract_title_tag("") is None
 
 
-def test_section_10_4_parses_canonical_table(tmp_path):
-    """Synthetic markdown with §10.4 table parses cleanly.
-    Pin the row-extraction logic against a controlled fixture
-    independent of the real ``10-improvements.md``."""
-    md = tmp_path / "synthetic.md"
-    md.write_text(
-        """
-# Title
-
-## 10.3 Some prior section
-
-Stuff.
-
-## 10.4 The complete table (all 3)
-
-| ID | Ch | Title | Impact | Effort | Theme |
-|---:|:---:|---|:---:|:---:|---|
-| 1 | 1 | First item | star | hammer | Architecture |
-| 2 | 1 | Second item | star | hammer | UX |
-| 3 | 2 | Third item | star | hammer | Image |
-
-## 10.5 Roadmap
-
-| # | Item | Effort | File(s) |
-|---:|---|---:|---|
-| 1 | [IMPROVE-30] Some title | 30m | path |
-""",
-        encoding="utf-8",
-    )
-    universe = _read_section_10_4_universe(md)
-    # Only §10.4 rows surface; §10.5's "1" row does NOT
-    # because we stop at the next ``## `` heading.
-    assert universe == {1, 2, 3}
-
-
-def test_section_10_4_returns_empty_for_missing_file(tmp_path):
-    """Missing markdown file → empty universe (graceful)."""
-    universe = _read_section_10_4_universe(
-        tmp_path / "nonexistent.md",
-    )
-    assert universe == set()
-
-
-def test_section_10_4_returns_empty_when_section_absent(tmp_path):
-    """File exists but no §10.4 heading → empty universe."""
-    md = tmp_path / "no_section.md"
-    md.write_text("# Just a title\nNo sections at all.\n", encoding="utf-8")
-    universe = _read_section_10_4_universe(md)
-    assert universe == set()
-
-
-def test_section_10_4_skips_header_row(tmp_path):
-    """The column-header row ``| ID | Ch | ...`` doesn't
-    match the digits-first regex so it's auto-excluded."""
-    md = tmp_path / "header_only.md"
-    md.write_text(
-        """
-## 10.4 Just headers
-
-| ID | Ch | Title |
-|---:|:---:|---|
-""",
-        encoding="utf-8",
-    )
-    universe = _read_section_10_4_universe(md)
-    assert universe == set()
-
-
-def test_section_10_4_handles_real_doc_format():
-    """Pin against the REAL ``docs/features/10-improvements.md``:
-    universe must be non-empty AND contain the canonical
-    landmark IDs we know are registered (1, 50, 118)."""
-    md_path = (
-        Path(__file__).resolve().parent.parent
-        / "docs" / "features" / "10-improvements.md"
-    )
-    if not md_path.exists():
-        pytest.skip("10-improvements.md not at expected location")
-    universe = _read_section_10_4_universe(md_path)
-    # Defence-in-depth: must contain the canonical landmarks.
-    assert 1 in universe, "IMPROVE-1 (Split api_server.py) missing"
-    assert 50 in universe, "IMPROVE-50 missing — table parser broken"
-    assert 118 in universe, (
-        "IMPROVE-118 (CI lint sibling) missing — Wave 13 row "
-        "should be registered"
-    )
-    # Sanity: shouldn't include placeholder or huge values.
-    assert 9999 not in universe
+# Note: the synthetic-markdown unit tests for the section-walker
+# helper moved to ``tests/test_lint_helpers.py`` per IMPROVE-126.
+# The walker is now ``_lint_helpers.read_doc_section_universe``,
+# parameterised on section_re + row_re. The real-doc landmark pin
+# (1/50/118/125) for §10.4 lives there too — we exercise the
+# real-doc lookup via the lint test below regardless.
 
 
 # ── Tier 1 lint test ─────────────────────────────────────────
@@ -402,7 +264,7 @@ def test_head_commit_body_improve_references_exist():
          forward reference — convention says use bare
          ``IMPROVE-N`` for forward refs.
     """
-    body = _get_head_commit_body()
+    body = get_head_commit_body()
     if not body:
         pytest.skip("No git history available")
 
@@ -411,11 +273,11 @@ def test_head_commit_body_improve_references_exist():
         # Nothing to verify; lint passes trivially.
         return
 
-    md_path = (
-        Path(__file__).resolve().parent.parent
-        / "docs" / "features" / "10-improvements.md"
+    universe = read_doc_section_universe(
+        get_repo_doc_path(),
+        section_re=_SECTION_10_4_RE,
+        row_re=_TABLE_ROW_RE,
     )
-    universe = _read_section_10_4_universe(md_path)
     if not universe:
         pytest.skip("§10.4 universe unavailable; cannot lint")
 

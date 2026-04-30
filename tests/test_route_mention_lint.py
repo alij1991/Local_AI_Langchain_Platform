@@ -36,6 +36,12 @@ contributors get immediate feedback at commit time, and
 the IMPROVE-90 → IMPROVE-99 class (claim a route, never
 implement) gets caught at the moment the claim lands.
 
+Wave 15 update: the ``_get_head_commit_body`` helper migrated
+to ``tests/_lint_helpers.py`` per IMPROVE-126 (consolidation
+across the IMPROVE-118 + IMPROVE-120 sibling lints). The route-
+specific extractor + ``_get_registered_routes`` helper stay
+local — they're not shared by the IMPROVE-N reference lint.
+
 Sources (2025-2026):
   * Wave 10 [IMPROVE-99] commit (0816973) — the drift case
     this lint catches forward-going.
@@ -50,9 +56,10 @@ Sources (2025-2026):
 from __future__ import annotations
 
 import re
-import subprocess
 
 import pytest
+
+from _lint_helpers import get_head_commit_body
 
 
 # Match VERB followed by whitespace and a /path. Path chars
@@ -102,29 +109,6 @@ def _extract_route_mentions(body: str) -> set[tuple[str, str]]:
             continue
         mentions.add((verb, path))
     return mentions
-
-
-def _get_head_commit_body() -> str:
-    """Return HEAD's commit body via ``git log -1 --format=%B``.
-
-    Returns empty string on any failure (no git, not a repo,
-    timeout). Caller should skip the lint test when the body
-    is empty rather than fail — the lint is a defence-in-
-    depth check, not a requirement that git is installed.
-    """
-    try:
-        result = subprocess.run(
-            ["git", "log", "-1", "--format=%B", "HEAD"],
-            capture_output=True,
-            text=True,
-            timeout=5.0,
-            check=False,
-        )
-        if result.returncode != 0:
-            return ""
-        return result.stdout
-    except (FileNotFoundError, subprocess.TimeoutExpired, OSError):
-        return ""
 
 
 def _get_registered_routes() -> set[tuple[str, str]]:
@@ -255,7 +239,7 @@ def test_head_commit_body_route_mentions_exist():
     Any of those needs fixing — either the body or the route
     table.
     """
-    body = _get_head_commit_body()
+    body = get_head_commit_body()
     if not body:
         pytest.skip("No git history available")
 

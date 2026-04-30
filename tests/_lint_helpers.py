@@ -1,0 +1,160 @@
+"""[IMPROVE-126] Shared CI-lint helpers for HEAD commit body
+inspection + doc-section universe extraction.
+
+[IMPROVE-118] / [IMPROVE-120] both shipped Tier 1 lints with
+the same shape: pull HEAD's commit body via ``git log``, extract
+references via regex, validate against a universe (registered
+routes / §10.4 IMPROVE-N rows). This module consolidates the
+shared scaffolding so future sibling lints (Wave-N references
+in IMPROVE-127, SHA-ancestor checks, cross-endpoint naming-drift)
+ship with ~50 LoC of glue rather than ~150 LoC of boilerplate.
+
+The helpers here are PUBLIC (no leading underscore) — they're
+intended to be imported by ``tests/test_*_lint.py`` files. No
+production code consumes them; this module lives in tests/ for
+test-only utility status. Pytest discovers tests/ (via the
+default rootdir-based collection mode) so direct imports like
+``from _lint_helpers import get_head_commit_body`` work without
+``tests/__init__.py`` (consistent with this codebase's
+"tests-not-a-package" pattern).
+
+Sources (2025-2026):
+  * Wave 13 [IMPROVE-118] commit (de52308) — route-mention lint
+    that contributed _get_head_commit_body + the regex-based
+    extractor pattern.
+  * Wave 14 [IMPROVE-120] commit (f947f47) — IMPROVE-N reference
+    lint that contributed _read_section_10_4_universe + the
+    title-tag self-reference pattern.
+  * Python ``subprocess`` docs (3.11):
+    https://docs.python.org/3.11/library/subprocess.html
+  * pytest rootdir-based collection (pytest 8.x reference 2025):
+    https://docs.pytest.org/en/stable/explanation/pythonpath.html
+"""
+from __future__ import annotations
+
+import re
+import subprocess
+from pathlib import Path
+
+# Stop a section walk at the next ``## `` heading. This is the
+# universal "section terminator" for the markdown shape used in
+# docs/features/10-improvements.md (and most markdown docs).
+_NEXT_SECTION_RE = re.compile(r"^## ")
+
+
+def get_head_commit_body() -> str:
+    """Return HEAD's commit body via ``git log -1 --format=%B``.
+
+    Returns empty string on any failure (no git, not a repo,
+    timeout). Callers should skip the lint test when the body
+    is empty rather than fail — the lint is a defence-in-depth
+    check, not a requirement that git is installed.
+
+    The 5-second timeout accommodates slow filesystems while
+    still failing fast in the broken-repo case. The
+    ``subprocess.run(check=False)`` keeps the helper tolerant
+    of any non-zero exit (e.g. detached HEAD without commits,
+    bare repo).
+
+    Returns:
+        Raw commit body string (may include trailing newline).
+        Empty string on any error path — caller treats as
+        "no body to lint" and skips the lint.
+    """
+    try:
+        result = subprocess.run(
+            ["git", "log", "-1", "--format=%B", "HEAD"],
+            capture_output=True,
+            text=True,
+            timeout=5.0,
+            check=False,
+        )
+        if result.returncode != 0:
+            return ""
+        return result.stdout
+    except (FileNotFoundError, subprocess.TimeoutExpired, OSError):
+        return ""
+
+
+def read_doc_section_universe(
+    md_path: Path,
+    *,
+    section_re: re.Pattern[str],
+    row_re: re.Pattern[str],
+) -> set[int]:
+    """Parse a markdown section and return integer IDs from
+    matching rows.
+
+    Generalised from [IMPROVE-120]'s ``_read_section_10_4_universe``
+    so siblings (Wave-N references in §10.5, future references
+    in other sections) can reuse the iterator scaffolding. The
+    walker:
+
+      1. Iterates lines until ``section_re`` matches a heading.
+      2. From there, iterates rows until the next ``## `` heading
+         (the universal section terminator).
+      3. For each row, applies ``row_re`` and adds group(1) (as
+         int) to the universe.
+
+    The walker is line-oriented and lazy — large markdown files
+    don't blow up memory.
+
+    Args:
+        md_path: Absolute path to the markdown file.
+        section_re: Regex matching the SECTION HEADING that
+            opens the universe (e.g. ``r"^## 10\\.4\\b"`` for
+            the §10.4 table; ``r"^## 10\\.5\\b"`` for the §10.5
+            wave roadmap).
+        row_re: Regex matching a TABLE ROW or SECTION ENTRY
+            with an integer ID in capture group 1. Examples:
+
+              * §10.4 table rows: ``r"^\\|\\s*(\\d+)\\s*\\|"``
+              * §10.5 wave headings: ``r"^### Wave (\\d+)\\b"``
+
+    Returns:
+        Set of integer IDs in the matched section. Empty set if
+        the file is missing OR the section heading isn't found
+        OR no rows match. Caller treats empty universe as
+        "skip the lint" (the graceful-degradation contract).
+    """
+    if not md_path.exists():
+        return set()
+    universe: set[int] = set()
+    in_section = False
+    with md_path.open(encoding="utf-8") as fh:
+        for line in fh:
+            if not in_section:
+                if section_re.match(line):
+                    in_section = True
+                continue
+            # In section: stop at next ``## `` heading.
+            if _NEXT_SECTION_RE.match(line):
+                break
+            match = row_re.match(line)
+            if match:
+                universe.add(int(match.group(1)))
+    return universe
+
+
+def get_repo_doc_path() -> Path:
+    """Return the canonical path to ``docs/features/10-improvements.md``.
+
+    The helper lives at ``tests/_lint_helpers.py``; the doc is
+    at ``<repo>/docs/features/10-improvements.md``. Centralising
+    the path lookup means callers across the lint test files
+    get the same canonical path regardless of where they're
+    invoked from.
+
+    The path may not exist in test environments without the
+    docs/ tree (rare; CI checks out the full tree). Callers
+    should check existence before reading and ``pytest.skip``
+    when absent.
+
+    Returns:
+        Absolute path. Always returns a deterministic path
+        regardless of current working directory.
+    """
+    return (
+        Path(__file__).resolve().parent.parent
+        / "docs" / "features" / "10-improvements.md"
+    )
