@@ -7,6 +7,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:local_ai_flutter_client/services/api_client.dart';
 import 'package:local_ai_flutter_client/widgets/tile_mode_badge.dart';
+import 'package:local_ai_flutter_client/widgets/tile_size_override_field.dart';
 
 class ImagesPage extends StatefulWidget {
   const ImagesPage({super.key, required this.api});
@@ -38,6 +39,13 @@ class _ImagesPageState extends State<ImagesPage> with TickerProviderStateMixin {
   bool _enableRefine = false;
   bool _enableUpscale = false;
   bool _enablePostprocess = false;
+  // [IMPROVE-139] Operator-supplied tile_size_override for the
+  // /images/upscale POST body. ``null`` = fall through to the
+  // [IMPROVE-100] band calibration on the backend; positive int
+  // = explicit override that wins per the [IMPROVE-117] contract.
+  // Power-user knob silently ignored on realesrgan / lanczos
+  // methods; honored on latent / sdxl_x4.
+  int? _tileSizeOverride;
   int _width = 1024;
   int _height = 1024;
   int _steps = 20;
@@ -783,11 +791,19 @@ class _ImagesPageState extends State<ImagesPage> with TickerProviderStateMixin {
     });
     _startProgressPolling();
     try {
-      await widget.api.post('/images/upscale', {
+      // [IMPROVE-139] Build the body with the optional
+      // tile_size_override. Backend silently ignores the field
+      // on realesrgan / lanczos paths and honors it on
+      // latent / sdxl_x4 per the [IMPROVE-117] contract.
+      final body = <String, dynamic>{
         'session_id': _activeSession!['id'],
         'image_id': _selectedImageId,
         'scale': 4,
-      });
+      };
+      if (_tileSizeOverride != null) {
+        body['tile_size_override'] = _tileSizeOverride;
+      }
+      await widget.api.post('/images/upscale', body);
       if (!mounted) return;
       await _openSession(_activeSession!['id'].toString());
       if (!mounted) return;
@@ -1988,6 +2004,41 @@ class _ImagesPageState extends State<ImagesPage> with TickerProviderStateMixin {
                     ),
             ),
           ]),
+          // [IMPROVE-139] Advanced upscale settings — collapsible
+          // expansion tile carrying the tile_size_override field.
+          // Hidden by default to keep the Tools tab compact for the
+          // typical realesrgan-default flow; expands when the
+          // operator wants to thread the [IMPROVE-117] knob to the
+          // diffusers (latent / sdxl_x4) paths.
+          if (!_inpaintMode) ...[
+            const SizedBox(height: 4),
+            Theme(
+              data: Theme.of(context).copyWith(
+                dividerColor: Colors.transparent,
+              ),
+              child: ExpansionTile(
+                tilePadding: const EdgeInsets.symmetric(horizontal: 4),
+                childrenPadding: const EdgeInsets.symmetric(
+                  horizontal: 4, vertical: 4,
+                ),
+                dense: true,
+                visualDensity: VisualDensity.compact,
+                title: const Text(
+                  'Advanced upscale settings',
+                  style: TextStyle(fontSize: 11, fontWeight: FontWeight.w500),
+                ),
+                children: [
+                  TileSizeOverrideField(
+                    value: _tileSizeOverride,
+                    enabled: !_busy,
+                    helperText: 'Override band calibration. '
+                        'Honored on latent / sdxl_x4 methods only.',
+                    onChanged: (v) => setState(() => _tileSizeOverride = v),
+                  ),
+                ],
+              ),
+            ),
+          ],
           // Inpaint controls
           if (_inpaintMode) ...[
             const SizedBox(height: 8),
