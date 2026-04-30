@@ -6407,6 +6407,22 @@ class ImageGenerationService:
         (10**9, 256),    # >8K output: aggressive calibration
     ]
 
+    # [IMPROVE-133] The diffusers default ``tile_overlap_factor``
+    # for VAE classes that accept the kwarg (AutoencoderKLCogVideoX,
+    # AutoencoderDC, the Hunyuan family). Surfaced in the v=2
+    # metadata schema as ``tile_overlap_factor_default`` so
+    # dashboards can chart override-vs-default distribution
+    # alongside the ``tile_overlap_factor`` (effective) and
+    # ``tile_stride_overridden`` (intent) fields. The base
+    # AutoencoderKL used by the SD x4 + latent upscalers today
+    # does NOT accept the kwarg — when ``tile_stride_honored=False``
+    # the default is "no overlap factor applied" rather than
+    # ``_DIFFUSERS_DEFAULT_TILE_OVERLAP_FACTOR``; dashboards should
+    # combine the two fields to interpret the actual VAE state.
+    # Reference: diffusers AutoencoderKLCogVideoX.enable_tiling
+    # signature (canonical 2025): ``tile_overlap_factor=0.25``.
+    _DIFFUSERS_DEFAULT_TILE_OVERLAP_FACTOR: float = 0.25
+
     @classmethod
     def _resolve_tile_size_with_override(
         cls,
@@ -6980,6 +6996,28 @@ class ImageGenerationService:
                         None if not tile_mode
                         else getattr(pipe, "_tile_stride_kwarg_honored", False)
                     ),
+                    # [IMPROVE-133] v=2 metadata schema dimensions.
+                    # tile_overlap_factor_default surfaces the
+                    # diffusers default (0.25) so dashboards can
+                    # chart override-vs-default distribution
+                    # alongside the effective tile_overlap_factor.
+                    # None when no tile_mode (the field is n/a) OR
+                    # when tile_mode engaged but VAE doesn't accept
+                    # the kwarg (no concept of "default" applies).
+                    # metadata_schema_version pins the v=2 contract
+                    # so dashboards know whether to expect the
+                    # default-value field.
+                    "metadata_schema_version": 2,
+                    "tile_overlap_factor_default": (
+                        None if not tile_mode
+                        else (
+                            self._DIFFUSERS_DEFAULT_TILE_OVERLAP_FACTOR
+                            if getattr(
+                                pipe, "_tile_stride_kwarg_honored", False,
+                            )
+                            else None
+                        )
+                    ),
                 },
             )
         except ImportError as exc:
@@ -7142,6 +7180,20 @@ class ImageGenerationService:
                     "tile_stride_honored": (
                         None if not tile_mode
                         else getattr(pipe, "_tile_stride_kwarg_honored", False)
+                    ),
+                    # [IMPROVE-133] Same v=2 metadata schema
+                    # dimensions as the latent path — see
+                    # _upscale_latent for the full rationale.
+                    "metadata_schema_version": 2,
+                    "tile_overlap_factor_default": (
+                        None if not tile_mode
+                        else (
+                            self._DIFFUSERS_DEFAULT_TILE_OVERLAP_FACTOR
+                            if getattr(
+                                pipe, "_tile_stride_kwarg_honored", False,
+                            )
+                            else None
+                        )
                     ),
                 },
             )

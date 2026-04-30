@@ -1842,3 +1842,197 @@ def test_metadata_tile_stride_honored_none_when_no_tile_mode(
     assert result.ok is True
     assert result.metadata["tile_mode"] is False
     assert result.metadata["tile_stride_honored"] is None
+
+
+# ── [IMPROVE-133] v=2 metadata schema ────────────────────────
+
+
+def test_metadata_schema_version_is_2_on_latent_path(
+    monkeypatch, tmp_path,
+):
+    """[IMPROVE-133] Latent upscaler returns metadata_schema_version=2.
+    Pin the version field so dashboards can branch on the v=2
+    dimensions (tile_overlap_factor_default) being present."""
+    import sys
+    s = _make_service()
+    src = _write_png(tmp_path)
+    _patch_torch_with_vram(monkeypatch, free_gb=2.0)
+
+    fake_pipe = MagicMock()
+    fake_pipe.return_value.images = [Image.new("RGB", (256, 256))]
+    fake_pipe.enable_sequential_cpu_offload = MagicMock()
+    fake_pipe.enable_vae_tiling = MagicMock()
+    fake_pipe.enable_vae_slicing = MagicMock()
+    fake_pipeline_class = MagicMock()
+    fake_pipeline_class.from_pretrained = MagicMock(return_value=fake_pipe)
+    fake_diffusers = MagicMock()
+    fake_diffusers.StableDiffusionLatentUpscalePipeline = fake_pipeline_class
+    monkeypatch.setitem(sys.modules, "diffusers", fake_diffusers)
+
+    result = s.upscale_image(
+        image_path=src, prompt="x", method="latent",
+        tile_stride_override=0.4,
+    )
+    assert result.ok is True
+    assert result.metadata["metadata_schema_version"] == 2
+
+
+def test_metadata_tile_overlap_factor_default_when_kwarg_honored(
+    monkeypatch, tmp_path,
+):
+    """[IMPROVE-133] When tile_mode engages AND the VAE accepts
+    the tile_overlap_factor kwarg (MagicMock case), the v=2
+    metadata field tile_overlap_factor_default carries the
+    diffusers default (0.25). Dashboards can chart override-
+    vs-default distribution by combining with the operator's
+    effective tile_overlap_factor."""
+    import sys
+    s = _make_service()
+    src = _write_png(tmp_path)
+    _patch_torch_with_vram(monkeypatch, free_gb=2.0)
+
+    fake_pipe = MagicMock()
+    fake_pipe.return_value.images = [Image.new("RGB", (256, 256))]
+    fake_pipe.enable_sequential_cpu_offload = MagicMock()
+    fake_pipe.enable_vae_tiling = MagicMock()  # accepts everything
+    fake_pipe.enable_vae_slicing = MagicMock()
+    fake_pipeline_class = MagicMock()
+    fake_pipeline_class.from_pretrained = MagicMock(return_value=fake_pipe)
+    fake_diffusers = MagicMock()
+    fake_diffusers.StableDiffusionLatentUpscalePipeline = fake_pipeline_class
+    monkeypatch.setitem(sys.modules, "diffusers", fake_diffusers)
+
+    result = s.upscale_image(
+        image_path=src, prompt="x", method="latent",
+        tile_stride_override=0.4,
+    )
+    assert result.ok is True
+    assert result.metadata["tile_mode"] is True
+    assert result.metadata["tile_stride_honored"] is True
+    # Default surfaced — operator chose 0.4, would-have-been 0.25.
+    assert result.metadata["tile_overlap_factor_default"] == 0.25
+
+
+def test_metadata_tile_overlap_factor_default_none_when_not_honored(
+    monkeypatch, tmp_path,
+):
+    """[IMPROVE-133] When tile_mode engages but the VAE rejects
+    the tile_overlap_factor kwarg (TypeError case, the
+    AutoencoderKL today), the v=2 metadata field
+    tile_overlap_factor_default is None — the concept of
+    "default" doesn't apply when the kwarg is unsupported.
+    Dashboards combine with tile_stride_honored=False to
+    interpret the actual VAE state."""
+    import sys
+    s = _make_service()
+    src = _write_png(tmp_path)
+    _patch_torch_with_vram(monkeypatch, free_gb=2.0)
+
+    fake_pipe = MagicMock()
+    fake_pipe.return_value.images = [Image.new("RGB", (256, 256))]
+    fake_pipe.enable_sequential_cpu_offload = MagicMock()
+    fake_pipe.enable_vae_slicing = MagicMock()
+
+    def _reject_stride(**kwargs):
+        if "tile_overlap_factor" in kwargs:
+            raise TypeError("no tile_overlap_factor support")
+        return None
+
+    fake_pipe.enable_vae_tiling = _reject_stride
+    fake_pipeline_class = MagicMock()
+    fake_pipeline_class.from_pretrained = MagicMock(return_value=fake_pipe)
+    fake_diffusers = MagicMock()
+    fake_diffusers.StableDiffusionLatentUpscalePipeline = fake_pipeline_class
+    monkeypatch.setitem(sys.modules, "diffusers", fake_diffusers)
+
+    result = s.upscale_image(
+        image_path=src, prompt="x", method="latent",
+        tile_stride_override=0.4,
+    )
+    assert result.ok is True
+    assert result.metadata["tile_mode"] is True
+    assert result.metadata["tile_stride_honored"] is False
+    # Default not applicable — kwarg unsupported by VAE.
+    assert result.metadata["tile_overlap_factor_default"] is None
+
+
+def test_metadata_tile_overlap_factor_default_none_when_no_tile_mode(
+    monkeypatch, tmp_path,
+):
+    """[IMPROVE-133] When tile_mode is False (small input + no
+    override), tile_overlap_factor_default is None — the field
+    is n/a alongside tile_stride_honored. Pin so dashboards
+    render "n/a" consistently for non-tile-mode runs."""
+    import sys
+    s = _make_service()
+    src = _write_png(tmp_path)
+    _patch_torch_with_vram(monkeypatch, free_gb=8.0)
+
+    fake_pipe = MagicMock()
+    fake_pipe.return_value.images = [Image.new("RGB", (256, 256))]
+    fake_pipe.enable_sequential_cpu_offload = MagicMock()
+    fake_pipe.enable_vae_tiling = MagicMock()
+    fake_pipe.enable_vae_slicing = MagicMock()
+    fake_pipeline_class = MagicMock()
+    fake_pipeline_class.from_pretrained = MagicMock(return_value=fake_pipe)
+    fake_diffusers = MagicMock()
+    fake_diffusers.StableDiffusionLatentUpscalePipeline = fake_pipeline_class
+    monkeypatch.setitem(sys.modules, "diffusers", fake_diffusers)
+
+    result = s.upscale_image(
+        image_path=src, prompt="x", method="latent",
+    )
+    assert result.ok is True
+    assert result.metadata["tile_mode"] is False
+    assert result.metadata["tile_overlap_factor_default"] is None
+    # metadata_schema_version still pinned even on non-tile path.
+    assert result.metadata["metadata_schema_version"] == 2
+
+
+def test_metadata_v2_fields_present_on_sdxl_x4_path(
+    monkeypatch, tmp_path,
+):
+    """[IMPROVE-133] SDXL x4 upscaler ships the same v=2 metadata
+    fields as the latent path (mirror pin so future drift between
+    the two paths surfaces here)."""
+    import sys
+    s = _make_service()
+    src = _write_png(tmp_path)
+    _patch_torch_with_vram(monkeypatch, free_gb=4.0)
+
+    fake_pipe = MagicMock()
+    fake_pipe.return_value.images = [Image.new("RGB", (1024, 1024))]
+    fake_pipe.enable_sequential_cpu_offload = MagicMock()
+    fake_pipe.enable_vae_tiling = MagicMock()
+    fake_pipe.enable_vae_slicing = MagicMock()
+    fake_pipeline_class = MagicMock()
+    fake_pipeline_class.from_pretrained = MagicMock(return_value=fake_pipe)
+    fake_diffusers = MagicMock()
+    fake_diffusers.StableDiffusionUpscalePipeline = fake_pipeline_class
+    monkeypatch.setitem(sys.modules, "diffusers", fake_diffusers)
+
+    result = s.upscale_image(
+        image_path=src, prompt="x", method="sdxl_x4",
+        tile_stride_override=0.3,
+    )
+    assert result.ok is True
+    assert result.metadata["method"] == "sdxl_x4"
+    # v=2 schema dimensions present on sdxl_x4 path:
+    assert result.metadata["metadata_schema_version"] == 2
+    assert "tile_overlap_factor_default" in result.metadata
+    # MagicMock accepts kwargs → default surfaces as 0.25.
+    assert result.metadata["tile_overlap_factor_default"] == 0.25
+
+
+def test_diffusers_default_tile_overlap_factor_constant_value():
+    """[IMPROVE-133] Pin the constant so a future commit changing
+    it surfaces as a deliberate update, not a silent regression.
+    Reference: diffusers AutoencoderKLCogVideoX.enable_tiling
+    (canonical 2025) uses tile_overlap_factor=0.25 default."""
+    from local_ai_platform.images.service import (
+        ImageGenerationService,
+    )
+    assert (
+        ImageGenerationService._DIFFUSERS_DEFAULT_TILE_OVERLAP_FACTOR
+        == 0.25
+    )
