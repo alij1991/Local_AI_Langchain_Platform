@@ -1512,6 +1512,19 @@ def upscale_image_endpoint(
             out_path = image_output_path(session_id, str(uuid.uuid4()))
             out_path.parent.mkdir(parents=True, exist_ok=True)
             out_path.write_bytes(result.image_bytes)
+            # [IMPROVE-138] Persist the full v=2 metadata (per
+            # IMPROVE-133) on the saved image's params_json so
+            # the Flutter editor v2 surface (TileModeBadge widget)
+            # can render badges from session-image data without
+            # a separate fetch. The flat ``scale`` + ``method``
+            # keys stay for backward compat with pre-Wave-18
+            # consumers reading params directly.
+            persisted_params: dict[str, Any] = {
+                "scale": scale,
+                "method": (result.metadata or {}).get("method", "unknown"),
+            }
+            if result.metadata:
+                persisted_params["metadata"] = result.metadata
             add_image(
                 session_id=session_id,
                 model_id="upscale",
@@ -1519,7 +1532,7 @@ def upscale_image_endpoint(
                 file_path=str(out_path),
                 parent_image_id=image_id or None,
                 operation="upscale",
-                params={"scale": scale, "method": (result.metadata or {}).get("method", "unknown")},
+                params=persisted_params,
             )
         except Exception as exc:
             logger.warning("Failed to save upscaled image: %s", exc)

@@ -6,6 +6,7 @@ import 'package:file_picker/file_picker.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:local_ai_flutter_client/services/api_client.dart';
+import 'package:local_ai_flutter_client/widgets/tile_mode_badge.dart';
 
 class ImagesPage extends StatefulWidget {
   const ImagesPage({super.key, required this.api});
@@ -1122,6 +1123,27 @@ class _ImagesPageState extends State<ImagesPage> with TickerProviderStateMixin {
 
   // ── IMAGE VIEWER ──
   Widget _buildImageViewer(ColorScheme cs, List<Map<String, dynamic>> images, String? selectedUrl) {
+    // [IMPROVE-138] Pull v=2 metadata for the selected image so
+    // the TileModeBadge can render over the viewer when an
+    // upscaled image is in focus. Non-upscale images surface a
+    // SizedBox.shrink (badge widget gates on the v=2 schema
+    // marker internally).
+    Map<String, dynamic>? selectedTileMetadata;
+    if (_selectedImageId != null) {
+      final selectedImg = images
+          .cast<Map<String, dynamic>>()
+          .firstWhere(
+            (i) => i['id']?.toString() == _selectedImageId,
+            orElse: () => <String, dynamic>{},
+          );
+      if (selectedImg.isNotEmpty) {
+        final params = _paramsFor(selectedImg);
+        final meta = params['metadata'];
+        if (meta is Map<String, dynamic>) {
+          selectedTileMetadata = meta;
+        }
+      }
+    }
     return Column(
       children: [
         // Main image area
@@ -1135,21 +1157,38 @@ class _ImagesPageState extends State<ImagesPage> with TickerProviderStateMixin {
             ),
             child: ClipRRect(
               borderRadius: const BorderRadius.vertical(top: Radius.circular(12)),
-              child: selectedUrl == null
-                  ? Center(
-                      child: Column(mainAxisSize: MainAxisSize.min, children: [
-                        Icon(Icons.image_outlined, size: 64, color: cs.onSurfaceVariant.withValues(alpha: 0.3)),
-                        const SizedBox(height: 12),
-                        Text('Generate an image to begin', style: TextStyle(fontSize: 14, color: cs.onSurfaceVariant.withValues(alpha: 0.5))),
-                      ]),
-                    )
-                  : _inpaintMode
-                      ? _buildInpaintOverlay(selectedUrl)
-                      : InteractiveViewer(
-                          minScale: 0.5,
-                          maxScale: 6,
-                          child: Center(child: Image.network(selectedUrl, filterQuality: FilterQuality.medium)),
-                        ),
+              child: Stack(
+                children: [
+                  Positioned.fill(
+                    child: selectedUrl == null
+                        ? Center(
+                            child: Column(mainAxisSize: MainAxisSize.min, children: [
+                              Icon(Icons.image_outlined, size: 64, color: cs.onSurfaceVariant.withValues(alpha: 0.3)),
+                              const SizedBox(height: 12),
+                              Text('Generate an image to begin', style: TextStyle(fontSize: 14, color: cs.onSurfaceVariant.withValues(alpha: 0.5))),
+                            ]),
+                          )
+                        : _inpaintMode
+                            ? _buildInpaintOverlay(selectedUrl)
+                            : InteractiveViewer(
+                                minScale: 0.5,
+                                maxScale: 6,
+                                child: Center(child: Image.network(selectedUrl, filterQuality: FilterQuality.medium)),
+                              ),
+                  ),
+                  // [IMPROVE-138] Tile-mode badge overlay (top-
+                  // right). Only renders when the selected image
+                  // is an upscaled image with v=2 metadata. Pinned
+                  // off the inpaint mode since that path has its
+                  // own top-right indicator.
+                  if (selectedTileMetadata != null && !_inpaintMode)
+                    Positioned(
+                      top: 12,
+                      right: 12,
+                      child: TileModeBadge(metadata: selectedTileMetadata),
+                    ),
+                ],
+              ),
             ),
           ),
         ),

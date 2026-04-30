@@ -2036,3 +2036,194 @@ def test_diffusers_default_tile_overlap_factor_constant_value():
         ImageGenerationService._DIFFUSERS_DEFAULT_TILE_OVERLAP_FACTOR
         == 0.25
     )
+
+
+# ── [IMPROVE-138] Persisted v=2 metadata on saved upscale image ───
+
+
+def test_endpoint_persists_v2_metadata_to_image_params(
+    tmp_path, monkeypatch,
+):
+    """[IMPROVE-138] When the /images/upscale handler runs with a
+    session_id, the saved image's params_json must carry the full
+    v=2 metadata under a ``metadata`` key (in addition to the
+    pre-Wave-18 flat ``scale`` + ``method`` keys for backward
+    compat). The Flutter Wave 18 TileModeBadge widget reads the
+    nested metadata to render badges from session-image data
+    without a separate fetch.
+
+    Pin the persistence contract — without this the Flutter side
+    would silently degrade to "no tile-mode badges visible after
+    page reload" since the upscale response metadata is not
+    captured on the image record otherwise.
+
+    The test mocks ImageGenerationService.upscale_image to return
+    a synthetic v=2 metadata dict (matching the shape the real
+    upscale paths emit per [IMPROVE-133]: metadata_schema_version,
+    tile_mode, tile_size_overridden, tile_stride_honored,
+    tile_overlap_factor_default). Real upscale paths require GPU
+    + multi-GB diffusers downloads — out of scope for CI.
+    """
+    pytest.importorskip("fastapi")
+    import json
+    from fastapi.testclient import TestClient
+    from local_ai_platform import db as db_mod
+    from local_ai_platform.images.service import ImageRuntimeResult
+
+    path = tmp_path / "app.db"
+    monkeypatch.setattr(db_mod, "DB_PATH", path)
+    db_mod.init_db()
+
+    import api_server
+    src = _write_png(tmp_path)
+
+    # Synthetic v=2 metadata mirroring the shape Wave 16
+    # [IMPROVE-133] surfaces on the latent + sdxl_x4 paths.
+    fake_metadata = {
+        "method": "latent",
+        "tile_mode": True,
+        "tile_size": 384,
+        "tile_size_overridden": True,
+        "tile_stride": 0.3,
+        "tile_stride_overridden": True,
+        "tile_stride_honored": True,
+        "tile_overlap_factor_default": 0.25,
+        "metadata_schema_version": 2,
+        "upscaled_size": "256x256",
+    }
+
+    def fake_upscale(**kwargs):
+        return ImageRuntimeResult(
+            ok=True,
+            image_bytes=b"\x89PNG\r\n\x1a\nfake-bytes",
+            metadata=fake_metadata,
+        )
+
+    with TestClient(api_server.app) as c:
+        # Lifespan must have run before we can patch app.state —
+        # see tests/test_api_server.py "_run_lifespan" fixture
+        # for the rationale.
+        monkeypatch.setattr(
+            api_server.app.state.image_service,
+            "upscale_image",
+            fake_upscale,
+        )
+        # Create an image session.
+        sess_resp = c.post(
+            "/images/sessions", json={"title": "upscale-meta-test"},
+        )
+        assert sess_resp.status_code == 200
+        session_id = sess_resp.json()["id"]
+
+        # POST /images/upscale with session_id + image_path.
+        resp = c.post(
+            "/images/upscale",
+            json={
+                "session_id": session_id,
+                "image_path": src,
+                "method": "latent",
+                "scale": 2,
+            },
+        )
+        assert resp.status_code == 200
+        # Endpoint response unchanged (still flat metadata).
+        assert resp.json()["metadata"]["metadata_schema_version"] == 2
+
+        # Read back the saved image — the IMPROVE-138 persistence
+        # contract.
+        detail = c.get(f"/images/sessions/{session_id}")
+        assert detail.status_code == 200
+        images = detail.json().get("images", [])
+        assert len(images) >= 1
+        saved = images[-1]  # latest = the upscaled one
+        params = saved.get("params_json")
+        # Sessions return params_json as a JSON string from
+        # SQLite; parse it.
+        if isinstance(params, str):
+            params = json.loads(params)
+        assert isinstance(params, dict), (
+            f"params_json must be a dict-shaped payload, "
+            f"got {type(params).__name__}"
+        )
+        # Backward-compat flat keys preserved.
+        assert params["scale"] == 2
+        assert params["method"] == "latent"
+        # NEW v=2 metadata block under ``metadata`` key.
+        assert "metadata" in params, (
+            "saved upscale image must carry v=2 metadata in "
+            "params['metadata'] for IMPROVE-138 Flutter "
+            "TileModeBadge consumption"
+        )
+        meta = params["metadata"]
+        assert meta["metadata_schema_version"] == 2
+        assert meta["tile_mode"] is True
+        assert meta["tile_size_overridden"] is True
+        assert meta["tile_stride_honored"] is True
+        assert meta["tile_overlap_factor_default"] == 0.25
+
+
+def test_endpoint_persists_metadata_even_when_realesrgan(
+    tmp_path, monkeypatch,
+):
+    """[IMPROVE-138] Even non-diffusers methods (realesrgan /
+    lanczos) get their metadata persisted — the dispatcher writes
+    a method-shaped metadata dict regardless. The Flutter side
+    needs to render "no tile mode" for these instead of silently
+    omitting badges, so the metadata key must be present.
+
+    Pin: when method=lanczos returns metadata WITHOUT v=2 fields
+    (since lanczos doesn't tile), params['metadata'] still
+    contains the dict so Flutter can detect "tile_mode absent /
+    falsy → render no-tile state" rather than "metadata missing
+    → render no badge at all".
+    """
+    pytest.importorskip("fastapi")
+    import json
+    from fastapi.testclient import TestClient
+    from local_ai_platform import db as db_mod
+    from local_ai_platform.images.service import ImageRuntimeResult
+
+    path = tmp_path / "app.db"
+    monkeypatch.setattr(db_mod, "DB_PATH", path)
+    db_mod.init_db()
+
+    import api_server
+    src = _write_png(tmp_path)
+
+    # lanczos metadata — no v=2 fields (lanczos doesn't tile).
+    fake_metadata = {
+        "method": "lanczos",
+        "upscaled_size": "128x128",
+    }
+    with TestClient(api_server.app) as c:
+        monkeypatch.setattr(
+            api_server.app.state.image_service,
+            "upscale_image",
+            lambda **kwargs: ImageRuntimeResult(
+                ok=True, image_bytes=b"fake", metadata=fake_metadata,
+            ),
+        )
+        sess_resp = c.post(
+            "/images/sessions", json={"title": "lanczos-meta-test"},
+        )
+        session_id = sess_resp.json()["id"]
+        c.post(
+            "/images/upscale",
+            json={
+                "session_id": session_id,
+                "image_path": src,
+                "method": "lanczos",
+                "scale": 2,
+            },
+        )
+        detail = c.get(f"/images/sessions/{session_id}")
+        images = detail.json().get("images", [])
+        saved = images[-1]
+        params = saved["params_json"]
+        if isinstance(params, str):
+            params = json.loads(params)
+        assert "metadata" in params
+        assert params["metadata"]["method"] == "lanczos"
+        # No tile_mode key present → Flutter renders "no tile
+        # mode" state.
+        assert "tile_mode" not in params["metadata"]
