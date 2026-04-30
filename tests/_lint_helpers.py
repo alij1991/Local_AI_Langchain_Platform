@@ -122,6 +122,55 @@ def get_recent_commit_titles(*, depth: int = 10) -> list[str]:
         return []
 
 
+def is_ancestor_sha(sha: str) -> bool | None:
+    """[IMPROVE-135] Verify whether ``sha`` is a real ancestor
+    of HEAD.
+
+    Wraps ``git merge-base --is-ancestor <sha> HEAD``:
+
+      * Exit 0  → ``sha`` IS an ancestor of HEAD → return True.
+      * Exit 1  → ``sha`` is a real object but NOT in HEAD's
+                  history (different branch, force-pushed
+                  earlier history, cherry-pick mismatch) →
+                  return False.
+      * Exit 128 (or other) → ``sha`` doesn't resolve to a real
+                  object in this repo (likely a hex string
+                  false-positive, e.g. a hash digest or a
+                  typo'd SHA) → return None.
+
+    Falls back to None on any subprocess failure (no git, not a
+    repo, timeout, OS error). The lint test treats None as
+    "skip — likely false-positive on a hex-shaped string that
+    isn't actually a SHA".
+
+    Args:
+        sha: 7-40 char hex string. The function passes it to
+            git verbatim; git resolves short prefixes
+            ambiguously when collisions exist (returns
+            error 128 on ambiguity, treated as None here).
+
+    Returns:
+        True / False / None per the contract above.
+    """
+    try:
+        result = subprocess.run(
+            ["git", "merge-base", "--is-ancestor", sha, "HEAD"],
+            capture_output=True,
+            text=True,
+            timeout=5.0,
+            check=False,
+        )
+        if result.returncode == 0:
+            return True
+        if result.returncode == 1:
+            return False
+        # Other exit codes (128 for unknown object, ambiguous
+        # short prefix, etc.) → treat as "not a real SHA".
+        return None
+    except (FileNotFoundError, subprocess.TimeoutExpired, OSError):
+        return None
+
+
 def read_doc_section_universe(
     md_path: Path,
     *,
