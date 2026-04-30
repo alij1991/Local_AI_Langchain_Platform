@@ -10,7 +10,7 @@
 
 - **137 improvements** flagged inline as `[IMPROVE-N]` in chapters 1–9 + the Wave 5/6/7/8/9/10/11/12/13/14/15/16 audits (NEW from Wave 6 audit: 71/72/73/74; NEW from Wave 7: 75/76/77/78/79/80/81/82; NEW from Wave 8: 83/84/85/86/87/88; NEW from Wave 9: 89/90/91/92/93/94; NEW from Wave 10: 95/96/97/98/99/100; NEW from Wave 11: 101/102/103/104/105/106; NEW from Wave 12: 107/108/109/110/111/112; NEW from Wave 13: 113/114/115/116/117/118; NEW from Wave 14: 119/120/121/122/123/124/125; NEW from Wave 15: 126/127/128/129/130/131; NEW from Wave 16: 132/133/134/135/136/137).
 - **10 themes** — security, architecture, observability, tracing, UX, memory & context, model & inference, background tasks, voice, and tools/MCP.
-- **16 waves** fully shipped (Waves 1-16); **1** standing in deferred queues (post-Wave-16 backlog → Wave 17).
+- **17 waves** fully shipped (Waves 1-16 numbered + Wave 17 doc-only cleanup); **1** standing in deferred queues (post-Wave-17 backlog → Wave 18+).
 
 All improvements are traceable back to a chapter + a 2025–2026 citation. This chapter is pure planning — *what* + *why this order*; *how* is in each origin chapter.
 
@@ -781,7 +781,49 @@ pin tests after migration) + IMPROVE-136 (3 schema-validation
 pins) + IMPROVE-137 (zero net delta — purely import-form
 refactor) all shipped in <0.2d each.
 
-### Wave 17 — Deferred (queued for next iteration)
+### Wave 17 — Deferred queue rationalization + open-questions refresh (✓ shipped 2026-04-30)
+
+Theme: a deliberate inflection-point wave that rationalises
+the Wave 17 deferred queue and refreshes the §10.7 open
+questions to reflect 16 waves of shipped reality. Doc-only —
+no code changes, no numbered IMPROVE-N items. Single commit
+captures the queue trim + open-questions restructure.
+
+Diagnosis (from end-of-Wave-16 strategic review): the
+deferred queue at Wave 17 start had ~60 items, ~22 of which
+were marginal or held-pending-trigger that had been "Hold"
+for 4-8 waves with no movement. And §10.7 Q1-Q16 still
+reflected the 2026-04-23 state — multiple gated IMPROVE-N
+items (2/10/20/21/26) hinged on Q1 (distribution) which
+hadn't been re-confirmed against shipped reality.
+
+Outcome: Wave 18+ planning gets a clean signal — the queue
+trims to ~32 substantive items with explicit ship triggers,
+~22 rejected items archived to NEW §10.5.1 Considered +
+rejected (so future audits can see prior consideration), 1
+promoted (Tranche A → Wave 18 numbered work), §10.7
+restructured into RESOLVED (4) / STILL OPEN (~25) / OBSOLETE
+(1) subsections with explicit DECISION DEADLINEs on the
+gating questions (Q1 distribution, Q4 Chatterbox, Q7
+instruction tools, Q15 ONNX styles, Q16 Mem0).
+
+| # | Tag | SHA | What landed | Tests |
+|---|---|---|---|---:|
+| 1 | (doc) | this | Wave 17: deferred queue rationalisation + open-questions refresh. Trim ~60-item §10.5 deferred queue to ~32 substantive items, archive ~22 to NEW §10.5.1 Considered + rejected, promote Tranche A to Wave 18 numbered work, restructure §10.7 into Resolved (4) / Still open (~25) / Obsolete (1). | 0 |
+
+Net: +0 tests (doc-only). 1 commit. 0 numbered IMPROVE-N
+items. The wave's deliberate cleanup-shape — planning hygiene
++ open-questions refresh — gets Wave 18+ a clean signal
+without the queue-noise backlog from earlier holds.
+
+### Wave 18 — Deferred (queued for next iteration)
+
+Trimmed in Wave 17 from ~60 items to the substantive
+remainder. Each item below has either a clear ship trigger
+(waits for hardware data, waits for 2nd consumer, gated on
+§10.7 question resolution) or a concrete next-step plan.
+Items removed during the Wave 17 cleanup are archived in
+§10.5.1 below.
 
 Carried-over NEW candidates that didn't promote in Wave 14:
 - [IMPROVE-NEW-2] Unify token-budget primitive (waits for Tranche D)
@@ -790,46 +832,26 @@ Carried-over NEW candidates that didn't promote in Wave 14:
 - [IMPROVE-NEW-10] Per-feature smoke fixtures
 (NEW-5 promoted to IMPROVE-125 in Wave 14.)
 
-Wave-12-audit items NOT promoted in Wave 13/14:
+Wave-12-audit items NOT promoted in Wave 13/14/17:
 - TypedDict ``RejectionRow`` to tighten the
   ``_rollup_rejections`` return type. Held until 4th
   consumer surfaces.
 
-Wave-13-audit items (still queued):
+Wave-13-audit items still queued (1 of 6 carries forward;
+5 archived to §10.5.1 in Wave 17):
 - Helper sibling ``is_kwarg_accepted(fn, key) -> bool`` for
   the 2 probe callsites in ai_enhance.py (2432/2949) that
   IMPROVE-114 left inline. Hold until a 3rd probe callsite
   surfaces.
-- Lint variant that walks ``git log --since=<N days>`` to
-  catch routes drifted BETWEEN commits (vs IMPROVE-118's
-  HEAD-only scope). Hold until HEAD-only proves
-  insufficient.
-- Pre-commit-hook variant of IMPROVE-118 (vs the Tier 1
-  test variant shipped). Hold; Tier 1 has zero install
-  friction.
-- "Did you mean?" fuzzy-match suggestions in IMPROVE-118's
-  failure message via Levenshtein distance against actual
-  route paths. Marginal.
-- "Auto-tune" mode for /images/upscale that learns the
-  per-card + per-resolution sweet spot from past upscale
-  runs. Multi-day project; out of scope.
-- Bundle.json could record FULL git-revision (not just
-  short-SHA) + dirty-tree marker for deeper provenance.
-  Marginal — short SHA is sufficient. Hold.
 
-Wave-14-audit items NOT promoted in Wave 15/16:
+Wave-14-audit items NOT promoted in Wave 15/16/17 (4 of 6
+carry forward; 2 archived to §10.5.1 in Wave 17):
 - Per-band stride CALIBRATION (vs IMPROVE-121's override-
   only ship). Waits for real-hardware sensitivity data
   (8GB 30xx benchmark suite). ~0.5d. Hold.
 - Sibling fixture ``obs_test_client_with_events`` with
   prepopulated event templates. Hold; today's 2 callsites
   don't justify the parameterisation.
-- Cross-fixture extraction for the 17 OTHER test files
-  with ``client`` fixtures (image-test, agent-test, etc.).
-  Hold; no observed cross-file drift.
-- Extract ``_attempt_enable_vae_tiling`` helper from the
-  IMPROVE-121 chained-fallback (4 attempts today). Hold;
-  current shape is readable.
 - Optimization-rules registry (the third NEW-5 candidate
   IMPROVE-125 held back). Could ship as a metadata-only
   manifest (rule names + notes + condition strings — no
@@ -847,60 +869,24 @@ Wave 16 as IMPROVE-135.)
 wave-internal cross-reference quirk fix all shipped in Wave 15
 as IMPROVE-127/131/128 respectively.)
 
-Wave-15-audit items NOT promoted in Wave 16 (3 of 14 shipped
-this wave as IMPROVE-132/136/137; 11 carry forward):
-- Symmetric ``tile_size_honored`` metadata flag (sibling of
-  IMPROVE-117's tile_size_overridden). Marginal — AutoencoderKL
-  DOES accept tile_sample_min_size, so the flag would
-  essentially always be True when set. The asymmetry IMPROVE-130
-  surfaces is stride-specific. Hold.
-- ``Waves`` plural reference lint variant (currently the
-  IMPROVE-127 regex requires singular ``Wave``; ranges like
-  "Waves 1-14" don't match). Add ``[Ww]aves?`` for inclusivity.
-  Hold; ranges are typically shorthand spans of existing
-  waves so drift-risk is low.
-- Lowercase ``wave N`` reference lint variant. Higher false-
-  positive rate. Hold; current convention matches uppercase.
+Wave-15-audit items still queued (1 of 10 carries forward;
+9 archived to §10.5.1 in Wave 17):
 - ``FILTER_AXIS_TYPES`` registry adding per-axis type info
-  (str | bool) to the IMPROVE-129 schema. Today the type info
-  lives implicitly in endpoint signatures. Marginal; would
-  enable JSON-Schema-style validation on filter values. Hold.
-- Strict-mode ``_build_filters_echo`` that raises on unknown
-  kwargs (catches typos at composition time vs the silent-drop
-  default). Hold; silent-drop matches the rest of the obs
-  router's tolerance contract.
-- Pre-commit hook variant of IMPROVE-118 / IMPROVE-120 /
-  IMPROVE-127. Marginal — Tier 1 already catches drift; pre-
-  commit adds install friction. Hold.
-- LRU cache for the IMPROVE-131 schema-file parses (today
-  re-parsed on every loader call; loaders run once at module
-  import so the cost is fine today). Hold.
-- Wave-internal cross-reference quirk for ROUTES (analogous
-  to the IMPROVE-128 fix for IMPROVE-120 references). Today
-  IMPROVE-118 doesn't have the same quirk because routes
-  are checked against live ``api_server.app.routes``. But a
-  forward-route claim in an early-wave commit (route added
-  by a sibling commit later) would still fail. Hold;
-  observed instance count = 0 today.
-- HEAD-ancestry universe extension's depth=10 default could
-  be derived from "current wave's first commit" (walking
-  back to the wave's [doc] commit) for exact wave-scoped
-  ancestry. Hold; depth=10 covers all wave sizes seen.
-- ``get_recent_commit_titles`` helper currently shells out
-  to git. A future optimisation could use ``pygit2`` or
-  ``GitPython`` for in-process traversal. Marginal — the
-  subprocess shape is consistent with sibling helpers and
-  has zero install friction. Hold.
+  (str | bool) to the IMPROVE-129 schema. Bridge to v=3
+  metadata schema if/when size-axis asymmetry surfaces;
+  pairs with the v=3 metadata candidate below. Hold.
 
 (v=2 metadata schema shipped Wave 16 as IMPROVE-133 —
 stride-only per Q3=A. Symmetric tile_size dimensions held
 for v=3 if a similar asymmetry surfaces.)
 
-Wave-16-audit items (NEW from this wave):
+Wave-16-audit items still queued (7 of 13 carry forward;
+6 archived to §10.5.1 in Wave 17):
 - ``$defs`` shared types in voices.schema.json +
   instruct_models.schema.json — DRY the duplicated string-
-  with-minLength type definitions. Marginal — both schemas
-  are tiny (<50 LoC each). Hold.
+  with-minLength type definitions. ~0.1d. Hold; both
+  schemas are tiny (<50 LoC each), revisit when either
+  grows.
 - VS Code .vscode/settings.example.json template (tracked
   in git) so operators can copy-paste the json.schemas
   mapping for IDE-time validation of data/registries/
@@ -911,53 +897,25 @@ Wave-16-audit items (NEW from this wave):
 - Tests/lints/ sub-package restructure — move the 5 lint
   test files + helpers into ``tests/lints/`` for stronger
   cohesion. Held per Q6=A — flat structure works for the
-  current count.
+  current count; revisit when a 6th lint file would land.
 - ``_extract_title_tag`` regex promotion to _lint_helpers.py
   (currently lives in test_improve_reference_lint.py). Hold
   until 2nd consumer surfaces (today only the IMPROVE-120
   lint uses it).
-- ``get_recent_commit_bodies(depth)`` extension (sibling of
-  get_recent_commit_titles): walks ancestor BODIES not just
-  titles, catching bracketed refs cited in upstream commit
-  bodies. Marginal — title self-tags handle the wave-
-  internal case fully today. Hold.
-- Production-side reuse of the encoding="utf-8" subprocess
+- Production-side audit for the encoding="utf-8" subprocess
   pattern (IMPROVE-137 collateral fix). Today's only
   consumer is _lint_helpers; a grep for ``subprocess.run
   (["git",`` would surface other callsites if they exist.
-  Hold; no observed instance.
-- Stricter SHA-ancestor lint (fails on None case): catches
-  typos at the cost of false-positives on hex-shaped non-
-  SHA strings. Held per Q5=A — current "skip None" policy
-  is the conservative pick.
-- Full-SHA (40 char) bypass fix for IMPROVE-135: a future
-  variant could add a separate ``\b[0-9a-f]{40}\b``
-  extractor + validator pair. Marginal — full-SHA refs
-  are typically intentional. Hold.
-- Cross-commit drift variant of IMPROVE-135 / IMPROVE-118 /
-  IMPROVE-120 / IMPROVE-127: walks ``git log --since=<N
-  days>`` to catch refs drifted across multiple recent
-  commits' bodies. Held; HEAD-only scope is sufficient
-  today.
+  ~0.1d audit. Hold; no observed instance.
 - Allowlist-staleness check for IMPROVE-132: fail if the
   _NAMING_DRIFT_ALLOWLIST has entries for prefixes no
   longer in any endpoint (stale allowlist). ~5 LoC. Hold;
   allowlist has no stale entries today.
-- IMPROVE-136 cache reset helper (``reset_schema_cache()``
-  sibling of the proposed reload_voice_catalog /
-  reload_instruct_models helpers). Lets operators force
-  re-validation after editing schemas. Hold; no use case
-  today.
-- Multiple-validator support for IMPROVE-136: future
-  schemas might use a different draft (e.g. Draft 2026
-  when finalised). The hardcoded Draft202012Validator
-  could become a lookup based on the schema's ``$schema``
-  URL. Hold; Draft 2020-12 is stable and the existing
-  schemas pin it explicitly.
 - v=3 metadata schema for /images/upscale: the Wave 16
   IMPROVE-133 v=2 ship surfaces tile_overlap_factor_default
   for stride; v=3 could mirror for the size axis when its
-  asymmetry surfaces. Speculative. Hold.
+  asymmetry surfaces. Pairs with the FILTER_AXIS_TYPES
+  registry above. Hold.
 
 Wave-11-audit items NOT promoted in Wave 12/13/14:
 - Tile_sample_stride calibration paired with ``min_size``
@@ -975,13 +933,21 @@ Wave-10-spawned items still queued:
   IMPROVE-95 follow-up. (~0.25d)
 
 Themed tranches (still queued):
-- Tranche A — Flutter editor v2 (~3d): recently-closed panel,
-  preset gallery, mask brush UI, blend slider, metrics overlay.
-  Now also includes decay-preset slider (IMPROVE-78) +
-  graph-time DAG-lint visualisation (IMPROVE-88) +
-  tile-mode badge for upscale results (IMPROVE-93) +
-  per-row diff overlay (IMPROVE-105) + scope multi-select
-  (IMPROVE-104) + dry-run preview UI (IMPROVE-98).
+- Tranche A — Flutter editor v2 (~3d): **PROMOTED to Wave 18
+  numbered work** in the Wave 17 cleanup. 6-7 numbered
+  IMPROVE-138+ items will ship the Flutter UI surfaces backed
+  by existing backend contracts (decay-preset slider
+  IMPROVE-78, DAG-lint visualisation IMPROVE-88, tile-mode
+  badge IMPROVE-93, per-row diff overlay IMPROVE-105, scope
+  multi-select IMPROVE-104, dry-run preview UI IMPROVE-98,
+  tile_size_override input IMPROVE-117, tile_stride_override
+  input IMPROVE-121, tile_stride_honored badge IMPROVE-130,
+  tile_overlap_factor_default badge IMPROVE-133,
+  tile_sample_min_size badge IMPROVE-100). Recently-closed
+  panel + preset gallery + mask brush UI + blend slider +
+  metrics overlay round out the scope. All backend contracts
+  shipped in Waves 7-16; Wave 18 is pure frontend
+  consumption.
 - Tranche B — Voice persistence (~1d): persist voice_id/gender,
   pre-rendered samples, per-emotion voice variants.
 - Tranche D — System DAG enrichments (~3d): LLM-summarized
@@ -1005,22 +971,160 @@ Themed tranches (still queued):
   G ships, presets could similarly externalise to
   data/registries/ with their own schema.
 
-Original carry-overs (still demoted):
+Original carry-overs (still demoted; gated on §10.7 questions):
 - [IMPROVE-21] Sandbox MCP servers *(if Q1 stays local)*
-- [IMPROVE-26] Cache MCP client connections
-- [IMPROVE-28] Wire MCP tools into agent registry
+- [IMPROVE-26] Cache MCP client connections *(gated on MCP
+  usage signal)*
+- [IMPROVE-28] Wire MCP tools into agent registry *(gated on
+  MCP usage signal)*
 - [IMPROVE-24] Remove/replace instruction tools *(Q7 still open)*
 - [IMPROVE-27] Shaped input for tools/test
 - [IMPROVE-66] Evaluate SimulStreaming for Whisper streaming
-- Deletion candidates — activate when answers firm up:
+- Deletion candidates — activate when answers firm up
+  (DECISION DEADLINE: before Wave 19 cleanup wave per §10.7
+  refresh):
   - Delete Chatterbox path if Q4 flips to Kokoro-only (currently kept per Q4=c)
   - Delete instruction tools if Q7=b
   - Delete ONNX styles if Q15=b (currently kept per Q15=unknown)
   - Drop Mem0 if Q16=b
 
+### 10.5.1 Considered + rejected (Wave 17 cleanup)
+
+Items previously in the Wave 17 deferred queue that were
+removed during the Wave 17 cleanup. Each entry includes the
+origin-wave audit + a one-line rationale. Future audits can
+consult this section to see "we already thought about this"
+without re-discovering each candidate.
+
+Rejection criteria (per the Wave 17 cleanup pass):
+
+  * **Marginal** — cost-benefit tilts negative (install
+    friction, low drift risk, speculative trigger).
+  * **Superseded** — a sibling lint or feature already
+    covers the use case.
+  * **Zero observed instance** — the bug class hasn't
+    surfaced once across 16 waves; scaffolding-cost is
+    not justified by catch-rate.
+  * **Held >4 waves with no movement** — no consumer
+    materialised, no triggering case surfaced. Sunset to
+    free queue bandwidth for substantive items.
+
+22 items archived (grouped by origin audit):
+
+**From Wave-13 audit (5 items):**
+- Lint variant walking ``git log --since=<N days>`` to
+  catch routes drifted BETWEEN commits (vs IMPROVE-118's
+  HEAD-only scope). REJECT — HEAD-only has caught zero
+  drift in 4 waves; cross-commit scope adds complexity for
+  no observed gain. (Cross-rejected with the Wave-16-audit
+  cross-commit drift variant for the same reason.)
+- Pre-commit-hook variant of IMPROVE-118 (vs Tier 1 test).
+  REJECT — Tier 1 has zero install friction; pre-commit
+  hooks require operator setup per machine. (Cross-rejected
+  with the Wave-15-audit pre-commit-hook variant.)
+- "Did you mean?" fuzzy-match suggestions in IMPROVE-118's
+  failure message via Levenshtein distance against actual
+  route paths. REJECT — marginal UX improvement; current
+  failure message already lists failing routes for
+  copy-paste correction.
+- "Auto-tune" mode for /images/upscale that learns the
+  per-card + per-resolution sweet spot from past upscale
+  runs. REJECT — multi-day project; out of scope. The
+  tile_size_override (IMPROVE-117) + tile_stride_override
+  (IMPROVE-121) knobs already cover power-user workflows.
+- Bundle.json full git-revision (not just short-SHA) +
+  dirty-tree marker for deeper provenance. REJECT — short
+  SHA is sufficient for 99% of provenance use; dirty-tree
+  marker is operator concern best handled via shell prompt
+  + commit hooks.
+
+**From Wave-14 audit (2 items):**
+- Cross-fixture extraction for the 17 OTHER test files
+  with ``client`` fixtures (image-test, agent-test, etc.).
+  REJECT — zero observed cross-file drift across 16 waves.
+  obs_test_client + the IMPROVE-122 fixture pattern serve
+  as living documentation; siblings can copy-paste when
+  their drift surfaces.
+- Extract ``_attempt_enable_vae_tiling`` helper from the
+  IMPROVE-121 chained-fallback (4 attempts today). REJECT
+  — current shape is readable inline; extraction adds
+  indirection without callsite multiplication. Held >2
+  waves; sunset.
+
+**From Wave-15 audit (9 items):**
+- Symmetric ``tile_size_honored`` metadata flag (sibling of
+  IMPROVE-117's tile_size_overridden). REJECT — AutoencoderKL
+  DOES accept tile_sample_min_size, so the flag would
+  essentially always be True when set. The asymmetry
+  IMPROVE-130 surfaces is stride-specific.
+- ``Waves`` plural reference lint variant. REJECT — ranges
+  like "Waves 1-14" are typically shorthand spans of
+  existing waves so drift-risk is low. Singular ``Wave N``
+  refs (IMPROVE-127) cover the actionable case.
+- Lowercase ``wave N`` reference lint variant. REJECT —
+  higher false-positive rate; current convention matches
+  uppercase reliably across 16 waves.
+- Strict-mode ``_build_filters_echo`` that raises on
+  unknown kwargs. REJECT — silent-drop matches the rest
+  of the obs router's tolerance contract; switching to
+  strict would surprise existing callers.
+- Pre-commit hook variant of IMPROVE-118 / IMPROVE-120 /
+  IMPROVE-127. REJECT — Tier 1 already catches drift;
+  pre-commit adds install friction. (Cross-rejected with
+  the Wave-13-audit pre-commit variant.)
+- LRU cache for the IMPROVE-131 schema-file parses (today
+  re-parsed on every loader call; loaders run once at
+  module import). REJECT — parses are <1ms; no measured
+  hot-path issue.
+- Wave-internal cross-reference quirk for ROUTES (analogous
+  to the IMPROVE-128 fix for IMPROVE-N references). REJECT
+  — observed instance count = 0 across 16 waves. Routes
+  are checked against live ``api_server.app.routes`` so a
+  forward-route claim would fail in the same commit it
+  appears.
+- HEAD-ancestry universe extension's depth=10 default
+  derived from "current wave's first commit". REJECT —
+  depth=10 covers all wave sizes seen (max Wave 14: 9
+  commits). Deriving depth from current-wave-start commit
+  adds traversal complexity for no observed benefit.
+- ``get_recent_commit_titles`` in-process traversal
+  (pygit2 / GitPython). REJECT — subprocess shape is
+  consistent with sibling helpers; new dependency for
+  marginal performance gain (titles fetch in <50ms).
+
+**From Wave-16 audit (6 items):**
+- ``get_recent_commit_bodies(depth)`` extension (sibling
+  of get_recent_commit_titles). REJECT — title self-tags
+  handle the wave-internal case fully today; bodies-walk
+  adds noise (commit messages contain prose-level hex
+  strings + IMPROVE-N refs that aren't necessarily
+  declarations).
+- Stricter SHA-ancestor lint (fails on None case). REJECT
+  — per Q5=A in Wave 16: skip-None policy is the
+  conservative pick. Catching typos would cost
+  false-positives on hex-shaped non-SHA strings (hash
+  digests, color codes).
+- Full-SHA (40 char) bypass fix for IMPROVE-135. REJECT —
+  full-SHA refs in commit bodies are typically
+  intentional copy-pastes from external sources where
+  short-form would be ambiguous. The lint adds no value
+  for that shape.
+- Cross-commit drift variant of IMPROVE-135 / IMPROVE-118 /
+  IMPROVE-120 / IMPROVE-127. REJECT — HEAD-only scope is
+  sufficient; sibling Wave-13-audit variant rejected for
+  the same reason.
+- IMPROVE-136 schema-cache reset helper
+  (``reset_schema_cache()``). REJECT — no use case today;
+  the cache is per-process so any operator change requires
+  module reload anyway.
+- Multiple-validator support for IMPROVE-136 (Draft 2026
+  readiness). REJECT — Draft 2020-12 is stable; existing
+  schemas pin it explicitly via ``$schema``. Will revisit
+  when Draft 2026 finalises.
+
 ---
 
-## 10.6 Wave 5 + Wave 6 + Wave 7 + Wave 8 + Wave 9 + Wave 10 + Wave 11 + Wave 12 + Wave 13 + Wave 14 + Wave 15 + Wave 16 retrospective
+## 10.6 Wave 5 + Wave 6 + Wave 7 + Wave 8 + Wave 9 + Wave 10 + Wave 11 + Wave 12 + Wave 13 + Wave 14 + Wave 15 + Wave 16 + Wave 17 retrospective
 
 > **Status as of 2026-04-30:** Wave 5 fully shipped (12 commits, +216
 > tests). Wave 6 fully shipped (12 commits, +118 tests across 8
@@ -1036,11 +1140,14 @@ Original carry-overs (still demoted):
 > tests). Wave 14 fully shipped (7 numbered + 2 doc commits = 9
 > total, +65 tests). Wave 15 fully shipped (6 numbered + 2 doc
 > commits = 8 total, +62 tests). Wave 16 fully shipped (6 numbered
-> + 2 doc commits = 8 total, +41 tests). Tier 1 baseline grew
+> + 2 doc commits = 8 total, +41 tests). Wave 17 fully shipped
+> (1 doc commit, 0 numbered, +0 tests — deferred queue
+> rationalisation + open-questions refresh). Tier 1 baseline grew
 > 875 → 1530 passes over Waves 5-11; Wave 12 brought it to 1602;
 > Wave 13 brought it to 1665; Wave 14 brought it to 1731; Wave 15
-> brought it to 1793; Wave 16 brought it to 1834. All 4 xfailed
-> agent tests resolved post-IMPROVE-71.
+> brought it to 1793; Wave 16 brought it to 1834; Wave 17 doc-only
+> (1834 unchanged). All 4 xfailed agent tests resolved
+> post-IMPROVE-71.
 
 ### Wave 5 (✓ shipped)
 
@@ -1241,13 +1348,26 @@ that would double-count the migrated tests.
 | 5 | [IMPROVE-135] | 180c1bd | SHA-ancestor reference lint — 4-lint family complete. Per Q5=A: ``\b[0-9a-f]{7}\b`` (short-SHA only). NEW ``is_ancestor_sha`` helper wrapping ``git merge-base --is-ancestor``. Returns True/False/None — fails only on real-but-not-ancestor; None case skips silently. | +13 |
 | 6 | [IMPROVE-136] | a24d896 | check_schema() validation for IMPROVE-131 schemas. Calls ``Draft202012Validator.check_schema(schema)`` on first encounter (cached per filename in NEW ``_CHECKED_SCHEMAS`` set). Defence-in-depth on top of IMPROVE-131. | +3 |
 | 7 | [IMPROVE-137] | e5e1c32 | Promote tests/ to Python package + UTF-8 subprocess encoding fix. Per Q6=A: minimal change — add tests/__init__.py + update 5 lint files' imports. Collateral: explicit ``encoding="utf-8"`` on 3 subprocess.run callsites (latent bug exposed by IMPROVE-136's commit body). | 0 |
-| 8 | (doc)         | this    | Wave 16 retrospective + Wave 17 deferred queue. | 0 |
+| 8 | (doc)         | 7d69c5c | Wave 16 retrospective + Wave 17 deferred queue. SHA filled in by Wave 17 doc commit per the Wave 12-15 placeholder convention. | 0 |
 
 Net: +41 tests over Wave 16 (1793 → 1834). 8 commits including
 the two doc commits; 6 numbered IMPROVE-N items. The lower test
 count vs Wave 15's +62 reflects Wave 16's lighter implementation
 footprint (IMPROVE-134 / 136 / 137 each shipped in <0.2d as
 architectural cleanups + defence-in-depth additions).
+
+### Wave 17 (✓ shipped)
+
+| # | Tag | SHA | What landed | Tests |
+|---|---|---|---|---:|
+| 1 | (doc) | this | Wave 17: deferred queue rationalisation + open-questions refresh. Trim ~60-item §10.5 deferred queue to ~32 substantive items, archive ~22 to NEW §10.5.1 Considered + rejected, promote Tranche A to Wave 18 numbered work, restructure §10.7 into Resolved (4) / Still open (~25) / Obsolete (1). Fill in Wave 16 row 8 SHA placeholder (7d69c5c). | 0 |
+
+Net: +0 tests (doc-only). 1 commit. 0 numbered IMPROVE-N
+items. The wave's deliberate cleanup-shape — planning hygiene
++ open-questions refresh — gets Wave 18+ a clean signal
+without the queue-noise backlog from earlier holds. SHA
+placeholder ``this`` will be replaced by Wave 18's first
+doc commit per the Wave 12-15 convention.
 
 ### Wave 14 architectural impact
 
@@ -1442,6 +1562,44 @@ architectural cleanups + defence-in-depth additions).
 
   * Tier 1 baseline 1793 → 1834 over Wave 16 (+41 tests).
     Total since Wave 5: 875 → 1834 (+959 over 12 waves).
+
+### Wave 17 architectural impact
+
+  * Queue rationalisation as planning hygiene: ~60 → ~32
+    substantive items in the §10.5 deferred queue + ~22
+    archived to NEW §10.5.1 Considered + rejected
+    subsection. Future audits can see prior consideration
+    without re-discovering each candidate. Rejection
+    criteria documented inline (marginal / superseded /
+    zero observed instance / held >4 waves).
+
+  * §10.7 open-questions restructure: 4 questions resolved
+    based on 16 waves of shipped reality (in-process
+    observability surface, api_server.py refactor as
+    "someday", thread_id column-vs-row, image step-preview
+    streaming), 1 marked obsolete (duplicate IMPROVE-17
+    entry consolidated), ~25 carried forward as STILL
+    OPEN with explicit DECISION DEADLINE annotations on
+    the gating questions (Q1 distribution, Q4 Chatterbox,
+    Q7 instruction tools, Q15 ONNX styles, Q16 Mem0 — all
+    "before Wave 19 cleanup wave").
+
+  * Tranche A promoted to Wave 18 numbered work — closes
+    the longest-running held-tranche (queued since Wave 5
+    audit). Wave 18 will ship 6-7 numbered IMPROVE-138+
+    items targeting the Flutter editor v2 surface with
+    backend contracts already in place from Waves 7-16
+    (decay-preset slider, DAG-lint visualization, tile-
+    mode badge, per-row diff overlay, scope multi-select,
+    dry-run preview UI, tile_size/tile_stride/honored/
+    overlap_factor/sample_min_size badges).
+
+  * Tier 1 baseline 1834 unchanged (doc-only changes).
+    Total since Wave 5: 875 → 1834 (+959 over 13 waves
+    counting Wave 17 doc-only).
+
+  * Routes 187 unchanged from Wave 16 close (doc-only
+    changes don't touch api_server.app.routes).
 
 ### Wave 7 architectural impact
 
@@ -1862,32 +2020,39 @@ architectural cleanups + defence-in-depth additions).
 
 ### Where to start today
 
-Wave 1-16 is shipped — pick up an item from §10.5 Wave 17
-(the deferred queue: IMPROVE-NEW-* carry-overs 2/7/8/10 +
-Wave-10-spawned carry-overs (AST walker generalisation +
-per-tier benchmarks + rules_suppressed_by narrowing) +
-Wave-11-audit tile_sample_stride calibration paired with
-min_size + Wave-12-audit RejectionRow TypedDict + Wave-13-
-audit-spawned items (is_kwarg_accepted probe-helper sibling,
-lint variants, upscale auto-tune, full-SHA bundle metadata)
-+ Wave-14-audit-spawned items NOT promoted in Wave 15/16
-(per-band stride calibration, optimization-rules metadata
-registry, hot-reload helpers, obs_test_client_with_events
-sibling, _attempt_enable_vae_tiling extraction, cross-
-fixture extraction) + Wave-15-audit-spawned items NOT
-promoted in Wave 16 (tile_size_honored sibling, plural
-Waves lint variant, lowercase wave variant,
-FILTER_AXIS_TYPES registry, strict _build_filters_echo,
-pre-commit-hook lint, LRU-cached schema parse, forward-
-route quirk fix, depth-from-wave-doc, in-process git
-traversal) + Wave-16-audit-spawned items NEW (schemas
-$defs, .vscode/settings.example.json template, tests/lints/
-sub-package, _extract_title_tag promotion,
-get_recent_commit_bodies extension, prod-side encoding="utf-8"
-audit, stricter SHA-ancestor lint, full-SHA bypass, cross-
-commit drift variant, allowlist-staleness check, schema
-cache reset helper, multi-validator support, v=3 metadata
-schema) + themed tranches A/B/D/E/F/G).
+Waves 1-17 are shipped — pick up an item from §10.5 Wave 18
+deferred queue (the trimmed Wave 17 cleanup output: ~32
+substantive items with explicit ship triggers).
+
+The biggest pending work is **Wave 18 — Tranche A Flutter
+editor v2** (~3d, 6-7 numbered IMPROVE-138+ items): Flutter
+UI surfaces backed by existing backend contracts shipped in
+Waves 7-16. The shape is decided; the planning chat at Wave 18
+start picks sequence (breadth-first per IMPROVE-N or
+depth-first single editor v2 page commit) + first item.
+
+Other paths from §10.5 Wave 18 deferred queue:
+
+  * NEW carry-overs (2/7/8/10) — small quality items that
+    waited for Tranche D substrate (NEW-2) or contract
+    refresh windows (NEW-7/8/10).
+  * Wave-12/13/14/16-audit triggered items — wait for the
+    relevant consumer / hardware data / 3rd callsite.
+  * Wave-15-audit FILTER_AXIS_TYPES registry — bridge to
+    v=3 metadata schema if size-axis asymmetry surfaces.
+  * Wave-10/11-spawned hardware-gated calibration items —
+    wait for 8GB 30xx benchmark suite.
+  * Tranches B/D/E/F/G — themed multi-day work.
+  * Original carry-overs — gated on §10.7 questions
+    (Q1 distribution / Q3 MCP usage / Q4 Chatterbox / Q7
+    instruction tools / Q15 ONNX / Q16 Mem0). Resolution
+    of the gating questions is queued for Wave 19 cleanup
+    wave.
+
+Items previously considered + rejected in the Wave 17 cleanup
+are archived in §10.5.1 (22 items, grouped by origin audit).
+Future audits should consult §10.5.1 before re-proposing those
+candidates.
 
 ---
 
@@ -1895,49 +2060,85 @@ schema) + themed tranches A/B/D/E/F/G).
 
 Every chapter closed with open questions. Collected here so you can answer them once and reshape priorities accordingly.
 
-### Architecture / infra
-- Will the Flutter client ever need to talk to the backend from another machine? (Affects [IMPROVE-2] urgency.)
-- Is `python-dotenv` / `pydantic-settings` absence intentional, or an oversight?
-- Do you have an observability tool you use (Datadog / Grafana / Langfuse / local Jaeger)? (Shapes [IMPROVE-4].)
-- Is refactoring `api_server.py` a "do it now" or "someday" item? ([IMPROVE-1])
+**Wave 17 refresh (2026-04-30):** re-categorised based on 16
+waves of shipped reality. RESOLVED questions (4) record the
+de-facto answer that waves shipped under; STILL OPEN
+questions (~25) carry forward with explicit DECISION
+DEADLINE annotations on the gating questions; OBSOLETE
+questions (1) record why they no longer apply.
 
-### Use / actual behavior
-- Is vLLM actually used, or is the registration aspirational?
-- Do you ever call a cloud LLM (Anthropic/OpenAI), or is 100% local the requirement?
-- Which quality tier (`max_quality` / `balanced` / `performance`) is your real default for image gen?
-- Is FLUX.1-dev used, or is everyone on Schnell + Z-Image Turbo?
-- How often does the NaN fallback trigger?
-- Are any of the 6 hardcoded system templates used, or has everyone moved to the custom DAG designer?
-- Is the `_evict_ollama_from_gpu` eviction → restart cycle actually causing user pain?
-- Is `_last_detected_emotion` + avatar integration actually visible, or dead code?
-- Which TTS mode do you use most — Kokoro or Chatterbox? (If always one, the other is dead code.)
-- Is Mem0 worth the complexity vs SQLite tiers alone?
-- Do you actually use the Runs page, or has it stayed read-only?
+### 10.7.1 Resolved (Wave 17)
 
-### Decisions
-- Partial-message semantics for chat cancel: keep in DB with "cancelled" flag, or drop entirely?
-- `thread_id` location: column on `conversations` (one per) or `threads` row (multi)?
-- For [IMPROVE-9] task registry: full build now, or small unification of `_ollama_pulls` + `_hf_downloads`?
-- For [IMPROVE-15] summarization: local 1B model inline, or periodic background job?
-- For [IMPROVE-17] cancel: keep partial message with "cancelled" flag, or drop it?
-- For [IMPROVE-43] streaming image: stream step previews too, or just stage events?
-- Sandbox depth for `run_python` ([IMPROVE-20]): Docker is a heavy dependency on Windows; gVisor is Linux-only. What's the minimum viable target?
-- Are the 6 templates + image-creator endpoint still wanted, or should they retire? ([IMPROVE-34])
-- Is node `config.notes` supposed to feed into node prompts, or stay cosmetic?
-- Is breaking silent cycle-handling (→ explicit reject) a pure win? ([IMPROVE-37])
-- Security / compliance items ([IMPROVE-59], [IMPROVE-60]) — real requirement, or local-only personal tool?
-- Does the presets concept ([IMPROVE-54]) matter vs deeper history tools ([IMPROVE-52])?
-- The `KONTEXT_GGUF_QUANT` default mismatch — is code (`Q4_K_S`) or docs (`Q3_K_S`) correct for your setup?
-- Is torch.compile config knob supposed to actually enable compile, or stay inert?
+These questions can be answered based on shipped reality
+across 16 waves. The roadmap operates as if these answers
+hold; deletion-candidate gating in §10.5 reflects the
+inverse cases.
 
-Answer whichever are easy. The roadmap is shaped enough to make progress on Wave 1 + Wave 2 without any of these answered.
+- **Observability tool** ("Do you have an observability tool you use — Datadog / Grafana / Langfuse / local Jaeger?"):
+  RESOLVED — in-process telemetry surface via /observability/* endpoints (timeseries, summary, recent, rejections, events registry, filters echo schema). 16 waves of telemetry work (Wave 3-6 OTel foundation, Wave 8-16 typed-event registry + rejection rollups + filters echo schema) shipped without a third-party tool. The platform is its own observability surface; [IMPROVE-4] (external observability tool integration) deferred indefinitely.
+
+- **Refactor api_server.py** ([IMPROVE-1]):
+  RESOLVED — Someday. 16 waves of feature work landed on api_server.py without a top-down refactor. Routes 187 (Wave 7 baseline 134 → Wave 16 187, +53 over 9 waves) with no reported regressions. Grep-then-Read access pattern (per CLAUDE.md) handles the size adequately. Revisit only if a structural change forces it.
+
+- **thread_id location** ("column on `conversations` (one per) or `threads` row (multi)?"):
+  RESOLVED — Column on conversations. 16 waves of conversation traffic (chat + systems streaming) without the multi-thread-per-conversation case surfacing. Single-thread-per-conversation is the de-facto contract; the column shape is sufficient.
+
+- **Streaming step previews for image** ([IMPROVE-43]):
+  RESOLVED — Streamed. Image step previews ship via the /images/stream endpoint; the test_image_step_preview_stream pin holds the contract since Wave 14. Both axes (step previews + stage events) are streamed.
+
+### 10.7.2 Still open (carries forward)
+
+These remain open. Gating questions have explicit DECISION
+DEADLINE annotations — answers shape Wave 19+ priorities.
+
+#### Architecture / infra
+
+- **Distribution** (Q1): Will the Flutter client ever need to talk to the backend from another machine? Affects [IMPROVE-2] (run as service), [IMPROVE-10] (auth), [IMPROVE-20] (sandbox), [IMPROVE-21] (sandbox MCP), [IMPROVE-26] (cache MCP), [IMPROVE-59]/[IMPROVE-60] (security/compliance). **DECISION DEADLINE:** before any [IMPROVE-2]/10/20/21/26 work begins. If local-only confirms, those items stay demoted; if distribution opens up, they flip to high priority and reshape the roadmap.
+- **python-dotenv / pydantic-settings absence**: intentional or oversight? Decision shape — adopt a settings library or document the bare-os.environ pattern.
+
+#### Use / actual behavior
+
+- **vLLM usage**: actually used or registration aspirational? Affects whether vLLM-targeted IMPROVE-N items stay active.
+- **Cloud LLM (Anthropic/OpenAI)**: ever called or 100% local requirement? Gates many MCP-related items.
+- **Quality tier default for image gen** (`max_quality` / `balanced` / `performance`): which is the real default? Affects optimization-rules priorities.
+- **FLUX.1-dev usage**: used or everyone on Schnell + Z-Image Turbo? Affects FLUX-specific tuning items.
+- **NaN fallback frequency**: how often does it trigger? If never, the fallback path is dead code worth pruning.
+- **Hardcoded system templates** (6 of them): used or everyone on custom DAG designer? Affects [IMPROVE-34] (template retirement).
+- **_evict_ollama_from_gpu pain**: eviction → restart cycle actually causing user pain? Affects whether to invest in a more surgical approach.
+- **_last_detected_emotion + avatar integration**: visible or dead code?
+- **TTS mode** (Q4): Kokoro or Chatterbox? **DECISION DEADLINE:** before Wave 19 cleanup wave. Gates "Delete Chatterbox path" deletion candidate (currently kept per Q4=c).
+- **Mem0 worth complexity** (Q16): keep vs SQLite tiers alone? **DECISION DEADLINE:** before Wave 19 cleanup wave. Gates "Drop Mem0" deletion candidate.
+- **Runs page usage**: actually used or stayed read-only? Affects investment in the page.
+
+#### Decisions
+
+- **Partial-message semantics for chat cancel** ([IMPROVE-17]): keep with "cancelled" flag or drop? (Consolidated from duplicate Q in original §10.7.)
+- **Task registry shape** ([IMPROVE-9]): full build now, or small unification of `_ollama_pulls` + `_hf_downloads`?
+- **Summarization shape** ([IMPROVE-15]): local 1B model inline, or periodic background job?
+- **Sandbox depth for run_python** ([IMPROVE-20]): Docker (Windows-heavy), gVisor (Linux-only), or minimum viable target on Windows?
+- **Hardcoded templates + image-creator endpoint** ([IMPROVE-34]): still wanted or retire?
+- **Node config.notes**: feed into prompts or stay cosmetic?
+- **Silent cycle-handling** ([IMPROVE-37]): break to explicit reject — pure win or breaking change?
+- **Security / compliance** ([IMPROVE-59], [IMPROVE-60]): real requirement or local-only personal tool? (Gates on Q1 distribution.)
+- **Presets vs deeper history** ([IMPROVE-54] vs [IMPROVE-52]): which matters more?
+- **KONTEXT_GGUF_QUANT default mismatch**: code (`Q4_K_S`) or docs (`Q3_K_S`) correct? (5-min user product decision.)
+- **torch.compile config knob**: actually enable compile or stay inert?
+- **Instruction tools** (Q7): keep or remove ([IMPROVE-24])? **DECISION DEADLINE:** before Wave 19 cleanup wave. Gates "Delete instruction tools" deletion candidate.
+- **ONNX styles** (Q15): keep or drop? **DECISION DEADLINE:** before Wave 19 cleanup wave. Gates "Delete ONNX styles" deletion candidate (currently kept per Q15=unknown).
+- **MCP usage signal** (Q3 implicit): are MCP servers actually used or aspirational? Gates [IMPROVE-21]/[IMPROVE-26]/[IMPROVE-28].
+
+### 10.7.3 Obsolete (Wave 17)
+
+- **IMPROVE-17 cancel duplicate**: original §10.7 listed "For [IMPROVE-17] cancel: keep partial message with 'cancelled' flag, or drop it?" twice (once under Decisions explicitly, once under "Partial-message semantics for chat cancel" prose). OBSOLETE — consolidated to a single entry under §10.7.2 Decisions above.
+
+Answer whichever are easy. The roadmap is shaped enough to make progress on Wave 18+ Tranche A without any of these answered, but the gating questions (Q1 / Q4 / Q7 / Q15 / Q16) should be resolved before Wave 19 (the cleanup wave that would activate the deletion candidates).
 
 ---
 
 ## 10.8 Where to go from here
 
 - **Read chapter 1 → 9 if you haven't.** This chapter is the index; the others have the details.
-- **Pick a Wave 16 item and ship it** — see §10.5 Wave 16 deferred queue (NEW candidates IMPROVE-NEW-2/7/8/10 + Wave-15-audit-spawned items + Wave-14-audit-spawned items + Wave-13-audit-spawned items + Wave-12-audit-spawned items + Wave-11-audit-spawned items + Wave-10-spawned items still queued + themed tranches A/B/D/E/F/G + carry-overs).
+- **Pick a Wave 18+ item and ship it** — see §10.5 Wave 18 deferred queue (the trimmed Wave 17 cleanup output: NEW candidates IMPROVE-NEW-2/7/8/10 + Wave-15-audit FILTER_AXIS_TYPES registry + 7 Wave-16-audit-spawned items + Wave-13/12/11/10-audit triggered items + themed tranches B/D/E/F/G + carry-overs gated on §10.7 questions). Tranche A (Flutter editor v2) was promoted to Wave 18 numbered work in the Wave 17 cleanup — see §10.5 Wave 18 deferred queue. Items previously considered + rejected are archived in §10.5.1.
 - **Keep `[IMPROVE-N]` references alive.** When you fix one, grep `docs/features/` for that ID and cross out. If you add new ones in future work, number them IMPROVE-138+ (1-137 are taken; the IMPROVE-NEW-* tags graduate to permanent numbers on acceptance) and note them in the originating chapter.
 - **The `MEMORY.md` in `~/.claude/projects/...` contains the feedback rule** that improvement suggestions should cite 2025–2026 sources. Every item here has citations in its origin chapter.
 
@@ -1945,4 +2146,4 @@ Answer whichever are easy. The roadmap is shaped enough to make progress on Wave
 
 **Guide complete.** `docs/features/README.md` → `01-architecture.md` → `02-llm-infrastructure.md` → `03-chat.md` → `04-agents-tools.md` → `05-systems.md` → `06-image-generation.md` → `07-image-editor.md` → `08-partner.md` → `09-observability.md` → `10-improvements.md` *(this file)*.
 
-Every major feature of the Local AI Platform is now documented end-to-end, with **137** research-backed improvement ideas cross-referenced into one prioritized plan. Waves 1-16 fully shipped; Wave 17 in deferred queue.
+Every major feature of the Local AI Platform is now documented end-to-end, with **137** research-backed improvement ideas cross-referenced into one prioritized plan. Waves 1-17 fully shipped; Wave 18+ in deferred queue.
