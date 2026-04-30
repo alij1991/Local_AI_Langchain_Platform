@@ -6,6 +6,7 @@ import 'package:flutter/services.dart';
 import 'package:file_picker/file_picker.dart';
 import 'package:local_ai_flutter_client/services/api_client.dart';
 import 'package:local_ai_flutter_client/widgets/attachment_widgets.dart';
+import 'package:local_ai_flutter_client/widgets/dag_lint_panel.dart';
 
 class _SystemNode {
   _SystemNode({
@@ -582,6 +583,26 @@ class _SystemsPageState extends State<SystemsPage> {
                           ],
                         ),
                         const Divider(height: 1),
+                        // [IMPROVE-142] Live DAG-lint panel —
+                        // surfaces unreachable / dead-end / orphan
+                        // llm_router edges as the operator edits.
+                        // Mirrors the [IMPROVE-88] backend
+                        // dag_lint.py rules; backend remains the
+                        // canonical authority on save (returns
+                        // 400 for orphan llm_router). This panel
+                        // gives fast feedback BEFORE save so the
+                        // operator catches issues without the
+                        // failed-save round-trip.
+                        DagLintPanel(
+                          issues: detectDagLintIssues(_definitionJson()),
+                          onIssueTap: (issue) {
+                            if (issue.nodeId != null) {
+                              setState(() {
+                                _selectedNodeId = issue.nodeId;
+                              });
+                            }
+                          },
+                        ),
                         Expanded(
                           child: InteractiveViewer(
                             constrained: false,
