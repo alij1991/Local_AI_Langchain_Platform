@@ -10,7 +10,7 @@
 
 - **146 improvements** flagged inline as `[IMPROVE-N]` in chapters 1–9 + the Wave 5/6/7/8/9/10/11/12/13/14/15/16/18/19 audits (NEW from Wave 6 audit: 71/72/73/74; NEW from Wave 7: 75/76/77/78/79/80/81/82; NEW from Wave 8: 83/84/85/86/87/88; NEW from Wave 9: 89/90/91/92/93/94; NEW from Wave 10: 95/96/97/98/99/100; NEW from Wave 11: 101/102/103/104/105/106; NEW from Wave 12: 107/108/109/110/111/112; NEW from Wave 13: 113/114/115/116/117/118; NEW from Wave 14: 119/120/121/122/123/124/125; NEW from Wave 15: 126/127/128/129/130/131; NEW from Wave 16: 132/133/134/135/136/137; NEW from Wave 18: 138/139/140/141/142/143/144; NEW from Wave 19 Tranche A: 145/146).
 - **10 themes** — security, architecture, observability, tracing, UX, memory & context, model & inference, background tasks, voice, and tools/MCP.
-- **19 waves** fully shipped (Waves 1-16 numbered + Wave 17 doc-only cleanup + Wave 18 Tranche A Flutter editor v2 + Wave 19 Tranche A partner-import host); **1** standing in deferred queues (post-Wave-19 backlog).
+- **19 waves fully shipped + Wave 20 cleanup wave in progress** (Waves 1-16 numbered + Wave 17 doc-only cleanup + Wave 18 Tranche A Flutter editor v2 + Wave 19 Tranche A partner-import host + Wave 20 §10.7 walkthrough resolving Q1/Q4/Q7/Q15/Q16 + 1 deletion + 5 TTS quick wins); **1** standing in deferred queues (post-Wave-19 backlog).
 
 All improvements are traceable back to a chapter + a 2025–2026 citation. This chapter is pure planning — *what* + *why this order*; *how* is in each origin chapter.
 
@@ -909,6 +909,60 @@ unit was the host-page-plus-wiring pair: import
 ([IMPROVE-145]) + export ([IMPROVE-146]) in the same
 Backup & Restore card.
 
+### Wave 20 — Cleanup wave (in progress)
+
+Theme: close the §10.7 STILL OPEN gating questions (Q1
+distribution / Q4 Chatterbox / Q7 instruction tools / Q15
+ONNX styles / Q16 Mem0) with shipped-reality-grounded
+answers, activate the one resulting deletion candidate
+(Q7=b), and ship 5 TTS pipeline quick wins surfaced by the
+Q4 audit. Per Wave 17 cleanup precedent: a deliberate
+inflection-point wave that resolves DECISION DEADLINEs
+before the deferred-queue items they gate.
+
+Per Q5=A mid + end-wave doc cadence (Wave 12-15
+convention): this commit opens Wave 20 by locking the §10.7
+answers in §10.7.1 + flipping the §10.5 deletion-candidate
+flags. Subsequent numbered items ship + the end-wave doc
+commit closes Wave 20 with the full table.
+
+Planned shape (8 commits = 1 mid-wave doc + 1 deletion + 5
+TTS quick wins + 1 end-wave doc):
+
+  * Mid-wave doc (this) — §10.7 walkthrough resolves all 5
+    gating questions; updates §10.5 + §10.7.1/§10.7.2.
+  * IMPROVE-147 (Q7=b) — Delete instruction tools.
+    `add_instruction_tool` from agents.py + the
+    `tool_type=="instruction"` branch in tools.py.
+  * IMPROVE-148 (Q4=c, TTS quick win B) — Tighten Chatterbox
+    sentence timeout 30s → 8s for faster fallback to Kokoro
+    on a hung sidecar.
+  * IMPROVE-149 (Q4=c, TTS quick win A) —
+    ``asyncio.to_thread(partner.init_voice)`` in
+    /partner/voice/init + /partner/voice/upload to unblock
+    the event loop during 3-8s cold init.
+  * IMPROVE-150 (Q4=c, TTS quick win D) — Pre-compile the
+    `_preprocess_text_for_tts` regexes at class scope.
+  * IMPROVE-151 (Q4=c, TTS quick win C) — Lift TTS hot-path
+    imports (io/struct/numpy) to module top + extract a
+    shared `_pcm_to_wav` helper to dedupe `synthesize` and
+    `_synthesize_kokoro`.
+  * IMPROVE-152 (Q4=c, TTS quick win E) — Add async
+    `synthesize_sentence_async` using the existing
+    `get_async_client()`; switch /partner/voice/synthesize-
+    sentence and the WS handler to `await` it directly
+    instead of `run_in_executor`.
+  * End-wave doc — Wave 20 retrospective + Wave 21 backlog
+    (deferred bigger TTS items + cross-cutting startup
+    contention investigation flagged during the Q4 audit).
+
+| # | Tag | SHA | What landed | Tests |
+|---|---|---|---|---:|
+| 1 | (doc)         | this    | Wave 20 mid-wave (start) — §10.7 walkthrough resolves Q1=a (local-only), Q4=c (keep both Kokoro + Chatterbox; ship 5 TTS pipeline quick wins instead of deleting), Q7=b (remove instruction tools — API-only feature with no Flutter UI exposure), Q15=a (keep ONNX styles — wired into editor via STYLE_FNS dispatch), Q16=a (keep Mem0 — confirmed actively producing 8+ semantic memories). Moves 5 questions §10.7.2 → §10.7.1 with rationale. Updates §10.5 deletion-candidate flags (1 activate + 3 drop). Updates §10.7.2 prefatory text (Wave 19+ priorities → Wave 21+ priorities). SHA filled in by Wave 20 end-wave doc commit per Wave 12-15 placeholder convention. | 0 |
+
+(Rows 2-8 added by subsequent Wave 20 commits + the end-
+wave doc commit.)
+
 ### Wave 18 — Deferred (queued for next iteration)
 
 Trimmed in Wave 17 from ~60 items to the substantive
@@ -1073,13 +1127,23 @@ Original carry-overs (still demoted; gated on §10.7 questions):
 - [IMPROVE-24] Remove/replace instruction tools *(Q7 still open)*
 - [IMPROVE-27] Shaped input for tools/test
 - [IMPROVE-66] Evaluate SimulStreaming for Whisper streaming
-- Deletion candidates — activate when answers firm up
-  (DECISION DEADLINE: before Wave 19 cleanup wave per §10.7
-  refresh):
-  - Delete Chatterbox path if Q4 flips to Kokoro-only (currently kept per Q4=c)
-  - Delete instruction tools if Q7=b
-  - Delete ONNX styles if Q15=b (currently kept per Q15=unknown)
-  - Drop Mem0 if Q16=b
+- Deletion candidates — closed Wave 20 (§10.7 walkthrough
+  locked all 5 gating answers):
+  - Delete Chatterbox path — DROPPED (Q4=c locked Wave 20:
+    keep both Kokoro + Chatterbox; ship 5 TTS pipeline quick
+    wins instead — see Wave 20 entry below)
+  - Delete instruction tools — ACTIVATED as the Wave 20
+    instruction-tools deletion (Q7=b locked Wave 20: API-only
+    feature with no Flutter UI exposure, just a string-template
+    no-op)
+  - Delete ONNX styles — DROPPED (Q15=a locked Wave 20: wired
+    into the image editor via editor_page.dart Style tool +
+    backend STYLE_FNS dispatch — verified live)
+  - Drop Mem0 — DROPPED (Q16=a locked Wave 20: confirmed
+    actively producing 8+ semantic memories per user
+    screenshot of the partner Memory tab + server log
+    confirmation of "Mem0 initialized with ChromaDB + Ollama
+    embeddings")
 
 ### 10.5.1 Considered + rejected (Wave 17 cleanup)
 
@@ -1217,7 +1281,7 @@ Rejection criteria (per the Wave 17 cleanup pass):
 
 ---
 
-## 10.6 Wave 5 + Wave 6 + Wave 7 + Wave 8 + Wave 9 + Wave 10 + Wave 11 + Wave 12 + Wave 13 + Wave 14 + Wave 15 + Wave 16 + Wave 17 + Wave 18 + Wave 19 retrospective
+## 10.6 Wave 5 + Wave 6 + Wave 7 + Wave 8 + Wave 9 + Wave 10 + Wave 11 + Wave 12 + Wave 13 + Wave 14 + Wave 15 + Wave 16 + Wave 17 + Wave 18 + Wave 19 + Wave 20 retrospective
 
 > **Status as of 2026-04-30:** Wave 5 fully shipped (12 commits, +216
 > tests). Wave 6 fully shipped (12 commits, +118 tests across 8
@@ -1252,7 +1316,10 @@ Rejection criteria (per the Wave 17 cleanup pass):
 > brought it to 1834; Wave 17 doc-only (1834 unchanged);
 > Wave 18 brought it to 1836 (+2 from [IMPROVE-138] backend
 > persistence pin tests); Wave 19 unchanged at 1836
-> (Flutter-only consumption). All 4 xfailed agent tests resolved
+> (Flutter-only consumption). Wave 20 cleanup wave in
+> progress (1 mid-wave doc commit landed; planned shape is
+> 8 commits = 1 mid-wave doc + 1 deletion + 5 TTS quick wins
+> + 1 end-wave doc). All 4 xfailed agent tests resolved
 > post-IMPROVE-71.
 
 ### Wave 5 (✓ shipped)
@@ -1519,6 +1586,22 @@ the Wave 18 convention: hosts (PartnerImportPage,
 partner_page.dart's _handleExport) skip widget tests and
 are verified by hand against a live backend; only the
 public widget + top-level helpers ship pinned tests.
+
+### Wave 20 (in progress)
+
+| # | Tag | SHA | What landed | Tests |
+|---|---|---|---|---:|
+| 1 | (doc)         | this    | Wave 20 mid-wave (start) — §10.7 walkthrough resolves Q1=a (local-only), Q4=c (keep both Kokoro + Chatterbox; ship 5 TTS pipeline quick wins instead of deleting), Q7=b (remove instruction tools), Q15=a (keep ONNX styles — wired into editor), Q16=a (keep Mem0 — confirmed actively producing 8+ semantic memories per user screenshot). Moves 5 questions §10.7.2 → §10.7.1 with rationale. Updates §10.5 deletion-candidate flags (1 activate + 3 drop). Updates §10.7.2 prefatory text (Wave 19+ priorities → Wave 21+ priorities). SHA filled in by Wave 20 end-wave doc commit. | 0 |
+
+(Rows 2-8 added by subsequent Wave 20 commits + the end-
+wave doc commit per the Wave 12-15 placeholder convention.)
+
+Net so far: +0 tests on the Tier 1 Python sweep at the
+mid-wave doc point (doc-only commit). Numbered items
+shipping under Wave 20 will add new pin tests for the TTS
+pipeline (per-item +1 to +5 each, depending on surface) +
+remove the `add_instruction_tool` test fixture. Tier 1
+expected to grow by ~5-15 tests across the wave.
 
 ### Wave 14 architectural impact
 
@@ -2312,30 +2395,25 @@ public widget + top-level helpers ship pinned tests.
 
 ### Where to start today
 
-Waves 1-18 are shipped — pick up an item from §10.5 Wave 18
-deferred queue (the trimmed Wave 17 cleanup output: ~32
-substantive items with explicit ship triggers).
+Waves 1-19 are shipped + Wave 20 cleanup wave is in progress
+— see §10.8 for current next-ship planning. Wave 19 Tranche
+A closed the GDPR Article 20 round-trip with the partner-
+import host ([IMPROVE-145]) + export button ([IMPROVE-146])
+co-resident in a NEW Backup & Restore card. Wave 20 closes
+the §10.7 gating questions (Q1 / Q4 / Q7 / Q15 / Q16) +
+activates the one resulting deletion candidate (Q7=b
+instruction tools) + ships 5 TTS pipeline quick wins per the
+Q4 audit (smallest to largest LoC: Chatterbox sentence
+timeout 30s→8s, `asyncio.to_thread(init_voice)`, pre-
+compiled `_preprocess_text_for_tts` regexes, lifted TTS
+hot-path imports + shared `_pcm_to_wav` helper, async
+Chatterbox `synthesize_sentence_async`).
 
-Wave 18 just closed — Tranche A Flutter editor v2 shipped 7
-numbered widgets + 2 doc commits ([IMPROVE-138] through
-[IMPROVE-144]). The widgets cover 11 backend contracts; the
-host-vs-widget split makes them composable into future flows.
+After Wave 20 closes, the natural Wave 21+ paths are:
 
-The natural Wave 19+ paths:
-
-  * **Partner-import host flow** — composes [IMPROVE-143]
-    PerRowDiffOverlay + [IMPROVE-144] ScopeMultiSelect into a
-    full preview/restore UI in partner_page.dart (file picker
-    + dry-run + verbose + scope selection + confirm). The
-    widgets are ready; only the host wiring + tests remain.
-  * **Wave 19 cleanup wave** — resolve the §10.7 gating
-    questions (Q1 distribution / Q4 Chatterbox / Q7
-    instruction tools / Q15 ONNX / Q16 Mem0) + activate the
-    deletion candidates that depend on the answers. Pre-
-    requisite for any cleanup work that touches the deletion
-    candidates.
   * **§10.5 Wave 18 deferred queue** — pick a substantive item
-    from the trimmed list:
+    from the trimmed list. Most §10.7-gated carry-overs are
+    now ungated since Wave 20 closed Q1 / Q4 / Q7 / Q15 / Q16.
       - NEW carry-overs (2/7/8/10) — small quality items that
         waited for Tranche D substrate (NEW-2) or contract
         refresh windows (NEW-7/8/10).
@@ -2346,6 +2424,19 @@ The natural Wave 19+ paths:
       - Wave-10/11-spawned hardware-gated calibration items —
         wait for 8GB 30xx benchmark suite.
       - Tranches B/D/E/F/G — themed multi-day work.
+  * **Wave 20-spawned bigger TTS items** — Kokoro
+    `create_stream` chunked TTFA (~25 LoC, med risk) +
+    server-side parallel synth-while-LLM-streams (~80-150
+    LoC, high risk) deferred from Wave 20's quick-win batch.
+    Both have measurable speedup levers per the Q4 audit.
+  * **Cross-cutting startup contention investigation** —
+    flagged during the Q4 audit. Logs show 7 endpoints all
+    blocking at exactly 20.94s + 4 more at 22.56s + 3 more
+    at 4.70s = three serialized lazy-init chains in the
+    request path (HF token resolver / Mem0 init /
+    hardware_profile probe). Same pattern as the Q4 audit's
+    `init_voice` finding (fixed in Wave 20 quick win A) but
+    cross-cutting.
 
 Items previously considered + rejected in the Wave 17 cleanup
 are archived in §10.5.1 (22 items, grouped by origin audit).
@@ -2365,12 +2456,21 @@ questions (~25) carry forward with explicit DECISION
 DEADLINE annotations on the gating questions; OBSOLETE
 questions (1) record why they no longer apply.
 
-### 10.7.1 Resolved (Wave 17)
+**Wave 20 refresh (2026-05-04):** the 5 gating questions
+(Q1 distribution / Q4 Chatterbox / Q7 instruction tools /
+Q15 ONNX styles / Q16 Mem0) — all annotated with
+"DECISION DEADLINE: before Wave 19 cleanup wave" — closed
+in Wave 20 with shipped-reality-grounded answers. Q1=a,
+Q4=c, Q7=b, Q15=a, Q16=a. RESOLVED count grows from 4 to
+9; STILL OPEN drops by 5; deletion candidates in §10.5
+flipped (1 activate + 3 drop).
+
+### 10.7.1 Resolved (Wave 17 + Wave 20)
 
 These questions can be answered based on shipped reality
-across 16 waves. The roadmap operates as if these answers
-hold; deletion-candidate gating in §10.5 reflects the
-inverse cases.
+across 19 waves + the Wave 20 §10.7 walkthrough. The
+roadmap operates as if these answers hold; deletion-
+candidate gating in §10.5 reflects the inverse cases.
 
 - **Observability tool** ("Do you have an observability tool you use — Datadog / Grafana / Langfuse / local Jaeger?"):
   RESOLVED — in-process telemetry surface via /observability/* endpoints (timeseries, summary, recent, rejections, events registry, filters echo schema). 16 waves of telemetry work (Wave 3-6 OTel foundation, Wave 8-16 typed-event registry + rejection rollups + filters echo schema) shipped without a third-party tool. The platform is its own observability surface; [IMPROVE-4] (external observability tool integration) deferred indefinitely.
@@ -2384,14 +2484,29 @@ inverse cases.
 - **Streaming step previews for image** ([IMPROVE-43]):
   RESOLVED — Streamed. Image step previews ship via the /images/stream endpoint; the test_image_step_preview_stream pin holds the contract since Wave 14. Both axes (step previews + stage events) are streamed.
 
+- **Distribution** (Q1 — *resolved Wave 20*):
+  RESOLVED — Local-only. 19 waves shipped without auth, sandbox, multi-machine work, or service mode; CLAUDE.md states "Windows desktop AI platform"; HF token in single-machine `.env`. [IMPROVE-2] (run as service), [IMPROVE-10] (auth), [IMPROVE-20] (sandbox), [IMPROVE-21] (sandbox MCP), [IMPROVE-26] (cache MCP), [IMPROVE-59]/[IMPROVE-60] (security/compliance) deferred indefinitely. Decision deadline closed Wave 20 — if distribution opens up later, those items flip back to high priority and reshape the roadmap.
+
+- **TTS mode** (Q4 — *resolved Wave 20*):
+  RESOLVED — Keep both, with Kokoro as default. Flutter `partner_page.dart:84,1305-1325` exposes a tappable "Fast (Kokoro)" ↔ "Emotional (Chatterbox)" toggle (only shown when the Chatterbox sidecar at port 8282 is detected). Variant detection (turbo/legacy) + GitHub link ship alongside. Auto-fallback to Kokoro if the sidecar is absent. Wave 20 Q4 audit found 5 TTS pipeline quick wins (the Wave 20 IMPROVE-148/149/150/151/152 numbered items, all <50 LoC each, low risk) shipping before Wave 20 close. Bigger architectural items (Kokoro `create_stream` chunked TTFA, server-side parallel synth-while-LLM-streams) deferred to Wave 21+ backlog. "Delete Chatterbox path" deletion candidate dropped (`§10.5`).
+
+- **Instruction tools** (Q7 — *resolved Wave 20*):
+  RESOLVED — Remove ([IMPROVE-24]). `add_instruction_tool` in `agents.py:522` produces a string-template tool (`f"Tool {name} guidance: {instructions}\nTask: {task}"`) that just prepends instructions to the task — agents already get system prompts. The `tool_type=="instruction"` branch in `routers/tools.py:104` is the sole consumer. **No Flutter UI** exposes the `instruction` tool type (tools_page.dart never references it). Activates the "Delete instruction tools" deletion candidate; landed as the Wave 20 instruction-tools deletion ([IMPROVE-147]).
+
+- **ONNX styles** (Q15 — *resolved Wave 20*):
+  RESOLVED — Keep. Wired into the image editor. `editor_page.dart:540` exposes a Style tool button; line 1116 lists all 5 styles (candy/mosaic/rain_princess/udnie/pointilism); line 1125 calls `_applyEdit('style_transfer', {'style': _selectedStyle})` which routes through POST `/editor/{session_id}/edit` → backend `STYLE_FNS["style_transfer"]` (`ai_models.py:823`) → `style_transfer()` (`ai_models.py:426`) using the 5 ONNX models from the ONNX Model Zoo. Each model is 6.6MB, ~100ms per inference, downloaded on demand. "Delete ONNX styles" deletion candidate dropped — the dispatch is generic so the route grep missed it; it's live code with a real user-facing path. Q15 was previously marked "currently kept per Q15=unknown" in §10.5 — now firmly Q15=a.
+
+- **Mem0 worth complexity** (Q16 — *resolved Wave 20*):
+  RESOLVED — Keep. User screenshot of the partner Memory tab confirms 8 actively-extracted Mem0 memories ("Had a rough tyrant day", "Wanted to talk to someone", "Struggles with time management, feels overwhelmed by tasks, and wastes time and energy", etc.) under the green-checkmarked "Mem0 Memories (AI-extracted)" panel. Server log confirms `Mem0 initialized with ChromaDB + Ollama embeddings (nomic-embed-text:latest)`. Mem0 produces value over plain SQLite by extracting semantic facts from conversation turns — that value is observed, not aspirational. SQLite-only fallback path (Wave 14 [IMPROVE-62] retry-TTL) remains for users without `mem0ai` / `chromadb` installed. "Drop Mem0" deletion candidate dropped.
+
 ### 10.7.2 Still open (carries forward)
 
 These remain open. Gating questions have explicit DECISION
-DEADLINE annotations — answers shape Wave 19+ priorities.
+DEADLINE annotations — answers shape Wave 21+ priorities.
+(Wave 20 closed Q1 / Q4 / Q7 / Q15 / Q16; see §10.7.1.)
 
 #### Architecture / infra
 
-- **Distribution** (Q1): Will the Flutter client ever need to talk to the backend from another machine? Affects [IMPROVE-2] (run as service), [IMPROVE-10] (auth), [IMPROVE-20] (sandbox), [IMPROVE-21] (sandbox MCP), [IMPROVE-26] (cache MCP), [IMPROVE-59]/[IMPROVE-60] (security/compliance). **DECISION DEADLINE:** before any [IMPROVE-2]/10/20/21/26 work begins. If local-only confirms, those items stay demoted; if distribution opens up, they flip to high priority and reshape the roadmap.
 - **python-dotenv / pydantic-settings absence**: intentional or oversight? Decision shape — adopt a settings library or document the bare-os.environ pattern.
 
 #### Use / actual behavior
@@ -2404,8 +2519,6 @@ DEADLINE annotations — answers shape Wave 19+ priorities.
 - **Hardcoded system templates** (6 of them): used or everyone on custom DAG designer? Affects [IMPROVE-34] (template retirement).
 - **_evict_ollama_from_gpu pain**: eviction → restart cycle actually causing user pain? Affects whether to invest in a more surgical approach.
 - **_last_detected_emotion + avatar integration**: visible or dead code?
-- **TTS mode** (Q4): Kokoro or Chatterbox? **DECISION DEADLINE:** before Wave 19 cleanup wave. Gates "Delete Chatterbox path" deletion candidate (currently kept per Q4=c).
-- **Mem0 worth complexity** (Q16): keep vs SQLite tiers alone? **DECISION DEADLINE:** before Wave 19 cleanup wave. Gates "Drop Mem0" deletion candidate.
 - **Runs page usage**: actually used or stayed read-only? Affects investment in the page.
 
 #### Decisions
@@ -2421,27 +2534,30 @@ DEADLINE annotations — answers shape Wave 19+ priorities.
 - **Presets vs deeper history** ([IMPROVE-54] vs [IMPROVE-52]): which matters more?
 - **KONTEXT_GGUF_QUANT default mismatch**: code (`Q4_K_S`) or docs (`Q3_K_S`) correct? (5-min user product decision.)
 - **torch.compile config knob**: actually enable compile or stay inert?
-- **Instruction tools** (Q7): keep or remove ([IMPROVE-24])? **DECISION DEADLINE:** before Wave 19 cleanup wave. Gates "Delete instruction tools" deletion candidate.
-- **ONNX styles** (Q15): keep or drop? **DECISION DEADLINE:** before Wave 19 cleanup wave. Gates "Delete ONNX styles" deletion candidate (currently kept per Q15=unknown).
 - **MCP usage signal** (Q3 implicit): are MCP servers actually used or aspirational? Gates [IMPROVE-21]/[IMPROVE-26]/[IMPROVE-28].
 
 ### 10.7.3 Obsolete (Wave 17)
 
 - **IMPROVE-17 cancel duplicate**: original §10.7 listed "For [IMPROVE-17] cancel: keep partial message with 'cancelled' flag, or drop it?" twice (once under Decisions explicitly, once under "Partial-message semantics for chat cancel" prose). OBSOLETE — consolidated to a single entry under §10.7.2 Decisions above.
 
-Answer whichever are easy. The roadmap is shaped enough to make progress on Wave 18+ Tranche A without any of these answered, but the gating questions (Q1 / Q4 / Q7 / Q15 / Q16) should be resolved before Wave 19 (the cleanup wave that would activate the deletion candidates).
+Answer whichever are easy. Wave 20 closed all 5 gating
+questions (Q1 / Q4 / Q7 / Q15 / Q16) — see §10.7.1 for the
+resolutions and §10.5 for the resulting deletion-candidate
+flag flips. The remaining STILL OPEN questions are non-
+gating (no deletion candidates depend on them) and shape
+Wave 21+ priorities at the user's pace.
 
 ---
 
 ## 10.8 Where to go from here
 
 - **Read chapter 1 → 9 if you haven't.** This chapter is the index; the others have the details.
-- **Pick a Wave 20+ item and ship it** — see §10.5 Wave 18 deferred queue (the trimmed Wave 17 cleanup output: NEW candidates IMPROVE-NEW-2/7/8/10 + Wave-15-audit FILTER_AXIS_TYPES registry + 7 Wave-16-audit-spawned items + Wave-13/12/11/10-audit triggered items + themed tranches B/D/E/F/G + carry-overs gated on §10.7 questions). Tranche A (Flutter editor v2) shipped fully in Wave 18 — IMPROVE-138 through IMPROVE-144 (7 widgets covering 11 backend contracts). Wave 19 Tranche A closed the round-trip with the partner-import host ([IMPROVE-145]) + export button ([IMPROVE-146]) co-resident in the new Backup & Restore card. The natural next ship is either (a) Wave 20 cleanup wave resolving §10.7 STILL OPEN gating questions and activating deletion candidates, (b) themed Tranche B/D/E/F/G work, or (c) deferred-queue picks (NEW carry-overs / Wave-N-audit items). Items previously considered + rejected are archived in §10.5.1.
-- **Keep `[IMPROVE-N]` references alive.** When you fix one, grep `docs/features/` for that ID and cross out. If you add new ones in future work, number them IMPROVE-147+ (1-146 are taken; the IMPROVE-NEW-* tags graduate to permanent numbers on acceptance) and note them in the originating chapter.
+- **Pick a Wave 21+ item and ship it** — see §10.5 Wave 18 deferred queue (the trimmed Wave 17 cleanup output: NEW candidates IMPROVE-NEW-2/7/8/10 + Wave-15-audit FILTER_AXIS_TYPES registry + 7 Wave-16-audit-spawned items + Wave-13/12/11/10-audit triggered items + themed tranches B/D/E/F/G + carry-overs gated on §10.7 questions — most of which are now ungated since Wave 20 closed Q1 / Q4 / Q7 / Q15 / Q16). Tranche A (Flutter editor v2) shipped fully in Wave 18 — IMPROVE-138 through IMPROVE-144. Wave 19 Tranche A closed the GDPR Article 20 round-trip with the partner-import host ([IMPROVE-145]) + export button ([IMPROVE-146]). Wave 20 cleanup wave (in progress) closes §10.7 gating questions + ships a Q7=b deletion + 5 Q4=c TTS pipeline quick wins. The natural Wave 21+ paths: (a) themed Tranche B/D/E/F/G work, (b) deferred-queue picks (NEW carry-overs / Wave-N-audit items), or (c) the Wave 20-spawned Wave 21+ items (bigger TTS architectural pieces — Kokoro `create_stream` chunked TTFA, server-side parallel synth-while-LLM-streams — plus the cross-cutting startup contention investigation flagged by the Q4 audit). Items previously considered + rejected are archived in §10.5.1.
+- **Keep `[IMPROVE-N]` references alive.** When you fix one, grep `docs/features/` for that ID and cross out. If you add new ones in future work, number them IMPROVE-153+ (1-146 are taken plus IMPROVE-147..152 reserved for Wave 20 numbered items shipping as the wave progresses; the IMPROVE-NEW-* tags graduate to permanent numbers on acceptance) and note them in the originating chapter.
 - **The `MEMORY.md` in `~/.claude/projects/...` contains the feedback rule** that improvement suggestions should cite 2025–2026 sources. Every item here has citations in its origin chapter.
 
 ---
 
 **Guide complete.** `docs/features/README.md` → `01-architecture.md` → `02-llm-infrastructure.md` → `03-chat.md` → `04-agents-tools.md` → `05-systems.md` → `06-image-generation.md` → `07-image-editor.md` → `08-partner.md` → `09-observability.md` → `10-improvements.md` *(this file)*.
 
-Every major feature of the Local AI Platform is now documented end-to-end, with **146** research-backed improvement ideas cross-referenced into one prioritized plan. Waves 1-19 fully shipped; post-Wave-19 backlog in deferred queue.
+Every major feature of the Local AI Platform is now documented end-to-end, with **146** research-backed improvement ideas cross-referenced into one prioritized plan. Waves 1-19 fully shipped + Wave 20 cleanup wave in progress; post-Wave-19 backlog in deferred queue.
