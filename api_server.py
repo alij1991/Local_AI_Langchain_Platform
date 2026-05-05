@@ -307,6 +307,34 @@ async def lifespan(app: FastAPI):
     except Exception as exc:
         logger.warning("Partner memory warmup task scheduling failed: %s", exc)
 
+    # [IMPROVE-164] Wave 30 — editor session TTL cleanup. When
+    # ``EDITOR_SESSION_TTL_DAYS=N`` (default 0 = disabled) is set,
+    # lifespan schedules a fire-and-forget asyncio.create_task that
+    # walks ``data/images/editor/_archive/`` date-bucket subdirs
+    # older than N days + drops them via shutil.rmtree + DELETEs
+    # corresponding editor_sessions rows. Mirrors the Wave 22
+    # IMPROVE-156 fire-and-forget pattern above. Default-off
+    # preserves pre-Wave-30 "archives accumulate forever"
+    # semantics.
+    ttl_days = app.state.settings.editor_session_ttl_days
+    if ttl_days > 0:
+        try:
+            from local_ai_platform.images.editor_ttl import (
+                _async_warmup_editor_session_ttl_cleanup,
+            )
+            asyncio.create_task(
+                _async_warmup_editor_session_ttl_cleanup(ttl_days)
+            )
+            logger.info(
+                "Editor session TTL cleanup task scheduled (Wave 30 "
+                "IMPROVE-164, ttl_days=%d)", ttl_days,
+            )
+        except Exception as exc:
+            logger.warning(
+                "Editor session TTL cleanup task scheduling failed: %s",
+                exc,
+            )
+
     # Restore saved agents from DB
     agents_loaded = 0
     for agent_row in list_agents_db():

@@ -224,6 +224,17 @@ class AppSettings(BaseSettings):
     # preserves current boot speed; opt-in via env-var
     # ``LIFESPAN_EAGER_EDITOR_WARMUP=1``.
     lifespan_eager_editor_warmup: bool = Field(default=False)
+    # [IMPROVE-164] Wave 30 — editor session TTL cleanup. When
+    # set to a positive integer N, lifespan schedules a fire-and-
+    # forget ``asyncio.create_task`` that runs
+    # ``prune_expired_editor_sessions(N)``: walks
+    # ``data/images/editor/_archive/`` date-bucket subdirs older
+    # than N days + drops them via ``shutil.rmtree`` + DELETEs
+    # corresponding ``editor_sessions`` rows. Default 0 disables
+    # the cleanup (preserves pre-Wave-30 "archives accumulate
+    # forever" semantics). Opt-in via env-var
+    # ``EDITOR_SESSION_TTL_DAYS=N``.
+    editor_session_ttl_days: int = Field(default=0)
 
     # ── Tracing ───────────────────────────────────────────────────
     trace_enabled: bool = Field(default=True)
