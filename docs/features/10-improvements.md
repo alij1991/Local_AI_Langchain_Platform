@@ -1,6 +1,6 @@
 # 10 — Improvement Roadmap
 
-> **Goal of this chapter:** a single consolidated view of the **70 improvement ideas** surfaced across chapters 1–9 (now **152** post Wave 20), scored for impact and effort, grouped by theme, and laid out in a phased roadmap. Every idea here is grounded in a 2025–2026 source — the citations are in each chapter; this doc focuses on *what to do when*.
+> **Goal of this chapter:** a single consolidated view of the **70 improvement ideas** surfaced across chapters 1–9 (now **155** post Wave 21), scored for impact and effort, grouped by theme, and laid out in a phased roadmap. Every idea here is grounded in a 2025–2026 source — the citations are in each chapter; this doc focuses on *what to do when*.
 
 > **Revised 2026-04-29** — Wave 5 shipped (12 commits: IMPROVE-29/31/33/34/35/36/51/52/53/54/55/56/57/63/67). Wave 6 shipped (12 commits, 8 table-rows: IMPROVE-71/72/8 + Tranche-C 5×telemetry + IMPROVE-73/46/74/61). Wave 7 shipped (8 commits + 1 test-fix + 2 doc commits: IMPROVE-NEW-4/11/12/13/14/16/17/18 promoted to IMPROVE-75/76/77/78/79/80/81/82, plus a deterministic-counter fix for the IMPROVE-36 parallel-wave speedup test). Wave 8 shipped (6 numbered + 2 doc commits: IMPROVE-83/84/85/86/87/88 — streaming parallel-wave parity, inter-node-context migration, /systems/* rejection telemetry mirror, per-byte hf_hub_download progress, VRAM-probe telemetry + decay-export bundle, graph-time DAG validation). Wave 9 shipped (6 numbered + 2 doc commits: IMPROVE-89/90/91/92/93/94 — bulk emit_typed migration + close keystone gaps, per-rejection counter in /observability/summary, per-subsystem Literal + @overload for emit_typed action, per-event TypedDict context schemas, VRAM-probe-driven tile-based upscaling, POST /partner/import endpoint). Wave 10 shipped (6 numbered + 2 doc commits: IMPROVE-95/96/97/98/99/100 — top-12 event context schemas, Recorder enumeration test + 6 missing event registrations, asymmetric bundle versioning, POST /partner/import/dry-run, GET /observability/timeseries with ?error_code= filter, tile-size calibration per input resolution). Wave 11 shipped (6 numbered + 2 doc commits: IMPROVE-101/102/103/104/105/106 — Tier-A high-traffic schema batch, Recorder context schemas + track_event audit, sibling GET /observability/rejections endpoint, differential restore via ?scope= filter, per-row diff with ?verbose= flag, mypy strict-mode + literal-typing of derivation tuples). Wave 12 shipped (6 numbered + 2 doc commits: IMPROVE-107/108/109/110/111/112 — final-tier context schemas closing 100% coverage + mypy dev extra, ?error_code_prefix= LIKE filter + _rollup_rejections helper extraction, schema audit opt-out flip, ?fill_zeros=true bucket-padding on /timeseries, validate_kwargs helpers in NEW utils/validation.py + bug fix, bundle.json richer provenance). Wave 13 shipped (6 numbered + 2 doc commits: IMPROVE-113/114/115/116/117/118 — /observability/recent error_code + error_code_prefix filter axes, filter_kwargs_to_signature helper + 3 callsite migrations, /observability/summary ?fill_zero_dim=true dim-axis pad, bundle.json platform field gains git revision suffix, /images/upscale ?tile_size_override= power-user knob, CI lint route-mention validator). Wave 14 shipped (7 numbered + 2 doc commits: IMPROVE-119/120/121/122/123/124/125 — /timeseries fill_zeros bucket-straddle flake fix, CI lint IMPROVE-N reference validator, /images/upscale tile_stride_override sibling knob, shared obs_test_client fixture in tests/conftest.py, filters echo schema pin tests for the 4 obs endpoints, /timeseries fill_zero_time deprecation alias for fill_zeros, voice + instruct-model registries promoted to data/registries/*.json).
 
@@ -8,9 +8,9 @@
 
 ## 10.1 Summary
 
-- **152 improvements** flagged inline as `[IMPROVE-N]` in chapters 1–9 + the Wave 5/6/7/8/9/10/11/12/13/14/15/16/18/19/20 audits (NEW from Wave 6 audit: 71/72/73/74; NEW from Wave 7: 75/76/77/78/79/80/81/82; NEW from Wave 8: 83/84/85/86/87/88; NEW from Wave 9: 89/90/91/92/93/94; NEW from Wave 10: 95/96/97/98/99/100; NEW from Wave 11: 101/102/103/104/105/106; NEW from Wave 12: 107/108/109/110/111/112; NEW from Wave 13: 113/114/115/116/117/118; NEW from Wave 14: 119/120/121/122/123/124/125; NEW from Wave 15: 126/127/128/129/130/131; NEW from Wave 16: 132/133/134/135/136/137; NEW from Wave 18: 138/139/140/141/142/143/144; NEW from Wave 19 Tranche A: 145/146; NEW from Wave 20 cleanup wave: 147/148/149/150/151/152).
+- **155 improvements** flagged inline as `[IMPROVE-N]` in chapters 1–9 + the Wave 5/6/7/8/9/10/11/12/13/14/15/16/18/19/20/21 audits (NEW from Wave 6 audit: 71/72/73/74; NEW from Wave 7: 75/76/77/78/79/80/81/82; NEW from Wave 8: 83/84/85/86/87/88; NEW from Wave 9: 89/90/91/92/93/94; NEW from Wave 10: 95/96/97/98/99/100; NEW from Wave 11: 101/102/103/104/105/106; NEW from Wave 12: 107/108/109/110/111/112; NEW from Wave 13: 113/114/115/116/117/118; NEW from Wave 14: 119/120/121/122/123/124/125; NEW from Wave 15: 126/127/128/129/130/131; NEW from Wave 16: 132/133/134/135/136/137; NEW from Wave 18: 138/139/140/141/142/143/144; NEW from Wave 19 Tranche A: 145/146; NEW from Wave 20 cleanup wave: 147/148/149/150/151/152; NEW from Wave 21 startup-contention fix: 153/154/155).
 - **10 themes** — security, architecture, observability, tracing, UX, memory & context, model & inference, background tasks, voice, and tools/MCP.
-- **20 waves fully shipped + Wave 21 in progress** (Waves 1-16 numbered + Wave 17 doc-only cleanup + Wave 18 Tranche A Flutter editor v2 + Wave 19 Tranche A partner-import host + Wave 20 cleanup wave: §10.7 walkthrough closing Q1/Q4/Q7/Q15/Q16 + 1 deletion + 5 TTS quick wins + Wave 21 startup-contention fix targeting the 3 lazy-init chains the user's startup log surfaced); **1** standing in deferred queues (post-Wave-20 backlog).
+- **21 waves fully shipped** (Waves 1-16 numbered + Wave 17 doc-only cleanup + Wave 18 Tranche A Flutter editor v2 + Wave 19 Tranche A partner-import host + Wave 20 cleanup wave: §10.7 walkthrough closing Q1/Q4/Q7/Q15/Q16 + 1 deletion + 5 TTS quick wins + Wave 21 startup-contention fix targeting the 3 lazy-init chains the user's startup log surfaced); **1** standing in deferred queues (post-Wave-21 backlog).
 
 All improvements are traceable back to a chapter + a 2025–2026 citation. This chapter is pure planning — *what* + *why this order*; *how* is in each origin chapter.
 
@@ -178,7 +178,7 @@ Smaller items that improve day-to-day use.
 
 ---
 
-## 10.4 The complete table (all 152)
+## 10.4 The complete table (all 155)
 
 Sortable if you paste into a spreadsheet. Chapter column links back to the originating doc.
 
@@ -336,10 +336,13 @@ Sortable if you paste into a spreadsheet. Chapter column links back to the origi
 | 150 | 8 | ✓ Pre-compile _preprocess_text_for_tts regexes at class scope (Wave 20 Q4=c TTS quick win D) | ⋆ | 🔨 | Voice |
 | 151 | 8 | ✓ Lift TTS hot-path imports + extract _pcm_to_wav helper (Wave 20 Q4=c TTS quick win C) | ⋆⋆ | 🔨 | Voice |
 | 152 | 8 | ✓ Async synthesize_sentence_async via get_async_client() (Wave 20 Q4=c TTS quick win E) | ⋆⋆⋆ | 🔨🔨 | Voice |
+| 153 | 1 | ✓ Async get_editor_service + whoami to_thread (Wave 21 Chain 1 startup-contention fix) | ⋆⋆⋆ | 🔨 | Architecture |
+| 154 | 1 | ✓ Async get_partner_engine + partner.get_memories to_thread (Wave 21 Chain 2 startup-contention fix) | ⋆⋆⋆ | 🔨 | Architecture |
+| 155 | 1 | ✓ Eager hardware-profile warm-up at lifespan (Wave 21 Chain 3 startup-contention fix) | ⋆⋆ | 🔨 | Architecture |
 
 *Impact for [IMPROVE-59] is ⋆⋆⋆⋆⋆ if the app is ever distributed, ⋆⋆ if it stays local-only.
 
-**Legend:** A ``✓`` prefix marks items that have shipped. See §10.6 for the Wave 5 / 6 / 7 / 8 / 9 / 10 / 11 / 12 / 13 / 14 / 15 / 16 / 17 / 18 / 19 / 20 retrospective.
+**Legend:** A ``✓`` prefix marks items that have shipped. See §10.6 for the Wave 5 / 6 / 7 / 8 / 9 / 10 / 11 / 12 / 13 / 14 / 15 / 16 / 17 / 18 / 19 / 20 / 21 retrospective.
 
 ---
 
@@ -946,69 +949,40 @@ helper, E async synthesize). The end-wave doc closes Wave
 | 7 | [IMPROVE-152] | 99a153e | TTS quick win E — Async ``synthesize_sentence_async`` via ``get_async_client()``. NEW async sibling of ``synthesize_sentence`` mirrors the Chatterbox path through ``await client.post()`` instead of ``get_sync_client().post()``; Kokoro fallback wraps in ``asyncio.to_thread(self._synthesize_kokoro, ...)``. POST /partner/voice/synthesize-sentence handler awaits it directly instead of ``run_in_executor(None, lambda: partner.synthesize_sentence(...))``. Saves ~10-30ms executor-hop per sentence + frees a thread-pool slot for actually-sync work. Extends test_partner_engine_httpx.py with 3 async pin tests. Sync ``synthesize_sentence`` retained for backward compat. | +3 |
 | 8 | (doc)         | 5c8a2e3 | Wave 20 end-wave retrospective. Bumps 146 → 152 in §10.1 + §10.4. Adds 6 IMPROVE-N rows (147-152) to §10.4 + ✓ to row 24 (closed by IMPROVE-147). Fills in Wave 20 mid-wave SHA placeholder (7bef779). Updates §10.5 + §10.6 Wave 20 status (in progress → ✓ shipped) + full 8-row tables. Adds Wave 20 architectural impact subsection in §10.6. Updates §10.8 closing line + Wave 21+ pivot text. | 0 |
 
-### Wave 21 — Startup-contention fix (in progress)
+### Wave 21 — Startup-contention fix (✓ shipped 2026-05-05)
 
 Theme: address the 3 serialized lazy-init chains the user's
 startup log surfaced — 7 endpoints all returning at exactly
 20.94s + 4 more at 22.56s + 3 more at 4.70s, signalling
 shared sync lazy-init in the request path that blocks the
 event loop / GIL. Wave 20's [IMPROVE-149] fixed the
-``init_voice`` instance of this pattern; Wave 21 generalises
-the fix to the 3 cross-cutting chains.
-
-The audit (delivered in chat) identified:
-
-  * **Chain 1 (~21s, 7 endpoints)** — ``get_editor_service``
-    lazy ``import local_ai_platform.images.editor`` chain
-    (PIL plugins / OpenCV / ai_enhance's transitive
-    diffusers / transformers / torch dependencies). Holds
-    GIL + import lock for ~21s on first call.
-  * **Chain 2 (~22.56s, 4 endpoints)** — Mem0 / ChromaDB
-    init via ``_init_mem0()`` triggered on first
-    ``partner.get_memories()`` call. ``Memory.from_config``
-    does heavy import + ChromaDB sqlite init + Ollama
-    embedding model warm-up.
-  * **Chain 3 (~4.70s, 3 endpoints)** — Hardware profile
-    detection in ``ImageGenerationService._get_hardware
-    _profile()`` triggered by ``/images/runtime`` first
-    call. cpuinfo subprocess + torch.cuda init + 8 module-
-    import probes.
-
-Per the audit's Wave 21 shape recommendation: 3 numbered
-items (one per chain) + 2 doc commits = 5 total.
-Numbering starts at IMPROVE-153 (1-152 are taken).
+``init_voice`` instance of this pattern; Wave 21 generalised
+the fix to 3 cross-cutting chains via 3 layers (Depends
+factory + route handler + lifespan startup).
 
 Per Q5=A mid + end-wave doc cadence (Wave 12-15
-convention): this commit opens Wave 21 by registering it
-in §10.5 + §10.6 + locking the planned shape. Subsequent
-numbered items ship + the end-wave doc commit closes
-Wave 21 with the full 5-row table.
-
-Planned shape (5 commits = 1 mid-wave doc + 3 numbered +
-1 end-wave doc):
-
-  * Mid-wave doc (this) — register Wave 21 in §10.5 +
-    §10.6; document the 3-chain audit findings.
-  * IMPROVE-153 (Chain 1) — async ``get_editor_service``
-    via ``asyncio.to_thread`` + wrap ``whoami`` in
-    /settings/hf-token GET + POST handlers.
-  * IMPROVE-154 (Chain 2) — async ``get_partner_engine``
-    via ``asyncio.to_thread`` + wrap heavy ``partner
-    .get_memories()`` call in /partner/memories handler.
-  * IMPROVE-155 (Chain 3) — eager ``_get_hardware_profile()``
-    warm-up in lifespan startup (after the existing
-    ``image_service.refresh_models()`` block).
-  * End-wave doc — Wave 21 retrospective + Wave 22+
-    backlog (deferred bigger items: true-async
-    ``_init_mem0`` via httpx.AsyncClient + lifespan eager
-    editor warm-up under a feature flag, etc.).
+convention): the mid-wave doc opened Wave 21 by registering
+it in §10.5 + §10.6 with the 3-chain audit findings + locked
+the planned shape. The 3 numbered items shipped per chain (1
+fix per chain). The end-wave doc closes Wave 21 with the
+full 5-row table + retrospective + Wave 22+ backlog.
 
 | # | Tag | SHA | What landed | Tests |
 |---|---|---|---|---:|
-| 1 | (doc)         | this    | Wave 21 mid-wave (start) — register Wave 21 in §10.5 + §10.6 with the 3-chain audit findings. Updates §10.1 wave-status bullet (20 waves shipped → 20 + Wave 21 in progress). Fills in Wave 20 end-wave SHA placeholder (this → 5c8a2e3) per the Wave 12-15 placeholder convention. SHA filled in by Wave 21 end-wave doc commit. | 0 |
+| 1 | (doc)         | 760d4f2 | Wave 21 mid-wave (start) — register Wave 21 in §10.5 + §10.6 with the 3-chain audit findings. Updates §10.1 wave-status bullet (20 waves shipped → 20 + Wave 21 in progress). Fills in Wave 20 end-wave SHA placeholder (this → 5c8a2e3) per the Wave 12-15 placeholder convention. | 0 |
+| 2 | [IMPROVE-153] | 5b6725f | Chain 1 fix — async ``get_editor_service`` Depends factory via ``asyncio.to_thread(_build_editor_service)`` + wrap ``huggingface_hub.whoami`` in /settings/hf-token GET + POST handlers. Unblocks 7 endpoints that previously serialized at 20.94s behind the editor-module lazy-import (PIL plugins / OpenCV / ai_enhance's diffusers/transformers/torch transitive chain). Sidecar fix for ``whoami`` covers the audit's Fix #2 too. | 0 |
+| 3 | [IMPROVE-154] | 856eb6a | Chain 2 fix — async ``get_partner_engine`` Depends factory via ``asyncio.to_thread(_build_partner_engine, router, config)`` + wrap heavy ``partner.get_memories()`` call in /partner/memories route handler. Unblocks 4 partner endpoints (/partner/voice/status, /partner/memories, /partner/user-profile, /partner/profile) that previously serialized at 22.56s behind Mem0 / ChromaDB init (~1s mem0 import + ~3s ChromaDB sqlite init + ~15-18s Ollama embedding model warm-up). | 0 |
+| 4 | [IMPROVE-155] | 1130869 | Chain 3 fix — eager ``image_service._get_hardware_profile()`` warm-up at lifespan startup via ``asyncio.to_thread`` (after the existing ``image_service.refresh_models()`` block in api_server.py). Unblocks 3 endpoints (/tools second hit, /models/chat-capable, /images/runtime) that previously serialized at 4.70s behind the lazy hardware-detection probe (cpuinfo subprocess + torch.cuda init + 8 module-import probes). Server boot time grows by ~4.7s (cost moves from "first request" to "lifespan startup" — right tradeoff for a desktop app). | 0 |
+| 5 | (doc)         | this    | Wave 21 end-wave retrospective. Bumps 152 → 155 in §10.1 + §10.4. Adds 3 IMPROVE-N rows (153/154/155). Fills in Wave 21 mid-wave SHA placeholder (760d4f2). Updates §10.5 + §10.6 Wave 21 status (in progress → ✓ shipped) + full 5-row tables. NEW Wave 21 architectural impact subsection in §10.6. Updates §10.8 closing line + Wave 22+ pivot text. SHA filled in by Wave 22 mid-wave doc commit per Wave 12-15 placeholder convention. | 0 |
 
-(Rows 2-5 added by subsequent Wave 21 commits + the end-
-wave doc commit per the Wave 12-15 placeholder convention.)
+Net: +0 tests on the Tier 1 Python sweep (1858 unchanged
+across the 3 numbered items — async-conversion + lifespan
+warm-up refactors have no behaviour-pin contract surface).
+The user-visible win is on the COLD STARTUP TIMELINE, not
+in the test suite: ~21s + ~22s + ~4.7s ≈ 47s of serialized
+blocking unwound, with the Chain 3 cost amortised cleanly
+to the lifespan window. 5 commits (2 doc + 3 numbered) —
+the planned shape held end-to-end.
 
 ### Wave 18 — Deferred (queued for next iteration)
 
@@ -1366,10 +1340,11 @@ Rejection criteria (per the Wave 17 cleanup pass):
 > (Flutter-only consumption). Wave 20 cleanup wave fully
 > shipped (8 commits = 2 doc + 1 deletion + 5 TTS quick
 > wins; +22 backend tests on Tier 1 — 1836 → 1858). Wave
-> 21 startup-contention fix in progress (1 mid-wave doc
-> commit landed; planned shape is 5 commits = 1 mid-wave
-> doc + 3 numbered chain fixes + 1 end-wave doc). All 4
-> xfailed agent tests resolved post-IMPROVE-71.
+> 21 startup-contention fix fully shipped (5 commits = 2
+> doc + 3 numbered chain fixes; 1858 unchanged — async-
+> conversion + lifespan warm-up has no test surface, but
+> ~47s of cold-startup blocking unwound). All 4 xfailed
+> agent tests resolved post-IMPROVE-71.
 
 ### Wave 5 (✓ shipped)
 
@@ -1746,22 +1721,116 @@ code action (Q1=a / Q15=a / Q16=a — doc-only flag flips).
     (IMPROVE-147) removed a tool_type branch inside POST
     /tools, not the route itself.
 
-### Wave 21 (in progress)
+### Wave 21 (✓ shipped)
 
 | # | Tag | SHA | What landed | Tests |
 |---|---|---|---|---:|
-| 1 | (doc)         | this    | Wave 21 mid-wave (start) — register Wave 21 in §10.5 + §10.6 with the 3-chain audit findings (Chain 1 editor-service import 21s / Chain 2 Mem0 init 22.56s / Chain 3 hardware-profile probe 4.7s). Updates §10.1 wave-status (20 waves shipped → 20 + Wave 21 in progress). Fills in Wave 20 end-wave SHA placeholder (this → 5c8a2e3). SHA filled in by Wave 21 end-wave doc commit. | 0 |
+| 1 | (doc)         | 760d4f2 | Wave 21 mid-wave (start) — register Wave 21 in §10.5 + §10.6 with the 3-chain audit findings (Chain 1 editor-service import 21s / Chain 2 Mem0 init 22.56s / Chain 3 hardware-profile probe 4.7s). Updates §10.1 wave-status (20 waves shipped → 20 + Wave 21 in progress). Fills in Wave 20 end-wave SHA placeholder (5c8a2e3). | 0 |
+| 2 | [IMPROVE-153] | 5b6725f | Chain 1 fix — async ``get_editor_service`` Depends factory + ``whoami`` to_thread wrap in /settings/hf-token GET + POST. Unblocks 7 endpoints previously serialized at 20.94s behind editor-module lazy-import. | 0 |
+| 3 | [IMPROVE-154] | 856eb6a | Chain 2 fix — async ``get_partner_engine`` Depends factory + ``partner.get_memories()`` to_thread wrap in /partner/memories handler. Unblocks 4 partner endpoints previously serialized at 22.56s behind Mem0 / ChromaDB / Ollama-embeddings init. | 0 |
+| 4 | [IMPROVE-155] | 1130869 | Chain 3 fix — eager ``image_service._get_hardware_profile()`` warm-up at lifespan startup via ``asyncio.to_thread``. Unblocks 3 endpoints previously serialized at 4.70s behind cpuinfo + torch.cuda + 8 module-import probes. Cost amortised to lifespan window (server boot +4.7s). | 0 |
+| 5 | (doc)         | this    | Wave 21 end-wave retrospective. Bumps 152 → 155 in §10.1 + §10.4. Adds 3 IMPROVE-N rows (153/154/155). Fills in Wave 21 mid-wave SHA placeholder (760d4f2). Updates §10.5 + §10.6 Wave 21 status (in progress → ✓ shipped) + full 5-row tables. NEW Wave 21 architectural impact subsection. Updates §10.8. | 0 |
 
-(Rows 2-5 added by subsequent Wave 21 commits + the end-
-wave doc commit per the Wave 12-15 placeholder convention.)
+Net: +0 tests on the Tier 1 Python sweep (1858 unchanged
+across the 3 numbered items — async-conversion + lifespan
+warm-up refactors have no behaviour-pin contract surface).
+The user-visible win is on the COLD STARTUP TIMELINE, not
+in the test suite: ~21s + ~22s + ~4.7s ≈ 47s of serialized
+blocking unwound, with the Chain 3 cost amortised cleanly
+to the lifespan window. 5 commits (2 doc + 3 numbered) —
+the planned shape held end-to-end.
 
-Net so far: +0 tests on the Tier 1 Python sweep at the
-mid-wave doc point (doc-only commit). Numbered items
-shipping under Wave 21 are async-conversion + lifespan
-warm-up refactors with no obvious test pin surface
-(timeout-style behaviour rather than contract-style); the
-Tier 1 baseline likely stays at 1858 across the 3 numbered
-items, with the end-wave doc commit confirming.
+### Wave 21 architectural impact
+
+  * **Three layers, three patterns**: Wave 21 fixed
+    cross-cutting startup contention via 3 different
+    layers, each with its own canonical pattern:
+      - Chain 1 + Chain 2: **async Depends factory** with
+        ``await asyncio.to_thread(_build_X)``. Wraps
+        heavy first-call import + construction so the
+        event loop yields during the 20+ second initial
+        load. Test compatibility: FastAPI's
+        ``app.dependency_overrides`` accepts sync
+        callables for async deps, so existing test
+        patterns (``[get_X] = lambda: stub``) continue
+        to work without churn.
+      - Chain 2 also: **route-handler-level to_thread**
+        for the heavy method call (``partner.get_memories
+        ()`` triggers Mem0 lazy-init). Layered with the
+        Depends factory fix — the factory becomes async
+        for consistency + future-proofing, the route
+        handler explicitly to_threads the slow operation.
+      - Chain 3: **lifespan eager warm-up** — call the
+        heavy probe (``image_service._get_hardware
+        _profile()``) at server boot via
+        ``asyncio.to_thread``. Trades ~4.7s of server
+        boot time for hot first-request behaviour. Right
+        tradeoff for desktop apps; would be wrong for
+        cloud workers where boot time matters.
+
+  * **Audit-driven, log-anchored**: the user's startup
+    log was the smoking gun (7 endpoints all at *exactly*
+    20.94s + 4 at *exactly* 22.56s + 3 at *exactly*
+    4.70s). The exact-equal elapsed times pinpoint the
+    serialized blocker pattern unambiguously. Wave 21's
+    audit traced each batch to its specific lazy-init
+    chain via grep + log inspection. Future startup-
+    contention investigations can use the same approach:
+    look for batches of identical SLOW elapsed times.
+
+  * **Doc-first wave shape**: like Wave 17 / Wave 20
+    cleanup waves, Wave 21 opened with a mid-wave doc
+    commit (760d4f2) that registered the wave in §10.5
+    before any numbered code commit. Reasoning:
+    numbered-first would force forward "Wave N+" plus-
+    suffix on every Wave 21 reference (or trip the
+    IMPROVE-127 wave-reference lint). Doc-first
+    registers Wave 21 in §10.5 immediately, allowing
+    bare ``Wave 21`` body refs in subsequent commits.
+    The Wave 21 ledger inherits this convention — it's
+    now the cleaner default for any wave with ≥3
+    numbered items.
+
+  * **Non-blocking tests**: the 3 numbered items added
+    zero pin tests. Audit-driven decision: the
+    refactors are timing-style (event-loop yielding)
+    not contract-style (return shapes). Pinning a
+    timing improvement requires a benchmark harness
+    that doesn't exist in the project yet; deferred to
+    Wave 22+ if needed. Existing Tier 1 (1858 tests)
+    continued to pass cleanly across all 3 numbered
+    commits, which validates that the async
+    conversions didn't break any contract-level
+    behaviour.
+
+  * **What's NOT solved**: Mem0's ``Memory.from_config``
+    is still sync upstream as of 2026-Q2; Wave 21 wraps
+    it in ``to_thread`` but doesn't replace it with a
+    truly-async surface. Wave 22+ could:
+      - Replace Mem0's Ollama embedding probe with
+        ``httpx.AsyncClient`` directly (skipping mem0
+        for that step).
+      - Add a feature flag to eager-warm the editor
+        module imports at lifespan (would push server
+        boot to ~26s but make first /editor/* calls hot
+        from ms-1).
+      - Add a benchmark harness for startup timing pins
+        (would let future regressions be caught at
+        commit time, not user-visible regression time).
+    None of these are urgent; the audit's quick wins
+    + this commit's 3 fixes deliver the bulk of the
+    user-visible improvement.
+
+  * **Tier 1 baseline 1858 unchanged over Wave 21**.
+    Total since Wave 5: 875 → 1858 (+983 over 17 waves
+    counting Waves 17/18/19/20/21).
+
+  * **Routes 187 unchanged from Wave 20 close**. Wave 21
+    is async-conversion + lifespan warm-up — no new or
+    removed routes. The 3 fixes touched ``api/deps.py``
+    (2 factories) + ``api/routers/system.py`` (whoami
+    wraps) + ``api/routers/partner.py`` (route handler
+    to_thread) + ``api_server.py`` (lifespan warm-up).
 
 ### Wave 14 architectural impact
 
@@ -2712,12 +2781,12 @@ Wave 21+ priorities at the user's pace.
 ## 10.8 Where to go from here
 
 - **Read chapter 1 → 9 if you haven't.** This chapter is the index; the others have the details.
-- **Pick a Wave 21+ item and ship it** — see §10.5 Wave 18 deferred queue (the trimmed Wave 17 cleanup output: NEW candidates IMPROVE-NEW-2/7/8/10 + Wave-15-audit FILTER_AXIS_TYPES registry + 7 Wave-16-audit-spawned items + Wave-13/12/11/10-audit triggered items + themed tranches B/D/E/F/G + carry-overs gated on §10.7 questions — most of which are now ungated since Wave 20 closed Q1 / Q4 / Q7 / Q15 / Q16). Tranche A (Flutter editor v2) shipped fully in Wave 18 — IMPROVE-138 through IMPROVE-144. Wave 19 Tranche A closed the GDPR Article 20 round-trip with the partner-import host ([IMPROVE-145]) + export button ([IMPROVE-146]). Wave 20 cleanup wave (✓ shipped) closed §10.7 gating questions + shipped a Q7=b deletion ([IMPROVE-147]) + 5 Q4=c TTS pipeline quick wins ([IMPROVE-148] / [IMPROVE-149] / [IMPROVE-150] / [IMPROVE-151] / [IMPROVE-152]). The natural Wave 21+ paths: (a) themed Tranche B/D/E/F/G work, (b) deferred-queue picks (NEW carry-overs / Wave-N-audit items), or (c) the Wave 20-spawned Wave 21+ items (bigger TTS architectural pieces — Kokoro `create_stream` chunked TTFA, server-side parallel synth-while-LLM-streams — plus the cross-cutting startup contention investigation flagged by the Q4 audit). Items previously considered + rejected are archived in §10.5.1.
-- **Keep `[IMPROVE-N]` references alive.** When you fix one, grep `docs/features/` for that ID and cross out. If you add new ones in future work, number them IMPROVE-153+ (1-152 are taken; the IMPROVE-NEW-* tags graduate to permanent numbers on acceptance) and note them in the originating chapter.
+- **Pick a Wave 22+ item and ship it** — see §10.5 Wave 18 deferred queue (the trimmed Wave 17 cleanup output: NEW candidates IMPROVE-NEW-2/7/8/10 + Wave-15-audit FILTER_AXIS_TYPES registry + 7 Wave-16-audit-spawned items + Wave-13/12/11/10-audit triggered items + themed tranches B/D/E/F/G + carry-overs gated on §10.7 questions — most of which are now ungated since Wave 20 closed Q1 / Q4 / Q7 / Q15 / Q16). Tranche A (Flutter editor v2) shipped fully in Wave 18 — IMPROVE-138 through IMPROVE-144. Wave 19 Tranche A closed the GDPR Article 20 round-trip with the partner-import host ([IMPROVE-145]) + export button ([IMPROVE-146]). Wave 20 cleanup wave (✓ shipped) closed §10.7 gating questions + shipped a Q7=b deletion ([IMPROVE-147]) + 5 Q4=c TTS pipeline quick wins ([IMPROVE-148] / [IMPROVE-149] / [IMPROVE-150] / [IMPROVE-151] / [IMPROVE-152]). Wave 21 (✓ shipped) closed the cross-cutting startup contention with 3 chain fixes ([IMPROVE-153] / [IMPROVE-154] / [IMPROVE-155]) — ~47s of cold-startup blocking unwound. The natural Wave 22+ paths: (a) themed Tranche B/D/E/F/G work, (b) deferred-queue picks (NEW carry-overs / Wave-N-audit items), (c) Wave 20-spawned bigger TTS architectural pieces (Kokoro `create_stream` chunked TTFA + server-side parallel synth-while-LLM-streams), or (d) Wave 21-spawned items (true-async ``_init_mem0`` via httpx.AsyncClient + lifespan eager editor warm-up under feature flag + benchmark harness for startup-timing pins). Items previously considered + rejected are archived in §10.5.1.
+- **Keep `[IMPROVE-N]` references alive.** When you fix one, grep `docs/features/` for that ID and cross out. If you add new ones in future work, number them IMPROVE-156+ (1-155 are taken; the IMPROVE-NEW-* tags graduate to permanent numbers on acceptance) and note them in the originating chapter.
 - **The `MEMORY.md` in `~/.claude/projects/...` contains the feedback rule** that improvement suggestions should cite 2025–2026 sources. Every item here has citations in its origin chapter.
 
 ---
 
 **Guide complete.** `docs/features/README.md` → `01-architecture.md` → `02-llm-infrastructure.md` → `03-chat.md` → `04-agents-tools.md` → `05-systems.md` → `06-image-generation.md` → `07-image-editor.md` → `08-partner.md` → `09-observability.md` → `10-improvements.md` *(this file)*.
 
-Every major feature of the Local AI Platform is now documented end-to-end, with **152** research-backed improvement ideas cross-referenced into one prioritized plan. Waves 1-20 fully shipped + Wave 21 startup-contention fix in progress; post-Wave-20 backlog in deferred queue.
+Every major feature of the Local AI Platform is now documented end-to-end, with **155** research-backed improvement ideas cross-referenced into one prioritized plan. Waves 1-21 fully shipped; post-Wave-21 backlog in deferred queue.
