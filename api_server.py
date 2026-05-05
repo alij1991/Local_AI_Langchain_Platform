@@ -260,6 +260,26 @@ async def lifespan(app: FastAPI):
     except Exception as exc:
         logger.warning("Hardware profile pre-detection failed at startup: %s", exc)
 
+    # [IMPROVE-161] Wave 27 — Path D from the Wave 21 residue list:
+    # lifespan eager editor warm-up under feature flag. When
+    # ``LIFESPAN_EAGER_EDITOR_WARMUP=1`` is set in .env (default
+    # off), pre-build the ImageEditorService at startup so the
+    # first ``/editor/*`` request returns hot. Trades ~21s of boot
+    # time for hot first request. The default-off path preserves
+    # current boot speed; the [IMPROVE-153] async lazy-init keeps
+    # serving correctly when the flag is off (build-on-first-use
+    # via the same to_thread). Wraps in try/except so a build
+    # failure during warm-up is degraded to lazy-init on first
+    # request rather than aborting boot.
+    if app.state.settings.lifespan_eager_editor_warmup:
+        try:
+            from local_ai_platform.api.deps import _build_editor_service
+            svc = await asyncio.to_thread(_build_editor_service)
+            app.state._editor_service = svc
+            logger.info("Editor service eager-warmed at startup (Wave 27 IMPROVE-161)")
+        except Exception as exc:
+            logger.warning("Editor service eager-warmup failed at startup: %s", exc)
+
     # [IMPROVE-156] Wave 22 — true-async lifespan warmup of partner
     # memory. Wave 21's [IMPROVE-154] wrapped partner.get_memories()
     # in asyncio.to_thread at the route handler so the event loop

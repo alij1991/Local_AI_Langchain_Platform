@@ -213,6 +213,17 @@ class AppSettings(BaseSettings):
     gradio_share: bool = Field(default=False)
     gradio_server_port: int = Field(default=7860)
     api_server_port: int = Field(default=8000)
+    # [IMPROVE-161] Wave 27 — Path D residue from Wave 21. When set
+    # to True, lifespan calls ``await asyncio.to_thread
+    # (_build_editor_service)`` after the [IMPROVE-155] hardware-
+    # profile warm-up. Trades ~21s of boot time for hot first
+    # ``/editor/*`` calls (Wave 21 [IMPROVE-153]'s lazy-init still
+    # works without this — ``get_editor_service`` builds on first
+    # request via the same to_thread; the flag just eager-amortises
+    # to startup so the first user request is fast). Default False
+    # preserves current boot speed; opt-in via env-var
+    # ``LIFESPAN_EAGER_EDITOR_WARMUP=1``.
+    lifespan_eager_editor_warmup: bool = Field(default=False)
 
     # ── Tracing ───────────────────────────────────────────────────
     trace_enabled: bool = Field(default=True)
