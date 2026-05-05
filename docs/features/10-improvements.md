@@ -10,7 +10,7 @@
 
 - **164 improvements** flagged inline as `[IMPROVE-N]` in chapters 1–9 + the Wave 5/6/7/8/9/10/11/12/13/14/15/16/18/19/20/21/22/23/24/26/27/28/29/30 audits (NEW from Wave 6 audit: 71/72/73/74; NEW from Wave 7: 75/76/77/78/79/80/81/82; NEW from Wave 8: 83/84/85/86/87/88; NEW from Wave 9: 89/90/91/92/93/94; NEW from Wave 10: 95/96/97/98/99/100; NEW from Wave 11: 101/102/103/104/105/106; NEW from Wave 12: 107/108/109/110/111/112; NEW from Wave 13: 113/114/115/116/117/118; NEW from Wave 14: 119/120/121/122/123/124/125; NEW from Wave 15: 126/127/128/129/130/131; NEW from Wave 16: 132/133/134/135/136/137; NEW from Wave 18: 138/139/140/141/142/143/144; NEW from Wave 19 Tranche A: 145/146; NEW from Wave 20 cleanup wave: 147/148/149/150/151/152; NEW from Wave 21 startup-contention fix: 153/154/155; NEW from Wave 22 true-async _init_mem0: 156; NEW from Wave 23 Kokoro create_stream chunked TTFA: 157/158; NEW from Wave 24 server-side parallel synth-while-LLM-streams: 159; NEW from Wave 26 startup-timing benchmark harness: 160; NEW from Wave 27 lifespan eager editor warm-up flag: 161; NEW from Wave 28 Tranche G partial preset export/import: 162; NEW from Wave 29 Tranche B voice persistence: 163; NEW from Wave 30 Tranche E partial editor session TTL cleanup: 164).
 - **10 themes** — security, architecture, observability, tracing, UX, memory & context, model & inference, background tasks, voice, and tools/MCP.
-- **28 waves fully shipped + Wave 25 deferred-by-investigation + Wave 30 in progress** (Waves 1-16 numbered + Wave 17 doc-only cleanup + Wave 18 Tranche A Flutter editor v2 + Wave 19 Tranche A partner-import host + Wave 20 cleanup wave: §10.7 walkthrough closing Q1/Q4/Q7/Q15/Q16 + 1 deletion + 5 TTS quick wins + Wave 21 startup-contention fix targeting the 3 lazy-init chains the user's startup log surfaced + Wave 22 true-async _init_mem0 — IMPROVE-156 background-task warmup at lifespan via httpx.AsyncClient pre-warm of nomic-embed-text + asyncio.create_task fire-and-forget Mem0 init, moving the ~22s Chain 2 cost OFF the user's first request entirely + Wave 23 Kokoro create_stream chunked TTFA — IMPROVE-157 backend stream_synthesize via kokoro_onnx.create_stream + IMPROVE-158 Flutter progressive playback delivering ~60-80% TTFA win on long-paragraph synth + Wave 24 server-side parallel synth-while-LLM-streams — IMPROVE-159 phrase-boundary fallback in PartnerEngine.astream_chat firing on ``,`` ``;`` ``:`` once a clause is ≥ 30 chars long, so TTS can begin synthesising while the LLM is still emitting later words + Wave 25 Chatterbox sidecar streaming investigation — chatterbox-tts 0.1.7 has no streaming surface in either ChatterboxTTS.generate or ChatterboxTTSTurbo.generate; deferred pending upstream feature OR justified 3-5d fork investment + Wave 29 voice persistence: IMPROVE-163 `data/partner/voice_settings.json` survives backend restart so a user's voice_id / voice_gender / tts_mode picks don't reset on every uvicorn cycle, closing Tranche B partial from the Wave 18 deferred queue + Wave 30 in progress: editor session TTL cleanup — fire-and-forget lifespan task that walks the [IMPROVE-53] archive directory + deletes date-buckets older than configurable threshold to bound disk growth); **1** standing in deferred queues (post-Wave-30 backlog).
+- **29 waves fully shipped + Wave 25 deferred-by-investigation** (Waves 1-16 numbered + Wave 17 doc-only cleanup + Wave 18 Tranche A Flutter editor v2 + Wave 19 Tranche A partner-import host + Wave 20 cleanup wave: §10.7 walkthrough closing Q1/Q4/Q7/Q15/Q16 + 1 deletion + 5 TTS quick wins + Wave 21 startup-contention fix targeting the 3 lazy-init chains the user's startup log surfaced + Wave 22 true-async _init_mem0 — IMPROVE-156 background-task warmup at lifespan via httpx.AsyncClient pre-warm of nomic-embed-text + asyncio.create_task fire-and-forget Mem0 init, moving the ~22s Chain 2 cost OFF the user's first request entirely + Wave 23 Kokoro create_stream chunked TTFA — IMPROVE-157 backend stream_synthesize via kokoro_onnx.create_stream + IMPROVE-158 Flutter progressive playback delivering ~60-80% TTFA win on long-paragraph synth + Wave 24 server-side parallel synth-while-LLM-streams — IMPROVE-159 phrase-boundary fallback in PartnerEngine.astream_chat firing on ``,`` ``;`` ``:`` once a clause is ≥ 30 chars long, so TTS can begin synthesising while the LLM is still emitting later words + Wave 25 Chatterbox sidecar streaming investigation — chatterbox-tts 0.1.7 has no streaming surface in either ChatterboxTTS.generate or ChatterboxTTSTurbo.generate; deferred pending upstream feature OR justified 3-5d fork investment + Wave 29 voice persistence: IMPROVE-163 `data/partner/voice_settings.json` survives backend restart so a user's voice_id / voice_gender / tts_mode picks don't reset on every uvicorn cycle, closing Tranche B partial from the Wave 18 deferred queue + Wave 30 editor session TTL cleanup: IMPROVE-164 opt-in `EDITOR_SESSION_TTL_DAYS=N` env-var triggers a fire-and-forget lifespan task that walks the [IMPROVE-53] archive directory + deletes date-buckets older than N days, closing Tranche E partial from the Wave 18 deferred queue); **1** standing in deferred queues (post-Wave-30 backlog).
 
 All improvements are traceable back to a chapter + a 2025–2026 citation. This chapter is pure planning — *what* + *why this order*; *how* is in each origin chapter.
 
@@ -178,7 +178,7 @@ Smaller items that improve day-to-day use.
 
 ---
 
-## 10.4 The complete table (all 163)
+## 10.4 The complete table (all 164)
 
 Sortable if you paste into a spreadsheet. Chapter column links back to the originating doc.
 
@@ -347,10 +347,11 @@ Sortable if you paste into a spreadsheet. Chapter column links back to the origi
 | 161 | 1 | ✓ Lifespan eager editor warm-up under feature flag — opt-in ``LIFESPAN_EAGER_EDITOR_WARMUP=1`` env-var that pre-builds ImageEditorService at lifespan via ``await asyncio.to_thread(_build_editor_service)`` (Wave 27 — closes Path D from the Wave 21 residue list; default-off preserves current boot speed; trades ~21s boot for hot first /editor/* request when enabled) | ⋆⋆ | 🔨 | Architecture |
 | 162 | 7 | ✓ Preset JSON export + import endpoints — GET ``/editor/presets/{preset_id}/export`` returns the preset as a downloadable JSON payload with ``schema_version: 1``; POST ``/editor/presets/import`` accepts the same shape and creates a new preset row (Wave 28 — closes Tranche G partial from the Wave 18 deferred queue; enables curl-based preset sharing between users / machines without direct SQLite access) | ⋆⋆ | 🔨 | UX |
 | 163 | 8 | ✓ Partner voice settings persistence — NEW ``data/partner/voice_settings.json`` (sibling of profile.json / user_profile.json / memory_decay.json) loads at PartnerEngine init + writes on every set_voice_id / set_voice_gender / set_tts_mode success, so the user's voice / gender / mode picks survive backend restart (Wave 29 — closes Tranche B partial from the Wave 18 deferred queue; mirrors the [IMPROVE-NEW-12] memory_decay persistence pattern) | ⋆⋆ | 🔨 | Voice |
+| 164 | 7 | ✓ Editor session TTL cleanup — opt-in ``EDITOR_SESSION_TTL_DAYS=N`` env-var triggers a fire-and-forget lifespan task that walks ``data/images/editor/_archive/`` date-bucket subdirs + drops those older than N days via ``shutil.rmtree`` + DELETEs corresponding ``editor_sessions`` rows in a single SQL (Wave 30 — closes Tranche E partial from the Wave 18 deferred queue + the [IMPROVE-53] Phase B prune-cron follow-up; default 0 = disabled preserves "archives accumulate forever" semantics) | ⋆⋆ | 🔨 | UX |
 
 *Impact for [IMPROVE-59] is ⋆⋆⋆⋆⋆ if the app is ever distributed, ⋆⋆ if it stays local-only.
 
-**Legend:** A ``✓`` prefix marks items that have shipped. See §10.6 for the Wave 5 / 6 / 7 / 8 / 9 / 10 / 11 / 12 / 13 / 14 / 15 / 16 / 17 / 18 / 19 / 20 / 21 / 22 / 23 / 24 / 26 / 27 / 28 / 29 retrospective.
+**Legend:** A ``✓`` prefix marks items that have shipped. See §10.6 for the Wave 5 / 6 / 7 / 8 / 9 / 10 / 11 / 12 / 13 / 14 / 15 / 16 / 17 / 18 / 19 / 20 / 21 / 22 / 23 / 24 / 26 / 27 / 28 / 29 / 30 retrospective.
 
 ---
 
@@ -1245,7 +1246,7 @@ at the cost of ~21s extra boot; default-off users keep
 current boot speed + lazy-init fallback. 3 commits (2 doc +
 1 numbered) — the planned single-numbered shape held.
 
-### Wave 30 — Tranche E partial: editor session TTL cleanup (in progress 2026-05-05)
+### Wave 30 — Tranche E partial: editor session TTL cleanup (✓ shipped 2026-05-05)
 
 Theme: address Tranche E "editor advanced" from the Wave 18
 deferred queue (see §10.5 Wave 18 deferred queue + §10.8). Per
@@ -1292,14 +1293,17 @@ field + 1 lifespan call-site + one new test file with ~10 pins)
 
 | # | Tag | SHA | What landed | Tests |
 |---|---|---|---|---:|
-| 1 | (doc)         | this    | Wave 30 mid-wave (start) — register Wave 30 in §10.5 + §10.6 with the editor TTL cleanup design (fire-and-forget lifespan task following the Wave 22 IMPROVE-156 pattern) + Tranche E framing + post-Wave-30 backlog footer. Updates §10.1 wave-status. | 0 |
-| 2 | [IMPROVE-164] | TBD     | NEW ``src/local_ai_platform/images/editor_ttl.py`` with ``prune_expired_editor_sessions(ttl_days)`` helper + ``_async_warmup_editor_session_ttl_cleanup`` async wrapper. NEW ``editor_session_ttl_days`` settings field in ``config.py``. NEW lifespan integration in ``api_server.py``. NEW ``tests/test_editor_session_ttl_cleanup.py`` with ~10 pins. | ~10 |
-| 3 | (doc)         | TBD     | Wave 30 end-wave retrospective. Bumps 163 → 164 in §10.1 + §10.4. Adds 1 IMPROVE-N row (164). Fills in Wave 30 mid-wave SHA placeholder (this) + IMPROVE-164 SHA. Flips Wave 30 status (in progress → ✓ shipped). NEW Wave 30 architectural impact subsection. | 0 |
+| 1 | (doc)         | a4a3314 | Wave 30 mid-wave (start) — register Wave 30 in §10.5 + §10.6 with the editor TTL cleanup design (fire-and-forget lifespan task following the Wave 22 IMPROVE-156 pattern) + Tranche E framing + post-Wave-30 backlog footer. Updates §10.1 wave-status. | 0 |
+| 2 | [IMPROVE-164] | 800397e | NEW ``src/local_ai_platform/images/editor_ttl.py`` with ``prune_expired_editor_sessions(ttl_days)`` helper + ``_async_warmup_editor_session_ttl_cleanup`` async wrapper. NEW ``editor_session_ttl_days`` settings field in ``config.py``. NEW lifespan integration in ``api_server.py``. NEW ``tests/test_editor_session_ttl_cleanup.py`` with 14 pins (2 disabled + 1 missing-archive + 5 walk + 2 DB + 2 async + 1 settings + 1 module-constants). | 14 |
+| 3 | (doc)         | this    | Wave 30 end-wave retrospective. Bumps 163 → 164 in §10.1 + §10.4. Adds 1 IMPROVE-N row (164). Fills in Wave 30 mid-wave SHA placeholder (a4a3314) + IMPROVE-164 SHA (800397e). Flips Wave 30 status (in progress → ✓ shipped). NEW Wave 30 architectural impact subsection. | 0 |
 
-Net (planned): +~10 Tier 1 tests (1914 → ~1924). Sweep file
-count grows 97 → 98. Routes 189 unchanged (no new endpoints
-— TTL cleanup is a background task, not a route). Flutter
-widget tests unchanged at 182 (Wave 30 is backend-only).
+Net: +14 Tier 1 tests (1914 → 1928). Sweep file count grew
+97 → 98. Routes 189 unchanged (no new endpoints — TTL
+cleanup is a background lifespan task, not a route).
+Flutter widget tests unchanged at 182 (Wave 30 is backend-
+only). 3 commits (2 doc + 1 numbered) — the planned
+single-numbered shape held end-to-end, identical cadence
+to Waves 28 / 29.
 
 ### Wave 29 — Tranche B: voice persistence (✓ shipped 2026-05-05)
 
@@ -2819,18 +2823,105 @@ held end-to-end.
   * **Flutter widget tests 182 unchanged**. Path D is
     backend-only (settings + lifespan).
 
-### Wave 30 (in progress)
+### Wave 30 (✓ shipped)
 
 | # | Tag | SHA | What landed | Tests |
 |---|---|---|---|---:|
-| 1 | (doc)         | this    | Wave 30 mid-wave (start) — register Wave 30 in §10.5 + §10.6 with the editor session TTL cleanup design + Tranche E framing + post-Wave-30 backlog footer. Updates §10.1 wave-status. | 0 |
-| 2 | [IMPROVE-164] | TBD     | NEW images/editor_ttl.py module (prune helper + async warmup) + NEW editor_session_ttl_days settings field + lifespan integration + NEW tests/test_editor_session_ttl_cleanup.py with ~10 pins. | ~10 |
-| 3 | (doc)         | TBD     | Wave 30 end-wave retrospective. Bumps 163 → 164. Adds 1 IMPROVE-N row + Wave 30 architectural impact subsection. | 0 |
+| 1 | (doc)         | a4a3314 | Wave 30 mid-wave (start) — register Wave 30 in §10.5 + §10.6 with the editor session TTL cleanup design + Tranche E framing + post-Wave-30 backlog footer. Updates §10.1 wave-status. | 0 |
+| 2 | [IMPROVE-164] | 800397e | NEW images/editor_ttl.py module (prune helper + async warmup) + NEW editor_session_ttl_days settings field + lifespan integration + NEW tests/test_editor_session_ttl_cleanup.py with 14 pins. | 14 |
+| 3 | (doc)         | this    | Wave 30 end-wave retrospective. Bumps 163 → 164. Adds 1 IMPROVE-N row + Wave 30 architectural impact subsection. | 0 |
 
-Net (planned): +~10 Tier 1 tests (1914 → ~1924). Sweep file
-count 97 → 98. Routes 189 unchanged. Flutter widget tests
+Net: +14 Tier 1 tests (1914 → 1928). Sweep file count
+97 → 98. Routes 189 unchanged. Flutter widget tests
 182 unchanged. Single-numbered + 2 doc commits = 3 total
 — the same shape as Waves 28 / 29.
+
+### Wave 30 architectural impact
+
+  * **Fire-and-forget lifespan-task pattern second
+    iteration**: Wave 30 is the second use of the
+    [IMPROVE-156] fire-and-forget pattern (after Wave 22's
+    Mem0 init). Pattern: when a lifespan task does
+    cleanup-shaped work (no return value the user waits
+    on, failure is recoverable next boot), schedule via
+    ``asyncio.create_task`` rather than ``await``. The
+    cost of a wedged task is bounded (one boot cycle's
+    worth of stale state); the cost of awaiting and
+    failing is unbounded (boot-blocking). With this
+    second use the pattern is now load-bearing
+    architecture — future cleanup-shaped lifespan work
+    (e.g. trace pruning, observability event TTL,
+    upload garbage collection) should follow the same
+    contract.
+
+  * **Date-bucket layout pays off**: The [IMPROVE-53]
+    archive flow's choice to bucket by YYYY-MM-DD
+    (instead of flat ``_archive/{sid}/``) makes Wave
+    30's prune walk O(buckets), not O(sessions). A
+    server with 6 months of daily archives has ~180
+    directories to inspect, not 180 × N sessions. The
+    forward-thinking design from W5 [IMPROVE-53] is
+    what makes Wave 30 a 0.5d shippable rather than a
+    multi-day refactor. Pattern: when designing an
+    archive scheme, choose a partition key that
+    matches the expected query shape (here: "find
+    everything older than N days").
+
+  * **Default-off opt-in pattern third iteration**:
+    Wave 27's ``LIFESPAN_EAGER_EDITOR_WARMUP``,
+    Wave 30's ``EDITOR_SESSION_TTL_DAYS``,
+    [IMPROVE-NEW-12]'s memory-decay-config, and now
+    Wave 28's ``schema_version`` versioning all share
+    a "default preserves prior behaviour, env-var or
+    field flips on the new feature" contract. The
+    pattern keeps each wave low-risk to land —
+    rollback is "leave .env alone" rather than "git
+    revert". Wave 30's third application reinforces
+    this as the preferred default for any
+    behavioural-change wave.
+
+  * **Forward-compat for non-date subdirs**: The walk
+    skips ``_archive/`` subdirs whose names don't match
+    YYYY-MM-DD — pinned by
+    ``test_non_date_subdirs_are_skipped`` +
+    ``test_invalid_date_bucket_format_skipped``. A
+    future contributor adding a sibling subdir under
+    ``_archive/`` (e.g.,
+    ``_archive/lost+found/`` or
+    ``_archive/manifest.json``) won't have user-visible
+    state accidentally wiped. Pattern: when walking a
+    well-known directory layout to delete subitems,
+    apply a strict positive filter (regex match) +
+    silently skip on mismatch — rather than a "delete
+    everything except these names" filter that breaks
+    when new sibling shapes appear.
+
+  * **Public-helper convention scaling — module-top
+    helpers + module constants**:
+    ``prune_expired_editor_sessions``,
+    ``_async_warmup_editor_session_ttl_cleanup``,
+    ``_TTL_DISABLED``, ``_DATE_BUCKET_RE``,
+    ``_editor_archive_root`` — 5 new module-top
+    surfaces. Pattern continues to scale across waves.
+
+  * **Tier 1 baseline 1928 after Wave 30 close**.
+    Total since Wave 5: 875 → 1928 (+1053 over 25
+    waves counting Waves 17-30). Sweep file count
+    97 → 98.
+
+  * **Routes 189 unchanged at Wave 30 close**. Wave 30
+    is a background lifespan task, not a request
+    endpoint. The [IMPROVE-164] fix touched
+    ``src/local_ai_platform/images/editor_ttl.py``
+    (NEW, ~225 lines including docstring) +
+    ``src/local_ai_platform/config.py`` (one new
+    field) + ``api_server.py`` (one new lifespan
+    block) + ``tests/test_editor_session_ttl_cleanup.py``
+    (NEW, 14 pins).
+
+  * **Flutter widget tests 182 unchanged**. Wave 30
+    is backend-only — no Flutter UI for the cleanup
+    (no in-product surface; opt-in is via .env).
 
 ### Wave 29 (✓ shipped)
 
@@ -3954,7 +4045,7 @@ Wave 24+ priorities at the user's pace.
 ## 10.8 Where to go from here
 
 - **Read chapter 1 → 9 if you haven't.** This chapter is the index; the others have the details.
-- **Pick a Wave 31+ item and ship it** — see §10.5 Wave 18 deferred queue (the trimmed Wave 17 cleanup output: NEW candidates IMPROVE-NEW-2/7/8/10 + Wave-15-audit FILTER_AXIS_TYPES registry + 7 Wave-16-audit-spawned items + Wave-13/12/11/10-audit triggered items + themed tranches B/D/E/F/G + carry-overs gated on §10.7 questions — most of which are now ungated since Wave 20 closed Q1 / Q4 / Q7 / Q15 / Q16). Tranche A (Flutter editor v2) shipped fully in Wave 18 — IMPROVE-138 through IMPROVE-144. Wave 19 Tranche A closed the GDPR Article 20 round-trip with the partner-import host ([IMPROVE-145]) + export button ([IMPROVE-146]). Wave 20 cleanup wave (✓ shipped) closed §10.7 gating questions + shipped a Q7=b deletion ([IMPROVE-147]) + 5 Q4=c TTS pipeline quick wins ([IMPROVE-148] / [IMPROVE-149] / [IMPROVE-150] / [IMPROVE-151] / [IMPROVE-152]). Wave 21 (✓ shipped) closed the cross-cutting startup contention with 3 chain fixes ([IMPROVE-153] / [IMPROVE-154] / [IMPROVE-155]) — ~47s of cold-startup blocking unwound. Wave 22 (✓ shipped) closed the Wave 21-spawned true-async ``_init_mem0`` follow-up via [IMPROVE-156] — httpx.AsyncClient pre-warm of Ollama embed + ``asyncio.create_task`` fire-and-forget Mem0 init at lifespan, moving the ~22s Chain 2 cost off the user's first request entirely. Wave 23 (✓ shipped) closed the Wave 20-spawned Kokoro create_stream piece via [IMPROVE-157] (backend stream_synthesize via ``async for`` over ``Kokoro.create_stream``) + [IMPROVE-158] (Flutter ``buildMiniWavForChunk`` + per-sentence StreamController + ``await for``-driven progressive playback) — ~60-80% TTFA reduction on long-paragraph synth. Wave 24 (✓ shipped) closed the Wave 23-spawned server-side parallel synth-while-LLM-streams piece via [IMPROVE-159] — phrase-boundary fallback in ``PartnerEngine.astream_chat`` firing on ``,`` ``;`` ``:`` once the clause is ≥ 30 chars, so TTS begins synthesising while the LLM keeps streaming later words. Wave 25 (deferred-by-investigation) inspected chatterbox-tts 0.1.7 source and confirmed neither ``ChatterboxTTS.generate`` nor ``ChatterboxTTSTurbo.generate`` has a streaming surface — true streaming requires forking the library (~3-5d), deferred pending upstream feature OR justified fork investment. Wave 26 (✓ shipped) pinned the cold-startup wins from Waves 21+22 + the TTFA wins from Waves 23+24 against future regressions via a new startup-timing benchmark harness ([IMPROVE-160]) — 4 deterministic timing pins on the actual ``api_server.app`` (no mocks). Wave 27 (✓ shipped) closed the Wave 21-residue Path D piece via [IMPROVE-161] — opt-in ``LIFESPAN_EAGER_EDITOR_WARMUP`` flag that pre-builds the editor service at lifespan time so editor-heavy users get hot first /editor/* calls at the cost of ~21s extra boot. Default-off preserves current boot speed. Wave 28 (✓ shipped) closed Tranche G partial — preset JSON export/import via [IMPROVE-162] — adding 2 new editor preset endpoints (export + import) with v=1 schema versioning so power users can share their tuned editor recipes via JSON files. Wave 29 (✓ shipped) closed Tranche B partial — voice persistence via [IMPROVE-163] — adding ``data/partner/voice_settings.json`` (sibling of profile.json / user_profile.json / memory_decay.json) loaded at PartnerEngine init + written on every set_voice_id / set_voice_gender / set_tts_mode success, so a user's voice / gender / mode picks survive backend restart. Wave 30 (in progress) closes Tranche E partial — editor session TTL cleanup — adding ``EDITOR_SESSION_TTL_DAYS`` settings field + a fire-and-forget lifespan task that walks the [IMPROVE-53] archive directory and deletes date-buckets older than the configured threshold (mirrors Wave 22's IMPROVE-156 fire-and-forget pattern). The natural Wave 31+ paths: (a) themed Tranche D (system DAG enrichments) / F (real-world evals) work, or (b) deferred-queue picks (NEW carry-overs / Wave-N-audit items). Items previously considered + rejected are archived in §10.5.1.
+- **Pick a Wave 31+ item and ship it** — see §10.5 Wave 18 deferred queue (the trimmed Wave 17 cleanup output: NEW candidates IMPROVE-NEW-2/7/8/10 + Wave-15-audit FILTER_AXIS_TYPES registry + 7 Wave-16-audit-spawned items + Wave-13/12/11/10-audit triggered items + themed tranches B/D/E/F/G + carry-overs gated on §10.7 questions — most of which are now ungated since Wave 20 closed Q1 / Q4 / Q7 / Q15 / Q16). Tranche A (Flutter editor v2) shipped fully in Wave 18 — IMPROVE-138 through IMPROVE-144. Wave 19 Tranche A closed the GDPR Article 20 round-trip with the partner-import host ([IMPROVE-145]) + export button ([IMPROVE-146]). Wave 20 cleanup wave (✓ shipped) closed §10.7 gating questions + shipped a Q7=b deletion ([IMPROVE-147]) + 5 Q4=c TTS pipeline quick wins ([IMPROVE-148] / [IMPROVE-149] / [IMPROVE-150] / [IMPROVE-151] / [IMPROVE-152]). Wave 21 (✓ shipped) closed the cross-cutting startup contention with 3 chain fixes ([IMPROVE-153] / [IMPROVE-154] / [IMPROVE-155]) — ~47s of cold-startup blocking unwound. Wave 22 (✓ shipped) closed the Wave 21-spawned true-async ``_init_mem0`` follow-up via [IMPROVE-156] — httpx.AsyncClient pre-warm of Ollama embed + ``asyncio.create_task`` fire-and-forget Mem0 init at lifespan, moving the ~22s Chain 2 cost off the user's first request entirely. Wave 23 (✓ shipped) closed the Wave 20-spawned Kokoro create_stream piece via [IMPROVE-157] (backend stream_synthesize via ``async for`` over ``Kokoro.create_stream``) + [IMPROVE-158] (Flutter ``buildMiniWavForChunk`` + per-sentence StreamController + ``await for``-driven progressive playback) — ~60-80% TTFA reduction on long-paragraph synth. Wave 24 (✓ shipped) closed the Wave 23-spawned server-side parallel synth-while-LLM-streams piece via [IMPROVE-159] — phrase-boundary fallback in ``PartnerEngine.astream_chat`` firing on ``,`` ``;`` ``:`` once the clause is ≥ 30 chars, so TTS begins synthesising while the LLM keeps streaming later words. Wave 25 (deferred-by-investigation) inspected chatterbox-tts 0.1.7 source and confirmed neither ``ChatterboxTTS.generate`` nor ``ChatterboxTTSTurbo.generate`` has a streaming surface — true streaming requires forking the library (~3-5d), deferred pending upstream feature OR justified fork investment. Wave 26 (✓ shipped) pinned the cold-startup wins from Waves 21+22 + the TTFA wins from Waves 23+24 against future regressions via a new startup-timing benchmark harness ([IMPROVE-160]) — 4 deterministic timing pins on the actual ``api_server.app`` (no mocks). Wave 27 (✓ shipped) closed the Wave 21-residue Path D piece via [IMPROVE-161] — opt-in ``LIFESPAN_EAGER_EDITOR_WARMUP`` flag that pre-builds the editor service at lifespan time so editor-heavy users get hot first /editor/* calls at the cost of ~21s extra boot. Default-off preserves current boot speed. Wave 28 (✓ shipped) closed Tranche G partial — preset JSON export/import via [IMPROVE-162] — adding 2 new editor preset endpoints (export + import) with v=1 schema versioning so power users can share their tuned editor recipes via JSON files. Wave 29 (✓ shipped) closed Tranche B partial — voice persistence via [IMPROVE-163] — adding ``data/partner/voice_settings.json`` (sibling of profile.json / user_profile.json / memory_decay.json) loaded at PartnerEngine init + written on every set_voice_id / set_voice_gender / set_tts_mode success, so a user's voice / gender / mode picks survive backend restart. Wave 30 (✓ shipped) closed Tranche E partial — editor session TTL cleanup via [IMPROVE-164] — adding ``EDITOR_SESSION_TTL_DAYS`` settings field + a fire-and-forget lifespan task that walks the [IMPROVE-53] archive directory and deletes date-buckets older than the configured threshold (mirrors Wave 22's IMPROVE-156 fire-and-forget pattern; default 0 = disabled preserves "archives accumulate forever" semantics). The natural Wave 31+ paths: (a) themed Tranche D (system DAG enrichments) / F (real-world evals) work, or (b) deferred-queue picks (NEW carry-overs / Wave-N-audit items). Items previously considered + rejected are archived in §10.5.1.
 - **Keep `[IMPROVE-N]` references alive.** When you fix one, grep `docs/features/` for that ID and cross out. If you add new ones in future work, number them IMPROVE-165+ (1-164 are taken; the IMPROVE-NEW-* tags graduate to permanent numbers on acceptance) and note them in the originating chapter.
 - **The `MEMORY.md` in `~/.claude/projects/...` contains the feedback rule** that improvement suggestions should cite 2025–2026 sources. Every item here has citations in its origin chapter.
 
@@ -3962,4 +4053,4 @@ Wave 24+ priorities at the user's pace.
 
 **Guide complete.** `docs/features/README.md` → `01-architecture.md` → `02-llm-infrastructure.md` → `03-chat.md` → `04-agents-tools.md` → `05-systems.md` → `06-image-generation.md` → `07-image-editor.md` → `08-partner.md` → `09-observability.md` → `10-improvements.md` *(this file)*.
 
-Every major feature of the Local AI Platform is now documented end-to-end, with **164** research-backed improvement ideas cross-referenced into one prioritized plan. Waves 1-24 + Wave 26 + Wave 27 + Wave 28 + Wave 29 fully shipped + Wave 25 deferred-by-investigation + Wave 30 in progress; post-Wave-30 backlog in deferred queue.
+Every major feature of the Local AI Platform is now documented end-to-end, with **164** research-backed improvement ideas cross-referenced into one prioritized plan. Waves 1-24 + Wave 26 + Wave 27 + Wave 28 + Wave 29 + Wave 30 fully shipped + Wave 25 deferred-by-investigation; post-Wave-30 backlog in deferred queue.
