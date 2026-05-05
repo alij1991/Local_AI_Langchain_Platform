@@ -10,7 +10,7 @@
 
 - **163 improvements** flagged inline as `[IMPROVE-N]` in chapters 1–9 + the Wave 5/6/7/8/9/10/11/12/13/14/15/16/18/19/20/21/22/23/24/26/27/28/29 audits (NEW from Wave 6 audit: 71/72/73/74; NEW from Wave 7: 75/76/77/78/79/80/81/82; NEW from Wave 8: 83/84/85/86/87/88; NEW from Wave 9: 89/90/91/92/93/94; NEW from Wave 10: 95/96/97/98/99/100; NEW from Wave 11: 101/102/103/104/105/106; NEW from Wave 12: 107/108/109/110/111/112; NEW from Wave 13: 113/114/115/116/117/118; NEW from Wave 14: 119/120/121/122/123/124/125; NEW from Wave 15: 126/127/128/129/130/131; NEW from Wave 16: 132/133/134/135/136/137; NEW from Wave 18: 138/139/140/141/142/143/144; NEW from Wave 19 Tranche A: 145/146; NEW from Wave 20 cleanup wave: 147/148/149/150/151/152; NEW from Wave 21 startup-contention fix: 153/154/155; NEW from Wave 22 true-async _init_mem0: 156; NEW from Wave 23 Kokoro create_stream chunked TTFA: 157/158; NEW from Wave 24 server-side parallel synth-while-LLM-streams: 159; NEW from Wave 26 startup-timing benchmark harness: 160; NEW from Wave 27 lifespan eager editor warm-up flag: 161; NEW from Wave 28 Tranche G partial preset export/import: 162; NEW from Wave 29 Tranche B voice persistence: 163).
 - **10 themes** — security, architecture, observability, tracing, UX, memory & context, model & inference, background tasks, voice, and tools/MCP.
-- **27 waves fully shipped + Wave 25 deferred-by-investigation + Wave 29 in progress** (Waves 1-16 numbered + Wave 17 doc-only cleanup + Wave 18 Tranche A Flutter editor v2 + Wave 19 Tranche A partner-import host + Wave 20 cleanup wave: §10.7 walkthrough closing Q1/Q4/Q7/Q15/Q16 + 1 deletion + 5 TTS quick wins + Wave 21 startup-contention fix targeting the 3 lazy-init chains the user's startup log surfaced + Wave 22 true-async _init_mem0 — IMPROVE-156 background-task warmup at lifespan via httpx.AsyncClient pre-warm of nomic-embed-text + asyncio.create_task fire-and-forget Mem0 init, moving the ~22s Chain 2 cost OFF the user's first request entirely + Wave 23 Kokoro create_stream chunked TTFA — IMPROVE-157 backend stream_synthesize via kokoro_onnx.create_stream + IMPROVE-158 Flutter progressive playback delivering ~60-80% TTFA win on long-paragraph synth + Wave 24 server-side parallel synth-while-LLM-streams — IMPROVE-159 phrase-boundary fallback in PartnerEngine.astream_chat firing on ``,`` ``;`` ``:`` once a clause is ≥ 30 chars long, so TTS can begin synthesising while the LLM is still emitting later words + Wave 25 Chatterbox sidecar streaming investigation — chatterbox-tts 0.1.7 has no streaming surface in either ChatterboxTTS.generate or ChatterboxTTSTurbo.generate; deferred pending upstream feature OR justified 3-5d fork investment + Wave 29 in progress: voice persistence — `data/partner/voice_settings.json` survives backend restart so a user's voice_id / voice_gender / tts_mode picks don't reset on every uvicorn cycle); **1** standing in deferred queues (post-Wave-29 backlog).
+- **28 waves fully shipped + Wave 25 deferred-by-investigation** (Waves 1-16 numbered + Wave 17 doc-only cleanup + Wave 18 Tranche A Flutter editor v2 + Wave 19 Tranche A partner-import host + Wave 20 cleanup wave: §10.7 walkthrough closing Q1/Q4/Q7/Q15/Q16 + 1 deletion + 5 TTS quick wins + Wave 21 startup-contention fix targeting the 3 lazy-init chains the user's startup log surfaced + Wave 22 true-async _init_mem0 — IMPROVE-156 background-task warmup at lifespan via httpx.AsyncClient pre-warm of nomic-embed-text + asyncio.create_task fire-and-forget Mem0 init, moving the ~22s Chain 2 cost OFF the user's first request entirely + Wave 23 Kokoro create_stream chunked TTFA — IMPROVE-157 backend stream_synthesize via kokoro_onnx.create_stream + IMPROVE-158 Flutter progressive playback delivering ~60-80% TTFA win on long-paragraph synth + Wave 24 server-side parallel synth-while-LLM-streams — IMPROVE-159 phrase-boundary fallback in PartnerEngine.astream_chat firing on ``,`` ``;`` ``:`` once a clause is ≥ 30 chars long, so TTS can begin synthesising while the LLM is still emitting later words + Wave 25 Chatterbox sidecar streaming investigation — chatterbox-tts 0.1.7 has no streaming surface in either ChatterboxTTS.generate or ChatterboxTTSTurbo.generate; deferred pending upstream feature OR justified 3-5d fork investment + Wave 29 voice persistence: IMPROVE-163 `data/partner/voice_settings.json` survives backend restart so a user's voice_id / voice_gender / tts_mode picks don't reset on every uvicorn cycle, closing Tranche B partial from the Wave 18 deferred queue); **1** standing in deferred queues (post-Wave-29 backlog).
 
 All improvements are traceable back to a chapter + a 2025–2026 citation. This chapter is pure planning — *what* + *why this order*; *how* is in each origin chapter.
 
@@ -178,7 +178,7 @@ Smaller items that improve day-to-day use.
 
 ---
 
-## 10.4 The complete table (all 162)
+## 10.4 The complete table (all 163)
 
 Sortable if you paste into a spreadsheet. Chapter column links back to the originating doc.
 
@@ -346,10 +346,11 @@ Sortable if you paste into a spreadsheet. Chapter column links back to the origi
 | 160 | 1 | ✓ Startup-timing benchmark harness — 4 timing pins (lifespan ≤ 30s + cold /editor/operations/list ≤ 5s + cold /images/runtime ≤ 15s + threshold-constants pin) on real ``api_server.app`` (no mocks) with LOCAL_AI_BENCHMARK_DISABLE / LOCAL_AI_BENCHMARK_SLOW env-var opt-outs (Wave 26 — pins the cold-startup wins from Waves 21+22 + the TTFA wins from Waves 23+24 against future regressions) | ⋆⋆ | 🔨 | Architecture |
 | 161 | 1 | ✓ Lifespan eager editor warm-up under feature flag — opt-in ``LIFESPAN_EAGER_EDITOR_WARMUP=1`` env-var that pre-builds ImageEditorService at lifespan via ``await asyncio.to_thread(_build_editor_service)`` (Wave 27 — closes Path D from the Wave 21 residue list; default-off preserves current boot speed; trades ~21s boot for hot first /editor/* request when enabled) | ⋆⋆ | 🔨 | Architecture |
 | 162 | 7 | ✓ Preset JSON export + import endpoints — GET ``/editor/presets/{preset_id}/export`` returns the preset as a downloadable JSON payload with ``schema_version: 1``; POST ``/editor/presets/import`` accepts the same shape and creates a new preset row (Wave 28 — closes Tranche G partial from the Wave 18 deferred queue; enables curl-based preset sharing between users / machines without direct SQLite access) | ⋆⋆ | 🔨 | UX |
+| 163 | 8 | ✓ Partner voice settings persistence — NEW ``data/partner/voice_settings.json`` (sibling of profile.json / user_profile.json / memory_decay.json) loads at PartnerEngine init + writes on every set_voice_id / set_voice_gender / set_tts_mode success, so the user's voice / gender / mode picks survive backend restart (Wave 29 — closes Tranche B partial from the Wave 18 deferred queue; mirrors the [IMPROVE-NEW-12] memory_decay persistence pattern) | ⋆⋆ | 🔨 | Voice |
 
 *Impact for [IMPROVE-59] is ⋆⋆⋆⋆⋆ if the app is ever distributed, ⋆⋆ if it stays local-only.
 
-**Legend:** A ``✓`` prefix marks items that have shipped. See §10.6 for the Wave 5 / 6 / 7 / 8 / 9 / 10 / 11 / 12 / 13 / 14 / 15 / 16 / 17 / 18 / 19 / 20 / 21 / 22 / 23 / 24 / 26 / 27 / 28 retrospective.
+**Legend:** A ``✓`` prefix marks items that have shipped. See §10.6 for the Wave 5 / 6 / 7 / 8 / 9 / 10 / 11 / 12 / 13 / 14 / 15 / 16 / 17 / 18 / 19 / 20 / 21 / 22 / 23 / 24 / 26 / 27 / 28 / 29 retrospective.
 
 ---
 
@@ -1244,7 +1245,7 @@ at the cost of ~21s extra boot; default-off users keep
 current boot speed + lazy-init fallback. 3 commits (2 doc +
 1 numbered) — the planned single-numbered shape held.
 
-### Wave 29 — Tranche B: voice persistence (in progress 2026-05-05)
+### Wave 29 — Tranche B: voice persistence (✓ shipped 2026-05-05)
 
 Theme: address Tranche B "voice persistence" from the Wave 18
 deferred queue (see §10.5 Wave 18 deferred queue + §10.8 Tranche-B
@@ -1277,17 +1278,19 @@ integrations in PartnerEngine + one new test file with ~10 pins)
 
 | # | Tag | SHA | What landed | Tests |
 |---|---|---|---|---:|
-| 1 | (doc)         | this    | Wave 29 mid-wave (start) — register Wave 29 in §10.5 + §10.6 with the voice-persistence design (load-on-init + save-on-set following the [IMPROVE-NEW-12] memory_decay pattern) + identity-mint-on-import callback to Wave 28 + post-Wave-29 backlog footer. Updates §10.1 wave-status. | 0 |
-| 2 | [IMPROVE-163] | TBD     | NEW ``src/local_ai_platform/partner/voice_settings.py`` with ``VoiceSettings`` dataclass (voice_id / voice_gender / tts_mode) + ``load_voice_settings()`` / ``save_voice_settings()`` helpers. Integrates into ``PartnerEngine.__init__`` (load + apply persisted state) + ``set_voice_id`` / ``set_voice_gender`` / ``set_tts_mode`` (save on success). NEW ``tests/test_partner_voice_persistence.py`` with ~10 pins (default-when-no-file + roundtrip + 3 setter writes + corrupt-json fallback + unknown-keys-ignored + engine-init restore + chatterbox-persisted-falls-back-when-unavailable). | ~10 |
-| 3 | (doc)         | TBD     | Wave 29 end-wave retrospective. Bumps 162 → 163 in §10.1 + §10.4. Adds 1 IMPROVE-N row (163). Fills in Wave 29 mid-wave SHA placeholder (this) + IMPROVE-163 SHA. Flips Wave 29 status (in progress → ✓ shipped). NEW Wave 29 architectural impact subsection. | 0 |
+| 1 | (doc)         | 282b26f | Wave 29 mid-wave (start) — register Wave 29 in §10.5 + §10.6 with the voice-persistence design (load-on-init + save-on-set following the [IMPROVE-NEW-12] memory_decay pattern) + identity-mint-on-import callback to Wave 28 + post-Wave-29 backlog footer. Updates §10.1 wave-status. | 0 |
+| 2 | [IMPROVE-163] | 2aac437 | NEW ``src/local_ai_platform/partner/voice_settings.py`` with ``VoiceSettings`` dataclass (voice_id / voice_gender / tts_mode) + ``load_voice_settings()`` / ``save_voice_settings()`` helpers. Integrates into ``PartnerEngine.__init__`` (load + apply persisted state) + ``set_voice_id`` / ``set_voice_gender`` / ``set_tts_mode`` (save on success). NEW ``tests/test_partner_voice_persistence.py`` with 16 pins (8 module-level + 7 engine-integration + 1 module-constants pin). | 16 |
+| 3 | (doc)         | this    | Wave 29 end-wave retrospective. Bumps 162 → 163 in §10.1 + §10.4. Adds 1 IMPROVE-N row (163). Fills in Wave 29 mid-wave SHA placeholder (282b26f) + IMPROVE-163 SHA (2aac437). Flips Wave 29 status (in progress → ✓ shipped). NEW Wave 29 architectural impact subsection. | 0 |
 
-Net (planned): +~10 Tier 1 tests (1898 → ~1908). Sweep file
-count grows 96 → 97. Routes 189 unchanged (no new endpoints —
-the existing /partner/voice/id, /partner/voice/gender,
-/partner/voice/mode setters gain persistence as a side-effect).
-Flutter widget tests unchanged at 182 (Wave 29 is backend-only;
-Flutter UI consumes the persisted state transparently via the
-existing GETs which already reflect engine state).
+Net: +16 Tier 1 tests (1898 → 1914). Sweep file count grew
+96 → 97. Routes 189 unchanged (no new endpoints — the existing
+/partner/voice/id, /partner/voice/gender, /partner/voice/mode
+setters gain persistence as a side-effect). Flutter widget tests
+unchanged at 182 (Wave 29 is backend-only; Flutter UI consumes
+the persisted state transparently via the existing GETs which
+already reflect engine state). 3 commits (2 doc + 1 numbered)
+— the planned single-numbered shape held end-to-end, identical
+cadence to Wave 28.
 
 ### Wave 28 — Tranche G partial: preset JSON export + import (✓ shipped 2026-05-05)
 
@@ -2760,18 +2763,98 @@ held end-to-end.
   * **Flutter widget tests 182 unchanged**. Path D is
     backend-only (settings + lifespan).
 
-### Wave 29 (in progress)
+### Wave 29 (✓ shipped)
 
 | # | Tag | SHA | What landed | Tests |
 |---|---|---|---|---:|
-| 1 | (doc)         | this    | Wave 29 mid-wave (start) — register Wave 29 in §10.5 + §10.6 with the voice-persistence design + identity-mint-on-import callback to Wave 28 + post-Wave-29 backlog footer. Updates §10.1 wave-status. | 0 |
-| 2 | [IMPROVE-163] | TBD     | NEW partner/voice_settings.py module (VoiceSettings dataclass + load/save helpers) + 3-call-site PartnerEngine integration (init load + setter save) + NEW tests/test_partner_voice_persistence.py with ~10 pins. | ~10 |
-| 3 | (doc)         | TBD     | Wave 29 end-wave retrospective. Bumps 162 → 163. Adds 1 IMPROVE-N row + Wave 29 architectural impact subsection. | 0 |
+| 1 | (doc)         | 282b26f | Wave 29 mid-wave (start) — register Wave 29 in §10.5 + §10.6 with the voice-persistence design + identity-mint-on-import callback to Wave 28 + post-Wave-29 backlog footer. Updates §10.1 wave-status. | 0 |
+| 2 | [IMPROVE-163] | 2aac437 | NEW partner/voice_settings.py module (VoiceSettings dataclass + load/save helpers) + 3-call-site PartnerEngine integration (init load + setter save) + NEW tests/test_partner_voice_persistence.py with 16 pins. | 16 |
+| 3 | (doc)         | this    | Wave 29 end-wave retrospective. Bumps 162 → 163. Adds 1 IMPROVE-N row + Wave 29 architectural impact subsection. | 0 |
 
-Net (planned): +~10 Tier 1 tests (1898 → ~1908). Sweep file
-count 96 → 97. Routes 189 unchanged. Flutter widget tests
-182 unchanged. Single-numbered + 2 doc commits = 3 total —
-the same shape as Wave 28.
+Net: +16 Tier 1 tests (1898 → 1914). Sweep file count
+96 → 97. Routes 189 unchanged. Flutter widget tests
+182 unchanged. Single-numbered + 2 doc commits = 3 total
+— the same shape as Wave 28.
+
+### Wave 29 architectural impact
+
+  * **Voice persistence pattern (sibling-file persistence)**:
+    Wave 29 introduces a fourth ``data/partner/*.json``
+    sibling file alongside profile.json /
+    user_profile.json / memory_decay.json. Pattern: when
+    engine state needs to survive backend restart and is
+    not appropriate for the SQLite store (because it's a
+    small flat config dict, not a row-shape entity), put
+    it in its own JSON sibling file under data/partner/
+    with load-on-init + save-on-mutate semantics. This is
+    now the third confirmed application of the pattern
+    (after profile.json + user_profile.json + memory_decay.json),
+    promoting it from "convention" to "established
+    pattern" status.
+
+  * **Load-is-runtime-agnostic pattern**: The Wave 29
+    loader (``load_voice_settings``) does NOT validate
+    persisted ``tts_mode == "chatterbox"`` against
+    runtime Chatterbox availability. The validation lives
+    in ``set_tts_mode`` (which would block a runtime
+    "chatterbox" pick on a system without the sidecar)
+    and in the synthesize path (which branches on
+    ``self._tts_emotional is not None``). Pattern: keep
+    persistence loaders simple (only JSON shape +
+    enum-set validation); let the apply layer handle
+    runtime-availability checks. Reduces persistence
+    layer coupling to runtime collaborators that may not
+    even exist at load time (Chatterbox sidecar might
+    start AFTER the engine boots). Confirmed in the
+    ``test_restore_with_chatterbox_persisted_falls_back_at_apply``
+    pin.
+
+  * **Identity-mint vs portability split**: The Wave 28
+    architectural impact's identity-mint-on-import
+    pattern targeted database-row identity (id +
+    created_at). Wave 29's voice_settings.json contains
+    NO identity fields — voice_id is a Kokoro catalog
+    enum (``af_heart`` / ``af_bella`` / etc.) that's the
+    same on every machine, voice_gender + tts_mode are
+    plain enums. Portability across machines is naturally
+    safe; the wave 28 identity-mint guard isn't needed
+    here because there's nothing identity-shaped to mint
+    on import. Documents the upper bound of the W28
+    pattern: it applies to row-shape entities, not flat
+    config dicts.
+
+  * **Public-helper convention scaling — module-top
+    helpers + module constants**: ``load_voice_settings``,
+    ``save_voice_settings``, ``VoiceSettings``,
+    ``_VALID_GENDERS``, ``_VALID_TTS_MODES``,
+    ``_VOICE_SETTINGS_PATH`` — 6 new public-helper-style
+    surfaces. Pattern continues to scale across waves —
+    repository helpers (Wave 28), service methods
+    (Wave 27), module constants (Waves 24/26/27/28/29),
+    top-level functions (Waves 18/19/20/21/22/23/29).
+    Convention is medium-agnostic.
+
+  * **Tier 1 baseline 1914 after Wave 29 close**. Total
+    since Wave 5: 875 → 1914 (+1039 over 24 waves
+    counting Waves 17-29). Sweep file count 96 → 97.
+
+  * **Routes 189 unchanged at Wave 29 close**. Wave 29
+    is backend-only persistence — the existing
+    /partner/voice/id, /partner/voice/gender,
+    /partner/voice/mode setters gain persistence
+    transparently. The [IMPROVE-163] fix touched
+    ``src/local_ai_platform/partner/voice_settings.py``
+    (NEW, 173 lines including docstring) +
+    ``src/local_ai_platform/partner/engine.py`` (init +
+    3 setter call-sites + 2 helper methods) +
+    ``tests/test_partner_voice_persistence.py``
+    (NEW, 16 pins).
+
+  * **Flutter widget tests 182 unchanged**. Wave 29 is
+    backend-only — the Flutter voice picker / gender
+    toggle UI already pulls current state via
+    /partner/voice/catalog + /partner/voice/gender, so
+    the persistence layer is invisible to the client.
 
 ### Wave 28 (✓ shipped)
 
@@ -3802,7 +3885,7 @@ Wave 24+ priorities at the user's pace.
 ## 10.8 Where to go from here
 
 - **Read chapter 1 → 9 if you haven't.** This chapter is the index; the others have the details.
-- **Pick a Wave 30+ item and ship it** — see §10.5 Wave 18 deferred queue (the trimmed Wave 17 cleanup output: NEW candidates IMPROVE-NEW-2/7/8/10 + Wave-15-audit FILTER_AXIS_TYPES registry + 7 Wave-16-audit-spawned items + Wave-13/12/11/10-audit triggered items + themed tranches B/D/E/F/G + carry-overs gated on §10.7 questions — most of which are now ungated since Wave 20 closed Q1 / Q4 / Q7 / Q15 / Q16). Tranche A (Flutter editor v2) shipped fully in Wave 18 — IMPROVE-138 through IMPROVE-144. Wave 19 Tranche A closed the GDPR Article 20 round-trip with the partner-import host ([IMPROVE-145]) + export button ([IMPROVE-146]). Wave 20 cleanup wave (✓ shipped) closed §10.7 gating questions + shipped a Q7=b deletion ([IMPROVE-147]) + 5 Q4=c TTS pipeline quick wins ([IMPROVE-148] / [IMPROVE-149] / [IMPROVE-150] / [IMPROVE-151] / [IMPROVE-152]). Wave 21 (✓ shipped) closed the cross-cutting startup contention with 3 chain fixes ([IMPROVE-153] / [IMPROVE-154] / [IMPROVE-155]) — ~47s of cold-startup blocking unwound. Wave 22 (✓ shipped) closed the Wave 21-spawned true-async ``_init_mem0`` follow-up via [IMPROVE-156] — httpx.AsyncClient pre-warm of Ollama embed + ``asyncio.create_task`` fire-and-forget Mem0 init at lifespan, moving the ~22s Chain 2 cost off the user's first request entirely. Wave 23 (✓ shipped) closed the Wave 20-spawned Kokoro create_stream piece via [IMPROVE-157] (backend stream_synthesize via ``async for`` over ``Kokoro.create_stream``) + [IMPROVE-158] (Flutter ``buildMiniWavForChunk`` + per-sentence StreamController + ``await for``-driven progressive playback) — ~60-80% TTFA reduction on long-paragraph synth. Wave 24 (✓ shipped) closed the Wave 23-spawned server-side parallel synth-while-LLM-streams piece via [IMPROVE-159] — phrase-boundary fallback in ``PartnerEngine.astream_chat`` firing on ``,`` ``;`` ``:`` once the clause is ≥ 30 chars, so TTS begins synthesising while the LLM keeps streaming later words. Wave 25 (deferred-by-investigation) inspected chatterbox-tts 0.1.7 source and confirmed neither ``ChatterboxTTS.generate`` nor ``ChatterboxTTSTurbo.generate`` has a streaming surface — true streaming requires forking the library (~3-5d), deferred pending upstream feature OR justified fork investment. Wave 26 (✓ shipped) pinned the cold-startup wins from Waves 21+22 + the TTFA wins from Waves 23+24 against future regressions via a new startup-timing benchmark harness ([IMPROVE-160]) — 4 deterministic timing pins on the actual ``api_server.app`` (no mocks). Wave 27 (✓ shipped) closed the Wave 21-residue Path D piece via [IMPROVE-161] — opt-in ``LIFESPAN_EAGER_EDITOR_WARMUP`` flag that pre-builds the editor service at lifespan time so editor-heavy users get hot first /editor/* calls at the cost of ~21s extra boot. Default-off preserves current boot speed. Wave 28 (✓ shipped) closed Tranche G partial — preset JSON export/import via [IMPROVE-162] — adding 2 new editor preset endpoints (export + import) with v=1 schema versioning so power users can share their tuned editor recipes via JSON files. Wave 29 (in progress) closes Tranche B partial — voice persistence — adding ``data/partner/voice_settings.json`` so a user's voice_id / voice_gender / tts_mode picks survive backend restart. The natural Wave 30+ paths: (a) themed Tranche D (system DAG enrichments) / E (editor advanced) / F (real-world evals) work, or (b) deferred-queue picks (NEW carry-overs / Wave-N-audit items). Items previously considered + rejected are archived in §10.5.1.
+- **Pick a Wave 30+ item and ship it** — see §10.5 Wave 18 deferred queue (the trimmed Wave 17 cleanup output: NEW candidates IMPROVE-NEW-2/7/8/10 + Wave-15-audit FILTER_AXIS_TYPES registry + 7 Wave-16-audit-spawned items + Wave-13/12/11/10-audit triggered items + themed tranches B/D/E/F/G + carry-overs gated on §10.7 questions — most of which are now ungated since Wave 20 closed Q1 / Q4 / Q7 / Q15 / Q16). Tranche A (Flutter editor v2) shipped fully in Wave 18 — IMPROVE-138 through IMPROVE-144. Wave 19 Tranche A closed the GDPR Article 20 round-trip with the partner-import host ([IMPROVE-145]) + export button ([IMPROVE-146]). Wave 20 cleanup wave (✓ shipped) closed §10.7 gating questions + shipped a Q7=b deletion ([IMPROVE-147]) + 5 Q4=c TTS pipeline quick wins ([IMPROVE-148] / [IMPROVE-149] / [IMPROVE-150] / [IMPROVE-151] / [IMPROVE-152]). Wave 21 (✓ shipped) closed the cross-cutting startup contention with 3 chain fixes ([IMPROVE-153] / [IMPROVE-154] / [IMPROVE-155]) — ~47s of cold-startup blocking unwound. Wave 22 (✓ shipped) closed the Wave 21-spawned true-async ``_init_mem0`` follow-up via [IMPROVE-156] — httpx.AsyncClient pre-warm of Ollama embed + ``asyncio.create_task`` fire-and-forget Mem0 init at lifespan, moving the ~22s Chain 2 cost off the user's first request entirely. Wave 23 (✓ shipped) closed the Wave 20-spawned Kokoro create_stream piece via [IMPROVE-157] (backend stream_synthesize via ``async for`` over ``Kokoro.create_stream``) + [IMPROVE-158] (Flutter ``buildMiniWavForChunk`` + per-sentence StreamController + ``await for``-driven progressive playback) — ~60-80% TTFA reduction on long-paragraph synth. Wave 24 (✓ shipped) closed the Wave 23-spawned server-side parallel synth-while-LLM-streams piece via [IMPROVE-159] — phrase-boundary fallback in ``PartnerEngine.astream_chat`` firing on ``,`` ``;`` ``:`` once the clause is ≥ 30 chars, so TTS begins synthesising while the LLM keeps streaming later words. Wave 25 (deferred-by-investigation) inspected chatterbox-tts 0.1.7 source and confirmed neither ``ChatterboxTTS.generate`` nor ``ChatterboxTTSTurbo.generate`` has a streaming surface — true streaming requires forking the library (~3-5d), deferred pending upstream feature OR justified fork investment. Wave 26 (✓ shipped) pinned the cold-startup wins from Waves 21+22 + the TTFA wins from Waves 23+24 against future regressions via a new startup-timing benchmark harness ([IMPROVE-160]) — 4 deterministic timing pins on the actual ``api_server.app`` (no mocks). Wave 27 (✓ shipped) closed the Wave 21-residue Path D piece via [IMPROVE-161] — opt-in ``LIFESPAN_EAGER_EDITOR_WARMUP`` flag that pre-builds the editor service at lifespan time so editor-heavy users get hot first /editor/* calls at the cost of ~21s extra boot. Default-off preserves current boot speed. Wave 28 (✓ shipped) closed Tranche G partial — preset JSON export/import via [IMPROVE-162] — adding 2 new editor preset endpoints (export + import) with v=1 schema versioning so power users can share their tuned editor recipes via JSON files. Wave 29 (✓ shipped) closed Tranche B partial — voice persistence via [IMPROVE-163] — adding ``data/partner/voice_settings.json`` (sibling of profile.json / user_profile.json / memory_decay.json) loaded at PartnerEngine init + written on every set_voice_id / set_voice_gender / set_tts_mode success, so a user's voice / gender / mode picks survive backend restart. The natural Wave 30+ paths: (a) themed Tranche D (system DAG enrichments) / E (editor advanced) / F (real-world evals) work, or (b) deferred-queue picks (NEW carry-overs / Wave-N-audit items). Items previously considered + rejected are archived in §10.5.1.
 - **Keep `[IMPROVE-N]` references alive.** When you fix one, grep `docs/features/` for that ID and cross out. If you add new ones in future work, number them IMPROVE-164+ (1-163 are taken; the IMPROVE-NEW-* tags graduate to permanent numbers on acceptance) and note them in the originating chapter.
 - **The `MEMORY.md` in `~/.claude/projects/...` contains the feedback rule** that improvement suggestions should cite 2025–2026 sources. Every item here has citations in its origin chapter.
 
@@ -3810,4 +3893,4 @@ Wave 24+ priorities at the user's pace.
 
 **Guide complete.** `docs/features/README.md` → `01-architecture.md` → `02-llm-infrastructure.md` → `03-chat.md` → `04-agents-tools.md` → `05-systems.md` → `06-image-generation.md` → `07-image-editor.md` → `08-partner.md` → `09-observability.md` → `10-improvements.md` *(this file)*.
 
-Every major feature of the Local AI Platform is now documented end-to-end, with **163** research-backed improvement ideas cross-referenced into one prioritized plan. Waves 1-24 + Wave 26 + Wave 27 + Wave 28 fully shipped + Wave 25 deferred-by-investigation + Wave 29 in progress; post-Wave-29 backlog in deferred queue.
+Every major feature of the Local AI Platform is now documented end-to-end, with **163** research-backed improvement ideas cross-referenced into one prioritized plan. Waves 1-24 + Wave 26 + Wave 27 + Wave 28 + Wave 29 fully shipped + Wave 25 deferred-by-investigation; post-Wave-29 backlog in deferred queue.
