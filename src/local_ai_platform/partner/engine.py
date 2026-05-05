@@ -1501,7 +1501,19 @@ class PartnerEngine:
                         "exaggeration": exaggeration,
                         "gender": self._voice_gender,
                     },
-                    timeout=30,
+                    # [IMPROVE-148] Sentence timeout tightened from 30s → 8s
+                    # per the Wave 20 Q4 TTS audit (Q4=c keep both Kokoro +
+                    # Chatterbox + optimize). Chatterbox-Turbo synthesizes
+                    # one sentence in <1s on consumer GPUs; the previous
+                    # 30s only caught a hung sidecar (ports 8282 stalled
+                    # on a wedged worker). 8s is generous for one sentence
+                    # while making the Kokoro fallback fire ~3.75× faster
+                    # on a stalled sidecar — perceptible UX win in the
+                    # rare-but-real "Chatterbox sidecar hung" case. The
+                    # full-paragraph timeout at line 1464 stays at 60s
+                    # since paragraph synthesis can legitimately take
+                    # 5-30s on long inputs.
+                    timeout=8,
                 )
                 resp.raise_for_status()
                 return resp.content
