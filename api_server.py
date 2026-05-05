@@ -260,6 +260,33 @@ async def lifespan(app: FastAPI):
     except Exception as exc:
         logger.warning("Hardware profile pre-detection failed at startup: %s", exc)
 
+    # [IMPROVE-156] Wave 22 — true-async lifespan warmup of partner
+    # memory. Wave 21's [IMPROVE-154] wrapped partner.get_memories()
+    # in asyncio.to_thread at the route handler so the event loop
+    # yielded during the ~22s Mem0 + ChromaDB + first-embed cost,
+    # but the wallclock stayed on the user's first /partner/memories
+    # request. Wave 22 moves that cost OFF the request path
+    # entirely:
+    #   1. httpx.AsyncClient pre-warms Ollama's nomic-embed-text
+    #      via POST /api/embed — replaces mem0's later first-call
+    #      warmup with an explicit pre-load on the lifespan
+    #      timeline (the literal "skipping the sync mem0 path"
+    #      from Wave 21 §10.6's deferred-list).
+    #   2. asyncio.to_thread(_init_mem0) runs Mem0's sync init
+    #      concurrently with the rest of lifespan + user idle
+    #      time before they hit /partner/memories.
+    # asyncio.create_task is fire-and-forget — boot doesn't wait.
+    # _init_mem0's own threading.Lock + double-checked locking
+    # keep the pattern safe if a request races the warmup. A
+    # failure in either phase falls through to _init_mem0's
+    # existing retry-TTL path on next request — no hard fail.
+    try:
+        from local_ai_platform.partner.memory import _async_warmup_partner_memory
+        asyncio.create_task(_async_warmup_partner_memory())
+        logger.info("Partner memory warmup task scheduled (Wave 22 IMPROVE-156)")
+    except Exception as exc:
+        logger.warning("Partner memory warmup task scheduling failed: %s", exc)
+
     # Restore saved agents from DB
     agents_loaded = 0
     for agent_row in list_agents_db():

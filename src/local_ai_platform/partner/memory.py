@@ -11,9 +11,11 @@ Falls back to SQLite-only if Mem0/ChromaDB not installed.
 """
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import math
+import threading
 import time
 from datetime import datetime, timezone
 from pathlib import Path
@@ -26,6 +28,21 @@ logger = logging.getLogger(__name__)
 
 _mem0_instance = None
 _mem0_available: bool | None = None  # None = not checked yet
+
+# [IMPROVE-156] Wave 22 — protect _init_mem0 against concurrent
+# callers. Pre-Wave-22 the function was sync and only ever called
+# from a request handler (one at a time). Wave 22 fires the init
+# from a lifespan asyncio.create_task in PARALLEL with the
+# possibility of an early /partner/memories request hitting
+# _init_mem0 directly. Without a lock, two threads could both pass
+# the ``if _mem0_instance is not None`` check and both invoke the
+# expensive Memory.from_config() — wasted ~5s of ChromaDB init,
+# the second instance overwriting the first, both ChromaDB clients
+# briefly co-existing on the same persistent path. Threading.Lock
+# is correct here (sync function called from threads; not awaited).
+# Double-checked locking pattern: the cached-success fast path
+# stays lock-free for hot-cache hits.
+_mem0_init_lock = threading.Lock()
 
 
 # [IMPROVE-61] Memory-decay parameters. Pre-IMPROVE-61 the
@@ -450,6 +467,15 @@ def _init_mem0():
     covers transient startup races (Ollama not up yet, ChromaDB lock)
     and the "installed mem0ai after first call" case without requiring
     a server restart. Successful init is still cached forever.
+
+    [IMPROVE-156] Wave 22 — double-checked locking around the slow
+    init path. The hot fast-path (``_mem0_instance is not None``)
+    stays lock-free; only the actual Memory.from_config call (and
+    its retry-TTL bookkeeping) runs under ``_mem0_init_lock`` so
+    a lifespan ``asyncio.create_task(_async_warmup_partner_memory)``
+    racing with an early /partner/memories request can't double-
+    init. After the lock is acquired we re-check the cached state
+    in case another thread won the race while we were blocked.
     """
     global _mem0_instance, _mem0_available, _mem0_last_failure_monotonic
 
@@ -457,17 +483,37 @@ def _init_mem0():
     if _mem0_instance is not None:
         return _mem0_instance
 
-    # Failure path: serve cached False until the TTL elapses, then retry.
-    is_retry = False
-    if _mem0_available is False:
-        since_failure = time.monotonic() - _mem0_last_failure_monotonic
-        if since_failure < _MEM0_RETRY_TTL_SEC:
-            return None
-        logger.debug(
-            "Mem0 retry after TTL (%.0fs since last failure)", since_failure
-        )
-        is_retry = True
-        _mem0_available = None  # reset so the "have we tried yet" flag is right
+    # Slow path runs under the lock so a lifespan warmup task and an
+    # early request handler don't both call Memory.from_config().
+    with _mem0_init_lock:
+        # Re-check after acquiring — another thread may have completed
+        # init while we were blocked on the lock.
+        if _mem0_instance is not None:
+            return _mem0_instance
+
+        # Failure path: serve cached False until the TTL elapses, then retry.
+        is_retry = False
+        if _mem0_available is False:
+            since_failure = time.monotonic() - _mem0_last_failure_monotonic
+            if since_failure < _MEM0_RETRY_TTL_SEC:
+                return None
+            logger.debug(
+                "Mem0 retry after TTL (%.0fs since last failure)", since_failure
+            )
+            is_retry = True
+            _mem0_available = None  # reset so the "have we tried yet" flag is right
+
+        return _init_mem0_locked(is_retry)
+
+
+def _init_mem0_locked(is_retry: bool):
+    """Slow-path body of _init_mem0; runs under _mem0_init_lock.
+
+    Split out so the lock-acquire branch in _init_mem0 stays readable
+    and so tests can inspect / mock the inner shape independently.
+    Callers MUST hold _mem0_init_lock before invoking this function.
+    """
+    global _mem0_instance, _mem0_available, _mem0_last_failure_monotonic
 
     t0 = time.monotonic()
     # [IMPROVE-69] Read through AppSettings. Pre-IMPROVE-6 the default
@@ -569,6 +615,143 @@ def _init_mem0():
             context={"retry": is_retry, "retry_in_sec": _MEM0_RETRY_TTL_SEC},
         )
         return None
+
+
+# [IMPROVE-156] Wave 22 — true-async lifespan warmup of Mem0.
+#
+# Pre-Wave-22 the partner memory init was lazy: the first
+# /partner/memories request triggered _init_mem0() which blocked
+# for ~5s on ChromaDB instantiation, then the FIRST
+# OllamaEmbedding.embed() call inside the same request blocked
+# again for ~15-18s as Ollama loaded nomic-embed-text into RAM.
+# Wave 21's [IMPROVE-154] wrapped the request-handler call in
+# asyncio.to_thread which freed the event loop but kept the
+# wallclock cost on the user's first request.
+#
+# Wave 22 moves the cost off the request path entirely:
+#   1. POST a dummy embed payload to Ollama's /api/embed BEFORE
+#      mem0 is invoked. This pre-loads nomic-embed-text into
+#      Ollama RAM. When mem0's first .embed() call fires later
+#      (during the user's first /partner/memories request) the
+#      model is already hot — that 15-18s vanishes from the
+#      user-facing path.
+#   2. Run the sync Memory.from_config() init in
+#      asyncio.to_thread so the ~5s ChromaDB init overlaps with
+#      the rest of lifespan + user idle time.
+# Wired into api_server.py lifespan as
+# ``asyncio.create_task(_async_warmup_partner_memory())``
+# (fire-and-forget). If the user opens /partner/memories before
+# the warmup completes, _init_mem0's threading.Lock serializes
+# the two callers; the second one returns the already-built
+# instance once the first finishes.
+#
+# Audit-vs-source note: the Wave 21 audit attributed 15-18s of
+# the observed 22.56s to "Ollama embedding warmup inside
+# _init_mem0". Reading mem0 source 2026-Q2 (.venv/Lib/site-
+# packages/mem0/embeddings/ollama.py) shows OllamaEmbedding
+# .__init__ only calls client.list() — no model warmup at init.
+# The 15-18s actually happens on the first .embed() call later,
+# which is what step 1 here targets directly via httpx
+# .AsyncClient instead of going through mem0 at all.
+#
+# References (2025-2026):
+#   * asyncio.create_task — https://docs.python.org/3/library/
+#     asyncio-task.html#asyncio.create_task
+#   * httpx AsyncClient — https://www.python-httpx.org/async/
+#   * Ollama embed API — https://github.com/ollama/ollama/blob/
+#     main/docs/api.md#generate-embeddings
+async def _async_warmup_partner_memory() -> None:
+    """Lifespan-side fire-and-forget warmup for partner memory.
+
+    Phase 1: pre-warm Ollama's embedding model via httpx
+    AsyncClient (replaces mem0's later first-call warmup with an
+    explicit pre-load on the lifespan timeline).
+    Phase 2: run sync _init_mem0() in a worker thread so its
+    ChromaDB init overlaps with the rest of server boot.
+
+    Both phases are wrapped in try/except so a wedged Ollama or a
+    missing mem0 install can't stop server boot — _init_mem0's
+    existing retry-TTL behaviour handles the eventual recovery.
+    Returns None unconditionally; all signals go through the
+    standard logger + observability pipeline.
+    """
+    from ..http_client import get_async_client
+
+    settings = get_settings()
+    ollama_url = settings.ollama_base_url.rstrip("/")
+    embed_model = settings.partner_embed_model
+
+    # Phase 1: warm the embedding model. Tiny payload — the only
+    # purpose is to make Ollama load the model into RAM so mem0's
+    # first .embed() call later returns instantly. We don't care
+    # about the response body or even success vs. failure: if
+    # Ollama is down, mem0's later .embed() will fail the same
+    # way it would have without the warmup, with the same retry
+    # path. Generous timeout because cold-loading nomic-embed-
+    # text on a slow disk can exceed the default 60s read window.
+    t0 = time.monotonic()
+    try:
+        client = get_async_client()
+        response = await client.post(
+            f"{ollama_url}/api/embed",
+            json={"model": embed_model, "input": "warmup"},
+            timeout=120.0,
+        )
+        warmup_ms = int((time.monotonic() - t0) * 1000)
+        if response.status_code == 200:
+            logger.info(
+                "Partner embed model pre-warmed at lifespan in %dms (Wave 22 IMPROVE-156): %s",
+                warmup_ms,
+                embed_model,
+            )
+            emit_typed(
+                "partner",
+                "mem0_embed_warmup",
+                status="ok",
+                duration_ms=warmup_ms,
+                context={"embed_model": embed_model},
+            )
+        else:
+            logger.warning(
+                "Partner embed model pre-warm returned HTTP %s (Wave 22 IMPROVE-156)",
+                response.status_code,
+            )
+            emit_typed(
+                "partner",
+                "mem0_embed_warmup",
+                status="error",
+                duration_ms=warmup_ms,
+                error_code=f"HTTP_{response.status_code}",
+                context={"embed_model": embed_model},
+            )
+    except Exception as exc:
+        warmup_ms = int((time.monotonic() - t0) * 1000)
+        logger.warning(
+            "Partner embed model pre-warm failed (%s) — proceeding to _init_mem0 anyway",
+            exc,
+        )
+        emit_typed(
+            "partner",
+            "mem0_embed_warmup",
+            status="error",
+            duration_ms=warmup_ms,
+            error_code=type(exc).__name__,
+            error_message=str(exc),
+            context={"embed_model": embed_model},
+        )
+
+    # Phase 2: run sync Memory.from_config() in a worker thread.
+    # _init_mem0's own threading.Lock serializes against any
+    # request handler that might race in. A failure here lands in
+    # _init_mem0's retry-TTL path (cached False for
+    # _MEM0_RETRY_TTL_SEC, then auto-retry on next call).
+    try:
+        await asyncio.to_thread(_init_mem0)
+    except Exception as exc:
+        logger.warning(
+            "Background _init_mem0 raised (%s) — request-time retry will run normally",
+            exc,
+        )
 
 
 def mem0_add(messages: list[dict], user_id: str = "user") -> None:

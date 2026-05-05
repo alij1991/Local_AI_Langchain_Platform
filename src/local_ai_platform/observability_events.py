@@ -231,6 +231,7 @@ PartnerAction = Literal[
     "chat.start",
     "emotion_detect",
     "fact_extract",
+    "mem0_embed_warmup",
     "mem0_init",
     "stt",
     "stt.partial",
@@ -761,6 +762,21 @@ class PartnerMem0InitContext(TypedDict):
     llm_model: NotRequired[str]
     embed_model: NotRequired[str]
     retry_in_sec: NotRequired[float]
+
+
+class PartnerMem0EmbedWarmupContext(TypedDict):
+    """[IMPROVE-156] Context schema for ``partner.mem0_embed_warmup``.
+
+    Fires from partner/memory.py::_async_warmup_partner_memory at
+    lifespan startup. Wave 22 added this Phase-1 step (httpx
+    AsyncClient POST /api/embed) to pre-load the Ollama embedding
+    model before mem0's first .embed() call later in the request
+    path. Status='ok' carries embed_model; status='error' carries
+    embed_model + an error code (HTTP_<status> for non-200 server
+    responses, exception class name for transport failures).
+    """
+    __pydantic_config__ = _FORBID_EXTRA  # type: ignore[misc]
+    embed_model: str
 
 
 # ── [IMPROVE-95] Wave 10 batch: 12 high-traffic event schemas ─
@@ -1795,6 +1811,7 @@ EVENT_CONTEXT_SCHEMAS: dict[tuple[str, str], type] = {
     ("partner", "chat.start"): PartnerChatContext,
     ("partner", "emotion_detect"): PartnerEmotionDetectContext,
     ("partner", "fact_extract"): PartnerFactExtractContext,
+    ("partner", "mem0_embed_warmup"): PartnerMem0EmbedWarmupContext,
     ("partner", "mem0_init"): PartnerMem0InitContext,
     ("partner", "stt"): PartnerSttContext,
     ("partner", "stt.partial"): PartnerSttContext,

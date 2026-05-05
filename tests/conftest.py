@@ -95,10 +95,30 @@ def obs_test_client(monkeypatch, tmp_path):
     pytest.importorskip("fastapi")
     from fastapi.testclient import TestClient
     from local_ai_platform import db as db_mod
+    from local_ai_platform.partner import memory as _partner_memory
 
     path = tmp_path / "app.db"
     monkeypatch.setattr(db_mod, "DB_PATH", path)
     db_mod.init_db()
+
+    # [IMPROVE-156] Wave 22 — the lifespan fires
+    # ``_async_warmup_partner_memory`` as an
+    # ``asyncio.create_task`` that emits
+    # ``partner.mem0_embed_warmup`` (Phase 1) and
+    # ``partner.mem0_init`` (Phase 2) events AFTER the TestClient
+    # context manager's lifespan __aenter__ returns — i.e. AFTER
+    # the ``DELETE FROM app_events`` truncation below. Without
+    # neutralising the warmup, those events land in the table
+    # mid-test and skew count assertions in /observability/recent
+    # and /observability/summary. Replace with a no-op coroutine
+    # for obs tests; the warmup function itself is exercised
+    # directly in tests/test_partner_mem0_warmup.py against an
+    # injected MockTransport, not via the lifespan path.
+    async def _noop_warmup() -> None:
+        return None
+    monkeypatch.setattr(
+        _partner_memory, "_async_warmup_partner_memory", _noop_warmup
+    )
 
     import api_server
     with TestClient(api_server.app) as c:
