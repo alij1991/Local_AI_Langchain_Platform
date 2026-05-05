@@ -659,7 +659,15 @@ async def partner_voice_init(
     """
     # Free VRAM from image editing/generation pipelines
     freed = _free_gpu_for_partner(image_service)
-    result = partner.init_voice()
+    # [IMPROVE-149] init_voice runs faster-whisper / Kokoro / Silero VAD
+    # loads + a Chatterbox sidecar probe + TTS warmup, totalling ~3-8s
+    # on cold init. Per the Wave 20 Q4 audit (Q4=c keep both, optimize):
+    # offload to a thread so the event loop stays responsive — every
+    # other route (e.g. /partner/voice/status, /agents, /editor/*)
+    # was previously blocking for the full init duration on the same
+    # uvicorn worker. asyncio.to_thread is the canonical 2025-2026
+    # FastAPI pattern for sync work that exceeds ~50ms.
+    result = await asyncio.to_thread(partner.init_voice)
     if freed:
         result["vram_freed"] = True
     return result
@@ -1193,7 +1201,10 @@ async def partner_voice_upload(
     try:
         # ASR: transcribe
         if partner._asr is None:
-            partner.init_voice()
+            # [IMPROVE-149] Same Q4=c quick win as /partner/voice/init —
+            # init_voice's 3-8s cold load goes off the event loop so other
+            # routes can serve. Sibling call site to the one above.
+            await asyncio.to_thread(partner.init_voice)
         if partner._asr is None:
             raise HTTPException(422, "ASR not available. Install faster-whisper.")
 
