@@ -141,6 +141,13 @@ class PartnerEngine:
         self._vad = None           # Silero VAD
         self._tts_mode = "kokoro"  # "kokoro" (fast) | "chatterbox" (emotional)
         self._voice_gender = "female"  # "female" | "male"
+        # [IMPROVE-163] Wave 29 — explicit init so the field always
+        # exists. Pre-Wave-29 ``_voice_id`` was set lazily by
+        # ``set_voice_id``; this made the persisted-state restore at
+        # the bottom of __init__ the only writer for first-run users
+        # who never opened the picker. Setting None here keeps every
+        # ``getattr(self, '_voice_id', None)`` reader's contract.
+        self._voice_id: str | None = None
         self._last_detected_emotion = "neutral"  # emotion from last LLM response tag
 
         # Best model detection (research: Qwen3-8B Q4_K_M recommended)
@@ -151,6 +158,15 @@ class PartnerEngine:
         self._session_messages: list[dict] = []
         # LLM profiling counter (every 5 turns)
         self._profiling_counter = 0
+
+        # [IMPROVE-163] Wave 29 — restore persisted voice/gender/mode
+        # picks from data/partner/voice_settings.json so the user's
+        # selection survives backend restart. Sibling of the existing
+        # ``data/partner/profile.json`` (loaded above via load_profile)
+        # and ``data/partner/memory_decay.json`` (autoloaded by
+        # memory.py at import time). Defaults already set above
+        # remain when the file is missing or values are invalid.
+        self._restore_persisted_voice_settings()
 
     # ── Profile Management ────────────────────────────────────────
 
@@ -1355,6 +1371,10 @@ class PartnerEngine:
             "[IMPROVE-63] voice_id set to %s (%s, %s)",
             voice_id, entry["display_name"], entry["gender"],
         )
+        # [IMPROVE-163] Wave 29 — persist so the pick survives
+        # backend restart. Best-effort; a write failure does not
+        # roll back the in-memory state above.
+        self._persist_voice_settings()
         return voice_id
 
     def synthesize_voice_sample(self, voice_id: str) -> bytes | None:
@@ -1420,10 +1440,65 @@ class PartnerEngine:
             except Exception:
                 pass  # Chatterbox server might not support gender yet
         logger.info("Voice gender set to: %s", gender)
+        # [IMPROVE-163] Wave 29 — persist so the pick survives
+        # backend restart. Note that ``_voice_id`` was just reset
+        # to None above, so the persisted file ALSO clears any
+        # explicit catalog-id override — matches the in-memory
+        # "back to gender default" intent.
+        self._persist_voice_settings()
         return f"Voice gender set to: {gender}"
 
     def get_voice_gender(self) -> str:
         return getattr(self, '_voice_gender', 'female')
+
+    # [IMPROVE-163] Wave 29 — voice persistence helpers. Called
+    # from __init__ (load) + set_voice_id / set_voice_gender /
+    # set_tts_mode (save). Pattern mirrors the [IMPROVE-NEW-12]
+    # memory_decay pattern at partner/memory.py — sibling JSON
+    # file under data/partner/, best-effort load + save.
+    def _restore_persisted_voice_settings(self) -> None:
+        """Restore voice/gender/mode picks from
+        ``data/partner/voice_settings.json``. Defaults remain
+        in place when the file is missing or fields are invalid;
+        ``load_voice_settings`` validates each field independently
+        so corrupt-on-one-field doesn't reset the others.
+        """
+        try:
+            from .voice_settings import load_voice_settings
+            persisted = load_voice_settings()
+            self._voice_id = persisted.voice_id
+            self._voice_gender = persisted.voice_gender
+            self._tts_mode = persisted.tts_mode
+        except Exception as exc:
+            # Defensive: a misbehaving import or unexpected error in
+            # load_voice_settings shouldn't crash partner-engine
+            # construction. The defaults set above remain in place.
+            logger.warning(
+                "[IMPROVE-163] Failed to restore persisted voice "
+                "settings (using defaults): %s", exc,
+            )
+
+    def _persist_voice_settings(self) -> None:
+        """Write current voice/gender/mode to disk so the picks
+        survive backend restart. Called at the tail of every
+        ``set_voice_id`` / ``set_voice_gender`` / ``set_tts_mode``
+        success path. Best-effort; a write failure logs but does
+        not roll back the in-memory state.
+        """
+        try:
+            from .voice_settings import (
+                VoiceSettings, save_voice_settings,
+            )
+            save_voice_settings(VoiceSettings(
+                voice_id=getattr(self, '_voice_id', None),
+                voice_gender=self._voice_gender,
+                tts_mode=self._tts_mode,
+            ))
+        except Exception as exc:
+            logger.warning(
+                "[IMPROVE-163] Failed to persist voice settings: %s",
+                exc,
+            )
 
     # [IMPROVE-150] Pre-compiled regex patterns for
     # _preprocess_text_for_tts (Wave 20 Q4=c TTS quick win D).
@@ -1852,6 +1927,11 @@ class PartnerEngine:
         if mode == "kokoro" and self._tts is None:
             return "kokoro not available — download model files"
         self._tts_mode = mode
+        # [IMPROVE-163] Wave 29 — persist so the pick survives
+        # backend restart. Persisted on the success path only; the
+        # two early returns above leave ``_tts_mode`` unchanged so
+        # there's nothing new to save.
+        self._persist_voice_settings()
         if mode == "chatterbox":
             if self._chatterbox_variant == "turbo":
                 return "TTS mode set to: chatterbox (Turbo variant — sub-200ms latency)"
