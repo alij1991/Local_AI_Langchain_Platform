@@ -290,20 +290,7 @@ TOOL_CATEGORIES = {
 
 ## 4.8 User-defined tools
 
-Two types, both persisted in the `tools` table and registered at runtime:
-
-### Instruction tool (`type="instruction"`)
-
-Created via `POST /tools {type:"instruction", name, description, config_json:{instructions}}`. The handler calls:
-
-```python
-orchestrator.add_instruction_tool(name, instructions)
-# internally:
-def instruction_tool(task: str) -> str:
-    return f"Tool `{name}` guidance: {instructions}\nTask: {task}"
-```
-
-This doesn't *do* anything — it returns a static string blending the stored instructions with the agent-provided task. Its only purpose is to let the agent see structured guidance injected as a "tool result" rather than part of the system prompt. In practice this ends up as a verbose way to steer the agent — less effective than simply editing the system prompt. [IMPROVE-24]
+One type now (instruction-tools removed in Wave 20 per Q7=b — see [IMPROVE-24] / [IMPROVE-147] in `docs/features/10-improvements.md` §10.7.1). User-defined tools are persisted in the `tools` table and registered at runtime:
 
 ### Agent delegation tool (`type="agent_tool"`)
 
@@ -405,7 +392,7 @@ This coarse-grained policy — "if *any* of the agent's tools is dangerous, inte
 - **MCP servers spin up a fresh subprocess per invoke.** No connection pooling. Adequate for occasional use, wasteful for chatty tool chains. [IMPROVE-26]
 - **`/tools/{id}/test` passes a flat string** as input. Multi-arg tools need the caller to know the schema. The Flutter Tools page handles common cases via per-tool UI, but the API route itself is limited. [IMPROVE-27]
 - **Tool list merges runtime + DB by name** but doesn't cross-reference. If you had a saved tool and a builtin with the same name, they'd both appear as separate items.
-- **`add_instruction_tool` / `add_agent_delegate_tool` append to `self.tools` globally.** The new tool is visible to *every* agent, not just the one whose flow triggered the addition — the gating is at `_tools_for_agent` via the binding table, which is fine unless you re-create a user tool mid-run. Idempotence in `create_supervisor` (line 801) handles the common case.
+- **`add_agent_delegate_tool` appends to `self.tools` globally.** The new tool is visible to *every* agent, not just the one whose flow triggered the addition — the gating is at `_tools_for_agent` via the binding table, which is fine unless you re-create a user tool mid-run. Idempotence in `create_supervisor` (line 801) handles the common case. (`add_instruction_tool` was removed in Wave 20 per Q7=b — [IMPROVE-24] / [IMPROVE-147].)
 
 ---
 
@@ -467,13 +454,9 @@ Alternative (matches [IMPROVE-10]): store in the OS keyring. Either way, env-onl
 
 **Sources:** canonical Python security pattern — see the Python `pathlib` docs and OWASP Python cheatsheet. No specific 2025–2026 citation needed; this is a longstanding best practice.
 
-### [IMPROVE-24] Replace "instruction tool" with prompt-composable fragments
+### [IMPROVE-24] Replace "instruction tool" with prompt-composable fragments — RESOLVED Wave 20
 
-**Problem:** an instruction tool is a tool that returns a static string. Not useful. The pattern is a workaround for "I want extra guidance available to the agent" — but the proper solution is a system prompt fragment.
-
-**Proposal:** drop instruction tools from the UI. In their place, add a "**Guidance fragment**" feature: a named snippet that's *appended* to an agent's system prompt. One-line selector in the agent edit screen, multi-select, saved to a new `prompt_fragments` table. The feature is additive and removes a footgun.
-
-Users who liked the instruction-tool trace-visibility can instead rely on the existing `TraceRecorder` to show the full system prompt on each run.
+**Resolution (Wave 20, [IMPROVE-147]):** Instruction tools deleted outright. Q7=b locked Wave 20 per §10.7.1; the "tool" was a string-template no-op (just prepended user instructions to the agent's task — agents already get system prompts via `build_router_from_config`). No Flutter UI ever exposed `tool_type="instruction"`; the only callers were the legacy Gradio app.py and the routers/tools.py POST handler — both updated in the [IMPROVE-147] commit. Existing DB rows with `tool_type="instruction"` remain (we don't auto-delete user data) but skip runtime registration; users can remove them via DELETE /tools/{tool_id}. The "guidance fragment" alternative proposal is dropped — agents already steer fine via the system prompt + dynamic per-run context, and adding another configuration surface for the same goal would just shift the footgun. If a user wants per-task hints, they can edit the agent's system prompt directly.
 
 **Sources:** internal cleanup; cross-ref:
 - Prompt composition patterns: [Anthropic: Use XML tags (2024/2025)](https://docs.anthropic.com/claude/docs/use-xml-tags) — relevant for fragment structure.

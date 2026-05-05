@@ -97,12 +97,14 @@ async def create_tool(
     # Also register as a runtime tool in the orchestrator. Graceful: the
     # DB row is the source of truth; runtime registration is a warm-cache
     # optimization that the next orchestrator boot will pick up from DB.
+    #
+    # [IMPROVE-147] tool_type=="instruction" branch removed — Q7=b locked
+    # Wave 20. Existing DB rows with tool_type="instruction" remain (we
+    # don't auto-delete user data) but skip runtime registration — they
+    # appear in /tools listings but won't fire as agent tools. Users can
+    # remove them via DELETE /tools/{tool_id}. See §10.7.1 Q7 resolution.
     if orchestrator and name:
-        if tool_type == "instruction":
-            # Instruction tool: wraps an LLM call with a custom system prompt
-            instructions = config.get("instructions", description)
-            orchestrator.add_instruction_tool(name, instructions)
-        elif tool_type == "agent_tool":
+        if tool_type == "agent_tool":
             # Agent delegation tool
             target = config.get("target_agent", "")
             if target:

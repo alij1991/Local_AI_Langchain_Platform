@@ -317,16 +317,19 @@ def build_app() -> gr.Blocks:
         except Exception as exc:  # noqa: BLE001
             return f"❌ {exc}"
 
+    # [IMPROVE-147] tool_mode=="instruction" branch removed — Q7=b
+    # locked Wave 20. The Gradio UI now offers only the
+    # delegate_agent template; the radio below was reduced from
+    # ["instruction", "delegate_agent"] to ["delegate_agent"].
     def apply_tool_template(tool_mode: str):
-        return ("summarize_for_exec", "Summarize output into 5 bullets.") if tool_mode == "instruction" else ("delegate_to_assistant", "Delegate task.")
+        return ("delegate_to_assistant", "Delegate task.")
 
     def add_tool(tool_name: str, tool_type: str, instructions: str, target_agent: str):
         clean = tool_name.strip().lower().replace(" ", "_")
         if not clean:
             return "❌ Tool name is required.", gr.update()
-        if tool_type == "instruction":
-            orchestrator.add_instruction_tool(clean, instructions.strip() or "General helper tool")
-            return f"✅ Added `{clean}`.", gr.update(value=_tool_map_text())
+        # [IMPROVE-147] tool_type=="instruction" branch removed — Q7=b
+        # locked Wave 20. See §10.7.1 Q7 resolution + agents.py.
         if target_agent not in orchestrator.definitions:
             return "❌ Select valid target agent.", gr.update()
         orchestrator.add_agent_delegate_tool(clean, target_agent)
@@ -437,7 +440,9 @@ def build_app() -> gr.Blocks:
                     gr.Markdown("### Tools", elem_id="section-title")
                     gr.Markdown("Built-ins: `multiply_numbers`, `utc_now`, `tavily_web_search`, `mcp_query`.")
                     tool_map = gr.Markdown(value=_tool_map_text())
-                    tool_type = gr.Radio(label="Tool type", choices=["instruction", "delegate_agent"], value="instruction")
+                    # [IMPROVE-147] "instruction" choice removed — Q7=b
+                    # locked Wave 20. Only delegate_agent remains.
+                    tool_type = gr.Radio(label="Tool type", choices=["delegate_agent"], value="delegate_agent")
                     tool_name = gr.Textbox(label="Tool name")
                     tool_instructions = gr.Textbox(label="Instructions", lines=3)
                     delegate_target = gr.Dropdown(label="Delegate target", choices=orchestrator.list_agents(), value="assistant")

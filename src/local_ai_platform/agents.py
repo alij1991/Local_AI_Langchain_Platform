@@ -519,17 +519,15 @@ class AgentOrchestrator:
 
     # ── Tool management ───────────────────────────────────────────
 
-    def add_instruction_tool(self, name: str, instructions: str) -> None:
-        def instruction_tool(task: str) -> str:
-            return f"Tool `{name}` guidance: {instructions}\nTask: {task}"
-
-        self.tools.append(
-            self._instrument_tool(StructuredTool.from_function(
-                func=instruction_tool,
-                name=name,
-                description=f"User-defined instruction tool: {instructions}",
-            ))
-        )
+    # [IMPROVE-147] add_instruction_tool removed — Q7=b locked
+    # Wave 20. The "tool" produced was a string-template no-op
+    # (just prepended user instructions to the agent's task —
+    # less effective than editing the system prompt directly,
+    # which agents already get via build_router_from_config).
+    # No Flutter UI ever exposed tool_type="instruction"; the
+    # only callers were the legacy Gradio app.py and the
+    # routers/tools.py POST handler — both updated in the same
+    # commit. See §10.7.1 Q7 resolution for the full rationale.
 
     def add_agent_delegate_tool(self, name: str, target_agent: str) -> None:
         def delegate_tool(task: str) -> str:
