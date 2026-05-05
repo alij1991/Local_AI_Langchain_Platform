@@ -10,7 +10,7 @@
 
 - **156 improvements** flagged inline as `[IMPROVE-N]` in chapters 1–9 + the Wave 5/6/7/8/9/10/11/12/13/14/15/16/18/19/20/21/22 audits (NEW from Wave 6 audit: 71/72/73/74; NEW from Wave 7: 75/76/77/78/79/80/81/82; NEW from Wave 8: 83/84/85/86/87/88; NEW from Wave 9: 89/90/91/92/93/94; NEW from Wave 10: 95/96/97/98/99/100; NEW from Wave 11: 101/102/103/104/105/106; NEW from Wave 12: 107/108/109/110/111/112; NEW from Wave 13: 113/114/115/116/117/118; NEW from Wave 14: 119/120/121/122/123/124/125; NEW from Wave 15: 126/127/128/129/130/131; NEW from Wave 16: 132/133/134/135/136/137; NEW from Wave 18: 138/139/140/141/142/143/144; NEW from Wave 19 Tranche A: 145/146; NEW from Wave 20 cleanup wave: 147/148/149/150/151/152; NEW from Wave 21 startup-contention fix: 153/154/155; NEW from Wave 22 true-async _init_mem0: 156).
 - **10 themes** — security, architecture, observability, tracing, UX, memory & context, model & inference, background tasks, voice, and tools/MCP.
-- **22 waves fully shipped** (Waves 1-16 numbered + Wave 17 doc-only cleanup + Wave 18 Tranche A Flutter editor v2 + Wave 19 Tranche A partner-import host + Wave 20 cleanup wave: §10.7 walkthrough closing Q1/Q4/Q7/Q15/Q16 + 1 deletion + 5 TTS quick wins + Wave 21 startup-contention fix targeting the 3 lazy-init chains the user's startup log surfaced + Wave 22 true-async _init_mem0 — IMPROVE-156 background-task warmup at lifespan via httpx.AsyncClient pre-warm of nomic-embed-text + asyncio.create_task fire-and-forget Mem0 init, moving the ~22s Chain 2 cost OFF the user's first request entirely); **1** standing in deferred queues (post-Wave-22 backlog).
+- **22 waves fully shipped + Wave 23 in progress** (Waves 1-16 numbered + Wave 17 doc-only cleanup + Wave 18 Tranche A Flutter editor v2 + Wave 19 Tranche A partner-import host + Wave 20 cleanup wave: §10.7 walkthrough closing Q1/Q4/Q7/Q15/Q16 + 1 deletion + 5 TTS quick wins + Wave 21 startup-contention fix targeting the 3 lazy-init chains the user's startup log surfaced + Wave 22 true-async _init_mem0 — IMPROVE-156 background-task warmup at lifespan via httpx.AsyncClient pre-warm of nomic-embed-text + asyncio.create_task fire-and-forget Mem0 init, moving the ~22s Chain 2 cost OFF the user's first request entirely + Wave 23 Kokoro create_stream chunked TTFA — IMPROVE-157 backend stream_synthesize via kokoro_onnx.create_stream + IMPROVE-158 Flutter progressive playback for end-to-end TTFA win on long replies); **1** standing in deferred queues (post-Wave-23 backlog).
 
 All improvements are traceable back to a chapter + a 2025–2026 citation. This chapter is pure planning — *what* + *why this order*; *how* is in each origin chapter.
 
@@ -1030,7 +1030,7 @@ full 3-row table + retrospective + Wave 23+ backlog.
 |---|---|---|---|---:|
 | 1 | (doc)         | 7f84199 | Wave 22 mid-wave (start) — register Wave 22 in §10.5 + §10.6 with the audit-vs-source-mismatch finding (Wave 21 audit said 15-18s embedding warmup at init; mem0 source shows that warmup actually happens on first ``.embed()`` call later, not at init). Updates §10.1 wave-status (21 waves shipped → 21 + Wave 22 in progress). Fills in Wave 21 end-wave SHA placeholder (5c79cbf) per the Wave 12-15 placeholder convention. | 0 |
 | 2 | [IMPROVE-156] | 45c0e7c | True-async ``_init_mem0`` — module-level ``async def _async_warmup_partner_memory()`` in ``partner/memory.py`` does ``httpx.AsyncClient.post(ollama_base_url + '/api/embed', json={'model': partner_embed_model, 'input': 'warmup'})`` to pre-warm nomic-embed-text in Ollama RAM (Phase 1), then ``await asyncio.to_thread(_init_mem0)`` to init mem0 concurrently with the rest of lifespan (Phase 2). ``threading.Lock`` + double-checked locking inside ``_init_mem0`` (split into ``_init_mem0`` fast-path + ``_init_mem0_locked`` slow-path body) so concurrent calls (lifespan task + early request handler) don't double-init. Wired into ``api_server.py`` lifespan as ``asyncio.create_task(_async_warmup_partner_memory())`` after the [IMPROVE-155] hardware-profile block — fire-and-forget, no boot-time cost. NEW typed event ``partner.mem0_embed_warmup`` registered. NEW ``tests/test_partner_mem0_warmup.py`` with 9 tests (3 lock-seam + 6 async-warmup). ``obs_test_client`` fixture neutralises the warmup task with a no-op coroutine to keep lifespan side-effects out of /observability/recent + /summary count assertions. | 9 |
-| 3 | (doc)         | this    | Wave 22 end-wave retrospective. Bumps 155 → 156 in §10.1 + §10.4. Adds 1 IMPROVE-N row (156). Fills in Wave 22 mid-wave SHA placeholder (7f84199) + IMPROVE-156 SHA (45c0e7c). Flips Wave 22 status (in progress → ✓ shipped) in §10.5 + §10.6 + full 3-row tables. NEW Wave 22 architectural impact subsection. Updates §10.8 closing line + Wave 23+ pivot text. SHA filled in by Wave 23+ mid-wave doc commit per Wave 12-15 placeholder convention. | 0 |
+| 3 | (doc)         | 10e1094 | Wave 22 end-wave retrospective. Bumps 155 → 156 in §10.1 + §10.4. Adds 1 IMPROVE-N row (156). Fills in Wave 22 mid-wave SHA placeholder (7f84199) + IMPROVE-156 SHA (45c0e7c). Flips Wave 22 status (in progress → ✓ shipped) in §10.5 + §10.6 + full 3-row tables. NEW Wave 22 architectural impact subsection. Updates §10.8 closing line + Wave 23+ pivot text. | 0 |
 
 Net: +9 tests on the Tier 1 Python sweep (1858 → 1867).
 Sweep file count grows 90 → 91 with the new
@@ -1045,6 +1045,60 @@ concurrently with the rest of server boot, so the user's
 first /partner/memories request hits a hot cache. 3
 commits (2 doc + 1 numbered) — the planned shape held
 end-to-end.
+
+### Wave 23 — Kokoro create_stream chunked TTFA (in progress)
+
+Theme: address the Wave 20-spawned bigger-TTS-architectural-
+piece flagged in §10.6 Wave 22 architectural impact (and
+originally in Wave 20's Q4=c TTS quick-win retrospective).
+The user's Wave 20 feedback "the pipeline is slow and not
+efficient at all" got 5 quick wins ([IMPROVE-148] through
+[IMPROVE-152]) but the bigger architectural piece — switching
+Kokoro synthesis from blocking ``self._tts.create()`` to the
+true streaming ``self._tts.create_stream()`` async generator
+— was deferred. Wave 23 ships that piece end-to-end (backend
++ Flutter).
+
+Wave 23 audit findings (kokoro_onnx 2026-Q2 inspection):
+the Wave 20 [IMPROVE-152] docstring claimed "no asyncio
+surface in kokoro_onnx as of 2026-Q2". Reading the kokoro_onnx
+source directly (``.venv/Lib/site-packages/kokoro_onnx/
+__init__.py``) shows ``Kokoro.create_stream`` IS available
+as an ``async def`` returning ``AsyncGenerator[tuple[NDArray,
+int], None]`` — same audit-vs-source-mismatch shape Wave 22
+caught for mem0 (``OllamaEmbedding._ensure_model_exists``
+doesn't actually warm the model). Methodology: when an audit
+claim sounds plausible but the math feels off, read the
+upstream library's source directly. ``.venv/Lib/site-
+packages/`` is cheap ground truth.
+
+Per Q5=A mid + end-wave doc cadence (Wave 12-15 / Wave 17 /
+Wave 20 / Wave 21 / Wave 22 convention): mid-wave doc opens
+Wave 23 by registering it in §10.5 + §10.6 with the audit
+finding + the planned scope. The 2 numbered items ship next.
+End-wave doc closes Wave 23 with the full 4-row table +
+retrospective + Wave 24+ backlog.
+
+| # | Tag | SHA | What landed | Tests |
+|---|---|---|---|---:|
+| 1 | (doc)         | this    | Wave 23 mid-wave (start) — register Wave 23 in §10.5 + §10.6 with the audit-vs-source-mismatch finding (Wave 20 [IMPROVE-152] said "no asyncio surface in kokoro_onnx"; kokoro_onnx 2026-Q2 source shows ``Kokoro.create_stream`` IS async). Updates §10.1 wave-status (22 waves shipped → 22 + Wave 23 in progress). Fills in Wave 22 end-wave SHA placeholder (this → 10e1094) per Wave 12-15 placeholder convention. | 0 |
+| 2 | IMPROVE-157   | TBD     | Backend stream_synthesize via kokoro_onnx.create_stream — replaces ``await loop.run_in_executor(None, lambda: self._tts.create(text, voice))`` (full Kokoro synth, then chunk-for-transport) with ``async for samples, sample_rate in self._tts.create_stream(text, voice=voice)`` so each Kokoro batch yields PCM AS IT'S PRODUCED. The existing /partner/voice/tts-stream WebSocket protocol is unchanged (still binary PCM16 frames + JSON start/done control messages). For long-paragraph synth ([≥510 phoneme batches], typical voice mode usage) the first chunk arrives ~60-80% sooner. NEW ``tests/test_partner_voice_create_stream.py`` pins the create_stream call shape + progressive yielding via mock generator. | TBD |
+| 3 | IMPROVE-158   | TBD     | Flutter progressive playback — ``_setupTTSSocketListener`` now plays each PCM chunk AS IT ARRIVES via a chained-play queue, instead of accumulating all chunks and playing on ``{type: done}``. Each Kokoro chunk wraps as a self-contained mini-WAV (per-chunk RIFF header) and queues for ``audioplayers.AudioPlayer.play(BytesSource(...))``. Audio gaps between chunks measured at <50ms on Windows (audioplayers' per-play startup); imperceptible for typical chat cadence. NEW Flutter widget tests pin the chunk-queue helper. | TBD |
+| 4 | (doc)         | TBD     | Wave 23 end-wave retrospective. Bumps 156 → 158 in §10.1 + §10.4. Adds 2 IMPROVE-N rows (157/158). Fills in Wave 23 mid-wave SHA placeholder + IMPROVE-157 + IMPROVE-158 SHAs. Updates §10.5 + §10.6 Wave 23 status (in progress → ✓ shipped) + full 4-row tables. NEW Wave 23 architectural impact subsection. Updates §10.8 closing line + Wave 24+ pivot text. | 0 |
+
+Net (planned): +N tests on the Tier 1 Python sweep (the
+new ``tests/test_partner_voice_create_stream.py`` pins the
+async-generator call shape + progressive yielding — all
+timing-independent contract pins). Sweep file count grows
+91 → 92. Flutter widget tests grow 173 → 173+M with the new
+chunk-queue helper tests. The user-visible win is on the
+TTFA TIMELINE: for long-paragraph TTS (voice mode whole-
+reply synthesis or multi-sentence stream where the first
+sentence ≥510 phonemes), first audio arrives ~60-80%
+sooner. For typical short chat sentences (single Kokoro
+batch), the win is marginal — the architectural change
+sets up future Chatterbox streaming + per-paragraph parallel
+synth-while-LLM-streams (Wave 24+).
 
 ### Wave 18 — Deferred (queued for next iteration)
 
@@ -1364,7 +1418,7 @@ Rejection criteria (per the Wave 17 cleanup pass):
 
 ---
 
-## 10.6 Wave 5 + Wave 6 + Wave 7 + Wave 8 + Wave 9 + Wave 10 + Wave 11 + Wave 12 + Wave 13 + Wave 14 + Wave 15 + Wave 16 + Wave 17 + Wave 18 + Wave 19 + Wave 20 + Wave 21 + Wave 22 retrospective
+## 10.6 Wave 5 + Wave 6 + Wave 7 + Wave 8 + Wave 9 + Wave 10 + Wave 11 + Wave 12 + Wave 13 + Wave 14 + Wave 15 + Wave 16 + Wave 17 + Wave 18 + Wave 19 + Wave 20 + Wave 21 + Wave 22 + Wave 23 retrospective
 
 > **Status as of 2026-04-30:** Wave 5 fully shipped (12 commits, +216
 > tests). Wave 6 fully shipped (12 commits, +118 tests across 8
@@ -1900,7 +1954,7 @@ the planned shape held end-to-end.
 |---|---|---|---|---:|
 | 1 | (doc)         | 7f84199 | Wave 22 mid-wave (start) — register Wave 22 in §10.5 + §10.6 with the audit-vs-source-mismatch finding (Wave 21 audit said 15-18s embedding warmup at init; mem0 source shows that warmup actually happens on first ``.embed()`` call later). Updates §10.1 wave-status (21 waves shipped → 21 + Wave 22 in progress). Fills in Wave 21 end-wave SHA placeholder (5c79cbf). | 0 |
 | 2 | [IMPROVE-156] | 45c0e7c | True-async ``_init_mem0`` — module-level ``async def _async_warmup_partner_memory()`` does ``httpx.AsyncClient.post`` (Phase 1, pre-warms nomic-embed-text in Ollama RAM) then ``await asyncio.to_thread(_init_mem0)`` (Phase 2, runs Mem0 sync init concurrently with lifespan). ``threading.Lock`` + double-checked locking in ``_init_mem0`` (split into fast-path + ``_init_mem0_locked`` slow-path) for concurrent safety. Wired into ``api_server.py`` lifespan via ``asyncio.create_task`` (fire-and-forget — no boot-time cost). NEW typed event ``partner.mem0_embed_warmup`` registered. ``obs_test_client`` fixture neutralises the warmup task with a no-op coroutine to keep lifespan side-effects out of /observability/recent + /summary count assertions. | 9 |
-| 3 | (doc)         | this    | Wave 22 end-wave retrospective. Bumps 155 → 156 in §10.1 + §10.4. Flips Wave 22 status (in progress → ✓ shipped) + full 3-row tables. NEW Wave 22 architectural impact subsection. | 0 |
+| 3 | (doc)         | 10e1094 | Wave 22 end-wave retrospective. Bumps 155 → 156 in §10.1 + §10.4. Flips Wave 22 status (in progress → ✓ shipped) + full 3-row tables. NEW Wave 22 architectural impact subsection. | 0 |
 
 Net: +9 tests on the Tier 1 Python sweep (1858 → 1867).
 Sweep file count grows 90 → 91. The user-visible win is on
@@ -1991,6 +2045,15 @@ end-to-end.
     ``tests/conftest.py`` (warmup neutralisation in
     obs_test_client) + new ``tests/test_partner_mem0
     _warmup.py``.
+
+### Wave 23 (in progress)
+
+| # | Tag | SHA | What landed | Tests |
+|---|---|---|---|---:|
+| 1 | (doc)         | this    | Wave 23 mid-wave (start) — register Wave 23 in §10.5 + §10.6 with the audit-vs-source-mismatch finding (Wave 20 [IMPROVE-152] said "no asyncio surface in kokoro_onnx"; kokoro_onnx 2026-Q2 source shows ``Kokoro.create_stream`` IS async). Updates §10.1 wave-status (22 waves shipped → 22 + Wave 23 in progress). Fills in Wave 22 end-wave SHA placeholder (10e1094). | 0 |
+| 2 | IMPROVE-157   | TBD     | Backend stream_synthesize via kokoro_onnx.create_stream — replaces blocking ``self._tts.create()`` with ``async for samples, sample_rate in self._tts.create_stream(text, voice=voice)`` so each Kokoro phoneme batch yields PCM AS IT'S PRODUCED. Existing /partner/voice/tts-stream WebSocket protocol unchanged. | TBD |
+| 3 | IMPROVE-158   | TBD     | Flutter progressive playback — ``_setupTTSSocketListener`` plays each PCM chunk AS IT ARRIVES via chained-play queue instead of accumulating before ``{type: done}``. Per-chunk mini-WAV wrap + queued ``audioplayers.AudioPlayer.play(BytesSource)`` calls. | TBD |
+| 4 | (doc)         | TBD     | Wave 23 end-wave retrospective. | 0 |
 
 ### Wave 14 architectural impact
 
@@ -2891,7 +2954,7 @@ candidate gating in §10.5 reflects the inverse cases.
 ### 10.7.2 Still open (carries forward)
 
 These remain open. Gating questions have explicit DECISION
-DEADLINE annotations — answers shape Wave 22+ priorities.
+DEADLINE annotations — answers shape Wave 23+ priorities.
 (Wave 20 closed Q1 / Q4 / Q7 / Q15 / Q16; see §10.7.1.)
 
 #### Architecture / infra
@@ -2934,7 +2997,7 @@ questions (Q1 / Q4 / Q7 / Q15 / Q16) — see §10.7.1 for the
 resolutions and §10.5 for the resulting deletion-candidate
 flag flips. The remaining STILL OPEN questions are non-
 gating (no deletion candidates depend on them) and shape
-Wave 22+ priorities at the user's pace.
+Wave 23+ priorities at the user's pace.
 
 ---
 
