@@ -86,6 +86,36 @@ def _pcm_to_wav(samples, sample_rate: int) -> bytes:
     return buf.getvalue()
 
 
+# [IMPROVE-159] Wave 24 Path A — phrase-boundary fallback for the
+# astream_chat sentence streamer. Pre-Wave-24 the loop only yielded
+# ``sentence_complete`` events on sentence-end punctuation
+# (``. ! ? ... .\n``); long opening sentences kept the user waiting
+# for TTFA because the LLM hasn't reached the period yet. With the
+# phrase-boundary fallback, once the buffered chunk is at least
+# _PHRASE_MIN_CHARS long AND the chunk just landed on a phrase-
+# ending punctuation (``,`` ``;`` ``:``), the partial chunk is
+# yielded as a sentence_complete event so TTS can begin synthesising
+# AS THE LLM IS STILL GENERATING. This is the W22-deferred / W23-
+# deferred third TTS architectural piece (server-side parallel
+# synth-while-LLM-streams), paired end-to-end with W23's per-chunk
+# Flutter playback ([IMPROVE-158]).
+#
+# Boundary set excludes ``—`` (em-dash) and ``...`` because:
+#   * em-dash mid-sentence often introduces a parenthetical clause
+#     that's hard for Kokoro to inflect well in isolation
+#   * ``...`` is a soft pause not a phrase boundary; firing on it
+#     yields very-short fragments that prosody-degrade audibly
+#
+# Threshold ``_PHRASE_MIN_CHARS = 30`` is chosen longer than the
+# existing first-sentence ``min_chars = 20`` because phrase chunks
+# end on a comma rather than a period — the Kokoro phoneme model
+# needs a slightly longer span to inflect a clause naturally
+# (per kokoro-onnx 2026-Q2 prosody behaviour: clause-internal
+# commas inflect noticeably worse below ~25 chars).
+_PHRASE_MIN_CHARS = 30
+_PHRASE_BOUNDARIES = (",", ";", ":")
+
+
 class PartnerEngine:
     """Full AI partner engine following the research recommendations."""
 
@@ -573,6 +603,31 @@ class PartnerEngine:
                         current_sentence += _tag_buffer
                         _stream_token_count += 1
                         yield {"type": "token", "text": _tag_buffer}
+                    # [IMPROVE-159] Wave 24 Path A: run boundary
+                    # detection on the just-flushed buffer so a long
+                    # initial clause that ends on a phrase-boundary
+                    # punctuation (``,`` ``;`` ``:``) can fire as
+                    # TTFA before the next chunk arrives. Without
+                    # this, a buffer-flush of ~40 chars containing
+                    # a comma would accumulate into ``current_
+                    # sentence`` and only fire on the next chunk's
+                    # period — losing the TTFA win on the first
+                    # clause. Mirrors the bottom-of-loop block.
+                    if any(current_sentence.rstrip().endswith(p) for p in ('.', '!', '?', '...', '.\n')):
+                        sentence = current_sentence.strip()
+                        min_chars = 20 if not first_sentence_sent else 10
+                        if len(sentence) >= min_chars:
+                            yield {"type": "sentence_complete", "sentence": sentence}
+                            current_sentence = ""
+                            first_sentence_sent = True
+                    elif (
+                        len(current_sentence.strip()) >= _PHRASE_MIN_CHARS
+                        and current_sentence.rstrip().endswith(_PHRASE_BOUNDARIES)
+                    ):
+                        phrase = current_sentence.strip()
+                        yield {"type": "sentence_complete", "sentence": phrase}
+                        current_sentence = ""
+                        first_sentence_sent = True
                 continue  # don't emit while buffering
 
             # Normal streaming (tag already handled or not present)
@@ -602,6 +657,23 @@ class PartnerEngine:
                     yield {"type": "sentence_complete", "sentence": sentence}
                     current_sentence = ""
                     first_sentence_sent = True
+            # [IMPROVE-159] Wave 24 Path A — phrase-boundary fallback.
+            # When the LLM is still mid-sentence (no terminal ``. ! ?``)
+            # but the chunk already has a comma / semicolon / colon AND
+            # is long enough for decent prosody, fire the partial chunk
+            # so TTS can begin synthesising while the LLM keeps
+            # generating later words. See module-top _PHRASE_MIN_CHARS
+            # / _PHRASE_BOUNDARIES rationale. Note: sentence-boundary
+            # fires above already reset current_sentence to "" so this
+            # branch only runs when the chunk is genuinely mid-sentence.
+            elif (
+                len(current_sentence.strip()) >= _PHRASE_MIN_CHARS
+                and current_sentence.rstrip().endswith(_PHRASE_BOUNDARIES)
+            ):
+                phrase = current_sentence.strip()
+                yield {"type": "sentence_complete", "sentence": phrase}
+                current_sentence = ""
+                first_sentence_sent = True
 
         # Final partial sentence
         if current_sentence.strip():
