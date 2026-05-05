@@ -1,6 +1,6 @@
 # 10 — Improvement Roadmap
 
-> **Goal of this chapter:** a single consolidated view of the **70 improvement ideas** surfaced across chapters 1–9 (now **146** post Wave 19), scored for impact and effort, grouped by theme, and laid out in a phased roadmap. Every idea here is grounded in a 2025–2026 source — the citations are in each chapter; this doc focuses on *what to do when*.
+> **Goal of this chapter:** a single consolidated view of the **70 improvement ideas** surfaced across chapters 1–9 (now **152** post Wave 20), scored for impact and effort, grouped by theme, and laid out in a phased roadmap. Every idea here is grounded in a 2025–2026 source — the citations are in each chapter; this doc focuses on *what to do when*.
 
 > **Revised 2026-04-29** — Wave 5 shipped (12 commits: IMPROVE-29/31/33/34/35/36/51/52/53/54/55/56/57/63/67). Wave 6 shipped (12 commits, 8 table-rows: IMPROVE-71/72/8 + Tranche-C 5×telemetry + IMPROVE-73/46/74/61). Wave 7 shipped (8 commits + 1 test-fix + 2 doc commits: IMPROVE-NEW-4/11/12/13/14/16/17/18 promoted to IMPROVE-75/76/77/78/79/80/81/82, plus a deterministic-counter fix for the IMPROVE-36 parallel-wave speedup test). Wave 8 shipped (6 numbered + 2 doc commits: IMPROVE-83/84/85/86/87/88 — streaming parallel-wave parity, inter-node-context migration, /systems/* rejection telemetry mirror, per-byte hf_hub_download progress, VRAM-probe telemetry + decay-export bundle, graph-time DAG validation). Wave 9 shipped (6 numbered + 2 doc commits: IMPROVE-89/90/91/92/93/94 — bulk emit_typed migration + close keystone gaps, per-rejection counter in /observability/summary, per-subsystem Literal + @overload for emit_typed action, per-event TypedDict context schemas, VRAM-probe-driven tile-based upscaling, POST /partner/import endpoint). Wave 10 shipped (6 numbered + 2 doc commits: IMPROVE-95/96/97/98/99/100 — top-12 event context schemas, Recorder enumeration test + 6 missing event registrations, asymmetric bundle versioning, POST /partner/import/dry-run, GET /observability/timeseries with ?error_code= filter, tile-size calibration per input resolution). Wave 11 shipped (6 numbered + 2 doc commits: IMPROVE-101/102/103/104/105/106 — Tier-A high-traffic schema batch, Recorder context schemas + track_event audit, sibling GET /observability/rejections endpoint, differential restore via ?scope= filter, per-row diff with ?verbose= flag, mypy strict-mode + literal-typing of derivation tuples). Wave 12 shipped (6 numbered + 2 doc commits: IMPROVE-107/108/109/110/111/112 — final-tier context schemas closing 100% coverage + mypy dev extra, ?error_code_prefix= LIKE filter + _rollup_rejections helper extraction, schema audit opt-out flip, ?fill_zeros=true bucket-padding on /timeseries, validate_kwargs helpers in NEW utils/validation.py + bug fix, bundle.json richer provenance). Wave 13 shipped (6 numbered + 2 doc commits: IMPROVE-113/114/115/116/117/118 — /observability/recent error_code + error_code_prefix filter axes, filter_kwargs_to_signature helper + 3 callsite migrations, /observability/summary ?fill_zero_dim=true dim-axis pad, bundle.json platform field gains git revision suffix, /images/upscale ?tile_size_override= power-user knob, CI lint route-mention validator). Wave 14 shipped (7 numbered + 2 doc commits: IMPROVE-119/120/121/122/123/124/125 — /timeseries fill_zeros bucket-straddle flake fix, CI lint IMPROVE-N reference validator, /images/upscale tile_stride_override sibling knob, shared obs_test_client fixture in tests/conftest.py, filters echo schema pin tests for the 4 obs endpoints, /timeseries fill_zero_time deprecation alias for fill_zeros, voice + instruct-model registries promoted to data/registries/*.json).
 
@@ -8,9 +8,9 @@
 
 ## 10.1 Summary
 
-- **146 improvements** flagged inline as `[IMPROVE-N]` in chapters 1–9 + the Wave 5/6/7/8/9/10/11/12/13/14/15/16/18/19 audits (NEW from Wave 6 audit: 71/72/73/74; NEW from Wave 7: 75/76/77/78/79/80/81/82; NEW from Wave 8: 83/84/85/86/87/88; NEW from Wave 9: 89/90/91/92/93/94; NEW from Wave 10: 95/96/97/98/99/100; NEW from Wave 11: 101/102/103/104/105/106; NEW from Wave 12: 107/108/109/110/111/112; NEW from Wave 13: 113/114/115/116/117/118; NEW from Wave 14: 119/120/121/122/123/124/125; NEW from Wave 15: 126/127/128/129/130/131; NEW from Wave 16: 132/133/134/135/136/137; NEW from Wave 18: 138/139/140/141/142/143/144; NEW from Wave 19 Tranche A: 145/146).
+- **152 improvements** flagged inline as `[IMPROVE-N]` in chapters 1–9 + the Wave 5/6/7/8/9/10/11/12/13/14/15/16/18/19/20 audits (NEW from Wave 6 audit: 71/72/73/74; NEW from Wave 7: 75/76/77/78/79/80/81/82; NEW from Wave 8: 83/84/85/86/87/88; NEW from Wave 9: 89/90/91/92/93/94; NEW from Wave 10: 95/96/97/98/99/100; NEW from Wave 11: 101/102/103/104/105/106; NEW from Wave 12: 107/108/109/110/111/112; NEW from Wave 13: 113/114/115/116/117/118; NEW from Wave 14: 119/120/121/122/123/124/125; NEW from Wave 15: 126/127/128/129/130/131; NEW from Wave 16: 132/133/134/135/136/137; NEW from Wave 18: 138/139/140/141/142/143/144; NEW from Wave 19 Tranche A: 145/146; NEW from Wave 20 cleanup wave: 147/148/149/150/151/152).
 - **10 themes** — security, architecture, observability, tracing, UX, memory & context, model & inference, background tasks, voice, and tools/MCP.
-- **19 waves fully shipped + Wave 20 cleanup wave in progress** (Waves 1-16 numbered + Wave 17 doc-only cleanup + Wave 18 Tranche A Flutter editor v2 + Wave 19 Tranche A partner-import host + Wave 20 §10.7 walkthrough resolving Q1/Q4/Q7/Q15/Q16 + 1 deletion + 5 TTS quick wins); **1** standing in deferred queues (post-Wave-19 backlog).
+- **20 waves fully shipped** (Waves 1-16 numbered + Wave 17 doc-only cleanup + Wave 18 Tranche A Flutter editor v2 + Wave 19 Tranche A partner-import host + Wave 20 cleanup wave: §10.7 walkthrough closing Q1/Q4/Q7/Q15/Q16 + 1 deletion + 5 TTS quick wins); **1** standing in deferred queues (post-Wave-20 backlog).
 
 All improvements are traceable back to a chapter + a 2025–2026 citation. This chapter is pure planning — *what* + *why this order*; *how* is in each origin chapter.
 
@@ -178,7 +178,7 @@ Smaller items that improve day-to-day use.
 
 ---
 
-## 10.4 The complete table (all 146)
+## 10.4 The complete table (all 152)
 
 Sortable if you paste into a spreadsheet. Chapter column links back to the originating doc.
 
@@ -207,7 +207,7 @@ Sortable if you paste into a spreadsheet. Chapter column links back to the origi
 | 21 | 4 | Sandbox MCP servers | ⋆⋆⋆⋆ | 🔨🔨🔨🔨 | Security |
 | 22 | 4 | Tavily key in DB/keyring | ⋆⋆ | 🔨 | Security |
 | 23 | 4 | Strict path containment | ⋆⋆⋆ | 🔨 | Security |
-| 24 | 4 | Replace instruction tools with prompt fragments | ⋆⋆ | 🔨🔨 | Tools |
+| 24 | 4 | ✓ Delete instruction tools (Wave 20 Q7=b — see IMPROVE-147) | ⋆⋆ | 🔨🔨 | Tools |
 | 25 | 4 | Expand calculator with math.* whitelist | ⋆⋆⋆ | 🔨 | Tools |
 | 26 | 4 | Cache MCP client connections | ⋆⋆ | 🔨🔨 | Tools |
 | 27 | 4 | Shaped input for /tools/{id}/test | ⋆⋆ | 🔨 | Tools |
@@ -330,10 +330,16 @@ Sortable if you paste into a spreadsheet. Chapter column links back to the origi
 | 144 | 17 | ✓ Flutter ScopeMultiSelect consuming IMPROVE-104 RESTORE_SCOPES vocabulary | ⋆⋆ | 🔨 | UX |
 | 145 | 19 | ✓ Flutter PartnerImportPage host composing IMPROVE-143/144 (Wave 19 Tranche A first) | ⋆⋆⋆ | 🔨 | UX |
 | 146 | 19 | ✓ Flutter PartnerExportButton + Backup & Restore export wiring (Wave 19 Tranche A close) | ⋆⋆ | 🔨 | UX |
+| 147 | 4 | ✓ Delete instruction tools — Wave 20 Q7=b cleanup (closes IMPROVE-24) | ⋆⋆ | 🔨 | Tools |
+| 148 | 8 | ✓ Tighten Chatterbox sentence timeout 30s→8s (Wave 20 Q4=c TTS quick win B) | ⋆ | 🔨 | Voice |
+| 149 | 8 | ✓ Move init_voice off event loop with asyncio.to_thread (Wave 20 Q4=c TTS quick win A) | ⋆⋆ | 🔨 | Voice |
+| 150 | 8 | ✓ Pre-compile _preprocess_text_for_tts regexes at class scope (Wave 20 Q4=c TTS quick win D) | ⋆ | 🔨 | Voice |
+| 151 | 8 | ✓ Lift TTS hot-path imports + extract _pcm_to_wav helper (Wave 20 Q4=c TTS quick win C) | ⋆⋆ | 🔨 | Voice |
+| 152 | 8 | ✓ Async synthesize_sentence_async via get_async_client() (Wave 20 Q4=c TTS quick win E) | ⋆⋆⋆ | 🔨🔨 | Voice |
 
 *Impact for [IMPROVE-59] is ⋆⋆⋆⋆⋆ if the app is ever distributed, ⋆⋆ if it stays local-only.
 
-**Legend:** A ``✓`` prefix marks items that have shipped. See §10.6 for the Wave 5 / 6 / 7 / 8 / 9 / 10 / 11 / 12 / 13 / 14 / 15 / 16 / 17 / 18 / 19 retrospective.
+**Legend:** A ``✓`` prefix marks items that have shipped. See §10.6 for the Wave 5 / 6 / 7 / 8 / 9 / 10 / 11 / 12 / 13 / 14 / 15 / 16 / 17 / 18 / 19 / 20 retrospective.
 
 ---
 
@@ -909,7 +915,7 @@ unit was the host-page-plus-wiring pair: import
 ([IMPROVE-145]) + export ([IMPROVE-146]) in the same
 Backup & Restore card.
 
-### Wave 20 — Cleanup wave (in progress)
+### Wave 20 — Cleanup wave (✓ shipped 2026-05-05)
 
 Theme: close the §10.7 STILL OPEN gating questions (Q1
 distribution / Q4 Chatterbox / Q7 instruction tools / Q15
@@ -921,47 +927,24 @@ inflection-point wave that resolves DECISION DEADLINEs
 before the deferred-queue items they gate.
 
 Per Q5=A mid + end-wave doc cadence (Wave 12-15
-convention): this commit opens Wave 20 by locking the §10.7
-answers in §10.7.1 + flipping the §10.5 deletion-candidate
-flags. Subsequent numbered items ship + the end-wave doc
-commit closes Wave 20 with the full table.
-
-Planned shape (8 commits = 1 mid-wave doc + 1 deletion + 5
-TTS quick wins + 1 end-wave doc):
-
-  * Mid-wave doc (this) — §10.7 walkthrough resolves all 5
-    gating questions; updates §10.5 + §10.7.1/§10.7.2.
-  * IMPROVE-147 (Q7=b) — Delete instruction tools.
-    `add_instruction_tool` from agents.py + the
-    `tool_type=="instruction"` branch in tools.py.
-  * IMPROVE-148 (Q4=c, TTS quick win B) — Tighten Chatterbox
-    sentence timeout 30s → 8s for faster fallback to Kokoro
-    on a hung sidecar.
-  * IMPROVE-149 (Q4=c, TTS quick win A) —
-    ``asyncio.to_thread(partner.init_voice)`` in
-    /partner/voice/init + /partner/voice/upload to unblock
-    the event loop during 3-8s cold init.
-  * IMPROVE-150 (Q4=c, TTS quick win D) — Pre-compile the
-    `_preprocess_text_for_tts` regexes at class scope.
-  * IMPROVE-151 (Q4=c, TTS quick win C) — Lift TTS hot-path
-    imports (io/struct/numpy) to module top + extract a
-    shared `_pcm_to_wav` helper to dedupe `synthesize` and
-    `_synthesize_kokoro`.
-  * IMPROVE-152 (Q4=c, TTS quick win E) — Add async
-    `synthesize_sentence_async` using the existing
-    `get_async_client()`; switch /partner/voice/synthesize-
-    sentence and the WS handler to `await` it directly
-    instead of `run_in_executor`.
-  * End-wave doc — Wave 20 retrospective + Wave 21 backlog
-    (deferred bigger TTS items + cross-cutting startup
-    contention investigation flagged during the Q4 audit).
+convention): the mid-wave doc commit opened Wave 20 by
+locking the §10.7 answers in §10.7.1 + flipping the §10.5
+deletion-candidate flags. The 5 TTS quick wins shipped in
+the audit-recommended order (smallest to largest LoC: B
+timeout, A init_voice, D regex precompile, C imports +
+helper, E async synthesize). The end-wave doc closes Wave
+20 with the full table + retrospective + Wave 21+ backlog.
 
 | # | Tag | SHA | What landed | Tests |
 |---|---|---|---|---:|
-| 1 | (doc)         | this    | Wave 20 mid-wave (start) — §10.7 walkthrough resolves Q1=a (local-only), Q4=c (keep both Kokoro + Chatterbox; ship 5 TTS pipeline quick wins instead of deleting), Q7=b (remove instruction tools — API-only feature with no Flutter UI exposure), Q15=a (keep ONNX styles — wired into editor via STYLE_FNS dispatch), Q16=a (keep Mem0 — confirmed actively producing 8+ semantic memories). Moves 5 questions §10.7.2 → §10.7.1 with rationale. Updates §10.5 deletion-candidate flags (1 activate + 3 drop). Updates §10.7.2 prefatory text (Wave 19+ priorities → Wave 21+ priorities). SHA filled in by Wave 20 end-wave doc commit per Wave 12-15 placeholder convention. | 0 |
-
-(Rows 2-8 added by subsequent Wave 20 commits + the end-
-wave doc commit.)
+| 1 | (doc)         | 7bef779 | Wave 20 mid-wave (start) — §10.7 walkthrough resolves Q1=a (local-only), Q4=c (keep both Kokoro + Chatterbox; ship 5 TTS pipeline quick wins instead of deleting), Q7=b (remove instruction tools — API-only feature with no Flutter UI exposure), Q15=a (keep ONNX styles — wired into editor via STYLE_FNS dispatch), Q16=a (keep Mem0 — confirmed actively producing 8+ semantic memories). Moves 5 questions §10.7.2 → §10.7.1 with rationale. Updates §10.5 deletion-candidate flags (1 activate + 3 drop). Updates §10.7.2 prefatory text (Wave 19+ priorities → Wave 21+ priorities). | 0 |
+| 2 | [IMPROVE-147] | 191502d | Delete instruction tools (Q7=b cleanup). Removes ``add_instruction_tool`` method from agents.py + ``tool_type=="instruction"`` branch from routers/tools.py POST /tools handler. Updates legacy Gradio app.py to drop the "instruction" radio choice + simplify ``add_tool``/``apply_tool_template``. Updates docs/features/04-agents-tools.md §4.8 to drop the "Instruction tool" subsection + rewrites §IMPROVE-24 as a "RESOLVED Wave 20" paragraph. Backward compat: existing DB rows with ``tool_type="instruction"`` remain (no auto-delete of user data) but skip runtime registration. Closes [IMPROVE-24]. | 0 |
+| 3 | [IMPROVE-148] | b3acf4d | TTS quick win B — Tighten Chatterbox sentence timeout 30s → 8s. Single-line change in ``_synthesize_chatterbox_sentence`` (engine.py around 1543) plus 12-line comment block. Chatterbox-Turbo synthesizes one sentence in <1s on consumer GPUs; the previous 30s only caught a hung sidecar. 8s is generous for one sentence while making the Kokoro fallback fire ~3.75× faster on a stalled sidecar — perceptible UX win in the rare-but-real "Chatterbox sidecar hung" case. Full-paragraph timeout at line 1464 stays at 60s. | 0 |
+| 4 | [IMPROVE-149] | f28cf7a | TTS quick win A — Move init_voice off the event loop with ``asyncio.to_thread``. Two call sites in routers/partner.py (POST /partner/voice/init at line 662 + POST /partner/voice/upload at line 1196). init_voice runs faster-whisper + Kokoro ONNX + Silero VAD probe + TTS warmup ``create()`` + Chatterbox sidecar probe — 3-8s on cold init, previously blocking the entire uvicorn event loop while sync-running inside an async route. asyncio.to_thread is the canonical 2025-2026 FastAPI pattern. Same shape as the Q4 audit's startup-contention finding (the broader cross-cutting fix is deferred to Wave 21+). | 0 |
+| 5 | [IMPROVE-150] | 6891564 | TTS quick win D — Pre-compile ``_preprocess_text_for_tts`` regexes at class scope. 7 regex patterns + 1 emoji range pattern lifted from re-compiled-on-every-call to class-level pre-compiled attributes (``_TTS_MD_BOLD`` / ``_TTS_MD_ITALIC`` / ``_TTS_MD_CODE`` / ``_TTS_MD_HEADER`` / ``_TTS_MD_LINK`` / ``_TTS_ELLIPSIS`` / ``_TTS_EMOJI`` / ``_TTS_WHITESPACE``). Drops redundant local ``import re`` (``re`` is module-top imported). NEW ``tests/test_partner_text_preprocess.py`` with 13 behaviour pin tests + 1 structural sentinel. | +13 |
+| 6 | [IMPROVE-151] | 3ac15b8 | TTS quick win C — Lift TTS hot-path imports (io / struct / numpy as np) to module top + extract module-level ``_pcm_to_wav(samples, sample_rate) -> bytes`` helper. Refactors ``_synthesize_kokoro`` body from ~17 lines of inline WAV-encoding to a single ``_pcm_to_wav`` call; same in ``synthesize`` Kokoro path; ``stream_synthesize`` drops local imports. Extends test_partner_text_preprocess.py with 6 ``_pcm_to_wav`` pin tests (RIFF/WAVE/fmt/data chunk structure + 16-bit PCM byte count + sample-rate echo + clipping + total size). | +6 |
+| 7 | [IMPROVE-152] | 99a153e | TTS quick win E — Async ``synthesize_sentence_async`` via ``get_async_client()``. NEW async sibling of ``synthesize_sentence`` mirrors the Chatterbox path through ``await client.post()`` instead of ``get_sync_client().post()``; Kokoro fallback wraps in ``asyncio.to_thread(self._synthesize_kokoro, ...)``. POST /partner/voice/synthesize-sentence handler awaits it directly instead of ``run_in_executor(None, lambda: partner.synthesize_sentence(...))``. Saves ~10-30ms executor-hop per sentence + frees a thread-pool slot for actually-sync work. Extends test_partner_engine_httpx.py with 3 async pin tests. Sync ``synthesize_sentence`` retained for backward compat. | +3 |
+| 8 | (doc)         | this    | Wave 20 end-wave retrospective. Bumps 146 → 152 in §10.1 + §10.4. Adds 6 IMPROVE-N rows (147-152) to §10.4 + ✓ to row 24 (closed by IMPROVE-147). Fills in Wave 20 mid-wave SHA placeholder (7bef779). Updates §10.5 + §10.6 Wave 20 status (in progress → ✓ shipped) + full 8-row tables. Adds Wave 20 architectural impact subsection in §10.6. Updates §10.8 closing line + Wave 21+ pivot text. SHA filled in by Wave 21 mid-wave doc commit per Wave 12-15 placeholder convention. | 0 |
 
 ### Wave 18 — Deferred (queued for next iteration)
 
@@ -1316,11 +1299,10 @@ Rejection criteria (per the Wave 17 cleanup pass):
 > brought it to 1834; Wave 17 doc-only (1834 unchanged);
 > Wave 18 brought it to 1836 (+2 from [IMPROVE-138] backend
 > persistence pin tests); Wave 19 unchanged at 1836
-> (Flutter-only consumption). Wave 20 cleanup wave in
-> progress (1 mid-wave doc commit landed; planned shape is
-> 8 commits = 1 mid-wave doc + 1 deletion + 5 TTS quick wins
-> + 1 end-wave doc). All 4 xfailed agent tests resolved
-> post-IMPROVE-71.
+> (Flutter-only consumption). Wave 20 cleanup wave fully
+> shipped (8 commits = 2 doc + 1 deletion + 5 TTS quick
+> wins; +22 backend tests on Tier 1 — 1836 → 1858). All 4
+> xfailed agent tests resolved post-IMPROVE-71.
 
 ### Wave 5 (✓ shipped)
 
@@ -1587,21 +1569,115 @@ partner_page.dart's _handleExport) skip widget tests and
 are verified by hand against a live backend; only the
 public widget + top-level helpers ship pinned tests.
 
-### Wave 20 (in progress)
+### Wave 20 (✓ shipped)
 
 | # | Tag | SHA | What landed | Tests |
 |---|---|---|---|---:|
-| 1 | (doc)         | this    | Wave 20 mid-wave (start) — §10.7 walkthrough resolves Q1=a (local-only), Q4=c (keep both Kokoro + Chatterbox; ship 5 TTS pipeline quick wins instead of deleting), Q7=b (remove instruction tools), Q15=a (keep ONNX styles — wired into editor), Q16=a (keep Mem0 — confirmed actively producing 8+ semantic memories per user screenshot). Moves 5 questions §10.7.2 → §10.7.1 with rationale. Updates §10.5 deletion-candidate flags (1 activate + 3 drop). Updates §10.7.2 prefatory text (Wave 19+ priorities → Wave 21+ priorities). SHA filled in by Wave 20 end-wave doc commit. | 0 |
+| 1 | (doc)         | 7bef779 | Wave 20 mid-wave (start) — §10.7 walkthrough resolves Q1=a (local-only), Q4=c (keep both Kokoro + Chatterbox; ship 5 TTS pipeline quick wins instead of deleting), Q7=b (remove instruction tools), Q15=a (keep ONNX styles — wired into editor), Q16=a (keep Mem0 — confirmed actively producing 8+ semantic memories per user screenshot). Moves 5 questions §10.7.2 → §10.7.1. Updates §10.5 deletion-candidate flags (1 activate + 3 drop). Updates §10.7.2 prefatory text (Wave 19+ priorities → Wave 21+ priorities). | 0 |
+| 2 | [IMPROVE-147] | 191502d | Delete instruction tools (Q7=b cleanup). Removes ``add_instruction_tool`` from agents.py + ``tool_type=="instruction"`` branch from routers/tools.py. Updates legacy Gradio app.py + docs/features/04-agents-tools.md §4.8. Closes [IMPROVE-24]. Backward compat: existing DB rows remain but skip runtime registration. | 0 |
+| 3 | [IMPROVE-148] | b3acf4d | TTS quick win B — Tighten Chatterbox sentence timeout 30s → 8s. 1-line change + 12-line comment block. ~3.75× faster Kokoro fallback on a hung sidecar; full-paragraph 60s timeout retained. | 0 |
+| 4 | [IMPROVE-149] | f28cf7a | TTS quick win A — Move init_voice off event loop with ``asyncio.to_thread``. POST /partner/voice/init + /partner/voice/upload. Unblocks the event loop during 3-8s cold init. | 0 |
+| 5 | [IMPROVE-150] | 6891564 | TTS quick win D — Pre-compile ``_preprocess_text_for_tts`` regexes at class scope. 8 ``_TTS_*`` class attributes; drops local ``import re``. NEW ``tests/test_partner_text_preprocess.py`` with 13 behaviour pin tests + 1 structural sentinel. | +13 |
+| 6 | [IMPROVE-151] | 3ac15b8 | TTS quick win C — Lift TTS hot-path imports (io / struct / numpy as np) to module top + extract module-level ``_pcm_to_wav(samples, sr) -> bytes`` helper. Refactors ``_synthesize_kokoro`` body to a single helper call; same in ``synthesize`` Kokoro path; ``stream_synthesize`` drops local imports. Extends ``test_partner_text_preprocess.py`` with 6 ``_pcm_to_wav`` pin tests. | +6 |
+| 7 | [IMPROVE-152] | 99a153e | TTS quick win E — Async ``synthesize_sentence_async`` via ``get_async_client()``. Mirrors the sync sibling shape; Chatterbox path awaits HTTPX client directly; Kokoro fallback wraps in ``asyncio.to_thread``. POST /partner/voice/synthesize-sentence handler awaits it directly instead of ``run_in_executor``. Extends ``test_partner_engine_httpx.py`` with 3 async pin tests. Sync version retained for backward compat. | +3 |
+| 8 | (doc)         | this    | Wave 20 end-wave retrospective. Bumps 146 → 152 in §10.1 + §10.4. Adds 6 IMPROVE-N rows (147-152) + ✓ to row 24 (closed by IMPROVE-147). Fills in Wave 20 mid-wave SHA placeholder (7bef779). Updates §10.5 + §10.6 Wave 20 status (in progress → ✓ shipped) + full 8-row tables. NEW Wave 20 architectural impact subsection. Updates §10.8. | 0 |
 
-(Rows 2-8 added by subsequent Wave 20 commits + the end-
-wave doc commit per the Wave 12-15 placeholder convention.)
+Net: +22 tests on the Tier 1 Python sweep (1836 → 1858).
+The new pin coverage breaks down: 13 ``test_partner_text_
+preprocess.py`` tests (8 markdown/preprocessor + 5
+structural for [IMPROVE-150]) + 6 more ``_pcm_to_wav``
+pins added in [IMPROVE-151] + 3 async sibling pins added
+in [IMPROVE-152] to ``test_partner_engine_httpx.py``. 8
+commits (2 doc + 1 deletion + 5 TTS quick wins) — the
+planned shape held end-to-end. The wave's natural unit
+was the §10.7 walkthrough's quintet of gating closures
+(Q1/Q4/Q7/Q15/Q16) plus a shipped instance of each
+audit-recommended action where applicable: 1 deletion
+(Q7=b → IMPROVE-147), 5 quick wins for keep-and-optimize
+(Q4=c → IMPROVE-148/149/150/151/152), and 3 keeps with no
+code action (Q1=a / Q15=a / Q16=a — doc-only flag flips).
 
-Net so far: +0 tests on the Tier 1 Python sweep at the
-mid-wave doc point (doc-only commit). Numbered items
-shipping under Wave 20 will add new pin tests for the TTS
-pipeline (per-item +1 to +5 each, depending on surface) +
-remove the `add_instruction_tool` test fixture. Tier 1
-expected to grow by ~5-15 tests across the wave.
+### Wave 20 architectural impact
+
+  * **Cleanup-wave precedent extended**: Wave 17 was the
+    only previous "deliberate cleanup" wave (single doc
+    commit f70ce5a, doc-only). Wave 20 demonstrates the
+    pattern scales to a multi-commit cleanup that combines
+    doc resolutions (the §10.7 walkthrough) with code
+    actions (1 deletion + 5 quick wins). Future cleanup
+    waves can mix doc-locking with whatever code actions
+    the locked answers activate.
+
+  * **Audit-driven scope discipline**: the Q4 TTS audit
+    surfaced 10 ranked optimization opportunities. Wave
+    20 shipped only the 5 sub-50-LoC, low-risk ones;
+    deferred the 5 larger ones (Kokoro `create_stream`
+    chunked TTFA, server-side parallel synth-while-LLM-
+    streams, broader cross-cutting startup-contention
+    investigation, etc.) to Wave 21+. Cleanup waves stay
+    focused by treating the audit's quick-wins-table as
+    the natural cut.
+
+  * **Order-by-LoC ordering for quick wins**: shipped B
+    (~2 LoC) → A (~3 LoC) → D (~15 LoC) → C (~30 LoC) →
+    E (~40 LoC). Smallest-to-largest gives early
+    confidence (each commit is a clean cherry-pick if
+    something blows up later) + lets the larger refactors
+    benefit from the smaller groundwork (e.g. IMPROVE-151's
+    `_pcm_to_wav` helper became the natural shared seam
+    that IMPROVE-152's async sibling could call into via
+    `_synthesize_kokoro`).
+
+  * **Async sibling pattern for sync-still-required
+    callers**: [IMPROVE-152] introduced the pattern of
+    keeping the sync version intact + adding an async
+    sibling for FastAPI routes that prefer to `await`
+    directly. Reusable in Wave 21+ as more routers move
+    off `run_in_executor(None, lambda: ...)` shims. Sync
+    callers (existing tests, scripting, future non-async
+    consumers) keep working without churn.
+
+  * **Test pin density**: the 5 quick wins added 22 new
+    Tier 1 tests (1836 → 1858, +1.2%). Audit recommended
+    tests for behavior pins (the regex patterns, the WAV
+    header layout, the async-sibling URL/body shape) —
+    not for raw timeout values or `to_thread` wrapping
+    where the implementation IS the contract. The
+    distinction informs Wave 21+ test-coverage decisions.
+
+  * **Shipped reality > theory**: Q15 (ONNX styles) was
+    proposed for deletion until the user said "I have
+    those names in image edit but don't know if it's
+    connected" — the resulting 5-minute grep proved the
+    editor wires ``style_transfer`` through a generic
+    dispatch that the route audit had missed (no
+    `/styles` route exists, but `STYLE_FNS["style_
+    transfer"]` is dispatched via `/editor/{session_id}/
+    edit`). User intuition + shipped-reality grep beats
+    static analysis for "is this dead code?" questions.
+
+  * **DECISION DEADLINE annotations work**: all 5 gating
+    questions had explicit "before Wave 19 cleanup wave"
+    annotations from the Wave 17 refresh. Wave 19 went
+    to partner-import work instead, slipping the deadline
+    to "Wave 20 cleanup wave" without losing track. The
+    annotation seam survived a 1-wave delay cleanly. Same
+    pattern would work for any future "must answer before
+    Wave N" gating.
+
+  * **Tier 1 baseline 1836 → 1858 over Wave 20** (+22
+    tests). Total since Wave 5: 875 → 1858 (+983 over 16
+    waves counting Waves 17/18/19/20). All from new pin
+    tests in `test_partner_text_preprocess.py` (NEW, 19
+    tests) + `test_partner_engine_httpx.py` (extended,
+    +3 async tests). No backend route changes — Wave 20
+    is pure cleanup + TTS internals.
+
+  * **Routes 187 unchanged from Wave 19 close**. Wave 20
+    is a deletion + 5 internal optimizations — no new or
+    removed routes. The instruction-tools deletion
+    (IMPROVE-147) removed a tool_type branch inside POST
+    /tools, not the route itself.
 
 ### Wave 14 architectural impact
 
@@ -2552,12 +2628,12 @@ Wave 21+ priorities at the user's pace.
 ## 10.8 Where to go from here
 
 - **Read chapter 1 → 9 if you haven't.** This chapter is the index; the others have the details.
-- **Pick a Wave 21+ item and ship it** — see §10.5 Wave 18 deferred queue (the trimmed Wave 17 cleanup output: NEW candidates IMPROVE-NEW-2/7/8/10 + Wave-15-audit FILTER_AXIS_TYPES registry + 7 Wave-16-audit-spawned items + Wave-13/12/11/10-audit triggered items + themed tranches B/D/E/F/G + carry-overs gated on §10.7 questions — most of which are now ungated since Wave 20 closed Q1 / Q4 / Q7 / Q15 / Q16). Tranche A (Flutter editor v2) shipped fully in Wave 18 — IMPROVE-138 through IMPROVE-144. Wave 19 Tranche A closed the GDPR Article 20 round-trip with the partner-import host ([IMPROVE-145]) + export button ([IMPROVE-146]). Wave 20 cleanup wave (in progress) closes §10.7 gating questions + ships a Q7=b deletion + 5 Q4=c TTS pipeline quick wins. The natural Wave 21+ paths: (a) themed Tranche B/D/E/F/G work, (b) deferred-queue picks (NEW carry-overs / Wave-N-audit items), or (c) the Wave 20-spawned Wave 21+ items (bigger TTS architectural pieces — Kokoro `create_stream` chunked TTFA, server-side parallel synth-while-LLM-streams — plus the cross-cutting startup contention investigation flagged by the Q4 audit). Items previously considered + rejected are archived in §10.5.1.
-- **Keep `[IMPROVE-N]` references alive.** When you fix one, grep `docs/features/` for that ID and cross out. If you add new ones in future work, number them IMPROVE-153+ (1-146 are taken plus IMPROVE-147..152 reserved for Wave 20 numbered items shipping as the wave progresses; the IMPROVE-NEW-* tags graduate to permanent numbers on acceptance) and note them in the originating chapter.
+- **Pick a Wave 21+ item and ship it** — see §10.5 Wave 18 deferred queue (the trimmed Wave 17 cleanup output: NEW candidates IMPROVE-NEW-2/7/8/10 + Wave-15-audit FILTER_AXIS_TYPES registry + 7 Wave-16-audit-spawned items + Wave-13/12/11/10-audit triggered items + themed tranches B/D/E/F/G + carry-overs gated on §10.7 questions — most of which are now ungated since Wave 20 closed Q1 / Q4 / Q7 / Q15 / Q16). Tranche A (Flutter editor v2) shipped fully in Wave 18 — IMPROVE-138 through IMPROVE-144. Wave 19 Tranche A closed the GDPR Article 20 round-trip with the partner-import host ([IMPROVE-145]) + export button ([IMPROVE-146]). Wave 20 cleanup wave (✓ shipped) closed §10.7 gating questions + shipped a Q7=b deletion ([IMPROVE-147]) + 5 Q4=c TTS pipeline quick wins ([IMPROVE-148] / [IMPROVE-149] / [IMPROVE-150] / [IMPROVE-151] / [IMPROVE-152]). The natural Wave 21+ paths: (a) themed Tranche B/D/E/F/G work, (b) deferred-queue picks (NEW carry-overs / Wave-N-audit items), or (c) the Wave 20-spawned Wave 21+ items (bigger TTS architectural pieces — Kokoro `create_stream` chunked TTFA, server-side parallel synth-while-LLM-streams — plus the cross-cutting startup contention investigation flagged by the Q4 audit). Items previously considered + rejected are archived in §10.5.1.
+- **Keep `[IMPROVE-N]` references alive.** When you fix one, grep `docs/features/` for that ID and cross out. If you add new ones in future work, number them IMPROVE-153+ (1-152 are taken; the IMPROVE-NEW-* tags graduate to permanent numbers on acceptance) and note them in the originating chapter.
 - **The `MEMORY.md` in `~/.claude/projects/...` contains the feedback rule** that improvement suggestions should cite 2025–2026 sources. Every item here has citations in its origin chapter.
 
 ---
 
 **Guide complete.** `docs/features/README.md` → `01-architecture.md` → `02-llm-infrastructure.md` → `03-chat.md` → `04-agents-tools.md` → `05-systems.md` → `06-image-generation.md` → `07-image-editor.md` → `08-partner.md` → `09-observability.md` → `10-improvements.md` *(this file)*.
 
-Every major feature of the Local AI Platform is now documented end-to-end, with **146** research-backed improvement ideas cross-referenced into one prioritized plan. Waves 1-19 fully shipped + Wave 20 cleanup wave in progress; post-Wave-19 backlog in deferred queue.
+Every major feature of the Local AI Platform is now documented end-to-end, with **152** research-backed improvement ideas cross-referenced into one prioritized plan. Waves 1-20 fully shipped; post-Wave-20 backlog in deferred queue.
