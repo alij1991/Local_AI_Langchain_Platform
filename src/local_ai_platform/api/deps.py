@@ -197,7 +197,15 @@ async def get_editor_service(request: Request):
     return svc
 
 
-def get_partner_engine(
+def _build_partner_engine(router, config):
+    """Sync helper that does the heavy ``import + construct``
+    work for ``get_partner_engine``. Extracted so it can run
+    inside ``asyncio.to_thread`` from the async Depends factory."""
+    from local_ai_platform.partner.engine import PartnerEngine
+    return PartnerEngine(router, config)
+
+
+async def get_partner_engine(
     request: Request,
     router: ProviderRouter = Depends(get_router),
     config: AppConfig = Depends(get_app_config),
@@ -213,11 +221,23 @@ def get_partner_engine(
     constructor args don't have to reach for module globals. The
     resolved dependencies come from ``app.state.router`` /
     ``app.state.config`` through the standard Depends chain.
+
+    [IMPROVE-154] (Wave 21 Chain 2 fix) — Converted to ``async
+    def`` + heavy first-call work runs under ``await asyncio
+    .to_thread(...)`` mirroring the sibling ``get_editor_service``
+    fix from IMPROVE-153. The PartnerEngine constructor itself
+    is light (loads profile JSON + initialises SQLite tables),
+    but the lazy-init pattern keeps it consistent + sets up the
+    seam for future ``_init_mem0`` async work (Wave 22+ when
+    Mem0's upstream `Memory.from_config` gets an async surface).
+    For now the heavy Mem0 init still happens lazily on first
+    ``partner.get_memories()`` call; the route handler at
+    ``/partner/memories`` wraps THAT call in ``to_thread``
+    explicitly (see routers/partner.py).
     """
     engine = getattr(request.app.state, "_partner_engine", None)
     if engine is None:
-        from local_ai_platform.partner.engine import PartnerEngine
-        engine = PartnerEngine(router, config)
+        engine = await asyncio.to_thread(_build_partner_engine, router, config)
         request.app.state._partner_engine = engine
     return engine
 

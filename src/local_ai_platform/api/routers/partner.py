@@ -107,7 +107,19 @@ async def partner_stats(partner=Depends(get_partner_engine)):
 
 @router.get("/partner/memories")
 async def partner_memories(partner=Depends(get_partner_engine)):
-    return partner.get_memories()
+    # [IMPROVE-154] Wave 21 Chain 2 fix — partner.get_memories()
+    # transitively calls memory.mem0_get_all() which triggers
+    # _init_mem0() on first call. Mem0 init is heavy (~22.56s on
+    # cold first request per the user's startup log): mem0 import
+    # + ChromaDB sqlite-vss init + Ollama embedding model warm-up.
+    # asyncio.to_thread yields the event loop so other partner
+    # endpoints (/partner/profile / /partner/voice/status /
+    # /partner/user-profile) — which were previously queued behind
+    # this blocker even though their own work is light — can be
+    # served concurrently while Mem0 initialises in a worker
+    # thread. Same pattern as the [IMPROVE-149] init_voice fix
+    # but at the route-handler layer rather than the engine layer.
+    return await asyncio.to_thread(partner.get_memories)
 
 
 @router.post("/partner/memories/facts")
