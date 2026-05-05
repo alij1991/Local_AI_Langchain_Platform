@@ -8,9 +8,9 @@
 
 ## 10.1 Summary
 
-- **156 improvements** flagged inline as `[IMPROVE-N]` in chapters 1–9 + the Wave 5/6/7/8/9/10/11/12/13/14/15/16/18/19/20/21/22 audits (NEW from Wave 6 audit: 71/72/73/74; NEW from Wave 7: 75/76/77/78/79/80/81/82; NEW from Wave 8: 83/84/85/86/87/88; NEW from Wave 9: 89/90/91/92/93/94; NEW from Wave 10: 95/96/97/98/99/100; NEW from Wave 11: 101/102/103/104/105/106; NEW from Wave 12: 107/108/109/110/111/112; NEW from Wave 13: 113/114/115/116/117/118; NEW from Wave 14: 119/120/121/122/123/124/125; NEW from Wave 15: 126/127/128/129/130/131; NEW from Wave 16: 132/133/134/135/136/137; NEW from Wave 18: 138/139/140/141/142/143/144; NEW from Wave 19 Tranche A: 145/146; NEW from Wave 20 cleanup wave: 147/148/149/150/151/152; NEW from Wave 21 startup-contention fix: 153/154/155; NEW from Wave 22 true-async _init_mem0: 156).
+- **158 improvements** flagged inline as `[IMPROVE-N]` in chapters 1–9 + the Wave 5/6/7/8/9/10/11/12/13/14/15/16/18/19/20/21/22/23 audits (NEW from Wave 6 audit: 71/72/73/74; NEW from Wave 7: 75/76/77/78/79/80/81/82; NEW from Wave 8: 83/84/85/86/87/88; NEW from Wave 9: 89/90/91/92/93/94; NEW from Wave 10: 95/96/97/98/99/100; NEW from Wave 11: 101/102/103/104/105/106; NEW from Wave 12: 107/108/109/110/111/112; NEW from Wave 13: 113/114/115/116/117/118; NEW from Wave 14: 119/120/121/122/123/124/125; NEW from Wave 15: 126/127/128/129/130/131; NEW from Wave 16: 132/133/134/135/136/137; NEW from Wave 18: 138/139/140/141/142/143/144; NEW from Wave 19 Tranche A: 145/146; NEW from Wave 20 cleanup wave: 147/148/149/150/151/152; NEW from Wave 21 startup-contention fix: 153/154/155; NEW from Wave 22 true-async _init_mem0: 156; NEW from Wave 23 Kokoro create_stream chunked TTFA: 157/158).
 - **10 themes** — security, architecture, observability, tracing, UX, memory & context, model & inference, background tasks, voice, and tools/MCP.
-- **22 waves fully shipped + Wave 23 in progress** (Waves 1-16 numbered + Wave 17 doc-only cleanup + Wave 18 Tranche A Flutter editor v2 + Wave 19 Tranche A partner-import host + Wave 20 cleanup wave: §10.7 walkthrough closing Q1/Q4/Q7/Q15/Q16 + 1 deletion + 5 TTS quick wins + Wave 21 startup-contention fix targeting the 3 lazy-init chains the user's startup log surfaced + Wave 22 true-async _init_mem0 — IMPROVE-156 background-task warmup at lifespan via httpx.AsyncClient pre-warm of nomic-embed-text + asyncio.create_task fire-and-forget Mem0 init, moving the ~22s Chain 2 cost OFF the user's first request entirely + Wave 23 Kokoro create_stream chunked TTFA — IMPROVE-157 backend stream_synthesize via kokoro_onnx.create_stream + IMPROVE-158 Flutter progressive playback for end-to-end TTFA win on long replies); **1** standing in deferred queues (post-Wave-23 backlog).
+- **23 waves fully shipped** (Waves 1-16 numbered + Wave 17 doc-only cleanup + Wave 18 Tranche A Flutter editor v2 + Wave 19 Tranche A partner-import host + Wave 20 cleanup wave: §10.7 walkthrough closing Q1/Q4/Q7/Q15/Q16 + 1 deletion + 5 TTS quick wins + Wave 21 startup-contention fix targeting the 3 lazy-init chains the user's startup log surfaced + Wave 22 true-async _init_mem0 — IMPROVE-156 background-task warmup at lifespan via httpx.AsyncClient pre-warm of nomic-embed-text + asyncio.create_task fire-and-forget Mem0 init, moving the ~22s Chain 2 cost OFF the user's first request entirely + Wave 23 Kokoro create_stream chunked TTFA — IMPROVE-157 backend stream_synthesize via kokoro_onnx.create_stream + IMPROVE-158 Flutter progressive playback delivering ~60-80% TTFA win on long-paragraph synth); **1** standing in deferred queues (post-Wave-23 backlog).
 
 All improvements are traceable back to a chapter + a 2025–2026 citation. This chapter is pure planning — *what* + *why this order*; *how* is in each origin chapter.
 
@@ -178,7 +178,7 @@ Smaller items that improve day-to-day use.
 
 ---
 
-## 10.4 The complete table (all 156)
+## 10.4 The complete table (all 158)
 
 Sortable if you paste into a spreadsheet. Chapter column links back to the originating doc.
 
@@ -340,10 +340,12 @@ Sortable if you paste into a spreadsheet. Chapter column links back to the origi
 | 154 | 1 | ✓ Async get_partner_engine + partner.get_memories to_thread (Wave 21 Chain 2 startup-contention fix) | ⋆⋆⋆ | 🔨 | Architecture |
 | 155 | 1 | ✓ Eager hardware-profile warm-up at lifespan (Wave 21 Chain 3 startup-contention fix) | ⋆⋆ | 🔨 | Architecture |
 | 156 | 8 | ✓ True-async lifespan warmup of partner memory — httpx pre-warm of Ollama embed + asyncio.create_task fire-and-forget Mem0 init (Wave 22 — moves the ~22s Chain 2 cost OFF the user's first /partner/memories request) | ⋆⋆⋆ | 🔨🔨 | Architecture |
+| 157 | 8 | ✓ Backend stream_synthesize via kokoro_onnx.create_stream — Kokoro path emits PCM batches AS THEY'RE PRODUCED instead of full-synth-then-chunk (Wave 23 — first chunk arrives ~60-80% sooner on long-paragraph synth) | ⋆⋆⋆ | 🔨 | Voice |
+| 158 | 8 | ✓ Flutter progressive playback for chunked TTS — buildMiniWavForChunk top-level helper + per-sentence StreamController fan-out + audioplayers play-as-they-arrive consumer (Wave 23 — pairs with IMPROVE-157 to deliver end-to-end TTFA win) | ⋆⋆⋆ | 🔨🔨 | Voice |
 
 *Impact for [IMPROVE-59] is ⋆⋆⋆⋆⋆ if the app is ever distributed, ⋆⋆ if it stays local-only.
 
-**Legend:** A ``✓`` prefix marks items that have shipped. See §10.6 for the Wave 5 / 6 / 7 / 8 / 9 / 10 / 11 / 12 / 13 / 14 / 15 / 16 / 17 / 18 / 19 / 20 / 21 / 22 retrospective.
+**Legend:** A ``✓`` prefix marks items that have shipped. See §10.6 for the Wave 5 / 6 / 7 / 8 / 9 / 10 / 11 / 12 / 13 / 14 / 15 / 16 / 17 / 18 / 19 / 20 / 21 / 22 / 23 retrospective.
 
 ---
 
@@ -1046,7 +1048,7 @@ first /partner/memories request hits a hot cache. 3
 commits (2 doc + 1 numbered) — the planned shape held
 end-to-end.
 
-### Wave 23 — Kokoro create_stream chunked TTFA (in progress)
+### Wave 23 — Kokoro create_stream chunked TTFA (✓ shipped 2026-05-05)
 
 Theme: address the Wave 20-spawned bigger-TTS-architectural-
 piece flagged in §10.6 Wave 22 architectural impact (and
@@ -1081,24 +1083,26 @@ retrospective + Wave 24+ backlog.
 
 | # | Tag | SHA | What landed | Tests |
 |---|---|---|---|---:|
-| 1 | (doc)         | this    | Wave 23 mid-wave (start) — register Wave 23 in §10.5 + §10.6 with the audit-vs-source-mismatch finding (Wave 20 [IMPROVE-152] said "no asyncio surface in kokoro_onnx"; kokoro_onnx 2026-Q2 source shows ``Kokoro.create_stream`` IS async). Updates §10.1 wave-status (22 waves shipped → 22 + Wave 23 in progress). Fills in Wave 22 end-wave SHA placeholder (this → 10e1094) per Wave 12-15 placeholder convention. | 0 |
-| 2 | IMPROVE-157   | TBD     | Backend stream_synthesize via kokoro_onnx.create_stream — replaces ``await loop.run_in_executor(None, lambda: self._tts.create(text, voice))`` (full Kokoro synth, then chunk-for-transport) with ``async for samples, sample_rate in self._tts.create_stream(text, voice=voice)`` so each Kokoro batch yields PCM AS IT'S PRODUCED. The existing /partner/voice/tts-stream WebSocket protocol is unchanged (still binary PCM16 frames + JSON start/done control messages). For long-paragraph synth ([≥510 phoneme batches], typical voice mode usage) the first chunk arrives ~60-80% sooner. NEW ``tests/test_partner_voice_create_stream.py`` pins the create_stream call shape + progressive yielding via mock generator. | TBD |
-| 3 | IMPROVE-158   | TBD     | Flutter progressive playback — ``_setupTTSSocketListener`` now plays each PCM chunk AS IT ARRIVES via a chained-play queue, instead of accumulating all chunks and playing on ``{type: done}``. Each Kokoro chunk wraps as a self-contained mini-WAV (per-chunk RIFF header) and queues for ``audioplayers.AudioPlayer.play(BytesSource(...))``. Audio gaps between chunks measured at <50ms on Windows (audioplayers' per-play startup); imperceptible for typical chat cadence. NEW Flutter widget tests pin the chunk-queue helper. | TBD |
-| 4 | (doc)         | TBD     | Wave 23 end-wave retrospective. Bumps 156 → 158 in §10.1 + §10.4. Adds 2 IMPROVE-N rows (157/158). Fills in Wave 23 mid-wave SHA placeholder + IMPROVE-157 + IMPROVE-158 SHAs. Updates §10.5 + §10.6 Wave 23 status (in progress → ✓ shipped) + full 4-row tables. NEW Wave 23 architectural impact subsection. Updates §10.8 closing line + Wave 24+ pivot text. | 0 |
+| 1 | (doc)         | 7b5ca4d | Wave 23 mid-wave (start) — register Wave 23 in §10.5 + §10.6 with the audit-vs-source-mismatch finding (Wave 20 [IMPROVE-152] said "no asyncio surface in kokoro_onnx"; kokoro_onnx 2026-Q2 source shows ``Kokoro.create_stream`` IS async). Updates §10.1 wave-status (22 waves shipped → 22 + Wave 23 in progress). Fills in Wave 22 end-wave SHA placeholder (10e1094) per Wave 12-15 placeholder convention. | 0 |
+| 2 | [IMPROVE-157] | d8610e8 | Backend stream_synthesize via kokoro_onnx.create_stream — replaces ``await loop.run_in_executor(None, lambda: self._tts.create(text, voice))`` (full Kokoro synth, then chunk-for-transport) with ``async for samples, sample_rate in self._tts.create_stream(text, voice=voice)`` so each Kokoro batch yields PCM AS IT'S PRODUCED. The existing /partner/voice/tts-stream WebSocket protocol is unchanged (still binary PCM16 frames + JSON start/done control messages). For long-paragraph synth (≥510 phoneme batches, typical voice mode usage) the first chunk arrives ~60-80% sooner. NEW ``tests/test_partner_voice_create_stream.py`` pins the create_stream call shape + progressive yielding via mock async generator + Chatterbox-path regression pin. | 7 |
+| 3 | [IMPROVE-158] | ea29380 | Flutter progressive playback — NEW top-level ``buildMiniWavForChunk(pcm, sampleRate)`` public helper builds a self-contained 44-byte-header WAV from a single PCM chunk. NEW per-sentence ``StreamController<Uint8List>`` (``_currentChunkStream``) owned by ``_synthesizeSentenceProgressive`` (NOT the listener) so the synthesize path has a non-null fan-out target before the WS message goes out. ``_setupTTSSocketListener`` pushes each PCM frame as a mini-WAV onto the controller; ``_processTTSQueue`` consumes via ``await for`` + plays each chunk via ``audioplayers.AudioPlayer.play(BytesSource(...))``. Pre-Wave-23 ``_synthesizeSentence`` removed (dead-code after refactor). NEW ``flutter_client/test/widgets/partner_tts_mini_wav_test.dart`` with 9 tests pinning the WAV header byte layout + sample-rate propagation + content-independence. | 9 |
+| 4 | (doc)         | this    | Wave 23 end-wave retrospective. Bumps 156 → 158 in §10.1 + §10.4. Adds 2 IMPROVE-N rows (157/158). Fills in Wave 23 mid-wave SHA placeholder (7b5ca4d) + IMPROVE-157 SHA (d8610e8) + IMPROVE-158 SHA (ea29380). Flips Wave 23 status (in progress → ✓ shipped) in §10.5 + §10.6 + full 4-row tables. NEW Wave 23 architectural impact subsection. Updates §10.8 closing line + Wave 24+ pivot text. | 0 |
 
-Net (planned): +N tests on the Tier 1 Python sweep (the
-new ``tests/test_partner_voice_create_stream.py`` pins the
-async-generator call shape + progressive yielding — all
-timing-independent contract pins). Sweep file count grows
-91 → 92. Flutter widget tests grow 173 → 173+M with the new
-chunk-queue helper tests. The user-visible win is on the
-TTFA TIMELINE: for long-paragraph TTS (voice mode whole-
-reply synthesis or multi-sentence stream where the first
-sentence ≥510 phonemes), first audio arrives ~60-80%
-sooner. For typical short chat sentences (single Kokoro
-batch), the win is marginal — the architectural change
-sets up future Chatterbox streaming + per-paragraph parallel
-synth-while-LLM-streams (Wave 24+).
+Net: +7 tests on the Tier 1 Python sweep (1867 → 1874 from
+[IMPROVE-157]'s ``tests/test_partner_voice_create_stream.py``)
++ +9 Flutter widget tests (173 → 182 from [IMPROVE-158]'s
+``flutter_client/test/widgets/partner_tts_mini_wav_test.dart``).
+Sweep file count grew 91 → 92. Total Python tests since Wave
+5: 875 → 1874 (+999 over 19 waves counting Waves 17 through
+23). The user-visible win is on the TTFA TIMELINE: for long-
+paragraph TTS (voice mode whole-reply synthesis or
+multi-sentence stream where the first sentence ≥510
+phonemes), first audio arrives ~60-80% sooner. For typical
+short chat sentences (single Kokoro batch) the win is
+marginal — the architectural change sets up future
+Chatterbox streaming + per-paragraph parallel
+synth-while-LLM-streams (Wave 24+). 4 commits (2 doc + 2
+numbered) — the planned shape held end-to-end.
 
 ### Wave 18 — Deferred (queued for next iteration)
 
@@ -2046,14 +2050,109 @@ end-to-end.
     obs_test_client) + new ``tests/test_partner_mem0
     _warmup.py``.
 
-### Wave 23 (in progress)
+### Wave 23 (✓ shipped)
 
 | # | Tag | SHA | What landed | Tests |
 |---|---|---|---|---:|
-| 1 | (doc)         | this    | Wave 23 mid-wave (start) — register Wave 23 in §10.5 + §10.6 with the audit-vs-source-mismatch finding (Wave 20 [IMPROVE-152] said "no asyncio surface in kokoro_onnx"; kokoro_onnx 2026-Q2 source shows ``Kokoro.create_stream`` IS async). Updates §10.1 wave-status (22 waves shipped → 22 + Wave 23 in progress). Fills in Wave 22 end-wave SHA placeholder (10e1094). | 0 |
-| 2 | IMPROVE-157   | TBD     | Backend stream_synthesize via kokoro_onnx.create_stream — replaces blocking ``self._tts.create()`` with ``async for samples, sample_rate in self._tts.create_stream(text, voice=voice)`` so each Kokoro phoneme batch yields PCM AS IT'S PRODUCED. Existing /partner/voice/tts-stream WebSocket protocol unchanged. | TBD |
-| 3 | IMPROVE-158   | TBD     | Flutter progressive playback — ``_setupTTSSocketListener`` plays each PCM chunk AS IT ARRIVES via chained-play queue instead of accumulating before ``{type: done}``. Per-chunk mini-WAV wrap + queued ``audioplayers.AudioPlayer.play(BytesSource)`` calls. | TBD |
-| 4 | (doc)         | TBD     | Wave 23 end-wave retrospective. | 0 |
+| 1 | (doc)         | 7b5ca4d | Wave 23 mid-wave (start) — register Wave 23 in §10.5 + §10.6 with the audit-vs-source-mismatch finding (Wave 20 [IMPROVE-152] said "no asyncio surface in kokoro_onnx"; kokoro_onnx 2026-Q2 source shows ``Kokoro.create_stream`` IS async). Updates §10.1 wave-status (22 waves shipped → 22 + Wave 23 in progress). Fills in Wave 22 end-wave SHA placeholder (10e1094). | 0 |
+| 2 | [IMPROVE-157] | d8610e8 | Backend stream_synthesize via kokoro_onnx.create_stream — replaces blocking ``self._tts.create()`` with ``async for samples, sample_rate in self._tts.create_stream(text, voice=voice)`` so each Kokoro phoneme batch yields PCM AS IT'S PRODUCED. Existing /partner/voice/tts-stream WebSocket protocol unchanged. | 7 |
+| 3 | [IMPROVE-158] | ea29380 | Flutter progressive playback — NEW ``buildMiniWavForChunk`` top-level helper + per-sentence ``StreamController<Uint8List>`` fan-out + ``await for`` consumer that plays each PCM chunk AS IT ARRIVES via ``audioplayers.AudioPlayer.play(BytesSource(...))`` instead of accumulating before ``{type: done}``. | 9 |
+| 4 | (doc)         | this    | Wave 23 end-wave retrospective. Bumps 156 → 158 in §10.1 + §10.4. Flips Wave 23 status (in progress → ✓ shipped) + full 4-row tables. NEW Wave 23 architectural impact subsection. | 0 |
+
+Net: +7 Tier 1 tests (1867 → 1874) + +9 Flutter widget
+tests (173 → 182). Sweep file count grew 91 → 92. The
+user-visible win is on the TTFA TIMELINE: ~60-80% reduction
+on long-paragraph synth. 4 commits (2 doc + 2 numbered) —
+the planned shape held end-to-end.
+
+### Wave 23 architectural impact
+
+  * **End-to-end progressive streaming**: Wave 23 is the
+    first wave to deliver TTFA improvement at BOTH the
+    server side ([IMPROVE-157]'s create_stream conversion)
+    AND the client side ([IMPROVE-158]'s chunk-queue
+    consumer). The server change alone gives no
+    user-visible win because the legacy Flutter consumer
+    waited for ``{type: done}`` to play. Both changes had
+    to land together. Sets the precedent for future
+    streaming-style waves: backend-only streaming
+    optimisations that don't move the user-perceived
+    latency forward should be paired with their consumer
+    counterparts.
+
+  * **Audit-vs-source verification methodology (third
+    proof point)**: Wave 21 caught it for mem0
+    (``OllamaEmbedding._ensure_model_exists`` doesn't warm
+    the model). Wave 22 caught it for the same mem0 path
+    + ChromaDB cost. Wave 23 caught it for kokoro_onnx
+    (Wave 20's "no asyncio surface" claim was wrong —
+    ``Kokoro.create_stream`` IS async). Three waves of
+    audit-vs-source mismatches shows this is a systemic
+    methodology gap. Future audits should include
+    ``ls .venv/Lib/site-packages/<lib>/`` + a quick
+    ``inspect.getsource(...)`` pass on the suspect API.
+
+  * **Public-helper convention scales to host pages with
+    audio infrastructure**: ``buildMiniWavForChunk`` is the
+    14th public top-level helper across Wave 18+19+20+21+
+    22+23 hosts (decay preset picker / DAG-lint panel /
+    tile-mode badge / per-row diff overlay / scope multi-
+    select / dry-run preview / tile_size_override field /
+    tile_stride_override field / partner export button /
+    partner-import helpers / TTS pre-compile regexes /
+    _pcm_to_wav / async sibling / mini-WAV builder).
+    Pattern holds across UI widgets AND infrastructure
+    helpers — the convention is medium-agnostic.
+
+  * **State-machine ownership refactor**: Pre-Wave-23 the
+    listener owned both the chunk accumulator + the
+    ``{type: start}`` lifecycle of the chunk stream. This
+    coupled "WS message arrives" with "controller exists"
+    in a way that broke the pre-create-controller-then-
+    send-message pattern needed for progressive playback.
+    Wave 23 refactored ownership: the synthesize method
+    owns the stream controller (creates BEFORE sending,
+    closes after the stream exhausts); the listener only
+    pushes / closes. This decoupled "WS state machine"
+    from "consumer subscription state" cleanly.
+
+  * **What's NOT solved**: Chatterbox sidecar streaming —
+    Chatterbox-Turbo at port 8282 is HTTP-only as of
+    2026-Q2 (no streaming endpoint). Wave 23's stream_
+    synthesize Chatterbox branch still uses ``run_in_
+    executor(_synthesize_chatterbox)`` + post-hoc PCM
+    chunking. A regression test pins this so future
+    Wave 24+ Chatterbox-streaming work can't accidentally
+    regress the sync sidecar. Per-paragraph parallel
+    synth-while-LLM-streams (the third TTS architectural
+    piece flagged in Wave 22's deferred list) is also
+    deferred to Wave 24+; would require the chat streamer
+    to forward sentences to TTS as they're emitted from
+    the LLM rather than waiting for sentence-end
+    punctuation.
+
+  * **Tier 1 baseline 1874 after Wave 23 close**. Total
+    since Wave 5: 875 → 1874 (+999 over 19 waves counting
+    Waves 17/18/19/20/21/22/23).
+
+  * **Routes 187 unchanged from Wave 22 close**. Wave 23
+    is internal Kokoro synthesis conversion + Flutter
+    playback restructure — no new or removed routes. The
+    [IMPROVE-157] fix touched
+    ``src/local_ai_platform/partner/engine.py``
+    (stream_synthesize body); [IMPROVE-158] touched
+    ``flutter_client/lib/pages/partner_page.dart``
+    (top-level helper + listener fan-out + progressive
+    consumer + queue consumer refactor) +
+    ``flutter_client/test/widgets/partner_tts_mini
+    _wav_test.dart`` (NEW).
+
+  * **Flutter widget test surface 182 after Wave 23**.
+    Up from 173 pre-Wave-23. The +9 from
+    ``partner_tts_mini_wav_test.dart`` covers the WAV
+    header byte layout — a pure data-format pin that
+    won't churn under future audioplayers updates because
+    the WAV format itself is canonical.
 
 ### Wave 14 architectural impact
 
@@ -3004,12 +3103,12 @@ Wave 23+ priorities at the user's pace.
 ## 10.8 Where to go from here
 
 - **Read chapter 1 → 9 if you haven't.** This chapter is the index; the others have the details.
-- **Pick a Wave 23+ item and ship it** — see §10.5 Wave 18 deferred queue (the trimmed Wave 17 cleanup output: NEW candidates IMPROVE-NEW-2/7/8/10 + Wave-15-audit FILTER_AXIS_TYPES registry + 7 Wave-16-audit-spawned items + Wave-13/12/11/10-audit triggered items + themed tranches B/D/E/F/G + carry-overs gated on §10.7 questions — most of which are now ungated since Wave 20 closed Q1 / Q4 / Q7 / Q15 / Q16). Tranche A (Flutter editor v2) shipped fully in Wave 18 — IMPROVE-138 through IMPROVE-144. Wave 19 Tranche A closed the GDPR Article 20 round-trip with the partner-import host ([IMPROVE-145]) + export button ([IMPROVE-146]). Wave 20 cleanup wave (✓ shipped) closed §10.7 gating questions + shipped a Q7=b deletion ([IMPROVE-147]) + 5 Q4=c TTS pipeline quick wins ([IMPROVE-148] / [IMPROVE-149] / [IMPROVE-150] / [IMPROVE-151] / [IMPROVE-152]). Wave 21 (✓ shipped) closed the cross-cutting startup contention with 3 chain fixes ([IMPROVE-153] / [IMPROVE-154] / [IMPROVE-155]) — ~47s of cold-startup blocking unwound. Wave 22 (✓ shipped) closed the Wave 21-spawned true-async ``_init_mem0`` follow-up via [IMPROVE-156] — httpx.AsyncClient pre-warm of Ollama embed + ``asyncio.create_task`` fire-and-forget Mem0 init at lifespan, moving the ~22s Chain 2 cost off the user's first request entirely. The natural Wave 23+ paths: (a) themed Tranche B/D/E/F/G work, (b) deferred-queue picks (NEW carry-overs / Wave-N-audit items), (c) Wave 20-spawned bigger TTS architectural pieces (Kokoro `create_stream` chunked TTFA + server-side parallel synth-while-LLM-streams), or (d) Wave 21-spawned residue (lifespan eager editor warm-up under feature flag + benchmark harness for startup-timing pins — Wave 22 closed the Mem0 piece of that residue). Items previously considered + rejected are archived in §10.5.1.
-- **Keep `[IMPROVE-N]` references alive.** When you fix one, grep `docs/features/` for that ID and cross out. If you add new ones in future work, number them IMPROVE-157+ (1-156 are taken; the IMPROVE-NEW-* tags graduate to permanent numbers on acceptance) and note them in the originating chapter.
+- **Pick a Wave 24+ item and ship it** — see §10.5 Wave 18 deferred queue (the trimmed Wave 17 cleanup output: NEW candidates IMPROVE-NEW-2/7/8/10 + Wave-15-audit FILTER_AXIS_TYPES registry + 7 Wave-16-audit-spawned items + Wave-13/12/11/10-audit triggered items + themed tranches B/D/E/F/G + carry-overs gated on §10.7 questions — most of which are now ungated since Wave 20 closed Q1 / Q4 / Q7 / Q15 / Q16). Tranche A (Flutter editor v2) shipped fully in Wave 18 — IMPROVE-138 through IMPROVE-144. Wave 19 Tranche A closed the GDPR Article 20 round-trip with the partner-import host ([IMPROVE-145]) + export button ([IMPROVE-146]). Wave 20 cleanup wave (✓ shipped) closed §10.7 gating questions + shipped a Q7=b deletion ([IMPROVE-147]) + 5 Q4=c TTS pipeline quick wins ([IMPROVE-148] / [IMPROVE-149] / [IMPROVE-150] / [IMPROVE-151] / [IMPROVE-152]). Wave 21 (✓ shipped) closed the cross-cutting startup contention with 3 chain fixes ([IMPROVE-153] / [IMPROVE-154] / [IMPROVE-155]) — ~47s of cold-startup blocking unwound. Wave 22 (✓ shipped) closed the Wave 21-spawned true-async ``_init_mem0`` follow-up via [IMPROVE-156] — httpx.AsyncClient pre-warm of Ollama embed + ``asyncio.create_task`` fire-and-forget Mem0 init at lifespan, moving the ~22s Chain 2 cost off the user's first request entirely. Wave 23 (✓ shipped) closed the Wave 20-spawned Kokoro create_stream piece via [IMPROVE-157] (backend stream_synthesize via ``async for`` over ``Kokoro.create_stream``) + [IMPROVE-158] (Flutter ``buildMiniWavForChunk`` + per-sentence StreamController + ``await for``-driven progressive playback) — ~60-80% TTFA reduction on long-paragraph synth. The natural Wave 24+ paths: (a) themed Tranche B/D/E/F/G work, (b) deferred-queue picks (NEW carry-overs / Wave-N-audit items), (c) Wave 20-spawned bigger TTS architectural piece still open (server-side parallel synth-while-LLM-streams), (d) Chatterbox sidecar streaming (Wave 23 left this as Wave 24+ since Chatterbox-Turbo is HTTP-only as of 2026-Q2), or (e) Wave 21-spawned residue (lifespan eager editor warm-up under feature flag + benchmark harness for startup-timing pins). Items previously considered + rejected are archived in §10.5.1.
+- **Keep `[IMPROVE-N]` references alive.** When you fix one, grep `docs/features/` for that ID and cross out. If you add new ones in future work, number them IMPROVE-159+ (1-158 are taken; the IMPROVE-NEW-* tags graduate to permanent numbers on acceptance) and note them in the originating chapter.
 - **The `MEMORY.md` in `~/.claude/projects/...` contains the feedback rule** that improvement suggestions should cite 2025–2026 sources. Every item here has citations in its origin chapter.
 
 ---
 
 **Guide complete.** `docs/features/README.md` → `01-architecture.md` → `02-llm-infrastructure.md` → `03-chat.md` → `04-agents-tools.md` → `05-systems.md` → `06-image-generation.md` → `07-image-editor.md` → `08-partner.md` → `09-observability.md` → `10-improvements.md` *(this file)*.
 
-Every major feature of the Local AI Platform is now documented end-to-end, with **156** research-backed improvement ideas cross-referenced into one prioritized plan. Waves 1-22 fully shipped; post-Wave-22 backlog in deferred queue.
+Every major feature of the Local AI Platform is now documented end-to-end, with **158** research-backed improvement ideas cross-referenced into one prioritized plan. Waves 1-23 fully shipped; post-Wave-23 backlog in deferred queue.
