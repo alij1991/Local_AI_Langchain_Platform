@@ -8,9 +8,9 @@
 
 ## 10.1 Summary
 
-- **161 improvements** flagged inline as `[IMPROVE-N]` in chapters 1–9 + the Wave 5/6/7/8/9/10/11/12/13/14/15/16/18/19/20/21/22/23/24/26/27 audits (NEW from Wave 6 audit: 71/72/73/74; NEW from Wave 7: 75/76/77/78/79/80/81/82; NEW from Wave 8: 83/84/85/86/87/88; NEW from Wave 9: 89/90/91/92/93/94; NEW from Wave 10: 95/96/97/98/99/100; NEW from Wave 11: 101/102/103/104/105/106; NEW from Wave 12: 107/108/109/110/111/112; NEW from Wave 13: 113/114/115/116/117/118; NEW from Wave 14: 119/120/121/122/123/124/125; NEW from Wave 15: 126/127/128/129/130/131; NEW from Wave 16: 132/133/134/135/136/137; NEW from Wave 18: 138/139/140/141/142/143/144; NEW from Wave 19 Tranche A: 145/146; NEW from Wave 20 cleanup wave: 147/148/149/150/151/152; NEW from Wave 21 startup-contention fix: 153/154/155; NEW from Wave 22 true-async _init_mem0: 156; NEW from Wave 23 Kokoro create_stream chunked TTFA: 157/158; NEW from Wave 24 server-side parallel synth-while-LLM-streams: 159; NEW from Wave 26 startup-timing benchmark harness: 160; NEW from Wave 27 lifespan eager editor warm-up flag: 161).
+- **162 improvements** flagged inline as `[IMPROVE-N]` in chapters 1–9 + the Wave 5/6/7/8/9/10/11/12/13/14/15/16/18/19/20/21/22/23/24/26/27/28 audits (NEW from Wave 6 audit: 71/72/73/74; NEW from Wave 7: 75/76/77/78/79/80/81/82; NEW from Wave 8: 83/84/85/86/87/88; NEW from Wave 9: 89/90/91/92/93/94; NEW from Wave 10: 95/96/97/98/99/100; NEW from Wave 11: 101/102/103/104/105/106; NEW from Wave 12: 107/108/109/110/111/112; NEW from Wave 13: 113/114/115/116/117/118; NEW from Wave 14: 119/120/121/122/123/124/125; NEW from Wave 15: 126/127/128/129/130/131; NEW from Wave 16: 132/133/134/135/136/137; NEW from Wave 18: 138/139/140/141/142/143/144; NEW from Wave 19 Tranche A: 145/146; NEW from Wave 20 cleanup wave: 147/148/149/150/151/152; NEW from Wave 21 startup-contention fix: 153/154/155; NEW from Wave 22 true-async _init_mem0: 156; NEW from Wave 23 Kokoro create_stream chunked TTFA: 157/158; NEW from Wave 24 server-side parallel synth-while-LLM-streams: 159; NEW from Wave 26 startup-timing benchmark harness: 160; NEW from Wave 27 lifespan eager editor warm-up flag: 161; NEW from Wave 28 Tranche G partial preset export/import: 162).
 - **10 themes** — security, architecture, observability, tracing, UX, memory & context, model & inference, background tasks, voice, and tools/MCP.
-- **26 waves fully shipped + Wave 25 deferred-by-investigation + Wave 28 in progress** (Waves 1-16 numbered + Wave 17 doc-only cleanup + Wave 18 Tranche A Flutter editor v2 + Wave 19 Tranche A partner-import host + Wave 20 cleanup wave: §10.7 walkthrough closing Q1/Q4/Q7/Q15/Q16 + 1 deletion + 5 TTS quick wins + Wave 21 startup-contention fix targeting the 3 lazy-init chains the user's startup log surfaced + Wave 22 true-async _init_mem0 — IMPROVE-156 background-task warmup at lifespan via httpx.AsyncClient pre-warm of nomic-embed-text + asyncio.create_task fire-and-forget Mem0 init, moving the ~22s Chain 2 cost OFF the user's first request entirely + Wave 23 Kokoro create_stream chunked TTFA — IMPROVE-157 backend stream_synthesize via kokoro_onnx.create_stream + IMPROVE-158 Flutter progressive playback delivering ~60-80% TTFA win on long-paragraph synth + Wave 24 server-side parallel synth-while-LLM-streams — IMPROVE-159 phrase-boundary fallback in PartnerEngine.astream_chat firing on ``,`` ``;`` ``:`` once a clause is ≥ 30 chars long, so TTS can begin synthesising while the LLM is still emitting later words + Wave 25 Chatterbox sidecar streaming investigation — chatterbox-tts 0.1.7 has no streaming surface in either ChatterboxTTS.generate or ChatterboxTTSTurbo.generate; deferred pending upstream feature OR justified 3-5d fork investment); **1** standing in deferred queues (post-Wave-25 backlog).
+- **27 waves fully shipped + Wave 25 deferred-by-investigation** (Waves 1-16 numbered + Wave 17 doc-only cleanup + Wave 18 Tranche A Flutter editor v2 + Wave 19 Tranche A partner-import host + Wave 20 cleanup wave: §10.7 walkthrough closing Q1/Q4/Q7/Q15/Q16 + 1 deletion + 5 TTS quick wins + Wave 21 startup-contention fix targeting the 3 lazy-init chains the user's startup log surfaced + Wave 22 true-async _init_mem0 — IMPROVE-156 background-task warmup at lifespan via httpx.AsyncClient pre-warm of nomic-embed-text + asyncio.create_task fire-and-forget Mem0 init, moving the ~22s Chain 2 cost OFF the user's first request entirely + Wave 23 Kokoro create_stream chunked TTFA — IMPROVE-157 backend stream_synthesize via kokoro_onnx.create_stream + IMPROVE-158 Flutter progressive playback delivering ~60-80% TTFA win on long-paragraph synth + Wave 24 server-side parallel synth-while-LLM-streams — IMPROVE-159 phrase-boundary fallback in PartnerEngine.astream_chat firing on ``,`` ``;`` ``:`` once a clause is ≥ 30 chars long, so TTS can begin synthesising while the LLM is still emitting later words + Wave 25 Chatterbox sidecar streaming investigation — chatterbox-tts 0.1.7 has no streaming surface in either ChatterboxTTS.generate or ChatterboxTTSTurbo.generate; deferred pending upstream feature OR justified 3-5d fork investment); **1** standing in deferred queues (post-Wave-25 backlog).
 
 All improvements are traceable back to a chapter + a 2025–2026 citation. This chapter is pure planning — *what* + *why this order*; *how* is in each origin chapter.
 
@@ -178,7 +178,7 @@ Smaller items that improve day-to-day use.
 
 ---
 
-## 10.4 The complete table (all 161)
+## 10.4 The complete table (all 162)
 
 Sortable if you paste into a spreadsheet. Chapter column links back to the originating doc.
 
@@ -345,10 +345,11 @@ Sortable if you paste into a spreadsheet. Chapter column links back to the origi
 | 159 | 8 | ✓ Phrase-boundary fallback in PartnerEngine.astream_chat — fires sentence_complete on ``,`` ``;`` ``:`` once clause ≥ 30 chars, so TTS begins synthesising while the LLM is still emitting later words (Wave 24 — closes the server-side parallel synth-while-LLM-streams piece flagged in §10.6 Wave 23 architectural impact) | ⋆⋆⋆ | 🔨 | Voice |
 | 160 | 1 | ✓ Startup-timing benchmark harness — 4 timing pins (lifespan ≤ 30s + cold /editor/operations/list ≤ 5s + cold /images/runtime ≤ 15s + threshold-constants pin) on real ``api_server.app`` (no mocks) with LOCAL_AI_BENCHMARK_DISABLE / LOCAL_AI_BENCHMARK_SLOW env-var opt-outs (Wave 26 — pins the cold-startup wins from Waves 21+22 + the TTFA wins from Waves 23+24 against future regressions) | ⋆⋆ | 🔨 | Architecture |
 | 161 | 1 | ✓ Lifespan eager editor warm-up under feature flag — opt-in ``LIFESPAN_EAGER_EDITOR_WARMUP=1`` env-var that pre-builds ImageEditorService at lifespan via ``await asyncio.to_thread(_build_editor_service)`` (Wave 27 — closes Path D from the Wave 21 residue list; default-off preserves current boot speed; trades ~21s boot for hot first /editor/* request when enabled) | ⋆⋆ | 🔨 | Architecture |
+| 162 | 7 | ✓ Preset JSON export + import endpoints — GET ``/editor/presets/{preset_id}/export`` returns the preset as a downloadable JSON payload with ``schema_version: 1``; POST ``/editor/presets/import`` accepts the same shape and creates a new preset row (Wave 28 — closes Tranche G partial from the Wave 18 deferred queue; enables curl-based preset sharing between users / machines without direct SQLite access) | ⋆⋆ | 🔨 | UX |
 
 *Impact for [IMPROVE-59] is ⋆⋆⋆⋆⋆ if the app is ever distributed, ⋆⋆ if it stays local-only.
 
-**Legend:** A ``✓`` prefix marks items that have shipped. See §10.6 for the Wave 5 / 6 / 7 / 8 / 9 / 10 / 11 / 12 / 13 / 14 / 15 / 16 / 17 / 18 / 19 / 20 / 21 / 22 / 23 / 24 / 26 / 27 retrospective.
+**Legend:** A ``✓`` prefix marks items that have shipped. See §10.6 for the Wave 5 / 6 / 7 / 8 / 9 / 10 / 11 / 12 / 13 / 14 / 15 / 16 / 17 / 18 / 19 / 20 / 21 / 22 / 23 / 24 / 26 / 27 / 28 retrospective.
 
 ---
 
@@ -1243,7 +1244,7 @@ at the cost of ~21s extra boot; default-off users keep
 current boot speed + lazy-init fallback. 3 commits (2 doc +
 1 numbered) — the planned single-numbered shape held.
 
-### Wave 28 — Tranche G partial: preset JSON export + import (in progress 2026-05-05)
+### Wave 28 — Tranche G partial: preset JSON export + import (✓ shipped 2026-05-05)
 
 Theme: address Tranche G "preset sharing/JSON export, preset
 versioning" from the Wave 18 deferred queue (see §10.5 Wave
@@ -1273,17 +1274,17 @@ pair.
 
 | # | Tag | SHA | What landed | Tests |
 |---|---|---|---|---:|
-| 1 | (doc)         | this    | Wave 28 mid-wave (start) — register Wave 28 in §10.5 + §10.6 with the Tranche G partial design (export/import + v=1 schema + Path E "ship the smallest tranche end-to-end" framing). Updates §10.1 wave-status. | 0 |
-| 2 | [IMPROVE-162] | TBD     | NEW ``editor_presets.export_preset()`` + ``import_preset()`` repository helpers + ``PRESET_EXPORT_SCHEMA_VERSION = 1`` module constant + ``ImageEditorService.export_user_preset()`` / ``import_user_preset()`` pass-throughs + 2 new routes (GET /editor/presets/{preset_id}/export + POST /editor/presets/import) + NEW ``tests/test_editor_preset_export_import.py`` with 8 pins (export shape + missing-preset 404 + roundtrip preserves steps + wrong-schema-version 400 + missing-name 400 + malformed-steps 400 + step-not-dict 400 + schema-version-constant pin). | 8 |
-| 3 | (doc)         | TBD     | Wave 28 end-wave retrospective. Bumps 161 → 162 in §10.1 + §10.4. Adds 1 IMPROVE-N row (162). Bumps route count 187 → 189. Fills in Wave 28 mid-wave SHA placeholder + IMPROVE-162 SHA. Flips Wave 28 status (in progress → ✓ shipped). NEW Wave 28 architectural impact subsection. | 0 |
+| 1 | (doc)         | 5a9670d | Wave 28 mid-wave (start) — register Wave 28 in §10.5 + §10.6 with the Tranche G partial design (export/import + v=1 schema + Path E "ship the smallest tranche end-to-end" framing). Updates §10.1 wave-status. | 0 |
+| 2 | [IMPROVE-162] | cd86253 | NEW ``editor_presets.export_preset()`` + ``import_preset()`` repository helpers + ``PRESET_EXPORT_SCHEMA_VERSION = 1`` module constant + ``ImageEditorService.export_user_preset()`` / ``import_user_preset()`` pass-throughs + 2 new routes (preset export + preset import endpoints) + NEW ``tests/test_editor_preset_export_import.py`` with 8 pins (export shape + missing-preset 404 + roundtrip preserves steps + wrong-schema-version 400 + missing-name 400 + malformed-steps 400 + step-not-dict 400 + schema-version-constant pin). | 8 |
+| 3 | (doc)         | this    | Wave 28 end-wave retrospective. Bumps 161 → 162 in §10.1 + §10.4. Adds 1 IMPROVE-N row (162). Bumps route count 187 → 189. Fills in Wave 28 mid-wave SHA placeholder (5a9670d) + IMPROVE-162 SHA (cd86253). Flips Wave 28 status (in progress → ✓ shipped). NEW Wave 28 architectural impact subsection. | 0 |
 
-Net (planned): +8 Tier 1 tests (1890 → 1898) from the new
+Net: +8 Tier 1 tests (1890 → 1898) from the new
 ``tests/test_editor_preset_export_import.py``. Sweep file
-count grows 95 → 96. Routes 187 → 189 (+2 from the new
+count grew 95 → 96. Routes 187 → 189 (+2 from the new
 endpoints). Flutter widget tests unchanged at 182 (Wave 28
 is backend-only; Flutter UI for export/import is a future
 wave when the URI scheme stabilises). 3 commits (2 doc + 1
-numbered) — the planned single-numbered shape.
+numbered) — the planned single-numbered shape held.
 
 ### Wave 25 — Chatterbox sidecar streaming investigation (deferred 2026-05-05)
 
@@ -2714,13 +2715,85 @@ held end-to-end.
   * **Flutter widget tests 182 unchanged**. Path D is
     backend-only (settings + lifespan).
 
-### Wave 28 (in progress)
+### Wave 28 (✓ shipped)
 
 | # | Tag | SHA | What landed | Tests |
 |---|---|---|---|---:|
-| 1 | (doc)         | this    | Wave 28 mid-wave (start) — register Wave 28 in §10.5 + §10.6 with the Tranche G partial design. Updates §10.1 wave-status. | 0 |
-| 2 | [IMPROVE-162] | TBD     | NEW preset export/import endpoints + repository helpers + v=1 schema versioning + 8 pin tests. | 8 |
-| 3 | (doc)         | TBD     | Wave 28 end-wave retrospective. Bumps 161 → 162. Adds 1 IMPROVE-N row + Wave 28 architectural impact subsection. | 0 |
+| 1 | (doc)         | 5a9670d | Wave 28 mid-wave (start) — register Wave 28 in §10.5 + §10.6 with the Tranche G partial design. Updates §10.1 wave-status. | 0 |
+| 2 | [IMPROVE-162] | cd86253 | NEW preset export/import endpoints + repository helpers + v=1 schema versioning + 8 pin tests. | 8 |
+| 3 | (doc)         | this    | Wave 28 end-wave retrospective. Bumps 161 → 162. Adds 1 IMPROVE-N row + Wave 28 architectural impact subsection. | 0 |
+
+Net: +8 Tier 1 tests (1890 → 1898). Sweep file count grew
+95 → 96. Routes 187 → 189 (+2). Flutter widget tests
+unchanged at 182. 3 commits (2 doc + 1 numbered) — the
+planned single-numbered shape held end-to-end.
+
+### Wave 28 architectural impact
+
+  * **Path E "ship smallest tranche end-to-end" pattern**:
+    Wave 28 closes the SMALLEST tranche from the Wave 18
+    deferred queue (G ~0.5d) end-to-end as a worked example
+    of how future tranches scale. Tranches B (voice
+    persistence ~1d), D (system DAG enrichments ~3d),
+    E (editor advanced ~2d), F (real-world evals ~2d)
+    remain as Wave 29+ candidates. Pattern: when a deferred-
+    queue umbrella spans multiple multi-day tranches, ship
+    the smallest first as proof-of-shape + queue the rest
+    as separate waves rather than partial-shipping
+    multiple tranches at once. Future deferred-queue
+    umbrellas should follow the same approach.
+
+  * **Schema-versioning as a fail-loud-on-shape-drift
+    mechanism**: ``PRESET_EXPORT_SCHEMA_VERSION = 1`` is
+    the canonical fail-loud field per JSON Schema 2025
+    conventions. Future tranches that extend the preset
+    shape (E "per-step metrics caching", F "real-world
+    eval metadata") should bump to v=2 + add a v1→v2
+    import migration. The
+    ``test_schema_version_constant_matches_design_value``
+    pin makes the bump explicit. Pattern holds for any
+    future export/import API: include a schema_version
+    field + pin its value in tests.
+
+  * **Identity-mint-on-import pattern**: Export
+    deliberately EXCLUDES ``id`` and ``created_at``;
+    import mints fresh values for both. Pattern: when
+    exporting database identity into a portable format,
+    strip identity fields the receiver should regenerate.
+    Future tranche-B "voice persistence" follows the
+    same pattern (don't carry the source machine's
+    voice_id into the receiver).
+
+  * **Public-helper convention scaling — repository
+    helpers + module constants**: ``export_preset()`` /
+    ``import_preset()`` / ``PRESET_EXPORT_SCHEMA_VERSION``
+    are 21st + 22nd + 23rd public-helper-style top-level
+    surfaces. Pattern continues to scale across waves —
+    repository helpers (this wave), service methods
+    (Wave 27's ``import_user_preset``), module constants
+    (Waves 24/26/27), top-level functions (Waves
+    18/19/20/21/22/23). Convention is medium-agnostic.
+
+  * **Tier 1 baseline 1898 after Wave 28 close**. Total
+    since Wave 5: 875 → 1898 (+1023 over 23 waves
+    counting Waves 17-28).
+
+  * **Routes 187 → 189 at Wave 28 close**. Wave 28 is
+    the first wave since Wave 19 to add new routes (Wave
+    19 added /partner/import + /partner/import/dry-run +
+    /partner/export, taking the count from 184 to 187).
+    The [IMPROVE-162] fix touched
+    ``src/local_ai_platform/repositories/editor_presets.py``
+    (2 helpers + 1 constant),
+    ``src/local_ai_platform/images/editor.py``
+    (2 service methods), and
+    ``src/local_ai_platform/api/routers/editor.py``
+    (2 route handlers).
+
+  * **Flutter widget tests 182 unchanged**. Wave 28 is
+    backend-only — Flutter UI for export/import (file
+    download / upload buttons) is a future wave when the
+    URI scheme stabilises.
 
 ### Wave 14 architectural impact
 
@@ -3671,12 +3744,12 @@ Wave 24+ priorities at the user's pace.
 ## 10.8 Where to go from here
 
 - **Read chapter 1 → 9 if you haven't.** This chapter is the index; the others have the details.
-- **Pick a Wave 29+ item and ship it** — see §10.5 Wave 18 deferred queue (the trimmed Wave 17 cleanup output: NEW candidates IMPROVE-NEW-2/7/8/10 + Wave-15-audit FILTER_AXIS_TYPES registry + 7 Wave-16-audit-spawned items + Wave-13/12/11/10-audit triggered items + themed tranches B/D/E/F/G + carry-overs gated on §10.7 questions — most of which are now ungated since Wave 20 closed Q1 / Q4 / Q7 / Q15 / Q16). Tranche A (Flutter editor v2) shipped fully in Wave 18 — IMPROVE-138 through IMPROVE-144. Wave 19 Tranche A closed the GDPR Article 20 round-trip with the partner-import host ([IMPROVE-145]) + export button ([IMPROVE-146]). Wave 20 cleanup wave (✓ shipped) closed §10.7 gating questions + shipped a Q7=b deletion ([IMPROVE-147]) + 5 Q4=c TTS pipeline quick wins ([IMPROVE-148] / [IMPROVE-149] / [IMPROVE-150] / [IMPROVE-151] / [IMPROVE-152]). Wave 21 (✓ shipped) closed the cross-cutting startup contention with 3 chain fixes ([IMPROVE-153] / [IMPROVE-154] / [IMPROVE-155]) — ~47s of cold-startup blocking unwound. Wave 22 (✓ shipped) closed the Wave 21-spawned true-async ``_init_mem0`` follow-up via [IMPROVE-156] — httpx.AsyncClient pre-warm of Ollama embed + ``asyncio.create_task`` fire-and-forget Mem0 init at lifespan, moving the ~22s Chain 2 cost off the user's first request entirely. Wave 23 (✓ shipped) closed the Wave 20-spawned Kokoro create_stream piece via [IMPROVE-157] (backend stream_synthesize via ``async for`` over ``Kokoro.create_stream``) + [IMPROVE-158] (Flutter ``buildMiniWavForChunk`` + per-sentence StreamController + ``await for``-driven progressive playback) — ~60-80% TTFA reduction on long-paragraph synth. Wave 24 (✓ shipped) closed the Wave 23-spawned server-side parallel synth-while-LLM-streams piece via [IMPROVE-159] — phrase-boundary fallback in ``PartnerEngine.astream_chat`` firing on ``,`` ``;`` ``:`` once the clause is ≥ 30 chars, so TTS begins synthesising while the LLM keeps streaming later words. Wave 25 (deferred-by-investigation) inspected chatterbox-tts 0.1.7 source and confirmed neither ``ChatterboxTTS.generate`` nor ``ChatterboxTTSTurbo.generate`` has a streaming surface — true streaming requires forking the library (~3-5d), deferred pending upstream feature OR justified fork investment. Wave 26 (✓ shipped) pinned the cold-startup wins from Waves 21+22 + the TTFA wins from Waves 23+24 against future regressions via a new startup-timing benchmark harness ([IMPROVE-160]) — 4 deterministic timing pins on the actual ``api_server.app`` (no mocks). Wave 27 (✓ shipped) closed the Wave 21-residue Path D piece via [IMPROVE-161] — opt-in ``LIFESPAN_EAGER_EDITOR_WARMUP`` flag that pre-builds the editor service at lifespan time so editor-heavy users get hot first /editor/* calls at the cost of ~21s extra boot. Default-off preserves current boot speed. Wave 28 (in progress) closes Tranche G partial — preset JSON export/import via IMPROVE-162 — adding 2 new editor routes (GET /editor/presets/{preset_id}/export + POST /editor/presets/import) with v=1 schema versioning so power users can share their tuned editor recipes via JSON files. The natural Wave 29+ paths: (a) themed Tranche B (voice persistence), D (system DAG enrichments), E (editor advanced), or F (real-world evals) work, or (b) deferred-queue picks (NEW carry-overs / Wave-N-audit items). Items previously considered + rejected are archived in §10.5.1.
-- **Keep `[IMPROVE-N]` references alive.** When you fix one, grep `docs/features/` for that ID and cross out. If you add new ones in future work, number them IMPROVE-162+ (1-161 are taken; the IMPROVE-NEW-* tags graduate to permanent numbers on acceptance) and note them in the originating chapter.
+- **Pick a Wave 29+ item and ship it** — see §10.5 Wave 18 deferred queue (the trimmed Wave 17 cleanup output: NEW candidates IMPROVE-NEW-2/7/8/10 + Wave-15-audit FILTER_AXIS_TYPES registry + 7 Wave-16-audit-spawned items + Wave-13/12/11/10-audit triggered items + themed tranches B/D/E/F/G + carry-overs gated on §10.7 questions — most of which are now ungated since Wave 20 closed Q1 / Q4 / Q7 / Q15 / Q16). Tranche A (Flutter editor v2) shipped fully in Wave 18 — IMPROVE-138 through IMPROVE-144. Wave 19 Tranche A closed the GDPR Article 20 round-trip with the partner-import host ([IMPROVE-145]) + export button ([IMPROVE-146]). Wave 20 cleanup wave (✓ shipped) closed §10.7 gating questions + shipped a Q7=b deletion ([IMPROVE-147]) + 5 Q4=c TTS pipeline quick wins ([IMPROVE-148] / [IMPROVE-149] / [IMPROVE-150] / [IMPROVE-151] / [IMPROVE-152]). Wave 21 (✓ shipped) closed the cross-cutting startup contention with 3 chain fixes ([IMPROVE-153] / [IMPROVE-154] / [IMPROVE-155]) — ~47s of cold-startup blocking unwound. Wave 22 (✓ shipped) closed the Wave 21-spawned true-async ``_init_mem0`` follow-up via [IMPROVE-156] — httpx.AsyncClient pre-warm of Ollama embed + ``asyncio.create_task`` fire-and-forget Mem0 init at lifespan, moving the ~22s Chain 2 cost off the user's first request entirely. Wave 23 (✓ shipped) closed the Wave 20-spawned Kokoro create_stream piece via [IMPROVE-157] (backend stream_synthesize via ``async for`` over ``Kokoro.create_stream``) + [IMPROVE-158] (Flutter ``buildMiniWavForChunk`` + per-sentence StreamController + ``await for``-driven progressive playback) — ~60-80% TTFA reduction on long-paragraph synth. Wave 24 (✓ shipped) closed the Wave 23-spawned server-side parallel synth-while-LLM-streams piece via [IMPROVE-159] — phrase-boundary fallback in ``PartnerEngine.astream_chat`` firing on ``,`` ``;`` ``:`` once the clause is ≥ 30 chars, so TTS begins synthesising while the LLM keeps streaming later words. Wave 25 (deferred-by-investigation) inspected chatterbox-tts 0.1.7 source and confirmed neither ``ChatterboxTTS.generate`` nor ``ChatterboxTTSTurbo.generate`` has a streaming surface — true streaming requires forking the library (~3-5d), deferred pending upstream feature OR justified fork investment. Wave 26 (✓ shipped) pinned the cold-startup wins from Waves 21+22 + the TTFA wins from Waves 23+24 against future regressions via a new startup-timing benchmark harness ([IMPROVE-160]) — 4 deterministic timing pins on the actual ``api_server.app`` (no mocks). Wave 27 (✓ shipped) closed the Wave 21-residue Path D piece via [IMPROVE-161] — opt-in ``LIFESPAN_EAGER_EDITOR_WARMUP`` flag that pre-builds the editor service at lifespan time so editor-heavy users get hot first /editor/* calls at the cost of ~21s extra boot. Default-off preserves current boot speed. Wave 28 (✓ shipped) closed Tranche G partial — preset JSON export/import via [IMPROVE-162] — adding 2 new editor preset endpoints (export + import) with v=1 schema versioning so power users can share their tuned editor recipes via JSON files. The natural Wave 29+ paths: (a) themed Tranche B (voice persistence), D (system DAG enrichments), E (editor advanced), or F (real-world evals) work, or (b) deferred-queue picks (NEW carry-overs / Wave-N-audit items). Items previously considered + rejected are archived in §10.5.1.
+- **Keep `[IMPROVE-N]` references alive.** When you fix one, grep `docs/features/` for that ID and cross out. If you add new ones in future work, number them IMPROVE-163+ (1-162 are taken; the IMPROVE-NEW-* tags graduate to permanent numbers on acceptance) and note them in the originating chapter.
 - **The `MEMORY.md` in `~/.claude/projects/...` contains the feedback rule** that improvement suggestions should cite 2025–2026 sources. Every item here has citations in its origin chapter.
 
 ---
 
 **Guide complete.** `docs/features/README.md` → `01-architecture.md` → `02-llm-infrastructure.md` → `03-chat.md` → `04-agents-tools.md` → `05-systems.md` → `06-image-generation.md` → `07-image-editor.md` → `08-partner.md` → `09-observability.md` → `10-improvements.md` *(this file)*.
 
-Every major feature of the Local AI Platform is now documented end-to-end, with **161** research-backed improvement ideas cross-referenced into one prioritized plan. Waves 1-24 + Wave 26 + Wave 27 fully shipped + Wave 25 deferred-by-investigation + Wave 28 in progress (preset JSON export/import via [IMPROVE-162]); post-Wave-28 backlog in deferred queue.
+Every major feature of the Local AI Platform is now documented end-to-end, with **162** research-backed improvement ideas cross-referenced into one prioritized plan. Waves 1-24 + Wave 26 + Wave 27 + Wave 28 fully shipped + Wave 25 deferred-by-investigation; post-Wave-28 backlog in deferred queue.
