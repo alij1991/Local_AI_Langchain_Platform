@@ -1308,29 +1308,56 @@ class PartnerEngine:
     def get_voice_gender(self) -> str:
         return getattr(self, '_voice_gender', 'female')
 
+    # [IMPROVE-150] Pre-compiled regex patterns for
+    # _preprocess_text_for_tts (Wave 20 Q4=c TTS quick win D).
+    # Per the Wave 20 Q4 audit: the previous code re-compiled 7
+    # regex literals on every call via re.sub(r'...', ...). Python's
+    # re._MAXCACHE=512 helps in steady state but still pays a per-
+    # call hash + lookup cost on the hot path (called once per TTS
+    # sentence, plus once per full-paragraph synthesis). Lifting to
+    # class attributes runs each compile exactly once at class-load
+    # time. The local ``import re`` inside the method is also
+    # dropped — ``re`` is already imported at module-top (line 19).
+    _TTS_MD_BOLD = re.compile(r'\*\*(.+?)\*\*')
+    _TTS_MD_ITALIC = re.compile(r'\*(.+?)\*')
+    _TTS_MD_CODE = re.compile(r'`(.+?)`')
+    _TTS_MD_HEADER = re.compile(r'#{1,6}\s*')
+    _TTS_MD_LINK = re.compile(r'\[(.+?)\]\(.+?\)')
+    _TTS_ELLIPSIS = re.compile(r'\.{3,}')
+    _TTS_EMOJI = re.compile(
+        r'[\U0001F600-\U0001F64F'  # emoticons
+        r'\U0001F300-\U0001F5FF'   # symbols & pictographs
+        r'\U0001F680-\U0001F6FF'   # transport & map symbols
+        r'\U0001F900-\U0001F9FF]'  # supplemental symbols
+    )
+    _TTS_WHITESPACE = re.compile(r'\s+')
+
     def _preprocess_text_for_tts(self, text: str, emotion: str) -> str:
         """Preprocess text to sound more natural in speech.
 
         - Remove markdown formatting
         - Add natural pauses (... → actual pause)
         - Clean up text-only patterns that sound bad when spoken
+
+        [IMPROVE-150] Uses class-level pre-compiled patterns (see
+        the ``_TTS_*`` block above) instead of re-compiling regex
+        literals on every call.
         """
-        import re
         # Remove markdown
-        text = re.sub(r'\*\*(.+?)\*\*', r'\1', text)  # bold
-        text = re.sub(r'\*(.+?)\*', r'\1', text)       # italic
-        text = re.sub(r'`(.+?)`', r'\1', text)         # code
-        text = re.sub(r'#{1,6}\s*', '', text)           # headers
-        text = re.sub(r'\[(.+?)\]\(.+?\)', r'\1', text) # links
+        text = self._TTS_MD_BOLD.sub(r'\1', text)        # bold
+        text = self._TTS_MD_ITALIC.sub(r'\1', text)      # italic
+        text = self._TTS_MD_CODE.sub(r'\1', text)        # code
+        text = self._TTS_MD_HEADER.sub('', text)         # headers
+        text = self._TTS_MD_LINK.sub(r'\1', text)        # links
 
         # Convert text emoticons to natural speech pauses
-        text = re.sub(r'\.{3,}', '...', text)  # normalize ellipsis
+        text = self._TTS_ELLIPSIS.sub('...', text)       # normalize ellipsis
 
         # Remove any remaining emoji (they get read as unicode names)
-        text = re.sub(r'[\U0001F600-\U0001F64F\U0001F300-\U0001F5FF\U0001F680-\U0001F6FF\U0001F900-\U0001F9FF]', '', text)
+        text = self._TTS_EMOJI.sub('', text)
 
         # Clean up whitespace
-        text = re.sub(r'\s+', ' ', text).strip()
+        text = self._TTS_WHITESPACE.sub(' ', text).strip()
 
         return text
 
