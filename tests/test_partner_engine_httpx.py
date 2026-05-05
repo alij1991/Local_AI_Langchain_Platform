@@ -325,3 +325,93 @@ def test_synthesize_sentence_posts_to_synthesize_sentence_endpoint():
     assert out == fake_audio
     assert captured["url"] == "http://127.0.0.1:8282/synthesize_sentence"
     assert captured["body"]["gender"] == "female"
+
+
+# ── [IMPROVE-152] synthesize_sentence_async: same path, async ────
+
+
+def test_synthesize_sentence_async_posts_to_synthesize_sentence_endpoint():
+    """[IMPROVE-152] async sibling routes through ``get_async_client
+    ().post(...)`` — same URL + body shape as the sync version, just
+    awaitable directly from the FastAPI route handler. Pin both:
+    URL must be ``/synthesize_sentence`` (not ``/synthesize``); body
+    must include the gender field.
+    """
+    import asyncio
+
+    captured: dict = {}
+    fake_audio = b"async-sentence-bytes"
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        captured["url"] = str(request.url)
+        captured["body"] = json.loads(request.content.decode())
+        return httpx.Response(200, content=fake_audio)
+
+    set_test_clients(
+        async_=httpx.AsyncClient(transport=httpx.MockTransport(handler)),
+    )
+
+    engine = _bare_engine_with_config()
+    engine._tts_emotional = "http://127.0.0.1:8282"
+    engine._tts_mode = "chatterbox"
+
+    out = asyncio.run(
+        engine.synthesize_sentence_async(
+            "This is a sentence with enough characters.", emotion="happy",
+        )
+    )
+    assert out == fake_audio
+    assert captured["url"] == "http://127.0.0.1:8282/synthesize_sentence"
+    assert captured["body"]["gender"] == "female"
+    assert captured["body"]["text"]  # non-empty preprocessed text
+
+
+def test_synthesize_sentence_async_short_text_returns_none():
+    """[IMPROVE-152] Short text (<5 chars after preprocessing) skips
+    the Chatterbox round-trip and returns None — same predicate as
+    the sync version."""
+    import asyncio
+
+    set_test_clients(async_=httpx.AsyncClient(transport=httpx.MockTransport(
+        lambda req: httpx.Response(500)  # would fail if reached
+    )))
+
+    engine = _bare_engine_with_config()
+    engine._tts_emotional = "http://127.0.0.1:8282"
+    engine._tts_mode = "chatterbox"
+    engine._tts = None  # force no Kokoro fallback
+
+    out = asyncio.run(engine.synthesize_sentence_async("Hi.", emotion="neutral"))
+    assert out is None
+
+
+def test_synthesize_sentence_async_falls_back_to_kokoro_on_chatterbox_error():
+    """[IMPROVE-152] When Chatterbox returns 500, the async path falls
+    back to Kokoro via ``asyncio.to_thread(self._synthesize_kokoro)``
+    — same fallback semantics as the sync version."""
+    import asyncio
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(500, content=b"chatterbox down")
+
+    set_test_clients(async_=httpx.AsyncClient(transport=httpx.MockTransport(handler)))
+
+    kokoro_calls = []
+
+    def fake_kokoro(text: str, voice: str) -> bytes:
+        kokoro_calls.append((text, voice))
+        return b"kokoro-async-fallback"
+
+    engine = _bare_engine_with_config()
+    engine._tts_emotional = "http://127.0.0.1:8282"
+    engine._tts_mode = "chatterbox"
+    engine._tts = object()
+    engine._synthesize_kokoro = fake_kokoro  # type: ignore[method-assign]
+
+    out = asyncio.run(
+        engine.synthesize_sentence_async(
+            "Long enough sentence for Chatterbox.", emotion="neutral"
+        )
+    )
+    assert out == b"kokoro-async-fallback"
+    assert len(kokoro_calls) == 1, "Kokoro fallback must run when async Chatterbox 500s"

@@ -30,7 +30,7 @@ from .user_profile import (
     UserProfile, load_user_profile, save_user_profile,
 )
 from . import memory
-from ..http_client import get_sync_client
+from ..http_client import get_async_client, get_sync_client
 from ..observability import track_event
 from ..observability_events import emit_typed
 from ..registries import load_voice_catalog as _load_voice_catalog_at_import
@@ -1541,11 +1541,80 @@ class PartnerEngine:
                 return self._synthesize_kokoro(text, voice)
             return None
 
+    async def synthesize_sentence_async(self, sentence: str, emotion: str = "neutral") -> bytes | None:
+        """Async sibling of ``synthesize_sentence`` ([IMPROVE-152]).
+
+        Wave 20 Q4=c TTS quick win E: routes the Chatterbox path
+        through ``get_async_client().post()`` so the FastAPI route
+        handler can ``await`` it directly. The previous flow used
+        ``run_in_executor(None, partner.synthesize_sentence, ...)``
+        which (a) paid a ~10-30ms executor-hop per sentence, and
+        (b) occupied a thread-pool slot for the entirety of the
+        HTTP round-trip. With the async path, the worker thread
+        stays free for actually-sync work (Kokoro's
+        ``_tts.create()``); concurrency on the synthesize-sentence
+        endpoint scales 2-4× on multi-user / multi-flow setups.
+
+        Same timeout (8s per [IMPROVE-148]) and same Kokoro
+        fallback semantics as the sync sibling. The Kokoro path
+        runs through ``asyncio.to_thread(self._synthesize_kokoro)``
+        because Kokoro's ``_tts.create()`` is unavoidably sync —
+        no asyncio surface in kokoro_onnx as of 2026-Q2.
+
+        Sources (2025-2026):
+          * HTTPX async client docs:
+            https://www.python-httpx.org/async/ — canonical
+            reference for ``await client.post(...)`` flow.
+          * FastAPI async docs:
+            https://fastapi.tiangolo.com/async/ — pattern
+            recommendation for sync-vs-async route handler
+            choice.
+        """
+        if self._tts_emotional is not None and self._tts_mode == "chatterbox":
+            try:
+                sentence = self._preprocess_text_for_tts(sentence, emotion)
+                if not sentence or len(sentence) < 5:
+                    return None
+                sentence = self._add_paralinguistic_tags(sentence, emotion)
+                exaggeration = self._EMOTION_EXAGGERATION.get(emotion, 0.65)
+
+                server_url = self._tts_emotional
+                client = get_async_client()
+                resp = await client.post(
+                    f"{server_url}/synthesize_sentence",
+                    json={
+                        "text": sentence,
+                        "exaggeration": exaggeration,
+                        "gender": self._voice_gender,
+                    },
+                    timeout=8,  # same as the sync sibling per [IMPROVE-148]
+                )
+                resp.raise_for_status()
+                return resp.content
+            except Exception as e:
+                logger.debug("Chatterbox sentence synthesis (async) failed: %s", e)
+
+        # Fallback to Kokoro for fast per-sentence synthesis.
+        # _tts.create() is sync — to_thread keeps the event loop free.
+        if self._tts is not None:
+            voice = self._get_voice_for_emotion(emotion)
+            sentence = self._preprocess_text_for_tts(sentence, emotion)
+            if sentence:
+                return await asyncio.to_thread(self._synthesize_kokoro, sentence, voice)
+
+        return None
+
     def synthesize_sentence(self, sentence: str, emotion: str = "neutral") -> bytes | None:
         """Synthesize a single sentence — for streaming TTS.
 
         Called per-sentence as the LLM generates. Shorter text = faster synthesis.
         Chatterbox processes a single sentence much faster than the full reply.
+
+        [IMPROVE-152] Sync version retained for backward compat
+        (existing tests + any non-async caller). The
+        ``synthesize_sentence_async`` sibling above is the
+        preferred path for FastAPI route handlers per Wave 20
+        Q4=c quick win E.
         """
         if self._tts_emotional is not None and self._tts_mode == "chatterbox":
             try:

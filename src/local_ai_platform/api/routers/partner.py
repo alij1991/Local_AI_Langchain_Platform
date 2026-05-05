@@ -738,9 +738,17 @@ async def partner_voice_synthesize_sentence(
     if not sentence:
         raise HTTPException(400, "sentence is required")
     t0 = time.monotonic()
-    wav_bytes = await asyncio.get_event_loop().run_in_executor(
-        None, lambda: partner.synthesize_sentence(sentence, emotion)
-    )
+    # [IMPROVE-152] Wave 20 Q4=c TTS quick win E — was
+    # ``await asyncio.get_event_loop().run_in_executor(None,
+    # lambda: partner.synthesize_sentence(sentence, emotion))``.
+    # Now awaits the async sibling directly: Chatterbox path
+    # uses get_async_client().post() (no executor hop, no
+    # thread-pool slot held for the HTTP round-trip); Kokoro
+    # fallback still runs through asyncio.to_thread inside
+    # synthesize_sentence_async since _tts.create() is sync.
+    # Saves ~10-30ms per sentence + 2-4× concurrency on the
+    # endpoint.
+    wav_bytes = await partner.synthesize_sentence_async(sentence, emotion)
     elapsed = time.monotonic() - t0
     if wav_bytes is None:
         raise HTTPException(422, "TTS not available")
