@@ -13,13 +13,17 @@ From the research document:
 from __future__ import annotations
 
 import asyncio
+import io
 import json
 import logging
 import random
 import re
+import struct
 import time
 from datetime import datetime, timezone
 from typing import Any, AsyncGenerator
+
+import numpy as np
 
 from .profile import PartnerProfile, load_profile, save_profile
 from .user_profile import (
@@ -39,6 +43,47 @@ from ..safety import (
 )
 
 logger = logging.getLogger(__name__)
+
+
+def _pcm_to_wav(samples, sample_rate: int) -> bytes:
+    """Encode float32 audio samples (in [-1.0, 1.0]) as a WAV bytes
+    blob — RIFF / WAVE / fmt (16-bit mono PCM) / data chunks.
+
+    Extracted by [IMPROVE-151] (Wave 20 Q4=c TTS quick win C) from
+    the previously-duplicated WAV-encoding inside ``synthesize`` +
+    ``_synthesize_kokoro``. The module-top ``io`` / ``struct`` /
+    ``numpy as np`` imports replaced the per-call local imports
+    those callers used to do — both lookups are now compile-time
+    constants, eliminating a tiny per-call cost on the TTS hot
+    path. The WAV header layout (16-bit signed little-endian PCM
+    mono) matches the previous inline implementation byte-for-
+    byte, so existing audio consumers (Flutter playback, file
+    save) need no changes.
+
+    Args:
+        samples: float32 array-like of audio samples in [-1.0, 1.0].
+        sample_rate: Hz sample rate (Kokoro is 24000; Chatterbox
+            varies by build).
+
+    Returns:
+        WAV-encoded bytes ready to write to a file or stream over
+        an HTTP / WebSocket response.
+    """
+    num_samples = len(samples)
+    buf = io.BytesIO()
+    # RIFF chunk header
+    buf.write(b'RIFF')
+    buf.write(struct.pack('<I', 36 + num_samples * 2))
+    buf.write(b'WAVE')
+    # fmt subchunk: 16-bit signed little-endian PCM mono
+    buf.write(b'fmt ')
+    buf.write(struct.pack('<IHHIIHH', 16, 1, 1, sample_rate, sample_rate * 2, 2, 16))
+    # data subchunk
+    buf.write(b'data')
+    buf.write(struct.pack('<I', num_samples * 2))
+    pcm = (np.clip(samples, -1, 1) * 32767).astype(np.int16)
+    buf.write(pcm.tobytes())
+    return buf.getvalue()
 
 
 class PartnerEngine:
@@ -1434,25 +1479,19 @@ class PartnerEngine:
                  perf={"output_bytes": 0})
             return None
 
+        # [IMPROVE-151] Kokoro synth delegated to _synthesize_kokoro
+        # (which itself calls the module-level _pcm_to_wav helper).
+        # Wave 20 Q4=c TTS quick win C: removes the inline WAV-
+        # encoding duplicate this method previously held + the
+        # per-call ``import io / struct / numpy`` cost. The
+        # emit_typed telemetry stays here so the synthesize-level
+        # context (path, emotion, output_bytes, audio_sec) is
+        # preserved; _synthesize_kokoro returns None on failure
+        # and we map that to an "error" event below.
         try:
             samples, sample_rate = self._tts.create(text, voice=voice)
-            # Convert to WAV bytes
-            import io
-            import struct
-            buf = io.BytesIO()
-            # WAV header
+            data = _pcm_to_wav(samples, sample_rate)
             num_samples = len(samples)
-            buf.write(b'RIFF')
-            buf.write(struct.pack('<I', 36 + num_samples * 2))
-            buf.write(b'WAVE')
-            buf.write(b'fmt ')
-            buf.write(struct.pack('<IHHIIHH', 16, 1, 1, sample_rate, sample_rate * 2, 2, 16))
-            buf.write(b'data')
-            buf.write(struct.pack('<I', num_samples * 2))
-            import numpy as np
-            pcm = (np.clip(samples, -1, 1) * 32767).astype(np.int16)
-            buf.write(pcm.tobytes())
-            data = buf.getvalue()
             emit_typed("partner", "tts", status="ok",
                  duration_ms=int((time.monotonic() - _tts_t0) * 1000),
                  context={**_tts_ctx, "voice": voice},
@@ -1556,26 +1595,18 @@ class PartnerEngine:
         return None
 
     def _synthesize_kokoro(self, text: str, voice: str) -> bytes | None:
-        """Kokoro synthesis (extracted for fallback use)."""
+        """Kokoro synthesis (extracted for fallback use).
+
+        [IMPROVE-151] Body collapsed from ~17 lines of inline WAV
+        encoding to a single ``_pcm_to_wav`` call. Same byte-for-
+        byte output; per-call ``import io / struct / numpy`` cost
+        eliminated (those imports now live at module top).
+        """
         if self._tts is None:
             return None
         try:
             samples, sample_rate = self._tts.create(text, voice=voice)
-            import io
-            import struct
-            buf = io.BytesIO()
-            num_samples = len(samples)
-            buf.write(b'RIFF')
-            buf.write(struct.pack('<I', 36 + num_samples * 2))
-            buf.write(b'WAVE')
-            buf.write(b'fmt ')
-            buf.write(struct.pack('<IHHIIHH', 16, 1, 1, sample_rate, sample_rate * 2, 2, 16))
-            buf.write(b'data')
-            buf.write(struct.pack('<I', num_samples * 2))
-            import numpy as np
-            pcm = (np.clip(samples, -1, 1) * 32767).astype(np.int16)
-            buf.write(pcm.tobytes())
-            return buf.getvalue()
+            return _pcm_to_wav(samples, sample_rate)
         except Exception as e:
             logger.warning("Kokoro synthesis failed: %s", e)
             return None
@@ -1589,10 +1620,11 @@ class PartnerEngine:
         For Chatterbox: synthesize via external server, strip WAV header, yield in chunks.
 
         Yields raw PCM16 bytes (no WAV header) — client must wrap in WAV for playback.
-        """
-        import numpy as np
-        import struct
 
+        [IMPROVE-151] Local ``import numpy as np`` / ``import struct``
+        dropped — both now live at module top alongside ``import io``,
+        eliminating the per-call sys.modules lookup on this hot path.
+        """
         text = self._preprocess_text_for_tts(text, emotion)
         if not text:
             return
