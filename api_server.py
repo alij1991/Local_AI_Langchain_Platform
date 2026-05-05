@@ -6,6 +6,7 @@ Run with:
 """
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import time
@@ -239,6 +240,25 @@ async def lifespan(app: FastAPI):
         logger.info("Image service: %d model(s) found (%d standalone, %d components)", img_count, standalone, components)
     except Exception as exc:
         logger.warning("Image service model scan failed at startup: %s", exc)
+
+    # [IMPROVE-155] Wave 21 Chain 3 fix — eager hardware-profile
+    # warm-up. Pre-Wave-21, ``ImageGenerationService._get_hardware
+    # _profile()`` was lazily called on first ``/images/runtime`` /
+    # ``/models/chat-capable`` / ``/tools`` request. The detection
+    # work (cpuinfo subprocess + torch.cuda init + 8 module-import
+    # probes) takes ~4.7s and held the GIL through Python imports,
+    # serializing 3 endpoints behind it per the user's startup
+    # log. Running it inside lifespan via ``asyncio.to_thread``
+    # amortises the cost to startup time (parallel with the model
+    # scan above + VRAM coordinator setup that already runs here)
+    # so first ``/images/runtime`` returns hot. The ``to_thread``
+    # wrap keeps the event loop free during the probe; other
+    # lifespan tasks can interleave.
+    try:
+        await asyncio.to_thread(image_service._get_hardware_profile)
+        logger.info("Hardware profile pre-detected at startup (Wave 21 IMPROVE-155)")
+    except Exception as exc:
+        logger.warning("Hardware profile pre-detection failed at startup: %s", exc)
 
     # Restore saved agents from DB
     agents_loaded = 0
