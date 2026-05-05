@@ -21,13 +21,27 @@ build their target on first use and cache it on a private
 ``app.state._X`` slot. They replace the pre-[IMPROVE-5] module-global
 factories ``_get_editor()`` / ``_get_partner()``.
 
+[IMPROVE-153] / [IMPROVE-154] (Wave 21) — both lazy-init helpers
+converted to ``async def`` and run their heavy first-call work
+(module import + service construction) under ``await asyncio.to_thread
+(...)``. Pre-Wave-21, the sync versions blocked the event loop +
+held the GIL through the import lock for 3-22s on cold first
+request — the user's startup log showed 7 endpoints all serializing
+at exactly 20.94s behind the editor-service import. Async +
+to_thread releases the event loop's awaiting coroutine so other
+requests can be dispatched concurrently while the heavy import
+runs in a worker thread.
+
 References (2025–2026):
 * FastAPI dependency injection — https://fastapi.tiangolo.com/tutorial/dependencies/
 * FastAPI bigger applications — https://fastapi.tiangolo.com/tutorial/bigger-applications/
+* FastAPI async docs — https://fastapi.tiangolo.com/async/
 * Starlette ``app.state`` — https://www.starlette.io/applications/#storing-state-on-the-app-instance
+* Python asyncio.to_thread — https://docs.python.org/3/library/asyncio-task.html#asyncio.to_thread
 """
 from __future__ import annotations
 
+import asyncio
 from typing import Any
 
 from fastapi import Depends, HTTPException, Request
@@ -146,20 +160,39 @@ def get_image_service_or_none(request: Request) -> ImageGenerationService | None
 # ── Lazy-init variants: build-on-first-use, cache on app.state ─────
 
 
-def get_editor_service(request: Request):
+def _build_editor_service():
+    """Sync helper that does the heavy ``import + construct``
+    work for ``get_editor_service``. Extracted so it can run
+    inside ``asyncio.to_thread`` from the async Depends factory."""
+    from local_ai_platform.images.editor import ImageEditorService
+    return ImageEditorService()
+
+
+async def get_editor_service(request: Request):
     """Lazy-init the ImageEditorService on ``app.state`` and return it.
 
     [IMPROVE-5] Replaces the module-global ``_editor_service`` +
     ``_get_editor()`` factory. First call on a cold process builds
     the service and caches it on ``app.state._editor_service``;
-    subsequent calls reuse it. The service is heavy-ish (imports
-    OpenCV / PIL plugins), so the factory pattern is preserved —
-    we just move the cache slot off the module global.
+    subsequent calls reuse it.
+
+    [IMPROVE-153] (Wave 21) — Converted to ``async def`` + heavy
+    first-call work runs under ``await asyncio.to_thread(...)``.
+    The pre-Wave-21 sync version blocked the event loop while
+    importing the editor module's transitive chain (PIL plugins,
+    OpenCV bindings, ai_enhance's diffusers/transformers/torch
+    dependencies that re-export through the editor namespace) —
+    a 21s cold-import that serialized 7+ endpoints behind the
+    same import-lock + GIL contention. The async wrapper yields
+    the event loop during the import so other coroutines can
+    make progress (each gets a turn during I/O-induced GIL
+    releases inside Python's importlib). Subsequent calls return
+    the cached instance synchronously through the ``await`` —
+    zero overhead vs. the sync path on the hot path.
     """
     svc = getattr(request.app.state, "_editor_service", None)
     if svc is None:
-        from local_ai_platform.images.editor import ImageEditorService
-        svc = ImageEditorService()
+        svc = await asyncio.to_thread(_build_editor_service)
         request.app.state._editor_service = svc
     return svc
 

@@ -30,6 +30,7 @@ References (2025–2026):
 """
 from __future__ import annotations
 
+import asyncio
 import time
 from pathlib import Path
 from typing import Any
@@ -241,7 +242,13 @@ async def get_hf_token_status(
         return {"configured": False, "username": None}
     try:
         from huggingface_hub import whoami
-        info = whoami(token=token)
+        # [IMPROVE-153] Wave 21 Chain 1 fix — whoami() is a sync
+        # huggingface.co HTTP call. Pre-Wave-21 it ran inside this
+        # async route's body, blocking the event loop for 1-2s
+        # (or longer if HF Hub is slow/down). asyncio.to_thread
+        # yields the loop so other requests can be dispatched
+        # while the HTTP probe runs in a worker thread.
+        info = await asyncio.to_thread(whoami, token=token)
         return {"configured": True, "username": info.get("name") or info.get("fullname", "unknown")}
     except Exception:
         return {"configured": True, "username": None}
@@ -278,7 +285,11 @@ async def set_hf_token(
     username = None
     try:
         from huggingface_hub import whoami
-        info = whoami(token=token)
+        # [IMPROVE-153] Wave 21 Chain 1 fix — sync HTTP call moved
+        # to a worker thread so the event loop stays responsive
+        # during the validation round-trip. Same fix as the GET
+        # handler above.
+        info = await asyncio.to_thread(whoami, token=token)
         username = info.get("name") or info.get("fullname")
     except Exception as exc:
         raise HTTPException(401, f"Invalid token: {exc}")
