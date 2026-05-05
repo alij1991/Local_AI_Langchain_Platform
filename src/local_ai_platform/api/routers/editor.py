@@ -308,6 +308,54 @@ async def editor_apply_preset(
         raise HTTPException(400, str(e))
 
 
+# ── [IMPROVE-162] Wave 28 — preset export/import (Tranche G) ────
+
+
+@router.get("/editor/presets/{preset_id}/export")
+async def editor_export_preset(
+    preset_id: str,
+    editor=Depends(get_editor_service),
+):
+    """[IMPROVE-162] Export a preset as a JSON payload suitable for
+    sharing or backup.
+
+    Returns ``{schema_version: 1, name, description, steps,
+    exported_at}``. ``id`` and ``created_at`` are deliberately
+    EXCLUDED — the importing side mints fresh values, so a
+    shared preset shouldn't carry the original's identity into
+    the receiver's database.
+
+    404 when no preset exists at the id.
+    """
+    payload = editor.export_user_preset(preset_id)
+    if payload is None:
+        raise HTTPException(404, f"No preset with id {preset_id!r}")
+    return payload
+
+
+@router.post("/editor/presets/import")
+async def editor_import_preset(
+    body: dict[str, Any],
+    editor=Depends(get_editor_service),
+):
+    """[IMPROVE-162] Import a preset from an exported JSON payload.
+
+    Body must include ``schema_version`` (currently must be 1),
+    ``name`` (non-empty after strip), ``steps`` (list of dicts).
+    ``description`` is optional.
+
+    Returns the new preset dict (with fresh id + created_at).
+
+    400 on schema mismatch / missing / malformed fields. The
+    repository's ``import_preset`` raises ValueError; caller
+    maps to 400 with the message.
+    """
+    try:
+        return editor.import_user_preset(body)
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+
+
 @router.post("/editor/{session_id}/restore")
 async def editor_restore(
     session_id: str,

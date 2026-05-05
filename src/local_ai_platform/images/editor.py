@@ -573,6 +573,26 @@ class ImageEditorService:
         from local_ai_platform.repositories.editor_presets import delete_preset
         return delete_preset(preset_id)
 
+    def export_user_preset(self, preset_id: str) -> dict[str, Any] | None:
+        """[IMPROVE-162] Build the exportable JSON shape for a
+        preset. Returns None when no preset with that id exists
+        (caller maps to 404). See repository docstring for the
+        exact shape (schema_version + name + description + steps
+        + exported_at; id + created_at deliberately excluded so
+        the importing side mints fresh values).
+        """
+        from local_ai_platform.repositories.editor_presets import export_preset
+        return export_preset(preset_id)
+
+    def import_user_preset(self, payload: dict[str, Any]) -> dict[str, Any]:
+        """[IMPROVE-162] Create a new preset from an exported JSON
+        payload. Raises ValueError on schema mismatch / missing
+        fields / wrong types (caller maps to 400). Returns the new
+        preset dict (with fresh id + created_at).
+        """
+        from local_ai_platform.repositories.editor_presets import import_preset
+        return import_preset(payload)
+
     # ── Edit Operations ───────────────────────────────────────────
 
     def _restore_session(self, session_id: str) -> EditSession | None:

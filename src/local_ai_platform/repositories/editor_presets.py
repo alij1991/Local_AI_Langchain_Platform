@@ -131,3 +131,87 @@ def delete_preset(preset_id: str) -> bool:
         return (cur.rowcount or 0) > 0
     finally:
         conn.close()
+
+
+# ── [IMPROVE-162] Wave 28 — preset export/import (Tranche G partial) ──
+
+
+# Schema version pinned at 1 for all preset exports. If a future
+# wave adds optional fields (e.g. tags, author metadata, cropped-
+# patch annotations from Tranche E) bump to 2 + add a v1→v2 import
+# migration here. v1 is the canonical baseline.
+PRESET_EXPORT_SCHEMA_VERSION = 1
+
+
+def export_preset(preset_id: str) -> dict[str, Any] | None:
+    """[IMPROVE-162] Build the exportable JSON shape for a preset.
+
+    Returns ``{schema_version, name, description, steps,
+    exported_at}`` ready to be serialised to a downloadable
+    file. ``id`` and ``created_at`` are deliberately EXCLUDED
+    from the export so the importing side can mint fresh
+    values — sharing a preset shouldn't carry the original's
+    creation timestamp into the receiver's database.
+
+    Returns None when no preset with that id exists; caller
+    maps to 404.
+
+    Sources (2025-2026):
+      * JSON-Schema versioning conventions (2025):
+        https://json-schema.org/draft/2020-12/draft-bhutton-json-schema-00
+        — the ``$schema`` / ``schema_version`` field convention
+        used by import handlers to dispatch on shape.
+    """
+    preset = get_preset(preset_id)
+    if preset is None:
+        return None
+    return {
+        "schema_version": PRESET_EXPORT_SCHEMA_VERSION,
+        "name": preset["name"],
+        "description": preset["description"],
+        "steps": preset["steps"],
+        "exported_at": _now_iso(),
+    }
+
+
+def import_preset(payload: dict[str, Any]) -> dict[str, Any]:
+    """[IMPROVE-162] Create a new preset from an exported JSON
+    payload.
+
+    Validates:
+      * ``schema_version`` matches ``PRESET_EXPORT_SCHEMA_VERSION``
+        (raises ValueError on mismatch — caller maps to 400).
+      * ``name`` is a non-empty string after strip.
+      * ``steps`` is a list of dicts (basic shape check; deeper
+        validation happens at apply time, mirroring create_preset's
+        design).
+
+    Returns the new preset dict (with fresh id + created_at).
+    """
+    if not isinstance(payload, dict):
+        raise ValueError(
+            f"Import payload must be a JSON object; got {type(payload).__name__}",
+        )
+    schema_version = payload.get("schema_version")
+    if schema_version != PRESET_EXPORT_SCHEMA_VERSION:
+        raise ValueError(
+            f"Unsupported schema_version: {schema_version!r} "
+            f"(expected {PRESET_EXPORT_SCHEMA_VERSION})",
+        )
+    name = (payload.get("name") or "").strip()
+    if not name:
+        raise ValueError("Imported preset name cannot be empty")
+    description = (payload.get("description") or "").strip()
+    steps = payload.get("steps")
+    if not isinstance(steps, list):
+        raise ValueError(
+            f"Imported preset 'steps' must be a list; got "
+            f"{type(steps).__name__}",
+        )
+    for i, step in enumerate(steps):
+        if not isinstance(step, dict):
+            raise ValueError(
+                f"Step {i} must be a dict; got {type(step).__name__}",
+            )
+
+    return create_preset(name=name, description=description, steps=steps)
