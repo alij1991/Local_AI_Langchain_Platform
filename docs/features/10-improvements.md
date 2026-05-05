@@ -8,9 +8,9 @@
 
 ## 10.1 Summary
 
-- **159 improvements** flagged inline as `[IMPROVE-N]` in chapters 1–9 + the Wave 5/6/7/8/9/10/11/12/13/14/15/16/18/19/20/21/22/23/24 audits (NEW from Wave 6 audit: 71/72/73/74; NEW from Wave 7: 75/76/77/78/79/80/81/82; NEW from Wave 8: 83/84/85/86/87/88; NEW from Wave 9: 89/90/91/92/93/94; NEW from Wave 10: 95/96/97/98/99/100; NEW from Wave 11: 101/102/103/104/105/106; NEW from Wave 12: 107/108/109/110/111/112; NEW from Wave 13: 113/114/115/116/117/118; NEW from Wave 14: 119/120/121/122/123/124/125; NEW from Wave 15: 126/127/128/129/130/131; NEW from Wave 16: 132/133/134/135/136/137; NEW from Wave 18: 138/139/140/141/142/143/144; NEW from Wave 19 Tranche A: 145/146; NEW from Wave 20 cleanup wave: 147/148/149/150/151/152; NEW from Wave 21 startup-contention fix: 153/154/155; NEW from Wave 22 true-async _init_mem0: 156; NEW from Wave 23 Kokoro create_stream chunked TTFA: 157/158; NEW from Wave 24 server-side parallel synth-while-LLM-streams: 159).
+- **160 improvements** flagged inline as `[IMPROVE-N]` in chapters 1–9 + the Wave 5/6/7/8/9/10/11/12/13/14/15/16/18/19/20/21/22/23/24/26 audits (NEW from Wave 6 audit: 71/72/73/74; NEW from Wave 7: 75/76/77/78/79/80/81/82; NEW from Wave 8: 83/84/85/86/87/88; NEW from Wave 9: 89/90/91/92/93/94; NEW from Wave 10: 95/96/97/98/99/100; NEW from Wave 11: 101/102/103/104/105/106; NEW from Wave 12: 107/108/109/110/111/112; NEW from Wave 13: 113/114/115/116/117/118; NEW from Wave 14: 119/120/121/122/123/124/125; NEW from Wave 15: 126/127/128/129/130/131; NEW from Wave 16: 132/133/134/135/136/137; NEW from Wave 18: 138/139/140/141/142/143/144; NEW from Wave 19 Tranche A: 145/146; NEW from Wave 20 cleanup wave: 147/148/149/150/151/152; NEW from Wave 21 startup-contention fix: 153/154/155; NEW from Wave 22 true-async _init_mem0: 156; NEW from Wave 23 Kokoro create_stream chunked TTFA: 157/158; NEW from Wave 24 server-side parallel synth-while-LLM-streams: 159; NEW from Wave 26 startup-timing benchmark harness: 160).
 - **10 themes** — security, architecture, observability, tracing, UX, memory & context, model & inference, background tasks, voice, and tools/MCP.
-- **24 waves fully shipped + Wave 25 deferred-by-investigation + Wave 26 in progress** (Waves 1-16 numbered + Wave 17 doc-only cleanup + Wave 18 Tranche A Flutter editor v2 + Wave 19 Tranche A partner-import host + Wave 20 cleanup wave: §10.7 walkthrough closing Q1/Q4/Q7/Q15/Q16 + 1 deletion + 5 TTS quick wins + Wave 21 startup-contention fix targeting the 3 lazy-init chains the user's startup log surfaced + Wave 22 true-async _init_mem0 — IMPROVE-156 background-task warmup at lifespan via httpx.AsyncClient pre-warm of nomic-embed-text + asyncio.create_task fire-and-forget Mem0 init, moving the ~22s Chain 2 cost OFF the user's first request entirely + Wave 23 Kokoro create_stream chunked TTFA — IMPROVE-157 backend stream_synthesize via kokoro_onnx.create_stream + IMPROVE-158 Flutter progressive playback delivering ~60-80% TTFA win on long-paragraph synth + Wave 24 server-side parallel synth-while-LLM-streams — IMPROVE-159 phrase-boundary fallback in PartnerEngine.astream_chat firing on ``,`` ``;`` ``:`` once a clause is ≥ 30 chars long, so TTS can begin synthesising while the LLM is still emitting later words + Wave 25 Chatterbox sidecar streaming investigation — chatterbox-tts 0.1.7 has no streaming surface in either ChatterboxTTS.generate or ChatterboxTTSTurbo.generate; deferred pending upstream feature OR justified 3-5d fork investment); **1** standing in deferred queues (post-Wave-25 backlog).
+- **25 waves fully shipped + Wave 25 deferred-by-investigation** (Waves 1-16 numbered + Wave 17 doc-only cleanup + Wave 18 Tranche A Flutter editor v2 + Wave 19 Tranche A partner-import host + Wave 20 cleanup wave: §10.7 walkthrough closing Q1/Q4/Q7/Q15/Q16 + 1 deletion + 5 TTS quick wins + Wave 21 startup-contention fix targeting the 3 lazy-init chains the user's startup log surfaced + Wave 22 true-async _init_mem0 — IMPROVE-156 background-task warmup at lifespan via httpx.AsyncClient pre-warm of nomic-embed-text + asyncio.create_task fire-and-forget Mem0 init, moving the ~22s Chain 2 cost OFF the user's first request entirely + Wave 23 Kokoro create_stream chunked TTFA — IMPROVE-157 backend stream_synthesize via kokoro_onnx.create_stream + IMPROVE-158 Flutter progressive playback delivering ~60-80% TTFA win on long-paragraph synth + Wave 24 server-side parallel synth-while-LLM-streams — IMPROVE-159 phrase-boundary fallback in PartnerEngine.astream_chat firing on ``,`` ``;`` ``:`` once a clause is ≥ 30 chars long, so TTS can begin synthesising while the LLM is still emitting later words + Wave 25 Chatterbox sidecar streaming investigation — chatterbox-tts 0.1.7 has no streaming surface in either ChatterboxTTS.generate or ChatterboxTTSTurbo.generate; deferred pending upstream feature OR justified 3-5d fork investment); **1** standing in deferred queues (post-Wave-25 backlog).
 
 All improvements are traceable back to a chapter + a 2025–2026 citation. This chapter is pure planning — *what* + *why this order*; *how* is in each origin chapter.
 
@@ -178,7 +178,7 @@ Smaller items that improve day-to-day use.
 
 ---
 
-## 10.4 The complete table (all 159)
+## 10.4 The complete table (all 160)
 
 Sortable if you paste into a spreadsheet. Chapter column links back to the originating doc.
 
@@ -343,10 +343,11 @@ Sortable if you paste into a spreadsheet. Chapter column links back to the origi
 | 157 | 8 | ✓ Backend stream_synthesize via kokoro_onnx.create_stream — Kokoro path emits PCM batches AS THEY'RE PRODUCED instead of full-synth-then-chunk (Wave 23 — first chunk arrives ~60-80% sooner on long-paragraph synth) | ⋆⋆⋆ | 🔨 | Voice |
 | 158 | 8 | ✓ Flutter progressive playback for chunked TTS — buildMiniWavForChunk top-level helper + per-sentence StreamController fan-out + audioplayers play-as-they-arrive consumer (Wave 23 — pairs with IMPROVE-157 to deliver end-to-end TTFA win) | ⋆⋆⋆ | 🔨🔨 | Voice |
 | 159 | 8 | ✓ Phrase-boundary fallback in PartnerEngine.astream_chat — fires sentence_complete on ``,`` ``;`` ``:`` once clause ≥ 30 chars, so TTS begins synthesising while the LLM is still emitting later words (Wave 24 — closes the server-side parallel synth-while-LLM-streams piece flagged in §10.6 Wave 23 architectural impact) | ⋆⋆⋆ | 🔨 | Voice |
+| 160 | 1 | ✓ Startup-timing benchmark harness — 4 timing pins (lifespan ≤ 30s + cold /editor/operations/list ≤ 5s + cold /images/runtime ≤ 15s + threshold-constants pin) on real ``api_server.app`` (no mocks) with LOCAL_AI_BENCHMARK_DISABLE / LOCAL_AI_BENCHMARK_SLOW env-var opt-outs (Wave 26 — pins the cold-startup wins from Waves 21+22 + the TTFA wins from Waves 23+24 against future regressions) | ⋆⋆ | 🔨 | Architecture |
 
 *Impact for [IMPROVE-59] is ⋆⋆⋆⋆⋆ if the app is ever distributed, ⋆⋆ if it stays local-only.
 
-**Legend:** A ``✓`` prefix marks items that have shipped. See §10.6 for the Wave 5 / 6 / 7 / 8 / 9 / 10 / 11 / 12 / 13 / 14 / 15 / 16 / 17 / 18 / 19 / 20 / 21 / 22 / 23 / 24 retrospective.
+**Legend:** A ``✓`` prefix marks items that have shipped. See §10.6 for the Wave 5 / 6 / 7 / 8 / 9 / 10 / 11 / 12 / 13 / 14 / 15 / 16 / 17 / 18 / 19 / 20 / 21 / 22 / 23 / 24 / 26 retrospective.
 
 ---
 
@@ -1170,7 +1171,7 @@ progressive playback for cumulative overlap across
 multi-sentence replies. 3 commits (2 doc + 1 numbered) —
 the planned single-numbered shape held.
 
-### Wave 26 — Startup-timing benchmark harness (in progress 2026-05-05)
+### Wave 26 — Startup-timing benchmark harness (✓ shipped 2026-05-05)
 
 Theme: pin the cold-startup wins from Waves 21 + 22 + 23 + 24
 against future regressions. Wave 21 ([IMPROVE-153] /
@@ -1190,17 +1191,17 @@ Wave 26 is single-numbered (one NEW test file with 4 pins)
 
 | # | Tag | SHA | What landed | Tests |
 |---|---|---|---|---:|
-| 1 | (doc)         | this    | Wave 26 mid-wave (start) — register Wave 26 in §10.5 + §10.6 with the benchmark-harness design + threshold rationale (30s lifespan / 5s editor-ops / 15s images-runtime + 3x slow-hardware multiplier + LOCAL_AI_BENCHMARK_DISABLE skip-all flag). Updates §10.1 wave-status. | 0 |
-| 2 | [IMPROVE-160] | TBD     | NEW ``tests/test_startup_timing_benchmarks.py`` with 4 pins: lifespan completion within threshold + cold /editor/operations/list within threshold + cold /images/runtime within threshold + threshold-constants pin. Real ``TestClient(api_server.app)`` (no mocks) so any blocking-work re-introduction lights up here. Two env-var opt-outs: LOCAL_AI_BENCHMARK_DISABLE skips all timing pins (CI w/o GPU); LOCAL_AI_BENCHMARK_SLOW=1 multiplies thresholds 3x for slow hardware. | 4 |
-| 3 | (doc)         | TBD     | Wave 26 end-wave retrospective. Bumps 159 → 160 in §10.1 + §10.4. Adds 1 IMPROVE-N row (160). Fills in Wave 26 mid-wave SHA placeholder + IMPROVE-160 SHA. Flips Wave 26 status (in progress → ✓ shipped). NEW Wave 26 architectural impact subsection. | 0 |
+| 1 | (doc)         | d0c033c | Wave 26 mid-wave (start) — register Wave 26 in §10.5 + §10.6 with the benchmark-harness design + threshold rationale (30s lifespan / 5s editor-ops / 15s images-runtime + 3x slow-hardware multiplier + LOCAL_AI_BENCHMARK_DISABLE skip-all flag). Updates §10.1 wave-status. | 0 |
+| 2 | [IMPROVE-160] | 947838b | NEW ``tests/test_startup_timing_benchmarks.py`` with 4 pins: lifespan completion within threshold + cold /editor/operations/list within threshold + cold /images/runtime within threshold + threshold-constants pin. Real ``TestClient(api_server.app)`` (no mocks) so any blocking-work re-introduction lights up here. Two env-var opt-outs: LOCAL_AI_BENCHMARK_DISABLE skips all timing pins (CI w/o GPU); LOCAL_AI_BENCHMARK_SLOW=1 multiplies thresholds 3x for slow hardware. | 4 |
+| 3 | (doc)         | this    | Wave 26 end-wave retrospective. Bumps 159 → 160 in §10.1 + §10.4. Adds 1 IMPROVE-N row (160). Fills in Wave 26 mid-wave SHA placeholder (d0c033c) + IMPROVE-160 SHA (947838b). Flips Wave 26 status (in progress → ✓ shipped). NEW Wave 26 architectural impact subsection. | 0 |
 
-Net (planned): +4 Tier 1 tests (1882 → 1886) from the new
+Net: +4 Tier 1 tests (1882 → 1886) from the new
 ``tests/test_startup_timing_benchmarks.py``. Sweep file count
-grows 93 → 94. Flutter widget tests unchanged at 182. The
+grew 93 → 94. Flutter widget tests unchanged at 182. The
 user-visible win is REGRESSION PREVENTION: no new feature ships,
 but Waves 21-24's cold-startup + TTFA wins are now load-bearing
 contracts that test failures will surface on. 3 commits (2 doc +
-1 numbered) — the planned single-numbered shape.
+1 numbered) — the planned single-numbered shape held end-to-end.
 
 ### Wave 25 — Chatterbox sidecar streaming investigation (deferred 2026-05-05)
 
@@ -2472,13 +2473,85 @@ numbered shape held end-to-end.
   * **Flutter widget tests 182 unchanged**. No code
     changes.
 
-### Wave 26 (in progress)
+### Wave 26 (✓ shipped)
 
 | # | Tag | SHA | What landed | Tests |
 |---|---|---|---|---:|
-| 1 | (doc)         | this    | Wave 26 mid-wave (start) — register Wave 26 in §10.5 + §10.6 with the benchmark-harness design + threshold rationale. Updates §10.1 wave-status. | 0 |
-| 2 | [IMPROVE-160] | TBD     | NEW ``tests/test_startup_timing_benchmarks.py`` — 4 timing pins (lifespan / editor-ops / images-runtime / threshold-constants) + 2 env-var opt-outs (LOCAL_AI_BENCHMARK_DISABLE / LOCAL_AI_BENCHMARK_SLOW). | 4 |
-| 3 | (doc)         | TBD     | Wave 26 end-wave retrospective. Bumps 159 → 160. Adds 1 IMPROVE-N row + Wave 26 architectural impact subsection. | 0 |
+| 1 | (doc)         | d0c033c | Wave 26 mid-wave (start) — register Wave 26 in §10.5 + §10.6 with the benchmark-harness design + threshold rationale. Updates §10.1 wave-status. | 0 |
+| 2 | [IMPROVE-160] | 947838b | NEW ``tests/test_startup_timing_benchmarks.py`` — 4 timing pins (lifespan / editor-ops / images-runtime / threshold-constants) + 2 env-var opt-outs (LOCAL_AI_BENCHMARK_DISABLE / LOCAL_AI_BENCHMARK_SLOW). | 4 |
+| 3 | (doc)         | this    | Wave 26 end-wave retrospective. Bumps 159 → 160. Adds 1 IMPROVE-N row + Wave 26 architectural impact subsection. | 0 |
+
+Net: +4 Tier 1 tests (1882 → 1886). Sweep file count grew
+93 → 94. Flutter widget tests unchanged at 182. 3 commits
+(2 doc + 1 numbered) — the planned single-numbered shape
+held end-to-end.
+
+### Wave 26 architectural impact
+
+  * **Regression-prevention as a wave shape**: Wave 26 is
+    the roadmap's first wave whose primary deliverable is
+    NOT a new feature but a SAFETY NET around prior waves'
+    wins. Pattern: when a sequence of consecutive waves
+    delivers a load-bearing contract that the user feels
+    immediately on regression but no Tier 1 pin guards,
+    the next wave should be a benchmark-harness wave
+    locking those wins in place. Future application: any
+    multi-wave sequence that touches latency / startup /
+    response-time (e.g., a future "image generation
+    pipeline" wave family) should end with a benchmark
+    pin wave.
+
+  * **Threshold-from-baseline methodology (extension of
+    the audit-vs-source family)**: Waves 21-25 used
+    audit-vs-source to anchor design DECISIONS (mem0 init
+    cost, kokoro async surface, kokoro prosody floor,
+    chatterbox no-streaming-surface). Wave 26 extends the
+    methodology to anchor TEST THRESHOLDS — each pin's
+    threshold (30s / 5s / 15s) is anchored in a
+    measurable post-fix baseline + headroom multiplier
+    rather than a guess. The 30/5/15 split corresponds to
+    6x / 10x / 2x headroom over the relevant baseline,
+    chosen to catch order-of-magnitude regressions while
+    tolerating 2-3x environmental spread.
+
+  * **Benchmark harness opt-out pattern (env-var
+    skipping)**: ``LOCAL_AI_BENCHMARK_DISABLE`` +
+    ``LOCAL_AI_BENCHMARK_SLOW`` are the first env-var-
+    based opt-outs in the Tier 1 sweep. The pattern: when
+    a test depends on hardware characteristics (timing,
+    GPU presence) that vary across CI environments, gate
+    via an env-var flag rather than skipping the test
+    file from the sweep entirely. Future hardware-
+    sensitive tests (e.g., GPU-based image-generation
+    benchmarks if they ever land) should follow the same
+    pattern.
+
+  * **Public-helper convention scaling — module
+    constants**: ``_LIFESPAN_THRESHOLD_SEC`` /
+    ``_EDITOR_OPS_THRESHOLD_SEC`` /
+    ``_IMAGES_RUNTIME_THRESHOLD_SEC`` are 17th + 18th +
+    19th public-helper-style top-level surfaces. The
+    convention "pin contract values publicly so tests can
+    import + assert against them" continues to scale —
+    Wave 24 introduced module-level
+    ``_PHRASE_MIN_CHARS`` / ``_PHRASE_BOUNDARIES``; Wave
+    26 does the same for benchmark thresholds. Both have
+    a corresponding ``test_*_constants_match_design_
+    values`` pin asserting the values directly.
+
+  * **Tier 1 baseline 1886 after Wave 26 close**. Total
+    since Wave 5: 875 → 1886 (+1011 over 21 waves
+    counting Waves 17-26).
+
+  * **Routes 187 unchanged from Wave 24 close**. Wave 26
+    is a test-only addition — ``tests/test_startup_
+    timing_benchmarks.py`` is the entire footprint. The
+    benchmark harness calls existing routes (GET
+    /editor/operations/list, GET /images/runtime) but
+    doesn't add any new routes.
+
+  * **Flutter widget tests 182 unchanged**. Path C is
+    backend-only.
 
 ### Wave 14 architectural impact
 
@@ -3429,12 +3502,12 @@ Wave 24+ priorities at the user's pace.
 ## 10.8 Where to go from here
 
 - **Read chapter 1 → 9 if you haven't.** This chapter is the index; the others have the details.
-- **Pick a Wave 27+ item and ship it** — see §10.5 Wave 18 deferred queue (the trimmed Wave 17 cleanup output: NEW candidates IMPROVE-NEW-2/7/8/10 + Wave-15-audit FILTER_AXIS_TYPES registry + 7 Wave-16-audit-spawned items + Wave-13/12/11/10-audit triggered items + themed tranches B/D/E/F/G + carry-overs gated on §10.7 questions — most of which are now ungated since Wave 20 closed Q1 / Q4 / Q7 / Q15 / Q16). Tranche A (Flutter editor v2) shipped fully in Wave 18 — IMPROVE-138 through IMPROVE-144. Wave 19 Tranche A closed the GDPR Article 20 round-trip with the partner-import host ([IMPROVE-145]) + export button ([IMPROVE-146]). Wave 20 cleanup wave (✓ shipped) closed §10.7 gating questions + shipped a Q7=b deletion ([IMPROVE-147]) + 5 Q4=c TTS pipeline quick wins ([IMPROVE-148] / [IMPROVE-149] / [IMPROVE-150] / [IMPROVE-151] / [IMPROVE-152]). Wave 21 (✓ shipped) closed the cross-cutting startup contention with 3 chain fixes ([IMPROVE-153] / [IMPROVE-154] / [IMPROVE-155]) — ~47s of cold-startup blocking unwound. Wave 22 (✓ shipped) closed the Wave 21-spawned true-async ``_init_mem0`` follow-up via [IMPROVE-156] — httpx.AsyncClient pre-warm of Ollama embed + ``asyncio.create_task`` fire-and-forget Mem0 init at lifespan, moving the ~22s Chain 2 cost off the user's first request entirely. Wave 23 (✓ shipped) closed the Wave 20-spawned Kokoro create_stream piece via [IMPROVE-157] (backend stream_synthesize via ``async for`` over ``Kokoro.create_stream``) + [IMPROVE-158] (Flutter ``buildMiniWavForChunk`` + per-sentence StreamController + ``await for``-driven progressive playback) — ~60-80% TTFA reduction on long-paragraph synth. Wave 24 (✓ shipped) closed the Wave 23-spawned server-side parallel synth-while-LLM-streams piece via [IMPROVE-159] — phrase-boundary fallback in ``PartnerEngine.astream_chat`` firing on ``,`` ``;`` ``:`` once the clause is ≥ 30 chars, so TTS begins synthesising while the LLM keeps streaming later words. Wave 25 (deferred-by-investigation) inspected chatterbox-tts 0.1.7 source and confirmed neither ``ChatterboxTTS.generate`` nor ``ChatterboxTTSTurbo.generate`` has a streaming surface — true streaming requires forking the library (~3-5d), deferred pending upstream feature OR justified fork investment. Wave 26 (in progress) pins the cold-startup wins from Waves 21+22 + the TTFA wins from Waves 23+24 against future regressions via a new startup-timing benchmark harness ([IMPROVE-160]) — 4 deterministic timing pins on the actual ``api_server.app`` (no mocks). The natural Wave 27+ paths: (a) themed Tranche B/D/E/F/G work, (b) deferred-queue picks (NEW carry-overs / Wave-N-audit items), or (c) lifespan eager editor warm-up under a feature flag (Wave 21 residue). Items previously considered + rejected are archived in §10.5.1.
-- **Keep `[IMPROVE-N]` references alive.** When you fix one, grep `docs/features/` for that ID and cross out. If you add new ones in future work, number them IMPROVE-160+ (1-159 are taken; the IMPROVE-NEW-* tags graduate to permanent numbers on acceptance) and note them in the originating chapter.
+- **Pick a Wave 27+ item and ship it** — see §10.5 Wave 18 deferred queue (the trimmed Wave 17 cleanup output: NEW candidates IMPROVE-NEW-2/7/8/10 + Wave-15-audit FILTER_AXIS_TYPES registry + 7 Wave-16-audit-spawned items + Wave-13/12/11/10-audit triggered items + themed tranches B/D/E/F/G + carry-overs gated on §10.7 questions — most of which are now ungated since Wave 20 closed Q1 / Q4 / Q7 / Q15 / Q16). Tranche A (Flutter editor v2) shipped fully in Wave 18 — IMPROVE-138 through IMPROVE-144. Wave 19 Tranche A closed the GDPR Article 20 round-trip with the partner-import host ([IMPROVE-145]) + export button ([IMPROVE-146]). Wave 20 cleanup wave (✓ shipped) closed §10.7 gating questions + shipped a Q7=b deletion ([IMPROVE-147]) + 5 Q4=c TTS pipeline quick wins ([IMPROVE-148] / [IMPROVE-149] / [IMPROVE-150] / [IMPROVE-151] / [IMPROVE-152]). Wave 21 (✓ shipped) closed the cross-cutting startup contention with 3 chain fixes ([IMPROVE-153] / [IMPROVE-154] / [IMPROVE-155]) — ~47s of cold-startup blocking unwound. Wave 22 (✓ shipped) closed the Wave 21-spawned true-async ``_init_mem0`` follow-up via [IMPROVE-156] — httpx.AsyncClient pre-warm of Ollama embed + ``asyncio.create_task`` fire-and-forget Mem0 init at lifespan, moving the ~22s Chain 2 cost off the user's first request entirely. Wave 23 (✓ shipped) closed the Wave 20-spawned Kokoro create_stream piece via [IMPROVE-157] (backend stream_synthesize via ``async for`` over ``Kokoro.create_stream``) + [IMPROVE-158] (Flutter ``buildMiniWavForChunk`` + per-sentence StreamController + ``await for``-driven progressive playback) — ~60-80% TTFA reduction on long-paragraph synth. Wave 24 (✓ shipped) closed the Wave 23-spawned server-side parallel synth-while-LLM-streams piece via [IMPROVE-159] — phrase-boundary fallback in ``PartnerEngine.astream_chat`` firing on ``,`` ``;`` ``:`` once the clause is ≥ 30 chars, so TTS begins synthesising while the LLM keeps streaming later words. Wave 25 (deferred-by-investigation) inspected chatterbox-tts 0.1.7 source and confirmed neither ``ChatterboxTTS.generate`` nor ``ChatterboxTTSTurbo.generate`` has a streaming surface — true streaming requires forking the library (~3-5d), deferred pending upstream feature OR justified fork investment. Wave 26 (✓ shipped) pinned the cold-startup wins from Waves 21+22 + the TTFA wins from Waves 23+24 against future regressions via a new startup-timing benchmark harness ([IMPROVE-160]) — 4 deterministic timing pins on the actual ``api_server.app`` (no mocks). The natural Wave 27+ paths: (a) themed Tranche B/D/E/F/G work, (b) deferred-queue picks (NEW carry-overs / Wave-N-audit items), or (c) lifespan eager editor warm-up under a feature flag (Wave 21 residue). Items previously considered + rejected are archived in §10.5.1.
+- **Keep `[IMPROVE-N]` references alive.** When you fix one, grep `docs/features/` for that ID and cross out. If you add new ones in future work, number them IMPROVE-161+ (1-160 are taken; the IMPROVE-NEW-* tags graduate to permanent numbers on acceptance) and note them in the originating chapter.
 - **The `MEMORY.md` in `~/.claude/projects/...` contains the feedback rule** that improvement suggestions should cite 2025–2026 sources. Every item here has citations in its origin chapter.
 
 ---
 
 **Guide complete.** `docs/features/README.md` → `01-architecture.md` → `02-llm-infrastructure.md` → `03-chat.md` → `04-agents-tools.md` → `05-systems.md` → `06-image-generation.md` → `07-image-editor.md` → `08-partner.md` → `09-observability.md` → `10-improvements.md` *(this file)*.
 
-Every major feature of the Local AI Platform is now documented end-to-end, with **159** research-backed improvement ideas cross-referenced into one prioritized plan. Waves 1-24 fully shipped + Wave 25 deferred-by-investigation + Wave 26 in progress (startup-timing benchmark harness via [IMPROVE-160]); post-Wave-26 backlog in deferred queue.
+Every major feature of the Local AI Platform is now documented end-to-end, with **160** research-backed improvement ideas cross-referenced into one prioritized plan. Waves 1-24 + Wave 26 fully shipped + Wave 25 deferred-by-investigation; post-Wave-26 backlog in deferred queue.
