@@ -14,6 +14,66 @@ import 'package:url_launcher/url_launcher.dart';
 import 'package:record/record.dart';
 import 'package:path_provider/path_provider.dart';
 
+/// [IMPROVE-158] Wave 23 — build a self-contained mini-WAV from a
+/// single PCM16 chunk. Used by progressive playback so each Kokoro
+/// `create_stream` batch arriving over the WebSocket can be played
+/// the moment it lands, instead of waiting for `{type: done}` to
+/// assemble the full sentence.
+///
+/// Layout matches the 44-byte canonical WAV header:
+///   * RIFF size = 36 + dataSize
+///   * fmt chunk = 16 bytes (PCM, mono, 16-bit, given sampleRate)
+///   * data chunk = pcm.length
+///
+/// Mirrors `_buildWav`'s header math (which builds a single WAV from
+/// a list of chunks at sentence-end) but operates on a single chunk.
+/// Public top-level so widget tests can pin the header layout
+/// without instantiating the partner page.
+///
+/// Sources (2025-2026):
+///   * Microsoft WAV format reference (canonical — semantics
+///     unchanged):
+///     https://learn.microsoft.com/en-us/windows/win32/multimedia/multimedia-file-formats
+///   * audioplayers BytesSource docs (2025):
+///     https://pub.dev/packages/audioplayers
+Uint8List buildMiniWavForChunk(Uint8List pcm, int sampleRate) {
+  final dataSize = pcm.length;
+  final result = ByteData(44 + dataSize);
+  // RIFF header.
+  result.setUint8(0, 0x52); // R
+  result.setUint8(1, 0x49); // I
+  result.setUint8(2, 0x46); // F
+  result.setUint8(3, 0x46); // F
+  result.setUint32(4, 36 + dataSize, Endian.little);
+  result.setUint8(8, 0x57);  // W
+  result.setUint8(9, 0x41);  // A
+  result.setUint8(10, 0x56); // V
+  result.setUint8(11, 0x45); // E
+  // fmt subchunk (16 bytes, PCM, mono, 16-bit).
+  result.setUint8(12, 0x66); // f
+  result.setUint8(13, 0x6D); // m
+  result.setUint8(14, 0x74); // t
+  result.setUint8(15, 0x20); // (space)
+  result.setUint32(16, 16, Endian.little);
+  result.setUint16(20, 1, Endian.little);
+  result.setUint16(22, 1, Endian.little);
+  result.setUint32(24, sampleRate, Endian.little);
+  result.setUint32(28, sampleRate * 2, Endian.little);
+  result.setUint16(32, 2, Endian.little);
+  result.setUint16(34, 16, Endian.little);
+  // data subchunk.
+  result.setUint8(36, 0x64); // d
+  result.setUint8(37, 0x61); // a
+  result.setUint8(38, 0x74); // t
+  result.setUint8(39, 0x61); // a
+  result.setUint32(40, dataSize, Endian.little);
+  // Copy PCM data after the header.
+  for (int i = 0; i < dataSize; i++) {
+    result.setUint8(44 + i, pcm[i]);
+  }
+  return result.buffer.asUint8List();
+}
+
 class PartnerPage extends StatefulWidget {
   const PartnerPage({super.key, required this.api});
   final ApiClient api;
@@ -93,6 +153,15 @@ class _PartnerPageState extends State<PartnerPage> {
   Completer<Uint8List>? _currentTTSCompleter;
   List<Uint8List> _currentPcmChunks = [];
   int _currentPcmBytes = 0;
+  // [IMPROVE-158] Wave 23 — per-sentence progressive-playback
+  // stream. Each PCM frame from the server is wrapped as a self-
+  // contained mini-WAV (via `buildMiniWavForChunk`) and pushed onto
+  // this controller. The TTS queue consumer plays chunks as they
+  // arrive (no buffering before {type: done}) — that's where the
+  // TTFA win materialises end-to-end. The legacy completer-based
+  // assembly path stays intact for HTTP fallback consumers + for
+  // the Chatterbox sidecar branch (single PCM blob, no streaming).
+  StreamController<Uint8List>? _currentChunkStream;
 
   @override
   void initState() {
@@ -209,26 +278,63 @@ class _PartnerPageState extends State<PartnerPage> {
   }
 
   /// Listen for TTS WebSocket responses: binary PCM chunks + JSON control messages.
+  ///
+  /// [IMPROVE-158] Wave 23 — listener fans out each PCM frame TWO
+  /// ways:
+  ///   1. Wraps the PCM as a self-contained mini-WAV (via
+  ///      `buildMiniWavForChunk`) and pushes it onto
+  ///      `_currentChunkStream` so the progressive-playback TTS
+  ///      queue can play it as soon as it lands. This is where the
+  ///      TTFA win materialises — the first chunk plays the moment
+  ///      Kokoro emits its first phoneme batch, instead of waiting
+  ///      for `{type: done}` to assemble the full sentence.
+  ///   2. Appends the raw PCM to `_currentPcmChunks` for the
+  ///      legacy completer-based assembly path. HTTP fallback
+  ///      callers still expect a full assembled WAV via
+  ///      `_currentTTSCompleter`, so we keep that pipeline
+  ///      intact alongside the new chunk stream.
   void _setupTTSSocketListener() {
     if (_ttsSocket == null) return;
     _ttsSocket!.listen(
       (data) {
         if (data is List<int>) {
-          // Binary frame: PCM16 audio chunk from server
+          // Binary frame: PCM16 audio chunk from server.
           final chunk = Uint8List.fromList(data);
           _currentPcmChunks.add(chunk);
           _currentPcmBytes += chunk.length;
+          // [IMPROVE-158] Fan out to the progressive-playback
+          // stream: wrap as mini-WAV + push so the TTS queue can
+          // play this chunk while subsequent chunks are still
+          // arriving from the server.
+          final stream = _currentChunkStream;
+          if (stream != null && !stream.isClosed) {
+            try {
+              final miniWav = buildMiniWavForChunk(chunk, _ttsSampleRate);
+              stream.add(miniWav);
+            } catch (e) {
+              debugPrint('[TTS-WS] Mini-WAV build failed: $e');
+            }
+          }
         } else if (data is String) {
           try {
             final msg = jsonDecode(data) as Map<String, dynamic>;
             final type = msg['type']?.toString() ?? '';
             if (type == 'start') {
-              // New sentence starting — reset chunk accumulator
+              // New sentence starting — reset chunk accumulator.
+              // The progressive-playback stream
+              // (`_currentChunkStream`) is owned by the
+              // synthesize method, NOT the listener — it sets it
+              // up BEFORE sending the WS message so we have a
+              // target to push the first frame into. Listener
+              // only pushes / closes; doesn't create.
               _ttsSampleRate = (msg['sample_rate'] as num?)?.toInt() ?? 24000;
               _currentPcmChunks = [];
               _currentPcmBytes = 0;
             } else if (type == 'done') {
-              // Sentence complete — build WAV from accumulated PCM and resolve
+              // Sentence complete — close progressive-playback
+              // stream (consumer's await terminates) AND assemble
+              // the legacy WAV blob for HTTP-fallback callers.
+              try { _currentChunkStream?.close(); } catch (_) {}
               if (_currentTTSCompleter != null && !_currentTTSCompleter!.isCompleted) {
                 final wav = _currentPcmChunks.isEmpty
                     ? Uint8List(0)
@@ -237,6 +343,7 @@ class _PartnerPageState extends State<PartnerPage> {
               }
             } else if (type == 'error') {
               debugPrint('[TTS-WS] Server error: ${msg['error']}');
+              try { _currentChunkStream?.close(); } catch (_) {}
               if (_currentTTSCompleter != null && !_currentTTSCompleter!.isCompleted) {
                 _currentTTSCompleter!.complete(Uint8List(0));
               }
@@ -247,6 +354,7 @@ class _PartnerPageState extends State<PartnerPage> {
       onError: (e) {
         debugPrint('[TTS-WS] Error: $e');
         _ttsSocket = null;
+        try { _currentChunkStream?.close(); } catch (_) {}
         if (_currentTTSCompleter != null && !_currentTTSCompleter!.isCompleted) {
           _currentTTSCompleter!.complete(Uint8List(0));
         }
@@ -254,6 +362,7 @@ class _PartnerPageState extends State<PartnerPage> {
       onDone: () {
         debugPrint('[TTS-WS] Closed');
         _ttsSocket = null;
+        try { _currentChunkStream?.close(); } catch (_) {}
         if (_currentTTSCompleter != null && !_currentTTSCompleter!.isCompleted) {
           _currentTTSCompleter!.complete(Uint8List(0));
         }
@@ -707,37 +816,82 @@ class _PartnerPageState extends State<PartnerPage> {
     if (!_ttsProcessing) _processTTSQueue();
   }
 
-  /// Synthesize one sentence via WebSocket (persistent connection, no HTTP overhead).
-  /// Falls back to HTTP POST if WebSocket is unavailable.
-  Future<Uint8List> _synthesizeSentence(String sentence) async {
-    // Try WebSocket first (persistent connection, ~5ms vs ~100ms per-sentence)
+  /// [IMPROVE-158] Wave 23 — progressive-playback variant of
+  /// `_synthesizeSentence`. Yields each Kokoro `create_stream`
+  /// batch as a self-contained mini-WAV the moment it arrives over
+  /// the WebSocket, so the consumer can play chunk N WHILE chunk
+  /// N+1 is still being synthesised on the server. This is where
+  /// the user-visible TTFA win lands end-to-end (paired with the
+  /// backend [IMPROVE-157] create_stream conversion).
+  ///
+  /// Falls back to HTTP if the WebSocket is unavailable: yields a
+  /// single mini-WAV (the full assembled HTTP response). The
+  /// fallback path gives no TTFA win — same wait as today's HTTP
+  /// path — but the consumer's logic is identical (single Stream
+  /// surface) so the queue consumer doesn't need a separate code
+  /// path for fallback.
+  Stream<Uint8List> _synthesizeSentenceProgressive(String sentence) async* {
     if (_ttsSocket != null) {
       try {
+        // Set up the chunk stream BEFORE sending the WS message so
+        // the listener has a non-null target to push the first
+        // frame into (it doesn't create the controller; we own it
+        // here so the consumer's stream subscription is durable
+        // across the listener's start/done state machine).
+        try { _currentChunkStream?.close(); } catch (_) {}
+        final controller = StreamController<Uint8List>();
+        _currentChunkStream = controller;
+        // Reset legacy assembler state too — listener still
+        // accumulates raw PCM for the completer-based fallback
+        // shape used by callers that want a full WAV (e.g. older
+        // tests + the HTTP fallback completion path).
+        _currentPcmChunks = [];
+        _currentPcmBytes = 0;
         _currentTTSCompleter = Completer<Uint8List>();
-        _ttsSocket!.add(jsonEncode({
-          'text': sentence,
-          'emotion': _currentEmotion,
-        }));
-        final wav = await _currentTTSCompleter!.future
-            .timeout(const Duration(seconds: 30));
-        if (wav.isNotEmpty) {
-          debugPrint('[TTS-WS] Got ${wav.length} bytes for sentence');
-          return wav;
+
+        try {
+          _ttsSocket!.add(jsonEncode({
+            'text': sentence,
+            'emotion': _currentEmotion,
+          }));
+        } catch (e) {
+          debugPrint('[TTS-WS] Send failed: $e — falling back to HTTP');
+          try { controller.close(); } catch (_) {}
+          // Reconnect for next sentence.
+          try { _ttsSocket?.close(); } catch (_) {}
+          _ttsSocket = null;
+          _connectTTSSocket().then((ok) {
+            if (ok) _setupTTSSocketListener();
+          });
+        }
+
+        // Yield each mini-WAV chunk as it arrives. The listener
+        // closes the controller on {type: done} / error /
+        // disconnect, which terminates this loop.
+        try {
+          await for (final miniWav in controller.stream
+              .timeout(const Duration(seconds: 30))) {
+            yield miniWav;
+          }
+          return;
+        } on TimeoutException {
+          debugPrint('[TTS-WS] Progressive stream timeout — falling back');
+        } catch (e) {
+          debugPrint('[TTS-WS] Progressive stream error: $e — falling back');
         }
       } catch (e) {
-        debugPrint('[TTS-WS] Synthesis failed: $e — falling back to HTTP');
-        // Force reconnect on next attempt
+        debugPrint('[TTS-WS] Progressive setup failed: $e — falling back to HTTP');
         try { _ttsSocket?.close(); } catch (_) {}
         _ttsSocket = null;
-        // Try reconnecting in background for next sentence
         _connectTTSSocket().then((ok) {
           if (ok) _setupTTSSocketListener();
         });
       }
     }
 
-    // Fallback: HTTP POST (original method)
-    return _synthesizeSentenceHttp(sentence);
+    // HTTP fallback: yield the full WAV as a single chunk.
+    final wav = await _synthesizeSentenceHttp(sentence);
+    if (wav.isNotEmpty) yield wav;
   }
 
   /// HTTP fallback for TTS synthesis (used when WebSocket is unavailable).
@@ -769,66 +923,60 @@ class _PartnerPageState extends State<PartnerPage> {
     _ttsStopped = false;
     if (mounted) setState(() => _playingAudio = true);
 
-    Future<Uint8List>? nextAudioFuture;
-
     while (_ttsQueue.isNotEmpty && !_ttsStopped) {
       final sentence = _ttsQueue.removeAt(0);
       debugPrint('[TTS] Synthesizing: "${sentence.substring(0, sentence.length.clamp(0, 40))}..."');
 
-      // Use pre-fetched audio if available, otherwise synthesize now
-      final Uint8List wavBytes;
-      if (nextAudioFuture != null) {
-        wavBytes = await nextAudioFuture;
-        nextAudioFuture = null;
-        debugPrint('[TTS] Using pre-fetched audio (${wavBytes.length} bytes)');
-      } else {
-        wavBytes = await _synthesizeSentence(sentence);
-        debugPrint('[TTS] Synthesized ${wavBytes.length} bytes');
-      }
-
-      // Start pre-fetching the NEXT sentence while this one plays
-      if (_ttsQueue.isNotEmpty && !_ttsStopped) {
-        debugPrint('[TTS] Pre-fetching next sentence...');
-        nextAudioFuture = _synthesizeSentence(_ttsQueue.first);
-      }
-
-      // Play current sentence
-      if (wavBytes.isNotEmpty && !_ttsStopped) {
-        try {
-          await _audioPlayer.play(BytesSource(wavBytes));
-          debugPrint('[TTS] Playing audio...');
-
-          // Calculate expected duration from WAV data for reliable wait.
-          // onPlayerComplete is unreliable on Windows for short clips.
-          final durationMs = _estimateWavDurationMs(wavBytes);
-          if (durationMs > 0) {
-            // Wait for the estimated duration + small buffer, OR onPlayerComplete
-            await Future.any([
-              _audioPlayer.onPlayerComplete.first,
-              Future.delayed(Duration(milliseconds: durationMs + 200)),
-            ]);
-          } else {
-            // Fallback: just wait for onPlayerComplete with timeout
-            try {
-              await _audioPlayer.onPlayerComplete.first.timeout(
-                const Duration(seconds: 30),
-              );
-            } on TimeoutException {
-              debugPrint('[TTS] Playback timeout — moving to next');
+      // [IMPROVE-158] Wave 23 — progressive playback. Subscribe to
+      // the chunk stream and play each mini-WAV the moment it
+      // arrives, instead of waiting for the full sentence to
+      // assemble. The first chunk plays the moment the server's
+      // create_stream batch lands ([IMPROVE-157]) — that's where
+      // the user-visible TTFA win materialises end-to-end.
+      //
+      // For HTTP fallback the stream yields a single chunk (the
+      // assembled full WAV) so the consumer logic stays uniform.
+      // Pre-fetch optimisation from the legacy buffer-then-play
+      // path is dropped here: WS-progressive overlaps synthesis
+      // with playback within a single sentence (no cross-sentence
+      // pre-fetch needed for the same headroom).
+      try {
+        await for (final miniWav
+            in _synthesizeSentenceProgressive(sentence)) {
+          if (_ttsStopped || miniWav.isEmpty) continue;
+          try {
+            await _audioPlayer.play(BytesSource(miniWav));
+            // onPlayerComplete is unreliable on Windows for short
+            // clips so we wall-clock-cap via the WAV's data-size
+            // header. Same belt-and-suspenders shape the legacy
+            // path used.
+            final durationMs = _estimateWavDurationMs(miniWav);
+            if (durationMs > 0) {
+              await Future.any([
+                _audioPlayer.onPlayerComplete.first,
+                Future.delayed(Duration(milliseconds: durationMs + 100)),
+              ]);
+            } else {
+              try {
+                await _audioPlayer.onPlayerComplete.first.timeout(
+                  const Duration(seconds: 30),
+                );
+              } on TimeoutException {
+                debugPrint('[TTS] Playback timeout — moving on');
+              }
             }
+          } catch (e) {
+            debugPrint('[TTS] Chunk playback error: $e');
           }
-        } catch (e) {
-          debugPrint('[TTS] Playback error: $e');
         }
-      } else if (wavBytes.isEmpty) {
-        debugPrint('[TTS] Empty audio returned — skipping');
+      } catch (e) {
+        debugPrint('[TTS] Progressive synth/play error: $e');
       }
     }
 
-    // Clean up
+    // Clean up.
     if (_ttsStopped) {
       _ttsQueue.clear();
-      nextAudioFuture = null;
     }
     _ttsProcessing = false;
     if (mounted) setState(() => _playingAudio = false);
