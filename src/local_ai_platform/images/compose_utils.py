@@ -56,6 +56,25 @@ METRICS_INPUT_MAX_SIDE = 1024
 # typical SSE event budget (<32KB after b64 expansion).
 REGION_MAP_MAX_SIDE = 256
 
+# [IMPROVE-175] Bbox-area threshold for the cropped-patch SSIM gate.
+# When the changed-pixels bbox covers >= this fraction of the full
+# post-resize frame, cropping doesn't reduce the skimage SSIM compute
+# meaningfully (it's O(W*H) for the per-window math, and a 90%-area
+# crop trims only ~10% of the work). Below the threshold, the crop
+# saves real compute (50%-area bbox -> ~half cost; 10%-area bbox ->
+# ~10x cost reduction). Single named constant so a future tuning
+# round can adjust without re-touching the cropping logic.
+_BBOX_CROP_FRAC_THRESHOLD = 0.9
+
+# [IMPROVE-175] Minimum bbox dimension for the cropped-patch SSIM
+# gate. skimage's structural_similarity defaults win_size=7; if
+# either bbox dim is < 7, SSIM raises (the
+# test_ssim_returns_none_on_degenerate_input pin already documents
+# this for the full-frame degenerate case at 4x4 inputs). Falling
+# back to the full-frame value at the dim check keeps the new path's
+# failure modes IDENTICAL to the existing full-frame path's.
+_SSIM_DEFAULT_WIN_SIZE = 7
+
 
 def decode_mask_base64(mask_b64: str) -> bytes:
     """Decode a base64 mask payload, accepting both bare base64 and
@@ -82,6 +101,9 @@ def compute_diff_metrics(path_a: str, path_b: str) -> dict[str, Any]:
           "changed_pixels_pct": float,
           "histogram_delta": {"r": float, "g": float, "b": float},
           "ssim": float | None,
+          "ssim_patch": float | None,
+          "patch_bbox": {"x0": int, "y0": int, "x1": int,
+                         "y1": int, "frac": float} | None,
           "region_map_base64": str,
           "width": int,
           "height": int,
@@ -95,6 +117,18 @@ def compute_diff_metrics(path_a: str, path_b: str) -> dict[str, Any]:
     ``ssim`` is None on any compute failure — degenerate inputs
     (1×1, mismatched channel counts) shouldn't escalate a metrics
     request into an HTTP 500.
+
+    [IMPROVE-175] ``ssim_patch`` is SSIM computed on the bounding-
+    box crop of the changed-pixels region. When the bbox covers
+    >= ``_BBOX_CROP_FRAC_THRESHOLD`` of the frame, or either bbox
+    dim is < skimage's ``win_size=7``, or no pixels changed, the
+    field falls back to the full-frame ``ssim`` value (so callers
+    can ALWAYS reference ``ssim_patch`` without an extra None
+    branch beyond the existing degenerate-input case). The
+    ``patch_bbox`` dict surfaces the bbox extents in post-resize
+    image coordinates (the same reference frame as ``width`` /
+    ``height`` / ``region_map_base64``); it's None when no crop
+    was applied.
 
     Heavy deps (numpy, skimage) are imported lazily so this module
     stays cheap to import at app startup.
@@ -172,6 +206,73 @@ def compute_diff_metrics(path_a: str, path_b: str) -> dict[str, Any]:
         logger.debug("ssim compute failed (%s); returning None", exc)
         ssim_val = None
 
+    # ── [IMPROVE-175] SSIM on the changed-region bbox crop ───────
+    # The full-frame SSIM above mixes the unchanged-region windows
+    # (which score ~1.0) with the actually-edited windows, so a
+    # localized edit's score is dominated by the unchanged area.
+    # The cropped-patch metric isolates the edited region and is a
+    # much more meaningful "how good is this edit" signal when the
+    # changed area is small. The bbox is derived from changed_mask
+    # (free — already computed for the region_map overlay above).
+    # Fall back to the full-frame value when cropping wouldn't
+    # help (>= 90% area, < win_size=7 dim, or no change). The
+    # field is non-None whenever ssim_val is non-None so callers
+    # don't need a second None-check past the existing degenerate-
+    # input case.
+    ssim_patch: float | None = ssim_val
+    patch_bbox: dict[str, Any] | None = None
+    ys, xs = np.where(changed_mask)
+    if ys.size > 0:
+        y0 = int(ys.min())
+        y1 = int(ys.max()) + 1
+        x0 = int(xs.min())
+        x1 = int(xs.max()) + 1
+        bbox_h = y1 - y0
+        bbox_w = x1 - x0
+        bbox_area = bbox_h * bbox_w
+        # Use changed_mask's full grid area for the frac denominator
+        # rather than out_w * out_h — they're identical here (mask
+        # was computed from arr_a which is the post-resize array),
+        # but reading from changed_mask.size keeps the math local
+        # to the bbox derivation if the upstream resize policy ever
+        # changes.
+        total_area = changed_mask.size if changed_mask.size else 1
+        frac = float(bbox_area) / float(total_area)
+        if (
+            frac < _BBOX_CROP_FRAC_THRESHOLD
+            and bbox_h >= _SSIM_DEFAULT_WIN_SIZE
+            and bbox_w >= _SSIM_DEFAULT_WIN_SIZE
+        ):
+            try:
+                from skimage.metrics import structural_similarity as _ssim
+                crop_a = arr_a[y0:y1, x0:x1, :]
+                crop_b = arr_b[y0:y1, x0:x1, :]
+                ssim_patch = float(_ssim(
+                    crop_a, crop_b,
+                    channel_axis=2,
+                    data_range=255,
+                ))
+                patch_bbox = {
+                    "x0": x0,
+                    "y0": y0,
+                    "x1": x1,
+                    "y1": y1,
+                    "frac": frac,
+                }
+            except Exception as exc:
+                # Same shape as the full-frame fallback above:
+                # log + return the full-frame value so the metrics
+                # request never escalates into a 500 just because
+                # the cropped variant tripped a skimage edge case
+                # the full-frame path didn't.
+                logger.debug(
+                    "ssim_patch compute failed (%s); falling back "
+                    "to full-frame ssim",
+                    exc,
+                )
+                ssim_patch = ssim_val
+                patch_bbox = None
+
     # ── region_map_base64 ────────────────────────────────────────
     # Desaturated A as background, red overlay where diff exceeds
     # threshold. Flutter drops this straight into Image.memory().
@@ -198,6 +299,9 @@ def compute_diff_metrics(path_a: str, path_b: str) -> dict[str, Any]:
         "changed_pixels_pct": changed_pixels_pct,
         "histogram_delta": hist_delta,
         "ssim": ssim_val,
+        # [IMPROVE-175] Cropped-patch SSIM + bbox (Wave 38).
+        "ssim_patch": ssim_patch,
+        "patch_bbox": patch_bbox,
         "region_map_base64": region_map_base64,
         "width": out_w,
         "height": out_h,

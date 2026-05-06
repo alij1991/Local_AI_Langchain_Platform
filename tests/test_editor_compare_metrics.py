@@ -68,9 +68,16 @@ def _save(img: Image.Image, dest: str) -> str:
 
 
 def test_metrics_keys_match_documented_shape(tmp_image_pair):
-    """The metrics dict carries the exact 8 keys the doc + Flutter
+    """The metrics dict carries the exact 10 keys the doc + Flutter
     side rely on. If a future refactor renames a key, the UI breaks
-    silently — pin the contract."""
+    silently — pin the contract.
+
+    [IMPROVE-175] Wave 38 — cropped-patch SSIM optimization
+    appended ``ssim_patch`` + ``patch_bbox`` to the documented
+    shape, growing the pin from 8 keys to 10. The original 8 keys
+    keep their pre-Wave-38 semantics; the 2 new keys carry the
+    bbox-cropped SSIM and the bbox extents.
+    """
     from local_ai_platform.images.editor import _compute_diff_metrics
 
     pa, pb = tmp_image_pair
@@ -80,6 +87,8 @@ def test_metrics_keys_match_documented_shape(tmp_image_pair):
         "changed_pixels_pct",
         "histogram_delta",
         "ssim",
+        "ssim_patch",
+        "patch_bbox",
         "region_map_base64",
         "width",
         "height",

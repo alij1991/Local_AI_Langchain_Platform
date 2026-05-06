@@ -128,6 +128,13 @@ def test_compute_diff_metrics_shape(tmp_path):
         "changed_pixels_pct",
         "histogram_delta",
         "ssim",
+        # [IMPROVE-175] Wave 38 — cropped-patch SSIM optimization
+        # appended ``ssim_patch`` + ``patch_bbox`` to the documented
+        # shape. The ``ssim`` field stays full-frame for backward
+        # compat; ``ssim_patch`` is the bbox-cropped value (or
+        # ``ssim`` when no useful crop applies).
+        "ssim_patch",
+        "patch_bbox",
         "region_map_base64",
         "width",
         "height",
@@ -149,6 +156,126 @@ def test_compute_diff_metrics_unaligned_flag(tmp_path):
     # Output shape follows A's grid (post-resize-of-B)
     assert m["width"] == 40
     assert m["height"] == 30
+
+
+# ── [IMPROVE-175] Cropped-patch SSIM optimization (Wave 38) ──────
+
+
+def test_cropped_patch_matches_full_frame_when_full_image_changed(tmp_path):
+    """When the full image changes, the changed-pixels bbox covers
+    the entire frame so ``frac >= _BBOX_CROP_FRAC_THRESHOLD = 0.9``
+    fires the gate; the cropping fallback then equates
+    ``ssim_patch`` to the full-frame ``ssim`` value and leaves
+    ``patch_bbox`` as None. This is the degenerate-case pin: the
+    new field is purely additive — when the optimization can't
+    help, callers see the full-frame value.
+
+    The 32x32 pure-red vs pure-green pair forces a 100%-changed
+    mask on the post-resize view (no max-side downscale at 32px),
+    which is the simplest way to drive frac to ~1.0. A non-full-
+    frame change at a smaller scale would also trip the dim<7 gate
+    AND not the frac>=0.9 gate, so this picks the dimensionally
+    safe variant for the "frac ≥ 0.9" branch.
+    """
+    a_path = tmp_path / "a.png"
+    b_path = tmp_path / "b.png"
+    Image.new("RGB", (32, 32), color=(255, 0, 0)).save(a_path)
+    Image.new("RGB", (32, 32), color=(0, 255, 0)).save(b_path)
+
+    m = compute_diff_metrics(str(a_path), str(b_path))
+    # ssim should be defined (32x32 ≥ default win_size=7).
+    assert m["ssim"] is not None
+    # ssim_patch falls back to ssim, patch_bbox is None.
+    assert m["patch_bbox"] is None
+    assert m["ssim_patch"] == m["ssim"]
+
+
+def test_cropped_patch_uses_crop_for_localized_edit(tmp_path):
+    """When only a small region changes, the bbox covers a small
+    fraction of the frame so the crop gate fires and ssim_patch is
+    computed on the bbox-cropped view of both arrays. The metric
+    differs from the full-frame ssim because the cropped view
+    excludes the unchanged-region windows that pull the full-frame
+    score toward 1.0 when the edit is localized.
+
+    Setup: 64x64 black image, B has a 16x16 white square in the
+    top-left corner. Bbox area is 256/4096 = 6.25% << 90%, well
+    above the dim ≥ 7 floor (16 ≥ 7), so the crop applies.
+    """
+    import numpy as np
+
+    a_arr = np.zeros((64, 64, 3), dtype=np.uint8)  # all black
+    b_arr = a_arr.copy()
+    b_arr[0:16, 0:16, :] = 255  # 16x16 white square top-left
+
+    a_path = tmp_path / "a.png"
+    b_path = tmp_path / "b.png"
+    Image.fromarray(a_arr, "RGB").save(a_path)
+    Image.fromarray(b_arr, "RGB").save(b_path)
+
+    m = compute_diff_metrics(str(a_path), str(b_path))
+    # patch_bbox set; frac small.
+    assert m["patch_bbox"] is not None
+    bbox = m["patch_bbox"]
+    assert 0.0 < bbox["frac"] < 0.1  # 6.25% with rounding slack
+    # Bbox should bound the 16x16 edit area: max(x1) <= 16, etc.
+    # (The exact bbox depends on how np.where reads the mask; the
+    # bound is x0 ∈ [0, 0], x1 ∈ [16, 16]; small slack for any
+    # off-by-one.)
+    assert bbox["x0"] == 0
+    assert bbox["y0"] == 0
+    assert bbox["x1"] <= 16
+    assert bbox["y1"] <= 16
+    # ssim_patch != full-frame ssim (the cropped view captures
+    # only the edited region, where the SSIM is much lower than
+    # the unchanged-dominated full-frame value).
+    assert m["ssim"] is not None and m["ssim_patch"] is not None
+    assert m["ssim"] != m["ssim_patch"]
+
+
+def test_patch_bbox_is_none_when_no_change(tmp_path):
+    """Identical inputs ⇒ no pixels changed ⇒ ``np.where`` returns
+    an empty index array ⇒ the bbox-derivation block doesn't enter
+    the crop branch ⇒ ``patch_bbox`` is None and ``ssim_patch``
+    keeps the full-frame ``ssim`` initial value (~1.0).
+    """
+    a_path = tmp_path / "a.png"
+    Image.new("RGB", (64, 64), (128, 128, 128)).save(a_path)
+    # Save B as a separate file with identical content.
+    b_path = tmp_path / "b.png"
+    Image.new("RGB", (64, 64), (128, 128, 128)).save(b_path)
+
+    m = compute_diff_metrics(str(a_path), str(b_path))
+    assert m["patch_bbox"] is None
+    # ssim ~ 1.0 for identical inputs; ssim_patch matches.
+    assert m["ssim"] is not None
+    assert m["ssim_patch"] == m["ssim"]
+
+
+def test_patch_bbox_is_none_when_bbox_too_small_for_ssim_window(tmp_path):
+    """A single-pixel diff produces a 1x1 bbox, which is far below
+    skimage's default ``win_size=7``. The dim-floor gate fires,
+    falling back to the full-frame ssim and leaving ``patch_bbox``
+    None — keeping the new path's failure modes IDENTICAL to the
+    pre-Wave-38 full-frame path.
+    """
+    a = Image.new("RGB", (64, 64), (128, 128, 128))
+    b = a.copy()
+    # Make the diff well above the 8-threshold so it definitely counts.
+    b.putpixel((10, 10), (255, 255, 255))
+
+    a_path = tmp_path / "a.png"
+    b_path = tmp_path / "b.png"
+    a.save(a_path)
+    b.save(b_path)
+
+    m = compute_diff_metrics(str(a_path), str(b_path))
+    # ssim is defined (full-frame is 64x64 ≥ 7).
+    assert m["ssim"] is not None
+    # patch_bbox falls back: 1x1 < win_size=7 dim floor.
+    assert m["patch_bbox"] is None
+    # ssim_patch falls back to ssim (the bbox crop wasn't run).
+    assert m["ssim_patch"] == m["ssim"]
 
 
 # ── weighted_blend ───────────────────────────────────────────────
