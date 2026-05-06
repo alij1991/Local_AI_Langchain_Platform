@@ -82,6 +82,13 @@ class EditSession:
     current_step: int  # Index into history (-1 = original)
     history: list[EditStep] = field(default_factory=list)
     redo_stack: list[EditStep] = field(default_factory=list)
+    # [IMPROVE-169] Per-(path_a, path_b) cache for the diff-metrics dict
+    # returned by ImageEditorService.compare(metrics=True). EditStep
+    # result_paths are stable for session lifetime (see [IMPROVE-53]
+    # comment in apply_edit), so the cache needs no invalidation on
+    # undo / redo / new-edit-after-undo. Goes out of scope when the
+    # session is evicted from ImageEditorService._sessions.
+    metrics_cache: dict[tuple[str, str], dict[str, Any]] = field(default_factory=dict)
 
     @property
     def current_path(self) -> str:
@@ -1112,20 +1119,35 @@ class ImageEditorService:
         }
 
         if metrics:
-            # Failure here MUST NOT escalate to a 500 — the caller
-            # is asking for a "nice to have" overlay, and a broken
-            # image file shouldn't break the side-by-side view.
-            # Surface the failure as ``metrics: None`` + an inline
-            # error message so the UI can degrade gracefully.
-            try:
-                result["metrics"] = _compute_diff_metrics(path_a, path_b)
-            except Exception as exc:
-                logger.warning(
-                    "[IMPROVE-56] diff-metrics failed for session=%s "
-                    "a=%s b=%s: %s", session_id, step_a, step_b, exc,
-                )
-                result["metrics"] = None
-                result["metrics_error"] = str(exc)
+            # [IMPROVE-169] Cache the metrics dict per (path_a, path_b)
+            # pair on the session. Paths are stable for session
+            # lifetime (see [IMPROVE-53] comment in apply_edit), so
+            # repeat calls with the same step pair return the same
+            # cached dict instantly — saves the SSIM compute + base64
+            # region-map encode (~80ms+ on 1024-side inputs).
+            cache_key = (path_a, path_b)
+            cached = session.metrics_cache.get(cache_key)
+            if cached is not None:
+                result["metrics"] = cached
+            else:
+                # Failure here MUST NOT escalate to a 500 — the caller
+                # is asking for a "nice to have" overlay, and a broken
+                # image file shouldn't break the side-by-side view.
+                # Surface the failure as ``metrics: None`` + an inline
+                # error message so the UI can degrade gracefully.
+                # Failed computes are NOT cached so a transient error
+                # doesn't poison the cache with None.
+                try:
+                    computed = _compute_diff_metrics(path_a, path_b)
+                    session.metrics_cache[cache_key] = computed
+                    result["metrics"] = computed
+                except Exception as exc:
+                    logger.warning(
+                        "[IMPROVE-56] diff-metrics failed for session=%s "
+                        "a=%s b=%s: %s", session_id, step_a, step_b, exc,
+                    )
+                    result["metrics"] = None
+                    result["metrics_error"] = str(exc)
 
         return result
 
