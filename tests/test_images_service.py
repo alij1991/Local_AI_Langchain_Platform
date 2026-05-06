@@ -102,6 +102,30 @@ def test_generate_uses_cpu_fallback_when_gpu_required_but_unavailable(tmp_path, 
         'effective_device': 'cpu',
         'torch_version': '2.10.0+cpu',
     })
+    # [IMPROVE-174] Wave 37 — patch the execution plan to return a CPU
+    # plan so the CPU-fallback gate at service.py:10315 fires
+    # (`require_gpu and not _any_gpu and preferred == 'cpu'`). Without
+    # this patch, build_image_execution_plan uses the real
+    # _get_hardware_profile and returns a GPU plan on machines with a
+    # CUDA card, _any_gpu=True, and the gate doesn't trigger — so the
+    # test fails on developer machines with a GPU even though the
+    # production logic is correct. The companion IMPROVE-174 patch
+    # below points the patch target at `_run_diffusers` (in-process)
+    # rather than `_run_diffusers_isolated` (subprocess fallback).
+    monkeypatch.setattr(svc, 'build_image_execution_plan', lambda model_id, requested=None: {
+        'device_plan': 'cpu_low_memory',
+        'torch_dtype': 'float32',
+        'use_attention_slicing': True,
+        'use_vae_tiling': True,
+        'use_model_cpu_offload': False,
+        'use_sequential_cpu_offload': False,
+        'recommended_width': 640,
+        'recommended_height': 640,
+        'recommended_steps': 12,
+        'expected_timeout_sec': 60,
+        'warnings': [],
+        'reason': 'test-cpu-fallback',
+    })
 
     def _fake_run_diffusers(**kwargs):
         assert kwargs['device'] == 'cpu'
@@ -112,7 +136,17 @@ def test_generate_uses_cpu_fallback_when_gpu_required_but_unavailable(tmp_path, 
         )
 
     monkeypatch.setattr(svc, '_cache_dir', lambda model_id: Path('/tmp'))
-    monkeypatch.setattr(svc, '_run_diffusers_isolated', _fake_run_diffusers)
+    # [IMPROVE-174] Wave 37 — patch the in-process `_run_diffusers`
+    # (service.py:8849), NOT the subprocess-isolated
+    # `_run_diffusers_isolated` (service.py:8603). `generate()` calls
+    # `self._run_diffusers` directly at 5 call sites (line 9914 retry
+    # / 10361 main path / 10408 post-failure retry / 10507 hires-fix
+    # / 10539 refine). `_run_diffusers_isolated` was the primary path
+    # during the [IMPROVE-44] OOM ladder introduction but became a
+    # fallback after the persistent-worker-pool refactor lifted
+    # in-process pipeline caching as the default. A future call-site
+    # move would need to update this patch target again.
+    monkeypatch.setattr(svc, '_run_diffusers', _fake_run_diffusers)
 
     result = svc.generate(model_id='some-org/test-model', prompt='test')
     assert result.ok is True
@@ -215,7 +249,12 @@ def test_generate_uses_timeout_and_returns_effective_settings(tmp_path, monkeypa
         observed.update(kwargs)
         return ImageRuntimeResult(ok=True, image_bytes=b'x', metadata={'runtime': 'diffusers_local', 'device_used': kwargs['device'], 'runtime_strategy': kwargs['execution_plan'].get('device_plan')})
 
-    monkeypatch.setattr(svc, '_run_diffusers_isolated', _fake_run_diffusers)
+    # [IMPROVE-174] Wave 37 — patch the in-process `_run_diffusers`
+    # (service.py:8849), NOT the subprocess-isolated
+    # `_run_diffusers_isolated` (service.py:8603). See the same
+    # comment block in test_generate_uses_cpu_fallback_when_gpu_required_but_unavailable
+    # above for the full rationale.
+    monkeypatch.setattr(svc, '_run_diffusers', _fake_run_diffusers)
 
     res = svc.generate(model_id='some-org/test-model', prompt='p', params_json={'timeout_sec': 444, 'width': 512, 'height': 512, 'steps': 16, 'guidance_scale': 5.5})
     assert res.ok is True
