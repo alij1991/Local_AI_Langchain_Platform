@@ -75,6 +75,93 @@ _BBOX_CROP_FRAC_THRESHOLD = 0.9
 # failure modes IDENTICAL to the existing full-frame path's.
 _SSIM_DEFAULT_WIN_SIZE = 7
 
+# [IMPROVE-176] Default LPIPS trunk net for the perceptual-distance
+# compute. Three options exist in the lpips package: 'alex' / 'vgg'
+# / 'squeeze'. AlexNet is the smallest trunk (~244MB torchvision
+# weights vs. VGG's ~528MB / SqueezeNet's ~3MB-but-less-accurate);
+# the richzhang/PerceptualSimilarity README recommends 'alex' as the
+# speed/accuracy default for general perceptual-distance use. Hard-
+# coded for the v1 wire-up; future tuning can expose a knob if
+# needed.
+_LPIPS_NET_DEFAULT = "alex"
+
+# [IMPROVE-176] Env-var name that gates the LPIPS compute. Default-off
+# because: (a) first enabled call triggers a ~244MB torchvision
+# AlexNet download from the model zoo, (b) per-call forward pass is
+# ~50-100ms on CPU (vs. SSIM's ~10-20ms), (c) callers who don't read
+# the new field shouldn't pay either cost. Same opt-in shape as W26 /
+# W27 / W30 / W31 / W33 / W34 — the lossless-no-gate W35 / W38
+# pattern doesn't apply because LPIPS has a real activation cost.
+_LPIPS_ENABLED_ENV = "EDITOR_METRICS_LPIPS_ENABLED"
+
+# [IMPROVE-176] String env-var values that count as "enabled". Read
+# per-call so test-side monkeypatch.setenv works without a settings-
+# cache invalidation step (W37 IMPROVE-173 lesson — per-call env-var
+# lookups are cheaper to test than cached singletons).
+_LPIPS_ENABLED_TRUTHY = {"1", "true", "True", "TRUE", "yes", "Yes"}
+
+# [IMPROVE-176] Module-scope cache for the loaded lpips.LPIPS model.
+# Keyed by trunk-net name so a future LPIPS_TRUNK_NET knob can
+# coexist with this default without invalidating the existing alex
+# entry. Bound by process lifetime; no invalidation needed (the
+# lpips model is read-only once loaded). The cache is intentionally
+# at module scope rather than per-call: the AlexNet trunk download +
+# load is the expensive part (~1-2s + 244MB download), and we want
+# the second + Nth metrics call within a process to pay zero load
+# cost (just the forward pass).
+_lpips_model_cache: dict[str, Any] = {}
+
+
+def _lpips_enabled() -> bool:
+    """Return True iff the LPIPS env-var is set to a truthy value.
+
+    [IMPROVE-176] Per-call env-var read so test-side
+    monkeypatch.setenv works without a settings-cache invalidation
+    step. Production cost is one os.environ.get + one set-membership
+    check; both are microseconds.
+    """
+    import os
+
+    return os.environ.get(_LPIPS_ENABLED_ENV, "") in _LPIPS_ENABLED_TRUTHY
+
+
+def _get_lpips_model(net: str) -> Any:
+    """Lazy-load + cache the lpips.LPIPS model for ``net`` ('alex' /
+    'vgg' / 'squeeze').
+
+    [IMPROVE-176] First call for a given trunk name triggers the
+    torchvision pretrained-weights download (~244MB for alex) +
+    constructs the perceptual-similarity head + lpips linear-layer
+    weights (bundled in the package, ~6KB). Subsequent calls return
+    the cached model without re-loading. The cache is module-scope so
+    tests that need to verify the cache-once contract can patch
+    ``_lpips_model_cache`` directly.
+
+    Raises ``RuntimeError`` if the lpips package or its torch
+    dependency is unavailable; the caller wraps in try/except per the
+    existing ssim failure-mode shape so a missing dependency
+    surfaces as ``lpips: None`` rather than escalating to a 500.
+    """
+    cached = _lpips_model_cache.get(net)
+    if cached is not None:
+        return cached
+    try:
+        import lpips as _lpips_pkg  # heavy import deferred until first enable
+    except ImportError as exc:
+        raise RuntimeError(
+            f"lpips package not available; install via "
+            f"`pip install lpips` to enable {_LPIPS_ENABLED_ENV}. "
+            f"original error: {exc}"
+        ) from exc
+    # verbose=False suppresses the package's "Setting up [LPIPS] ..."
+    # banner that would otherwise pollute test logs + production
+    # startup output. eval_mode=True is the default but pinned here
+    # explicitly because the metric MUST not run in training mode
+    # (would compute gradients we discard, doubling memory).
+    model = _lpips_pkg.LPIPS(net=net, verbose=False, eval_mode=True)
+    _lpips_model_cache[net] = model
+    return model
+
 
 def decode_mask_base64(mask_b64: str) -> bytes:
     """Decode a base64 mask payload, accepting both bare base64 and
@@ -104,6 +191,7 @@ def compute_diff_metrics(path_a: str, path_b: str) -> dict[str, Any]:
           "ssim_patch": float | None,
           "patch_bbox": {"x0": int, "y0": int, "x1": int,
                          "y1": int, "frac": float} | None,
+          "lpips": float | None,
           "region_map_base64": str,
           "width": int,
           "height": int,
@@ -130,8 +218,21 @@ def compute_diff_metrics(path_a: str, path_b: str) -> dict[str, Any]:
     ``height`` / ``region_map_base64``); it's None when no crop
     was applied.
 
-    Heavy deps (numpy, skimage) are imported lazily so this module
-    stays cheap to import at app startup.
+    [IMPROVE-176] ``lpips`` is the perceptual-distance score from
+    the ``lpips`` Python package (Zhang et al., 2018). Range
+    ``[0, ~1.0]``; LOWER is more similar (it's a distance, not a
+    similarity). Opt-in via ``EDITOR_METRICS_LPIPS_ENABLED=1``
+    env-var; when disabled (default), the field is None and no
+    LPIPS compute / model load happens. When enabled, the model
+    (default trunk: AlexNet) lazy-loads on first call + caches at
+    module scope, so the per-call cost amortizes across the
+    process. Failure (missing dep, compute exception) falls back
+    to None — same shape as the existing ssim failure contract.
+
+    Heavy deps (numpy, skimage, lpips/torch) are imported lazily
+    so this module stays cheap to import at app startup. The
+    lpips/torch import only happens when LPIPS is enabled AND
+    the model isn't already cached.
     """
     import base64
     import io
@@ -273,6 +374,39 @@ def compute_diff_metrics(path_a: str, path_b: str) -> dict[str, Any]:
                 ssim_patch = ssim_val
                 patch_bbox = None
 
+    # ── [IMPROVE-176] LPIPS perceptual-distance metric ───────────
+    # Opt-in via EDITOR_METRICS_LPIPS_ENABLED env-var. When enabled,
+    # lazy-load the lpips.LPIPS model (cached at module scope) +
+    # convert arr_a / arr_b to torch tensors via lpips.im2tensor +
+    # run the forward pass + extract the scalar float. Disabled
+    # (default) skips the entire compute + leaves lpips=None, so
+    # callers who don't opt in pay zero cost (no model download, no
+    # forward pass, no torch import beyond what skimage already
+    # pulls in transitively).
+    #
+    # On any failure (lpips unavailable, model load error, forward-
+    # pass exception), fall back to None — same shape as the
+    # existing ssim_val try/except: a metrics request never
+    # escalates into a 500 just because LPIPS tripped.
+    lpips_val: float | None = None
+    if _lpips_enabled():
+        try:
+            model = _get_lpips_model(_LPIPS_NET_DEFAULT)
+            import lpips as _lpips_pkg
+            tensor_a = _lpips_pkg.im2tensor(arr_a)
+            tensor_b = _lpips_pkg.im2tensor(arr_b)
+            # lpips.LPIPS.__call__ returns a torch tensor; extract
+            # the scalar via float() which handles both 0-d tensor
+            # (single image pair) + (1, 1, 1, 1)-shaped tensor (the
+            # default forward output shape).
+            distance = model(tensor_a, tensor_b)
+            lpips_val = float(distance)
+        except Exception as exc:
+            logger.debug(
+                "lpips compute failed (%s); returning None", exc,
+            )
+            lpips_val = None
+
     # ── region_map_base64 ────────────────────────────────────────
     # Desaturated A as background, red overlay where diff exceeds
     # threshold. Flutter drops this straight into Image.memory().
@@ -302,6 +436,11 @@ def compute_diff_metrics(path_a: str, path_b: str) -> dict[str, Any]:
         # [IMPROVE-175] Cropped-patch SSIM + bbox (Wave 38).
         "ssim_patch": ssim_patch,
         "patch_bbox": patch_bbox,
+        # [IMPROVE-176] LPIPS perceptual distance (Wave 39). None
+        # when EDITOR_METRICS_LPIPS_ENABLED is unset OR when the
+        # compute raises — same shape as the ssim field's failure
+        # contract.
+        "lpips": lpips_val,
         "region_map_base64": region_map_base64,
         "width": out_w,
         "height": out_h,

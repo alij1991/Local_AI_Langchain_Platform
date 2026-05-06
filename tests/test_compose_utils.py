@@ -135,6 +135,11 @@ def test_compute_diff_metrics_shape(tmp_path):
         # ``ssim`` when no useful crop applies).
         "ssim_patch",
         "patch_bbox",
+        # [IMPROVE-176] Wave 39 — LPIPS perceptual metric appended
+        # to the documented shape. Always present in the dict, but
+        # None when EDITOR_METRICS_LPIPS_ENABLED is unset OR when
+        # the compute raises (matches the ssim failure contract).
+        "lpips",
         "region_map_base64",
         "width",
         "height",
@@ -276,6 +281,162 @@ def test_patch_bbox_is_none_when_bbox_too_small_for_ssim_window(tmp_path):
     assert m["patch_bbox"] is None
     # ssim_patch falls back to ssim (the bbox crop wasn't run).
     assert m["ssim_patch"] == m["ssim"]
+
+
+# ── [IMPROVE-176] LPIPS perceptual metric (Wave 39) ──────────────
+
+
+def test_lpips_field_is_none_when_disabled_default(tmp_path, monkeypatch):
+    """Without EDITOR_METRICS_LPIPS_ENABLED set (default), the
+    `lpips` field is None and `_get_lpips_model` is NOT called (no
+    AlexNet network download in tests). Pinning this contract is
+    important: a regression that flipped the default to "enabled"
+    would surface as a 244MB download on every test run, slowing
+    CI to a crawl.
+    """
+    from local_ai_platform.images import compose_utils as cu
+
+    monkeypatch.delenv("EDITOR_METRICS_LPIPS_ENABLED", raising=False)
+
+    # Patch _get_lpips_model to raise if called — the test is
+    # asserting it's NOT called when disabled.
+    def _should_not_be_called(net):
+        raise AssertionError(
+            f"_get_lpips_model called with net={net!r} but the env-var "
+            f"is unset, so the LPIPS path should be skipped entirely."
+        )
+    monkeypatch.setattr(cu, "_get_lpips_model", _should_not_be_called)
+
+    a_path = tmp_path / "a.png"
+    b_path = tmp_path / "b.png"
+    Image.new("RGB", (32, 32), color=(255, 0, 0)).save(a_path)
+    Image.new("RGB", (32, 32), color=(0, 255, 0)).save(b_path)
+
+    m = cu.compute_diff_metrics(str(a_path), str(b_path))
+    assert m["lpips"] is None
+
+
+def test_lpips_field_computed_when_enabled_via_mocked_model(
+    tmp_path, monkeypatch,
+):
+    """With EDITOR_METRICS_LPIPS_ENABLED=1 + a mocked
+    `_get_lpips_model` that returns a callable producing a fixed
+    torch scalar, the `lpips` field is the expected float. Tests the
+    wiring (env-var read -> model getter -> im2tensor conversion ->
+    forward pass -> float() coerce) without paying the AlexNet-
+    download cost.
+    """
+    from local_ai_platform.images import compose_utils as cu
+
+    monkeypatch.setenv("EDITOR_METRICS_LPIPS_ENABLED", "1")
+
+    # Reset module-scope cache so the test starts clean. The test's
+    # monkeypatch on `_get_lpips_model` shadows any cached entry,
+    # but clearing the cache also pins the lazy-init contract: an
+    # unmocked enabled call would hit `_get_lpips_model`, not a
+    # leaked cache entry from a prior test.
+    monkeypatch.setattr(cu, "_lpips_model_cache", {})
+
+    class _FakeLpipsModel:
+        """Callable that mimics lpips.LPIPS.__call__: takes two
+        torch tensors + returns a torch scalar tensor."""
+
+        def __call__(self, tensor_a, tensor_b):
+            import torch
+            return torch.tensor(0.42)
+
+    monkeypatch.setattr(cu, "_get_lpips_model", lambda net: _FakeLpipsModel())
+
+    a_path = tmp_path / "a.png"
+    b_path = tmp_path / "b.png"
+    Image.new("RGB", (32, 32), color=(255, 0, 0)).save(a_path)
+    Image.new("RGB", (32, 32), color=(0, 255, 0)).save(b_path)
+
+    m = cu.compute_diff_metrics(str(a_path), str(b_path))
+    assert m["lpips"] is not None
+    assert m["lpips"] == pytest.approx(0.42, abs=1e-6)
+
+
+def test_lpips_field_is_none_on_compute_failure_when_enabled(
+    tmp_path, monkeypatch,
+):
+    """With env-var set + a mocked model that raises, the `lpips`
+    field is None (not raised). Same shape as the existing ssim
+    failure-mode contract — a bad LPIPS compute can't escalate the
+    metrics request to a 500.
+    """
+    from local_ai_platform.images import compose_utils as cu
+
+    monkeypatch.setenv("EDITOR_METRICS_LPIPS_ENABLED", "1")
+    monkeypatch.setattr(cu, "_lpips_model_cache", {})
+
+    def _raising_model_getter(net):
+        raise RuntimeError("synthetic lpips load failure")
+    monkeypatch.setattr(cu, "_get_lpips_model", _raising_model_getter)
+
+    a_path = tmp_path / "a.png"
+    b_path = tmp_path / "b.png"
+    Image.new("RGB", (32, 32), color=(255, 0, 0)).save(a_path)
+    Image.new("RGB", (32, 32), color=(0, 255, 0)).save(b_path)
+
+    m = cu.compute_diff_metrics(str(a_path), str(b_path))
+    # lpips field falls back to None — no exception escapes the
+    # compute_diff_metrics call.
+    assert m["lpips"] is None
+    # Other metrics still computed (the LPIPS try/except is scoped
+    # to the lpips block only; SSIM + region map etc. are unaffected).
+    assert m["ssim"] is not None
+    assert m["region_map_base64"].startswith("data:image/png;base64,")
+
+
+def test_lpips_model_cache_loads_once_across_calls(tmp_path, monkeypatch):
+    """The module-scope `_lpips_model_cache` ensures multiple
+    `compute_diff_metrics` calls only instantiate the model ONCE.
+    Pinning this contract protects against a future refactor that
+    accidentally moves the cache into function scope (each call
+    would re-load the 244MB AlexNet trunk, defeating the whole
+    point of enabling LPIPS).
+    """
+    from local_ai_platform.images import compose_utils as cu
+
+    monkeypatch.setenv("EDITOR_METRICS_LPIPS_ENABLED", "1")
+
+    # Start with a clean cache so the first call definitely lazy-
+    # inits.
+    monkeypatch.setattr(cu, "_lpips_model_cache", {})
+
+    instantiate_count = {"n": 0}
+
+    class _FakeLpipsModel:
+        def __call__(self, tensor_a, tensor_b):
+            import torch
+            return torch.tensor(0.5)
+
+    def _counting_model_getter(net):
+        # Replicate the lazy-init + cache contract that the real
+        # _get_lpips_model implements: only instantiate when not
+        # cached; otherwise return the cached entry.
+        cached = cu._lpips_model_cache.get(net)
+        if cached is not None:
+            return cached
+        instantiate_count["n"] += 1
+        cached = _FakeLpipsModel()
+        cu._lpips_model_cache[net] = cached
+        return cached
+
+    monkeypatch.setattr(cu, "_get_lpips_model", _counting_model_getter)
+
+    a_path = tmp_path / "a.png"
+    b_path = tmp_path / "b.png"
+    Image.new("RGB", (32, 32), color=(255, 0, 0)).save(a_path)
+    Image.new("RGB", (32, 32), color=(0, 255, 0)).save(b_path)
+
+    # 3 calls in a row — instantiate count should grow to 1 only.
+    for _ in range(3):
+        m = cu.compute_diff_metrics(str(a_path), str(b_path))
+        assert m["lpips"] == pytest.approx(0.5, abs=1e-6)
+
+    assert instantiate_count["n"] == 1
 
 
 # ── weighted_blend ───────────────────────────────────────────────
