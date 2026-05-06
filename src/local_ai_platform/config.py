@@ -235,6 +235,15 @@ class AppSettings(BaseSettings):
     # forever" semantics). Opt-in via env-var
     # ``EDITOR_SESSION_TTL_DAYS=N``.
     editor_session_ttl_days: int = Field(default=0)
+    # [IMPROVE-165] Wave 31 — LLM-summarized inter-node DAG context
+    # (Tranche D piece 1). When set to a model identifier (e.g.
+    # ``ollama:gemma3:1b`` / ``ollama:qwen3:4b``), the executor's
+    # ``_build_inter_node_context`` replaces the legacy
+    # ``[... N earlier output(s) elided ...]`` marker with a one-
+    # shot LLM summary of the dropped entries. Empty string
+    # (default) preserves pre-Wave-31 truncation-only behaviour.
+    # Opt-in via env-var ``DAG_INTER_NODE_SUMMARIZATION_MODEL=...``.
+    dag_inter_node_summarization_model: str = Field(default="")
 
     # ── Tracing ───────────────────────────────────────────────────
     trace_enabled: bool = Field(default=True)

@@ -33,7 +33,7 @@ import logging
 import re
 import time as _time
 import uuid
-from typing import TYPE_CHECKING, Any, AsyncGenerator
+from typing import TYPE_CHECKING, Any, AsyncGenerator, Callable
 
 from ..observability_events import emit_typed
 
@@ -99,6 +99,8 @@ def _estimate_tokens(text: str) -> int:
 def _build_inter_node_context(
     node_outputs: list[dict[str, Any]],
     budget_tokens: int = _INTER_NODE_CONTEXT_BUDGET_TOKENS,
+    *,
+    summarizer: Callable[[list[dict[str, Any]]], "str | None"] | None = None,
 ) -> str:
     """[IMPROVE-33] Build a token-budgeted prior-context block.
 
@@ -115,6 +117,17 @@ def _build_inter_node_context(
     Returns an empty string when there are no usable entries —
     callers can then skip the "Context from prior agents:" prefix
     entirely (matches the legacy "if accumulated_context" branch).
+
+    [IMPROVE-165] Wave 31 — when a ``summarizer`` callable is
+    provided AND there are elided entries, the elided entries are
+    handed to the summarizer + its non-empty return value replaces
+    the legacy ``[... N earlier output(s) elided ...]`` marker
+    with ``[Summary of N earlier output(s): {summary}]``. On any
+    summarizer failure (raises, returns None, returns empty
+    string), the legacy marker is restored so a wedged summarizer
+    LLM never makes the executor worse than pre-Wave-31. Default
+    ``summarizer=None`` preserves pre-Wave-31 truncation-only
+    behaviour.
     """
     usable = [r for r in node_outputs if r.get("status") == "ok"]
     if not usable:
@@ -143,12 +156,135 @@ def _build_inter_node_context(
 
     chunks = list(reversed(chunks_newest_first))
     if elided_count > 0:
-        prefix = (
-            f"\n[... {elided_count} earlier output(s) elided to fit "
-            f"context budget ...]\n"
-        )
+        # [IMPROVE-165] Wave 31 — try summarizer first; fall back
+        # to legacy marker on any failure path.
+        summary = None
+        if summarizer is not None:
+            elided_entries = usable[:elided_count]
+            try:
+                summary = summarizer(elided_entries)
+            except Exception as exc:
+                logger.warning(
+                    "[IMPROVE-165] summarizer raised (fallback to "
+                    "legacy marker): %s", exc,
+                )
+                summary = None
+        if summary:
+            prefix = (
+                f"\n[Summary of {elided_count} earlier output(s): "
+                f"{summary}]\n"
+            )
+        else:
+            prefix = (
+                f"\n[... {elided_count} earlier output(s) elided to fit "
+                f"context budget ...]\n"
+            )
         chunks.insert(0, prefix)
     return "".join(chunks)
+
+
+# ── [IMPROVE-165] Wave 31 — LLM-summarized inter-node context ─────
+#
+# Tranche D piece 1 from the Wave 18 deferred queue. The IMPROVE-84
+# block comment near _INTER_NODE_CONTEXT_BUDGET_TOKENS named "LLM-
+# summarized inter-node context" as a follow-up; this implements
+# the elision-replacement variant.
+#
+# The summarizer is opt-in via the
+# ``dag_inter_node_summarization_model`` setting (default empty =
+# disabled). When set, call sites in this module build a closure
+# capturing ``orch`` + the model name + invoke the helper below
+# from inside ``_build_inter_node_context``.
+#
+# Failure modes are graceful: any exception, empty response, or
+# missing model identifier returns ``None`` so
+# ``_build_inter_node_context`` falls back to the legacy elision
+# marker. Pattern: opt-in features fail open to the default,
+# rather than fail-loud (the inverse of Wave 28's schema-
+# versioning fail-loud — different contracts call for different
+# defaults).
+
+
+def _summarize_elided_outputs(
+    orchestrator: Any,
+    model: str,
+    elided_entries: list[dict[str, Any]],
+) -> "str | None":
+    """[IMPROVE-165] Summarize a list of elided node outputs into
+    1-2 sentences via a one-shot ``orchestrator.router.chat`` call.
+
+    Returns the trimmed summary text on success, or ``None`` on
+    any failure (LLM unreachable, empty response, model missing,
+    transient timeout). Callers (specifically
+    ``_build_inter_node_context``) use the None to fall back to
+    the legacy elision marker.
+
+    Why a separate helper rather than inline in
+    ``_build_inter_node_context``: the helper's signature
+    (orchestrator + model + entries) makes it trivially mockable
+    in tests + keeps ``_build_inter_node_context`` agnostic to the
+    LLM-call mechanism (any callable matching the
+    ``Callable[[list[dict]], str | None]`` summarizer signature
+    works).
+    """
+    if not elided_entries or not model:
+        return None
+    try:
+        from ..providers.base import ChatMessage, GenerationSettings
+
+        joined = "\n\n".join(
+            f"[{r.get('agent', '?')} ({r.get('role', '')})]: "
+            f"{r.get('text', '')}"
+            for r in elided_entries
+        )
+        messages = [
+            ChatMessage(
+                role="system",
+                content=(
+                    "You are a context summarizer for a multi-agent "
+                    "DAG runner. Summarize the prior agents' outputs "
+                    "in ONE OR TWO sentences. Capture the key "
+                    "facts/decisions; drop step-by-step reasoning. "
+                    "Reply with the summary text only — no preamble."
+                ),
+            ),
+            ChatMessage(role="user", content=joined),
+        ]
+        settings = GenerationSettings(
+            temperature=0.2, max_tokens=200,
+        )
+        resp = orchestrator.router.chat(model, messages, settings)
+        text = (getattr(resp, "content", "") or "").strip()
+        if not text:
+            return None
+        return text
+    except Exception as exc:
+        logger.warning(
+            "[IMPROVE-165] summarizer LLM call failed (fallback to "
+            "legacy marker): %s", exc,
+        )
+        return None
+
+
+def _build_summarizer(
+    orchestrator: Any, model: str | None,
+) -> Callable[[list[dict[str, Any]]], "str | None"] | None:
+    """[IMPROVE-165] Convenience builder used by the 3 call sites
+    in this module. Returns a closure that captures the
+    orchestrator + model name and adapts the
+    ``_summarize_elided_outputs`` signature to the
+    ``_build_inter_node_context`` ``summarizer`` kwarg shape.
+
+    Returns ``None`` when ``model`` is empty / falsy so call sites
+    can pass the result directly without an extra branch.
+    """
+    if not model:
+        return None
+
+    def _summarize(elided: list[dict[str, Any]]) -> "str | None":
+        return _summarize_elided_outputs(orchestrator, model, elided)
+
+    return _summarize
 
 
 # ── Edge classification ──────────────────────────────────────────
@@ -523,8 +659,16 @@ async def _run_parallel_wave_or_fallback(
         )
 
     # Wave is safe — run concurrently.
+    # [IMPROVE-165] Wave 31 — opt-in LLM summarizer for elided
+    # inter-node context entries. Empty setting (default) yields
+    # ``summarizer=None`` so behaviour matches pre-Wave-31.
+    from ..config import get_settings
+    pre_wave_summarizer = _build_summarizer(
+        orch, get_settings().dag_inter_node_summarization_model,
+    )
     pre_wave_ctx = _build_inter_node_context(
         node_outputs, budget_tokens=context_budget,
+        summarizer=pre_wave_summarizer,
     )
 
     async def _preload(_nid: str):
@@ -764,8 +908,16 @@ async def execute_graph(
             # [IMPROVE-33] Build prompt with token-budgeted prior
             # context — newest outputs win, older ones get elided
             # with a marker so the agent knows truncation happened.
+            # [IMPROVE-165] Wave 31 — opt-in LLM summarizer
+            # replaces the elision marker with a 1-2 sentence
+            # digest when the setting is non-empty.
+            from ..config import get_settings
+            _summarizer = _build_summarizer(
+                orch, get_settings().dag_inter_node_summarization_model,
+            )
             ctx_block = _build_inter_node_context(
                 node_outputs, budget_tokens=context_budget,
+                summarizer=_summarizer,
             )
             if ctx_block:
                 prompt = (
@@ -1131,8 +1283,15 @@ async def astream_graph(
                 # through to that block.
             else:
                 # [IMPROVE-33] same budgeted context builder as sync.
+                # [IMPROVE-165] Wave 31 — same opt-in summarizer
+                # as the sync sibling above.
+                from ..config import get_settings
+                _summarizer = _build_summarizer(
+                    orch, get_settings().dag_inter_node_summarization_model,
+                )
                 ctx_block = _build_inter_node_context(
                     node_outputs, budget_tokens=context_budget,
+                    summarizer=_summarizer,
                 )
                 if ctx_block:
                     prompt = (
