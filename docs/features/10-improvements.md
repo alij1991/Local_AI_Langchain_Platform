@@ -10,7 +10,7 @@
 
 - **169 improvements** flagged inline as `[IMPROVE-N]` in chapters 1–9 + the Wave 5/6/7/8/9/10/11/12/13/14/15/16/18/19/20/21/22/23/24/26/27/28/29/30/31/32/33/34/35 audits (NEW from Wave 6 audit: 71/72/73/74; NEW from Wave 7: 75/76/77/78/79/80/81/82; NEW from Wave 8: 83/84/85/86/87/88; NEW from Wave 9: 89/90/91/92/93/94; NEW from Wave 10: 95/96/97/98/99/100; NEW from Wave 11: 101/102/103/104/105/106; NEW from Wave 12: 107/108/109/110/111/112; NEW from Wave 13: 113/114/115/116/117/118; NEW from Wave 14: 119/120/121/122/123/124/125; NEW from Wave 15: 126/127/128/129/130/131; NEW from Wave 16: 132/133/134/135/136/137; NEW from Wave 18: 138/139/140/141/142/143/144; NEW from Wave 19 Tranche A: 145/146; NEW from Wave 20 cleanup wave: 147/148/149/150/151/152; NEW from Wave 21 startup-contention fix: 153/154/155; NEW from Wave 22 true-async _init_mem0: 156; NEW from Wave 23 Kokoro create_stream chunked TTFA: 157/158; NEW from Wave 24 server-side parallel synth-while-LLM-streams: 159; NEW from Wave 26 startup-timing benchmark harness: 160; NEW from Wave 27 lifespan eager editor warm-up flag: 161; NEW from Wave 28 Tranche G partial preset export/import: 162; NEW from Wave 29 Tranche B voice persistence: 163; NEW from Wave 30 Tranche E partial editor session TTL cleanup: 164; NEW from Wave 31 Tranche D piece 1 LLM-summarized inter-node DAG context: 165; NEW from Wave 32 Tranche D piece 2 per-edge pass config: 166; NEW from Wave 33 Tranche D piece 3 classifier confidence threshold: 167; NEW from Wave 34 Tranche F real-LLM enhancer eval suite: 168; NEW from Wave 35 Tranche E sub-piece per-step metrics caching: 169).
 - **10 themes** — security, architecture, observability, tracing, UX, memory & context, model & inference, background tasks, voice, and tools/MCP.
-- **33 waves fully shipped + Wave 25 deferred-by-investigation + Wave 35 in progress** (Waves 1-16 numbered + Wave 17 doc-only cleanup + Wave 18 Tranche A Flutter editor v2 + Wave 19 Tranche A partner-import host + Wave 20 cleanup wave: §10.7 walkthrough closing Q1/Q4/Q7/Q15/Q16 + 1 deletion + 5 TTS quick wins + Wave 21 startup-contention fix targeting the 3 lazy-init chains the user's startup log surfaced + Wave 22 true-async _init_mem0 — IMPROVE-156 background-task warmup at lifespan via httpx.AsyncClient pre-warm of nomic-embed-text + asyncio.create_task fire-and-forget Mem0 init, moving the ~22s Chain 2 cost OFF the user's first request entirely + Wave 23 Kokoro create_stream chunked TTFA — IMPROVE-157 backend stream_synthesize via kokoro_onnx.create_stream + IMPROVE-158 Flutter progressive playback delivering ~60-80% TTFA win on long-paragraph synth + Wave 24 server-side parallel synth-while-LLM-streams — IMPROVE-159 phrase-boundary fallback in PartnerEngine.astream_chat firing on ``,`` ``;`` ``:`` once a clause is ≥ 30 chars long, so TTS can begin synthesising while the LLM is still emitting later words + Wave 25 Chatterbox sidecar streaming investigation — chatterbox-tts 0.1.7 has no streaming surface in either ChatterboxTTS.generate or ChatterboxTTSTurbo.generate; deferred pending upstream feature OR justified 3-5d fork investment + Wave 29 voice persistence: IMPROVE-163 `data/partner/voice_settings.json` survives backend restart so a user's voice_id / voice_gender / tts_mode picks don't reset on every uvicorn cycle, closing Tranche B partial from the Wave 18 deferred queue + Wave 30 editor session TTL cleanup: IMPROVE-164 opt-in `EDITOR_SESSION_TTL_DAYS=N` env-var triggers a fire-and-forget lifespan task that walks the [IMPROVE-53] archive directory + deletes date-buckets older than N days, closing Tranche E partial from the Wave 18 deferred queue + Wave 31 LLM-summarized inter-node DAG context: IMPROVE-165 opt-in `DAG_INTER_NODE_SUMMARIZATION_MODEL` env-var replaces the legacy `[... N earlier output(s) elided ...]` truncation marker with a one-shot LLM summary of the dropped entries when context budget is exceeded, closing Tranche D piece 1 of 3 + Wave 32 per-edge "pass" config: IMPROVE-166 adds 3 edge.rule.pass modes (`all` default / `source_only` / `none`) so DAG authors can scope which prior outputs each downstream agent sees, closing Tranche D piece 2 of 3 + Wave 33 classifier confidence threshold: IMPROVE-167 opt-in `DAG_CLASSIFIER_CONFIDENCE_THRESHOLD` env-var with heuristic confidence ``1 / matched_count`` rejects ambiguous llm_router classifications so the always-fallback edge fires instead, closing Tranche D piece 3 of 3 + the entire Tranche D umbrella + Wave 34 real-LLM enhancer eval suite: IMPROVE-168 opt-in `LOCAL_AI_EVAL_REAL_LLM=1` env-var runs `enhance_edit_prompt` against real Ollama LLMs with 8 curated test cases that pin content-word preservation + forbidden-phrase rejection + multi-model behaviour, closing Tranche F from the Wave 18 deferred queue + the IMPROVE-55 spawned-follow-up callout + the user's "in order A, B, C, D" batch + Wave 35 in progress: per-step metrics caching — IMPROVE-169 caches the [IMPROVE-56] diff-metrics dict per `(path_a, path_b)` pair on `EditSession` so repeated `GET /editor/{session_id}/compare?metrics=true` calls return the cached dict instead of recomputing the SSIM + region-map base64 (~80ms+ saved on cache hit), closing Tranche E sub-piece from the post-Wave-34 backlog); **1** standing in deferred queues (post-Wave-35 backlog).
+- **34 waves fully shipped + Wave 25 deferred-by-investigation** (Waves 1-16 numbered + Wave 17 doc-only cleanup + Wave 18 Tranche A Flutter editor v2 + Wave 19 Tranche A partner-import host + Wave 20 cleanup wave: §10.7 walkthrough closing Q1/Q4/Q7/Q15/Q16 + 1 deletion + 5 TTS quick wins + Wave 21 startup-contention fix targeting the 3 lazy-init chains the user's startup log surfaced + Wave 22 true-async _init_mem0 — IMPROVE-156 background-task warmup at lifespan via httpx.AsyncClient pre-warm of nomic-embed-text + asyncio.create_task fire-and-forget Mem0 init, moving the ~22s Chain 2 cost OFF the user's first request entirely + Wave 23 Kokoro create_stream chunked TTFA — IMPROVE-157 backend stream_synthesize via kokoro_onnx.create_stream + IMPROVE-158 Flutter progressive playback delivering ~60-80% TTFA win on long-paragraph synth + Wave 24 server-side parallel synth-while-LLM-streams — IMPROVE-159 phrase-boundary fallback in PartnerEngine.astream_chat firing on ``,`` ``;`` ``:`` once a clause is ≥ 30 chars long, so TTS can begin synthesising while the LLM is still emitting later words + Wave 25 Chatterbox sidecar streaming investigation — chatterbox-tts 0.1.7 has no streaming surface in either ChatterboxTTS.generate or ChatterboxTTSTurbo.generate; deferred pending upstream feature OR justified 3-5d fork investment + Wave 29 voice persistence: IMPROVE-163 `data/partner/voice_settings.json` survives backend restart so a user's voice_id / voice_gender / tts_mode picks don't reset on every uvicorn cycle, closing Tranche B partial from the Wave 18 deferred queue + Wave 30 editor session TTL cleanup: IMPROVE-164 opt-in `EDITOR_SESSION_TTL_DAYS=N` env-var triggers a fire-and-forget lifespan task that walks the [IMPROVE-53] archive directory + deletes date-buckets older than N days, closing Tranche E partial from the Wave 18 deferred queue + Wave 31 LLM-summarized inter-node DAG context: IMPROVE-165 opt-in `DAG_INTER_NODE_SUMMARIZATION_MODEL` env-var replaces the legacy `[... N earlier output(s) elided ...]` truncation marker with a one-shot LLM summary of the dropped entries when context budget is exceeded, closing Tranche D piece 1 of 3 + Wave 32 per-edge "pass" config: IMPROVE-166 adds 3 edge.rule.pass modes (`all` default / `source_only` / `none`) so DAG authors can scope which prior outputs each downstream agent sees, closing Tranche D piece 2 of 3 + Wave 33 classifier confidence threshold: IMPROVE-167 opt-in `DAG_CLASSIFIER_CONFIDENCE_THRESHOLD` env-var with heuristic confidence ``1 / matched_count`` rejects ambiguous llm_router classifications so the always-fallback edge fires instead, closing Tranche D piece 3 of 3 + the entire Tranche D umbrella + Wave 34 real-LLM enhancer eval suite: IMPROVE-168 opt-in `LOCAL_AI_EVAL_REAL_LLM=1` env-var runs `enhance_edit_prompt` against real Ollama LLMs with 8 curated test cases that pin content-word preservation + forbidden-phrase rejection + multi-model behaviour, closing Tranche F from the Wave 18 deferred queue + the IMPROVE-55 spawned-follow-up callout + the user's "in order A, B, C, D" batch + Wave 35 per-step metrics caching: IMPROVE-169 caches the [IMPROVE-56] diff-metrics dict per `(path_a, path_b)` pair on `EditSession` so repeated `GET /editor/{session_id}/compare?metrics=true` calls return the cached dict instead of recomputing the SSIM + region-map base64 (~80ms+ saved on cache hit), closing Tranche E sub-piece from the post-Wave-34 backlog); **1** standing in deferred queues (post-Wave-35 backlog).
 
 All improvements are traceable back to a chapter + a 2025–2026 citation. This chapter is pure planning — *what* + *why this order*; *how* is in each origin chapter.
 
@@ -178,7 +178,7 @@ Smaller items that improve day-to-day use.
 
 ---
 
-## 10.4 The complete table (all 168)
+## 10.4 The complete table (all 169)
 
 Sortable if you paste into a spreadsheet. Chapter column links back to the originating doc.
 
@@ -352,10 +352,11 @@ Sortable if you paste into a spreadsheet. Chapter column links back to the origi
 | 166 | 5 | ✓ Per-edge "pass" config — NEW ``edge.rule.pass`` field with 3 modes (``all`` default / ``source_only`` / ``none``) controls which prior outputs the downstream agent sees in its context block; per-target tracking with last-fired-edge-wins for multi-incoming case; helper signature gets ``pass_mode`` + ``source_node_id`` kwargs (Wave 32 — closes Tranche D piece 2 of 3 from the Wave 18 deferred queue + the §IMPROVE-33 doc proposal; default ``all`` preserves pre-Wave-32 behaviour; invalid pass_mode silently falls back to ``all``) | ⋆⋆ | 🔨 | Architecture |
 | 167 | 5 | ✓ DAG classifier confidence threshold — opt-in ``DAG_CLASSIFIER_CONFIDENCE_THRESHOLD=...`` env-var (default 0.0 = disabled) with heuristic confidence ``1 / matched_count`` rejects ambiguous llm_router classifications (multiple options match the response) so the always-fallback edge fires instead of a low-confidence pick (Wave 33 — closes Tranche D piece 3 of 3 + the entire Tranche D umbrella from the Wave 18 deferred queue + the IMPROVE-35 follow-up; provider-agnostic heuristic ships now, logprob-based confidence is a Wave N+ extension if the simpler heuristic hits its ceiling) | ⋆⋆ | 🔨 | Architecture |
 | 168 | 7 | ✓ Real-LLM enhancer eval suite — NEW ``tests/eval/test_edit_prompt_enhancer_real_llm.py`` with 8 curated test cases that run ``enhance_edit_prompt`` against real Ollama LLMs (gated by ``LOCAL_AI_EVAL_REAL_LLM=1`` env-var; default-off skips all eval tests so CI + most local dev pay zero cost); pins content-word preservation + forbidden-phrase rejection + multi-model behaviour (kontext target-state vs cosxl imperative format) + the canonical "make the girls kiss" regression case (Wave 34 — closes Tranche F from the Wave 18 deferred queue + the IMPROVE-55 spawned-follow-up callout + the user's "in order A, B, C, D" batch end-to-end) | ⋆⋆ | 🔨 | UX |
+| 169 | 7 | ✓ Per-step metrics caching for ``GET /editor/{session_id}/compare?metrics=true`` — NEW ``metrics_cache: dict[tuple[str, str], dict[str, Any]]`` field on ``EditSession`` keyed by ``(path_a, path_b)`` so repeated calls for the same step pair return the cached dict instead of recomputing the [IMPROVE-56] SSIM + region-map base64 tuple (~80ms+ saved on cache hit when the Flutter UI scrubs through history with metrics on); path-based keys are invariant under undo / redo / new-edit-after-undo per the [IMPROVE-53] file-stability invariant so no cache invalidation is needed (Wave 35 — closes Tranche E sub-piece from the post-Wave-34 backlog; lossless cache, no env-var gate; first behaviour-change wave to ship without an opt-in flag because the cache is provably backwards-compatible) | ⋆⋆ | 🔨 | UX |
 
 *Impact for [IMPROVE-59] is ⋆⋆⋆⋆⋆ if the app is ever distributed, ⋆⋆ if it stays local-only.
 
-**Legend:** A ``✓`` prefix marks items that have shipped. See §10.6 for the Wave 5 / 6 / 7 / 8 / 9 / 10 / 11 / 12 / 13 / 14 / 15 / 16 / 17 / 18 / 19 / 20 / 21 / 22 / 23 / 24 / 26 / 27 / 28 / 29 / 30 / 31 / 32 / 33 / 34 retrospective.
+**Legend:** A ``✓`` prefix marks items that have shipped. See §10.6 for the Wave 5 / 6 / 7 / 8 / 9 / 10 / 11 / 12 / 13 / 14 / 15 / 16 / 17 / 18 / 19 / 20 / 21 / 22 / 23 / 24 / 26 / 27 / 28 / 29 / 30 / 31 / 32 / 33 / 34 / 35 retrospective.
 
 ---
 
@@ -1250,7 +1251,7 @@ at the cost of ~21s extra boot; default-off users keep
 current boot speed + lazy-init fallback. 3 commits (2 doc +
 1 numbered) — the planned single-numbered shape held.
 
-### Wave 35 — Tranche E sub-piece: per-step metrics caching (in progress 2026-05-05)
+### Wave 35 — Tranche E sub-piece: per-step metrics caching (✓ shipped 2026-05-05)
 
 Theme: address the Tranche E "editor advanced" sub-piece flagged
 in the post-Wave-34 backlog — per-step metrics caching for the
@@ -1346,15 +1347,18 @@ unconditionally.
 
 | # | Tag | SHA | What landed | Tests |
 |---|---|---|---|---:|
-| 1 | (doc)         | this    | Wave 35 mid-wave (start) — register Wave 35 in §10.5 + §10.6 with the per-step metrics caching design + Tranche E sub-piece framing + post-Wave-35 backlog footer. Updates §10.1 wave-status. | 0 |
-| 2 | [IMPROVE-169] | TBD     | NEW `metrics_cache` field on `EditSession` + MODIFIED `ImageEditorService.compare` to check cache first + NEW `tests/test_editor_metrics_cache.py` with ~10 pin tests. Tier 1 grows by ~10. Routes 189 unchanged. | +10 |
-| 3 | (doc)         | TBD     | Wave 35 end-wave retrospective. Bumps 168 → 169 in §10.4 header. Adds 1 IMPROVE-N row (169). Fills in Wave 35 mid-wave SHA placeholder (this) + IMPROVE-169 SHA. Flips Wave 35 status (in progress → ✓ shipped). NEW Wave 35 architectural impact subsection. | 0 |
+| 1 | (doc)         | b9b6da1 | Wave 35 mid-wave (start) — register Wave 35 in §10.5 + §10.6 with the per-step metrics caching design + Tranche E sub-piece framing + post-Wave-35 backlog footer. Updates §10.1 wave-status. | 0 |
+| 2 | [IMPROVE-169] | c488f40 | NEW `metrics_cache` field on `EditSession` + MODIFIED `ImageEditorService.compare` to check cache first + NEW `tests/test_editor_metrics_cache.py` with 12 pin tests. Tier 1 grows by 12. Routes 189 unchanged. | +12 |
+| 3 | (doc)         | this    | Wave 35 end-wave retrospective. Bumps 168 → 169 in §10.4 header. Adds 1 IMPROVE-N row (169). Fills in Wave 35 mid-wave SHA placeholder (this → b9b6da1) + IMPROVE-169 SHA (TBD → c488f40). Flips Wave 35 status (in progress → ✓ shipped). NEW Wave 35 architectural impact subsection. | 0 |
 
-Net (planned): +~10 Tier 1 "passed" tests (1966 → ~1976).
-Sweep file count grows 102 → 103. Routes 189 unchanged
-(cache is internal to `compare`; no new HTTP surface).
-Flutter widget tests unchanged at 182 (Wave 35 is
-backend-only).
+Net: +12 Tier 1 "passed" tests (1966 → 1978 vs the
+documented Wave-34-close baseline). Sweep file count grew
+102 → 103. Routes 189 unchanged (cache is internal to
+`compare`; no new HTTP surface). Flutter widget tests
+unchanged at 182 (Wave 35 is backend-only). 3 commits
+(2 doc + 1 numbered) — the planned single-numbered shape
+held end-to-end, identical cadence to Waves 28 / 29 / 30 /
+31 / 32 / 33 / 34.
 
 ### Wave 34 — Tranche F: real-LLM enhancer eval suite (✓ shipped 2026-05-05)
 
@@ -3269,19 +3273,109 @@ held end-to-end.
   * **Flutter widget tests 182 unchanged**. Path D is
     backend-only (settings + lifespan).
 
-### Wave 35 (in progress)
+### Wave 35 (✓ shipped)
 
 | # | Tag | SHA | What landed | Tests |
 |---|---|---|---|---:|
-| 1 | (doc)         | this    | Wave 35 mid-wave (start) — register Wave 35 in §10.5 + §10.6 with the per-step metrics caching design + Tranche E sub-piece framing + post-Wave-35 backlog footer. Updates §10.1 wave-status. | 0 |
-| 2 | [IMPROVE-169] | TBD     | NEW `metrics_cache` field on `EditSession` + MODIFIED `ImageEditorService.compare` to check cache first + NEW `tests/test_editor_metrics_cache.py` with ~10 pin tests. | +10 |
-| 3 | (doc)         | TBD     | Wave 35 end-wave retrospective. Bumps 168 → 169. Adds 1 IMPROVE-N row + Wave 35 architectural impact subsection. | 0 |
+| 1 | (doc)         | b9b6da1 | Wave 35 mid-wave (start) — register Wave 35 in §10.5 + §10.6 with the per-step metrics caching design + Tranche E sub-piece framing + post-Wave-35 backlog footer. Updates §10.1 wave-status. | 0 |
+| 2 | [IMPROVE-169] | c488f40 | NEW `metrics_cache` field on `EditSession` + MODIFIED `ImageEditorService.compare` to check cache first + NEW `tests/test_editor_metrics_cache.py` with 12 pin tests. | +12 |
+| 3 | (doc)         | this    | Wave 35 end-wave retrospective. Bumps 168 → 169. Adds 1 IMPROVE-N row + Wave 35 architectural impact subsection. | 0 |
 
-Net (planned): +~10 Tier 1 "passed" tests. Sweep file
-count 102 → 103. Routes 189 unchanged. Flutter widget
-tests 182 unchanged. Single-numbered + 2 doc commits = 3
-total — the same shape as Waves 28 / 29 / 30 / 31 / 32 /
-33 / 34.
+Net: +12 Tier 1 "passed" tests. Sweep file count 102 →
+103. Routes 189 unchanged. Flutter widget tests 182
+unchanged. Single-numbered + 2 doc commits = 3 total —
+the same shape as Waves 28 / 29 / 30 / 31 / 32 / 33 /
+34.
+
+### Wave 35 architectural impact
+
+  * **Lossless-cache pattern (no env-var gate)**: Wave
+    35 is the FIRST wave to ship a behaviour change
+    WITHOUT the env-var opt-in pattern. The default-off
+    opt-in pattern from Waves 26/27/30/31/33/34 applies
+    when the new behaviour has a behavioural cost
+    (slower path / different output / external resource
+    dependency). Wave 35's cache is LOSSLESS (same
+    dict instance returned, ``id()`` equality pinned in
+    test_cache_hit_returns_identical_dict_instance) +
+    ~free (memory cost is bounded + cheap), so no opt-
+    out is needed. Pattern: env-var gates exist to
+    protect callers from behavioural regressions; when
+    a change is provably backwards-compatible,
+    unconditional shipping is correct. Future cache /
+    memoization waves should follow the same rule —
+    test for backward-compat, ship unconditionally if
+    proven.
+
+  * **Path-based cache key as the natural identifier**:
+    Wave 35 uses ``(path_a, path_b)`` paths as the
+    cache key rather than the synthetic
+    ``(session_id, step_a, step_b)`` shape suggested in
+    the resume prompt. Paths are stable identifiers
+    (per the [IMPROVE-53] file-stability invariant) +
+    naturally deduplicate the case where ``step_b=-1``
+    resolves to the same file as the explicit current-
+    step index. Pattern: prefer the most stable
+    identifier available; resolve synthetic params
+    (step indices) to stable identifiers BEFORE
+    building the cache key. This avoids the alias
+    bug class where two logically-equivalent calls
+    miss the cache because their synthetic keys
+    differ.
+
+  * **No-invalidation invariant**: Path-based keys +
+    the [IMPROVE-53] file-stability invariant mean
+    undo / redo / new-edit-after-undo do NOT invalidate
+    the cache. The 3 dedicated tests
+    (test_undo_does_not_invalidate_cached_pair /
+    test_redo_does_not_invalidate_cached_pair /
+    test_new_edit_after_undo_does_not_invalidate_old_cache)
+    pin this. Pattern: when the cache key is invariant
+    under the full set of operations the entity
+    supports, the cache needs no invalidation surface
+    at all — saves the on-undo / on-redo / on-edit
+    callback wiring entirely. Worth checking BEFORE
+    designing an invalidation pipeline: can the cache
+    key be rotated to make invalidation unnecessary?
+
+  * **Stacking optional kwargs avoided**: Wave 31+32
+    documented "stacking optional kwargs on the same
+    helper" as a pattern (3 keyword-only kwargs added
+    to ``_build_inter_node_context``). Wave 35 takes
+    the alternative path: the cache state lives on
+    the ``EditSession`` dataclass (a NEW field) rather
+    than as a kwarg on ``compare``. Pattern: when the
+    state is per-entity (per-session in this case),
+    prefer dataclass fields over signature kwargs.
+    Kwargs are for per-call configuration; fields are
+    for per-entity state.
+
+  * **Tier 1 baseline 1966 → 1978 at Wave 35 close
+    (passed)**. Sweep file count 102 → 103 (the new
+    test_editor_metrics_cache.py file).
+
+  * **Routes 189 unchanged at Wave 35 close**. Wave 35
+    is internal to ``ImageEditorService.compare`` — no
+    new HTTP surface, no router changes, no
+    api_server.py changes. The [IMPROVE-169] fix
+    touched src/local_ai_platform/images/editor.py
+    (1 NEW dataclass field + 1 MODIFIED method, ~30
+    LoC) + tests/test_editor_metrics_cache.py (NEW,
+    ~330 lines including docstring + 12 pin tests).
+
+  * **Flutter widget tests 182 unchanged**. Wave 35 is
+    backend-only — Flutter UI is unaffected. The cache
+    win is realised by EXISTING Flutter scrub-through-
+    history calls; no client changes required.
+
+  * **Tranche E continues**: Wave 30 [IMPROVE-164] was
+    Tranche E partial (TTL cleanup); Wave 35 ships
+    another Tranche E sub-piece (per-step metrics
+    caching). Tranche E "editor advanced" remains open
+    with sub-pieces queued (LPIPS metric + cropped-
+    patch optimization). Pattern continues: ship-
+    smallest-first applies WITHIN tranche subdivisions,
+    not just across tranches.
 
 ### Wave 34 (✓ shipped)
 
@@ -4864,7 +4958,7 @@ Wave 24+ priorities at the user's pace.
 ## 10.8 Where to go from here
 
 - **Read chapter 1 → 9 if you haven't.** This chapter is the index; the others have the details.
-- **Pick a Wave 35+ item and ship it** — see §10.5 Wave 18 deferred queue (the trimmed Wave 17 cleanup output: NEW candidates IMPROVE-NEW-2/7/8/10 + Wave-15-audit FILTER_AXIS_TYPES registry + 7 Wave-16-audit-spawned items + Wave-13/12/11/10-audit triggered items + themed tranches B/D/E/F/G + carry-overs gated on §10.7 questions — most of which are now ungated since Wave 20 closed Q1 / Q4 / Q7 / Q15 / Q16). Tranche A (Flutter editor v2) shipped fully in Wave 18 — IMPROVE-138 through IMPROVE-144. Wave 19 Tranche A closed the GDPR Article 20 round-trip with the partner-import host ([IMPROVE-145]) + export button ([IMPROVE-146]). Wave 20 cleanup wave (✓ shipped) closed §10.7 gating questions + shipped a Q7=b deletion ([IMPROVE-147]) + 5 Q4=c TTS pipeline quick wins ([IMPROVE-148] / [IMPROVE-149] / [IMPROVE-150] / [IMPROVE-151] / [IMPROVE-152]). Wave 21 (✓ shipped) closed the cross-cutting startup contention with 3 chain fixes ([IMPROVE-153] / [IMPROVE-154] / [IMPROVE-155]) — ~47s of cold-startup blocking unwound. Wave 22 (✓ shipped) closed the Wave 21-spawned true-async ``_init_mem0`` follow-up via [IMPROVE-156] — httpx.AsyncClient pre-warm of Ollama embed + ``asyncio.create_task`` fire-and-forget Mem0 init at lifespan, moving the ~22s Chain 2 cost off the user's first request entirely. Wave 23 (✓ shipped) closed the Wave 20-spawned Kokoro create_stream piece via [IMPROVE-157] (backend stream_synthesize via ``async for`` over ``Kokoro.create_stream``) + [IMPROVE-158] (Flutter ``buildMiniWavForChunk`` + per-sentence StreamController + ``await for``-driven progressive playback) — ~60-80% TTFA reduction on long-paragraph synth. Wave 24 (✓ shipped) closed the Wave 23-spawned server-side parallel synth-while-LLM-streams piece via [IMPROVE-159] — phrase-boundary fallback in ``PartnerEngine.astream_chat`` firing on ``,`` ``;`` ``:`` once the clause is ≥ 30 chars, so TTS begins synthesising while the LLM keeps streaming later words. Wave 25 (deferred-by-investigation) inspected chatterbox-tts 0.1.7 source and confirmed neither ``ChatterboxTTS.generate`` nor ``ChatterboxTTSTurbo.generate`` has a streaming surface — true streaming requires forking the library (~3-5d), deferred pending upstream feature OR justified fork investment. Wave 26 (✓ shipped) pinned the cold-startup wins from Waves 21+22 + the TTFA wins from Waves 23+24 against future regressions via a new startup-timing benchmark harness ([IMPROVE-160]) — 4 deterministic timing pins on the actual ``api_server.app`` (no mocks). Wave 27 (✓ shipped) closed the Wave 21-residue Path D piece via [IMPROVE-161] — opt-in ``LIFESPAN_EAGER_EDITOR_WARMUP`` flag that pre-builds the editor service at lifespan time so editor-heavy users get hot first /editor/* calls at the cost of ~21s extra boot. Default-off preserves current boot speed. Wave 28 (✓ shipped) closed Tranche G partial — preset JSON export/import via [IMPROVE-162] — adding 2 new editor preset endpoints (export + import) with v=1 schema versioning so power users can share their tuned editor recipes via JSON files. Wave 29 (✓ shipped) closed Tranche B partial — voice persistence via [IMPROVE-163] — adding ``data/partner/voice_settings.json`` (sibling of profile.json / user_profile.json / memory_decay.json) loaded at PartnerEngine init + written on every set_voice_id / set_voice_gender / set_tts_mode success, so a user's voice / gender / mode picks survive backend restart. Wave 30 (✓ shipped) closed Tranche E partial — editor session TTL cleanup via [IMPROVE-164] — adding ``EDITOR_SESSION_TTL_DAYS`` settings field + a fire-and-forget lifespan task that walks the [IMPROVE-53] archive directory and deletes date-buckets older than the configured threshold (mirrors Wave 22's IMPROVE-156 fire-and-forget pattern; default 0 = disabled preserves "archives accumulate forever" semantics). Wave 31 (✓ shipped) closed Tranche D piece 1 — LLM-summarized inter-node DAG context via [IMPROVE-165] — adding ``DAG_INTER_NODE_SUMMARIZATION_MODEL`` opt-in env-var that replaces the legacy elision marker in ``_build_inter_node_context`` with a one-shot LLM summary of dropped entries (default empty = disabled preserves truncation-only behaviour; failure paths fall back to the legacy marker). Wave 32 (✓ shipped) closed Tranche D piece 2 — per-edge "pass" config via [IMPROVE-166] — adding 3 edge.rule.pass modes (``all`` default / ``source_only`` / ``none``) so DAG authors can scope which prior outputs each downstream agent sees (default ``all`` preserves pre-Wave-32 behaviour; invalid pass_mode silently falls back to ``all``). Wave 33 (✓ shipped) closed Tranche D piece 3 + the entire Tranche D umbrella — classifier confidence threshold via [IMPROVE-167] — adding ``DAG_CLASSIFIER_CONFIDENCE_THRESHOLD`` opt-in env-var with heuristic confidence ``1 / matched_count`` that rejects ambiguous llm_router classifications (multiple options match the response) so the always-fallback edge fires instead of a low-confidence pick (default 0.0 = no filtering preserves current behaviour). Wave 34 (✓ shipped) closed Tranche F + the user's "in order A, B, C, D" batch end-to-end — real-LLM enhancer eval suite via [IMPROVE-168] — adding ``tests/eval/test_edit_prompt_enhancer_real_llm.py`` with 8 curated test cases that pin ``enhance_edit_prompt`` against real Ollama LLMs (gated by ``LOCAL_AI_EVAL_REAL_LLM=1`` env-var; default-off skips all eval tests so CI + most local dev pay zero cost). Wave 35 (in progress) closes a Tranche E sub-piece — per-step metrics caching — adding a `metrics_cache` field on `EditSession` keyed by `(path_a, path_b)` so repeated `GET /editor/{session_id}/compare?metrics=true` calls return the cached dict instead of recomputing the SSIM + region-map base64 per call (lossless cache, no env-var gate; bounded by session lifetime + close_session purge). The natural Wave 36+ paths: (a) deferred-queue picks (NEW carry-overs / Wave-N-audit items), or (b) emergent work surfaced by ongoing usage. Items previously considered + rejected are archived in §10.5.1.
+- **Pick a Wave 35+ item and ship it** — see §10.5 Wave 18 deferred queue (the trimmed Wave 17 cleanup output: NEW candidates IMPROVE-NEW-2/7/8/10 + Wave-15-audit FILTER_AXIS_TYPES registry + 7 Wave-16-audit-spawned items + Wave-13/12/11/10-audit triggered items + themed tranches B/D/E/F/G + carry-overs gated on §10.7 questions — most of which are now ungated since Wave 20 closed Q1 / Q4 / Q7 / Q15 / Q16). Tranche A (Flutter editor v2) shipped fully in Wave 18 — IMPROVE-138 through IMPROVE-144. Wave 19 Tranche A closed the GDPR Article 20 round-trip with the partner-import host ([IMPROVE-145]) + export button ([IMPROVE-146]). Wave 20 cleanup wave (✓ shipped) closed §10.7 gating questions + shipped a Q7=b deletion ([IMPROVE-147]) + 5 Q4=c TTS pipeline quick wins ([IMPROVE-148] / [IMPROVE-149] / [IMPROVE-150] / [IMPROVE-151] / [IMPROVE-152]). Wave 21 (✓ shipped) closed the cross-cutting startup contention with 3 chain fixes ([IMPROVE-153] / [IMPROVE-154] / [IMPROVE-155]) — ~47s of cold-startup blocking unwound. Wave 22 (✓ shipped) closed the Wave 21-spawned true-async ``_init_mem0`` follow-up via [IMPROVE-156] — httpx.AsyncClient pre-warm of Ollama embed + ``asyncio.create_task`` fire-and-forget Mem0 init at lifespan, moving the ~22s Chain 2 cost off the user's first request entirely. Wave 23 (✓ shipped) closed the Wave 20-spawned Kokoro create_stream piece via [IMPROVE-157] (backend stream_synthesize via ``async for`` over ``Kokoro.create_stream``) + [IMPROVE-158] (Flutter ``buildMiniWavForChunk`` + per-sentence StreamController + ``await for``-driven progressive playback) — ~60-80% TTFA reduction on long-paragraph synth. Wave 24 (✓ shipped) closed the Wave 23-spawned server-side parallel synth-while-LLM-streams piece via [IMPROVE-159] — phrase-boundary fallback in ``PartnerEngine.astream_chat`` firing on ``,`` ``;`` ``:`` once the clause is ≥ 30 chars, so TTS begins synthesising while the LLM keeps streaming later words. Wave 25 (deferred-by-investigation) inspected chatterbox-tts 0.1.7 source and confirmed neither ``ChatterboxTTS.generate`` nor ``ChatterboxTTSTurbo.generate`` has a streaming surface — true streaming requires forking the library (~3-5d), deferred pending upstream feature OR justified fork investment. Wave 26 (✓ shipped) pinned the cold-startup wins from Waves 21+22 + the TTFA wins from Waves 23+24 against future regressions via a new startup-timing benchmark harness ([IMPROVE-160]) — 4 deterministic timing pins on the actual ``api_server.app`` (no mocks). Wave 27 (✓ shipped) closed the Wave 21-residue Path D piece via [IMPROVE-161] — opt-in ``LIFESPAN_EAGER_EDITOR_WARMUP`` flag that pre-builds the editor service at lifespan time so editor-heavy users get hot first /editor/* calls at the cost of ~21s extra boot. Default-off preserves current boot speed. Wave 28 (✓ shipped) closed Tranche G partial — preset JSON export/import via [IMPROVE-162] — adding 2 new editor preset endpoints (export + import) with v=1 schema versioning so power users can share their tuned editor recipes via JSON files. Wave 29 (✓ shipped) closed Tranche B partial — voice persistence via [IMPROVE-163] — adding ``data/partner/voice_settings.json`` (sibling of profile.json / user_profile.json / memory_decay.json) loaded at PartnerEngine init + written on every set_voice_id / set_voice_gender / set_tts_mode success, so a user's voice / gender / mode picks survive backend restart. Wave 30 (✓ shipped) closed Tranche E partial — editor session TTL cleanup via [IMPROVE-164] — adding ``EDITOR_SESSION_TTL_DAYS`` settings field + a fire-and-forget lifespan task that walks the [IMPROVE-53] archive directory and deletes date-buckets older than the configured threshold (mirrors Wave 22's IMPROVE-156 fire-and-forget pattern; default 0 = disabled preserves "archives accumulate forever" semantics). Wave 31 (✓ shipped) closed Tranche D piece 1 — LLM-summarized inter-node DAG context via [IMPROVE-165] — adding ``DAG_INTER_NODE_SUMMARIZATION_MODEL`` opt-in env-var that replaces the legacy elision marker in ``_build_inter_node_context`` with a one-shot LLM summary of dropped entries (default empty = disabled preserves truncation-only behaviour; failure paths fall back to the legacy marker). Wave 32 (✓ shipped) closed Tranche D piece 2 — per-edge "pass" config via [IMPROVE-166] — adding 3 edge.rule.pass modes (``all`` default / ``source_only`` / ``none``) so DAG authors can scope which prior outputs each downstream agent sees (default ``all`` preserves pre-Wave-32 behaviour; invalid pass_mode silently falls back to ``all``). Wave 33 (✓ shipped) closed Tranche D piece 3 + the entire Tranche D umbrella — classifier confidence threshold via [IMPROVE-167] — adding ``DAG_CLASSIFIER_CONFIDENCE_THRESHOLD`` opt-in env-var with heuristic confidence ``1 / matched_count`` that rejects ambiguous llm_router classifications (multiple options match the response) so the always-fallback edge fires instead of a low-confidence pick (default 0.0 = no filtering preserves current behaviour). Wave 34 (✓ shipped) closed Tranche F + the user's "in order A, B, C, D" batch end-to-end — real-LLM enhancer eval suite via [IMPROVE-168] — adding ``tests/eval/test_edit_prompt_enhancer_real_llm.py`` with 8 curated test cases that pin ``enhance_edit_prompt`` against real Ollama LLMs (gated by ``LOCAL_AI_EVAL_REAL_LLM=1`` env-var; default-off skips all eval tests so CI + most local dev pay zero cost). Wave 35 (✓ shipped) closed a Tranche E sub-piece — per-step metrics caching via [IMPROVE-169] — adding a ``metrics_cache: dict[tuple[str, str], dict[str, Any]]`` field on ``EditSession`` keyed by ``(path_a, path_b)`` so repeated ``GET /editor/{session_id}/compare?metrics=true`` calls return the cached dict instead of recomputing the SSIM + region-map base64 per call (lossless cache, no env-var gate — first behaviour-change wave to ship without an opt-in flag because the cache is provably backwards-compatible; bounded by session lifetime + close_session purge). The natural Wave 36+ paths: (a) deferred-queue picks (NEW carry-overs / Wave-N-audit items + remaining Tranche E sub-pieces: LPIPS metric + cropped-patch optimization), or (b) emergent work surfaced by ongoing usage. Items previously considered + rejected are archived in §10.5.1.
 - **Keep `[IMPROVE-N]` references alive.** When you fix one, grep `docs/features/` for that ID and cross out. If you add new ones in future work, number them IMPROVE-170+ (1-169 are taken; the IMPROVE-NEW-* tags graduate to permanent numbers on acceptance) and note them in the originating chapter.
 - **The `MEMORY.md` in `~/.claude/projects/...` contains the feedback rule** that improvement suggestions should cite 2025–2026 sources. Every item here has citations in its origin chapter.
 
@@ -4872,4 +4966,4 @@ Wave 24+ priorities at the user's pace.
 
 **Guide complete.** `docs/features/README.md` → `01-architecture.md` → `02-llm-infrastructure.md` → `03-chat.md` → `04-agents-tools.md` → `05-systems.md` → `06-image-generation.md` → `07-image-editor.md` → `08-partner.md` → `09-observability.md` → `10-improvements.md` *(this file)*.
 
-Every major feature of the Local AI Platform is now documented end-to-end, with **169** research-backed improvement ideas cross-referenced into one prioritized plan. Waves 1-24 + Wave 26 + Wave 27 + Wave 28 + Wave 29 + Wave 30 + Wave 31 + Wave 32 + Wave 33 + Wave 34 fully shipped + Wave 25 deferred-by-investigation + Wave 35 in progress; post-Wave-35 backlog in deferred queue.
+Every major feature of the Local AI Platform is now documented end-to-end, with **169** research-backed improvement ideas cross-referenced into one prioritized plan. Waves 1-24 + Wave 26 + Wave 27 + Wave 28 + Wave 29 + Wave 30 + Wave 31 + Wave 32 + Wave 33 + Wave 34 + Wave 35 fully shipped + Wave 25 deferred-by-investigation; post-Wave-35 backlog in deferred queue.
