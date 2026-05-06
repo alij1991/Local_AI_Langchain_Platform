@@ -8,9 +8,9 @@
 
 ## 10.1 Summary
 
-- **169 improvements** flagged inline as `[IMPROVE-N]` in chapters 1–9 + the Wave 5/6/7/8/9/10/11/12/13/14/15/16/18/19/20/21/22/23/24/26/27/28/29/30/31/32/33/34/35 audits (NEW from Wave 6 audit: 71/72/73/74; NEW from Wave 7: 75/76/77/78/79/80/81/82; NEW from Wave 8: 83/84/85/86/87/88; NEW from Wave 9: 89/90/91/92/93/94; NEW from Wave 10: 95/96/97/98/99/100; NEW from Wave 11: 101/102/103/104/105/106; NEW from Wave 12: 107/108/109/110/111/112; NEW from Wave 13: 113/114/115/116/117/118; NEW from Wave 14: 119/120/121/122/123/124/125; NEW from Wave 15: 126/127/128/129/130/131; NEW from Wave 16: 132/133/134/135/136/137; NEW from Wave 18: 138/139/140/141/142/143/144; NEW from Wave 19 Tranche A: 145/146; NEW from Wave 20 cleanup wave: 147/148/149/150/151/152; NEW from Wave 21 startup-contention fix: 153/154/155; NEW from Wave 22 true-async _init_mem0: 156; NEW from Wave 23 Kokoro create_stream chunked TTFA: 157/158; NEW from Wave 24 server-side parallel synth-while-LLM-streams: 159; NEW from Wave 26 startup-timing benchmark harness: 160; NEW from Wave 27 lifespan eager editor warm-up flag: 161; NEW from Wave 28 Tranche G partial preset export/import: 162; NEW from Wave 29 Tranche B voice persistence: 163; NEW from Wave 30 Tranche E partial editor session TTL cleanup: 164; NEW from Wave 31 Tranche D piece 1 LLM-summarized inter-node DAG context: 165; NEW from Wave 32 Tranche D piece 2 per-edge pass config: 166; NEW from Wave 33 Tranche D piece 3 classifier confidence threshold: 167; NEW from Wave 34 Tranche F real-LLM enhancer eval suite: 168; NEW from Wave 35 Tranche E sub-piece per-step metrics caching: 169).
+- **172 improvements** flagged inline as `[IMPROVE-N]` in chapters 1–9 + the Wave 5/6/7/8/9/10/11/12/13/14/15/16/18/19/20/21/22/23/24/26/27/28/29/30/31/32/33/34/35/36 audits (NEW from Wave 6 audit: 71/72/73/74; NEW from Wave 7: 75/76/77/78/79/80/81/82; NEW from Wave 8: 83/84/85/86/87/88; NEW from Wave 9: 89/90/91/92/93/94; NEW from Wave 10: 95/96/97/98/99/100; NEW from Wave 11: 101/102/103/104/105/106; NEW from Wave 12: 107/108/109/110/111/112; NEW from Wave 13: 113/114/115/116/117/118; NEW from Wave 14: 119/120/121/122/123/124/125; NEW from Wave 15: 126/127/128/129/130/131; NEW from Wave 16: 132/133/134/135/136/137; NEW from Wave 18: 138/139/140/141/142/143/144; NEW from Wave 19 Tranche A: 145/146; NEW from Wave 20 cleanup wave: 147/148/149/150/151/152; NEW from Wave 21 startup-contention fix: 153/154/155; NEW from Wave 22 true-async _init_mem0: 156; NEW from Wave 23 Kokoro create_stream chunked TTFA: 157/158; NEW from Wave 24 server-side parallel synth-while-LLM-streams: 159; NEW from Wave 26 startup-timing benchmark harness: 160; NEW from Wave 27 lifespan eager editor warm-up flag: 161; NEW from Wave 28 Tranche G partial preset export/import: 162; NEW from Wave 29 Tranche B voice persistence: 163; NEW from Wave 30 Tranche E partial editor session TTL cleanup: 164; NEW from Wave 31 Tranche D piece 1 LLM-summarized inter-node DAG context: 165; NEW from Wave 32 Tranche D piece 2 per-edge pass config: 166; NEW from Wave 33 Tranche D piece 3 classifier confidence threshold: 167; NEW from Wave 34 Tranche F real-LLM enhancer eval suite: 168; NEW from Wave 35 Tranche E sub-piece per-step metrics caching: 169; NEW from Wave 36 Path E partial test-suite stabilisation bucket A: 170/171/172).
 - **10 themes** — security, architecture, observability, tracing, UX, memory & context, model & inference, background tasks, voice, and tools/MCP.
-- **34 waves fully shipped + Wave 25 deferred-by-investigation** (Waves 1-16 numbered + Wave 17 doc-only cleanup + Wave 18 Tranche A Flutter editor v2 + Wave 19 Tranche A partner-import host + Wave 20 cleanup wave: §10.7 walkthrough closing Q1/Q4/Q7/Q15/Q16 + 1 deletion + 5 TTS quick wins + Wave 21 startup-contention fix targeting the 3 lazy-init chains the user's startup log surfaced + Wave 22 true-async _init_mem0 — IMPROVE-156 background-task warmup at lifespan via httpx.AsyncClient pre-warm of nomic-embed-text + asyncio.create_task fire-and-forget Mem0 init, moving the ~22s Chain 2 cost OFF the user's first request entirely + Wave 23 Kokoro create_stream chunked TTFA — IMPROVE-157 backend stream_synthesize via kokoro_onnx.create_stream + IMPROVE-158 Flutter progressive playback delivering ~60-80% TTFA win on long-paragraph synth + Wave 24 server-side parallel synth-while-LLM-streams — IMPROVE-159 phrase-boundary fallback in PartnerEngine.astream_chat firing on ``,`` ``;`` ``:`` once a clause is ≥ 30 chars long, so TTS can begin synthesising while the LLM is still emitting later words + Wave 25 Chatterbox sidecar streaming investigation — chatterbox-tts 0.1.7 has no streaming surface in either ChatterboxTTS.generate or ChatterboxTTSTurbo.generate; deferred pending upstream feature OR justified 3-5d fork investment + Wave 29 voice persistence: IMPROVE-163 `data/partner/voice_settings.json` survives backend restart so a user's voice_id / voice_gender / tts_mode picks don't reset on every uvicorn cycle, closing Tranche B partial from the Wave 18 deferred queue + Wave 30 editor session TTL cleanup: IMPROVE-164 opt-in `EDITOR_SESSION_TTL_DAYS=N` env-var triggers a fire-and-forget lifespan task that walks the [IMPROVE-53] archive directory + deletes date-buckets older than N days, closing Tranche E partial from the Wave 18 deferred queue + Wave 31 LLM-summarized inter-node DAG context: IMPROVE-165 opt-in `DAG_INTER_NODE_SUMMARIZATION_MODEL` env-var replaces the legacy `[... N earlier output(s) elided ...]` truncation marker with a one-shot LLM summary of the dropped entries when context budget is exceeded, closing Tranche D piece 1 of 3 + Wave 32 per-edge "pass" config: IMPROVE-166 adds 3 edge.rule.pass modes (`all` default / `source_only` / `none`) so DAG authors can scope which prior outputs each downstream agent sees, closing Tranche D piece 2 of 3 + Wave 33 classifier confidence threshold: IMPROVE-167 opt-in `DAG_CLASSIFIER_CONFIDENCE_THRESHOLD` env-var with heuristic confidence ``1 / matched_count`` rejects ambiguous llm_router classifications so the always-fallback edge fires instead, closing Tranche D piece 3 of 3 + the entire Tranche D umbrella + Wave 34 real-LLM enhancer eval suite: IMPROVE-168 opt-in `LOCAL_AI_EVAL_REAL_LLM=1` env-var runs `enhance_edit_prompt` against real Ollama LLMs with 8 curated test cases that pin content-word preservation + forbidden-phrase rejection + multi-model behaviour, closing Tranche F from the Wave 18 deferred queue + the IMPROVE-55 spawned-follow-up callout + the user's "in order A, B, C, D" batch + Wave 35 per-step metrics caching: IMPROVE-169 caches the [IMPROVE-56] diff-metrics dict per `(path_a, path_b)` pair on `EditSession` so repeated `GET /editor/{session_id}/compare?metrics=true` calls return the cached dict instead of recomputing the SSIM + region-map base64 (~80ms+ saved on cache hit), closing Tranche E sub-piece from the post-Wave-34 backlog); **1** standing in deferred queues (post-Wave-35 backlog).
+- **34 waves fully shipped + Wave 25 deferred-by-investigation + Wave 36 in progress** (Waves 1-16 numbered + Wave 17 doc-only cleanup + Wave 18 Tranche A Flutter editor v2 + Wave 19 Tranche A partner-import host + Wave 20 cleanup wave: §10.7 walkthrough closing Q1/Q4/Q7/Q15/Q16 + 1 deletion + 5 TTS quick wins + Wave 21 startup-contention fix targeting the 3 lazy-init chains the user's startup log surfaced + Wave 22 true-async _init_mem0 — IMPROVE-156 background-task warmup at lifespan via httpx.AsyncClient pre-warm of nomic-embed-text + asyncio.create_task fire-and-forget Mem0 init, moving the ~22s Chain 2 cost OFF the user's first request entirely + Wave 23 Kokoro create_stream chunked TTFA — IMPROVE-157 backend stream_synthesize via kokoro_onnx.create_stream + IMPROVE-158 Flutter progressive playback delivering ~60-80% TTFA win on long-paragraph synth + Wave 24 server-side parallel synth-while-LLM-streams — IMPROVE-159 phrase-boundary fallback in PartnerEngine.astream_chat firing on ``,`` ``;`` ``:`` once a clause is ≥ 30 chars long, so TTS can begin synthesising while the LLM is still emitting later words + Wave 25 Chatterbox sidecar streaming investigation — chatterbox-tts 0.1.7 has no streaming surface in either ChatterboxTTS.generate or ChatterboxTTSTurbo.generate; deferred pending upstream feature OR justified 3-5d fork investment + Wave 29 voice persistence: IMPROVE-163 `data/partner/voice_settings.json` survives backend restart so a user's voice_id / voice_gender / tts_mode picks don't reset on every uvicorn cycle, closing Tranche B partial from the Wave 18 deferred queue + Wave 30 editor session TTL cleanup: IMPROVE-164 opt-in `EDITOR_SESSION_TTL_DAYS=N` env-var triggers a fire-and-forget lifespan task that walks the [IMPROVE-53] archive directory + deletes date-buckets older than N days, closing Tranche E partial from the Wave 18 deferred queue + Wave 31 LLM-summarized inter-node DAG context: IMPROVE-165 opt-in `DAG_INTER_NODE_SUMMARIZATION_MODEL` env-var replaces the legacy `[... N earlier output(s) elided ...]` truncation marker with a one-shot LLM summary of the dropped entries when context budget is exceeded, closing Tranche D piece 1 of 3 + Wave 32 per-edge "pass" config: IMPROVE-166 adds 3 edge.rule.pass modes (`all` default / `source_only` / `none`) so DAG authors can scope which prior outputs each downstream agent sees, closing Tranche D piece 2 of 3 + Wave 33 classifier confidence threshold: IMPROVE-167 opt-in `DAG_CLASSIFIER_CONFIDENCE_THRESHOLD` env-var with heuristic confidence ``1 / matched_count`` rejects ambiguous llm_router classifications so the always-fallback edge fires instead, closing Tranche D piece 3 of 3 + the entire Tranche D umbrella + Wave 34 real-LLM enhancer eval suite: IMPROVE-168 opt-in `LOCAL_AI_EVAL_REAL_LLM=1` env-var runs `enhance_edit_prompt` against real Ollama LLMs with 8 curated test cases that pin content-word preservation + forbidden-phrase rejection + multi-model behaviour, closing Tranche F from the Wave 18 deferred queue + the IMPROVE-55 spawned-follow-up callout + the user's "in order A, B, C, D" batch + Wave 35 per-step metrics caching: IMPROVE-169 caches the [IMPROVE-56] diff-metrics dict per `(path_a, path_b)` pair on `EditSession` so repeated `GET /editor/{session_id}/compare?metrics=true` calls return the cached dict instead of recomputing the SSIM + region-map base64 (~80ms+ saved on cache hit), closing Tranche E sub-piece from the post-Wave-34 backlog + Wave 36 Path E partial test-suite stabilisation: IMPROVE-170 restores `OllamaController` static helpers + `_get_client` + `_enrich_capabilities_from_show` for `test_ollama.py` (7 fixes) + IMPROVE-171 rewires `test_images_enhance_prompt.py` to patch the `routers.images` namespace after the [IMPROVE-1] router split (6 fixes) + IMPROVE-172 extracts `AgentOrchestrator._build_agent_graph(definition, allow_tools=True)` from `_chat_with_react_agent` to expose the retry-without-tools seam (2 fixes), closing bucket A 13 of 22 known pre-existing failures from the post-Wave-35 backlog Path E; bucket B 9 signal regressions in `test_images_service.py` + `test_huggingface.py` deferred to Wave 37+); **1** standing in deferred queues (post-Wave-36 backlog).
 
 All improvements are traceable back to a chapter + a 2025–2026 citation. This chapter is pure planning — *what* + *why this order*; *how* is in each origin chapter.
 
@@ -178,7 +178,7 @@ Smaller items that improve day-to-day use.
 
 ---
 
-## 10.4 The complete table (all 169)
+## 10.4 The complete table (all 172)
 
 Sortable if you paste into a spreadsheet. Chapter column links back to the originating doc.
 
@@ -353,10 +353,13 @@ Sortable if you paste into a spreadsheet. Chapter column links back to the origi
 | 167 | 5 | ✓ DAG classifier confidence threshold — opt-in ``DAG_CLASSIFIER_CONFIDENCE_THRESHOLD=...`` env-var (default 0.0 = disabled) with heuristic confidence ``1 / matched_count`` rejects ambiguous llm_router classifications (multiple options match the response) so the always-fallback edge fires instead of a low-confidence pick (Wave 33 — closes Tranche D piece 3 of 3 + the entire Tranche D umbrella from the Wave 18 deferred queue + the IMPROVE-35 follow-up; provider-agnostic heuristic ships now, logprob-based confidence is a Wave N+ extension if the simpler heuristic hits its ceiling) | ⋆⋆ | 🔨 | Architecture |
 | 168 | 7 | ✓ Real-LLM enhancer eval suite — NEW ``tests/eval/test_edit_prompt_enhancer_real_llm.py`` with 8 curated test cases that run ``enhance_edit_prompt`` against real Ollama LLMs (gated by ``LOCAL_AI_EVAL_REAL_LLM=1`` env-var; default-off skips all eval tests so CI + most local dev pay zero cost); pins content-word preservation + forbidden-phrase rejection + multi-model behaviour (kontext target-state vs cosxl imperative format) + the canonical "make the girls kiss" regression case (Wave 34 — closes Tranche F from the Wave 18 deferred queue + the IMPROVE-55 spawned-follow-up callout + the user's "in order A, B, C, D" batch end-to-end) | ⋆⋆ | 🔨 | UX |
 | 169 | 7 | ✓ Per-step metrics caching for ``GET /editor/{session_id}/compare?metrics=true`` — NEW ``metrics_cache: dict[tuple[str, str], dict[str, Any]]`` field on ``EditSession`` keyed by ``(path_a, path_b)`` so repeated calls for the same step pair return the cached dict instead of recomputing the [IMPROVE-56] SSIM + region-map base64 tuple (~80ms+ saved on cache hit when the Flutter UI scrubs through history with metrics on); path-based keys are invariant under undo / redo / new-edit-after-undo per the [IMPROVE-53] file-stability invariant so no cache invalidation is needed (Wave 35 — closes Tranche E sub-piece from the post-Wave-34 backlog; lossless cache, no env-var gate; first behaviour-change wave to ship without an opt-in flag because the cache is provably backwards-compatible) | ⋆⋆ | 🔨 | UX |
+| 170 | 2 | OllamaController surface restoration for `test_ollama.py` — NEW static helpers `_extract_model_names(payload)` + `_extract_model_infos(payload)` that handle the 3 envelope shapes (dict / pydantic-like via `model_dump` / object with `.models` attribute) and the 4 model-item shapes (bare string / dict-with-name / dict-with-model / object-with-attribute); NEW instance helper `_get_client(self)` delegating to `self._provider._get_client()`; NEW instance helper `_enrich_capabilities_from_show(self, infos)` that calls `client.show(name)` per info to read capabilities and updates `supports_generate` / `supports_tools` / `supports_vision`; updated 3 `test_ollama.py` monkeypatches from `controller._get_client` to `controller._provider._get_client` so the patch reaches the actual call site (Wave 36 in progress — closes 7 of 22 pre-existing failures, bucket A piece 1) | ⋆ | 🔨 | Tools |
+| 171 | 3 | `test_images_enhance_prompt.py` routing alignment — test-only update from `import api_server` + `api_server.enhance_image_prompt(...)` / `patch.object(api_server, "_pick_small_ollama_model", ...)` to `from local_ai_platform.api.routers import images as images_router` + `images_router.enhance_image_prompt(...)` / `patch.object(images_router, ...)`. The `enhance_image_prompt` endpoint moved to `api/routers/images.py` during the [IMPROVE-1] router split but the test still imported via `api_server`; the patches also targeted the wrong namespace because the endpoint looks up `_pick_small_ollama_model` and `_ollama_generate_via_router` in its OWN module scope (Wave 36 in progress — closes 6 of 22 pre-existing failures, bucket A piece 2; test-only change, no source modifications) | ⋆ | 🔨 | UX |
+| 172 | 4 | `AgentOrchestrator._build_agent_graph` extraction — NEW `_build_agent_graph(self, definition, allow_tools=True)` method extracted from `_chat_with_react_agent`; substitutes empty tools list when `allow_tools=False` so the same `create_react_agent` shape returns for the retry path. Refactor uses it with retry-without-tools fallback: catch the "does not support tools" exception, add the model to `_models_without_tool_support`, build a fresh no-tools graph, retry. Empty-messages fallback text adjusted from "No response." to "No response returned." to match the pre-refactor contract pinned in `tests/test_agents.py` (Wave 36 in progress — closes 2 of 22 pre-existing failures, bucket A piece 3) | ⋆ | 🔨 | Tools |
 
 *Impact for [IMPROVE-59] is ⋆⋆⋆⋆⋆ if the app is ever distributed, ⋆⋆ if it stays local-only.
 
-**Legend:** A ``✓`` prefix marks items that have shipped. See §10.6 for the Wave 5 / 6 / 7 / 8 / 9 / 10 / 11 / 12 / 13 / 14 / 15 / 16 / 17 / 18 / 19 / 20 / 21 / 22 / 23 / 24 / 26 / 27 / 28 / 29 / 30 / 31 / 32 / 33 / 34 / 35 retrospective.
+**Legend:** A ``✓`` prefix marks items that have shipped. See §10.6 for the Wave 5 / 6 / 7 / 8 / 9 / 10 / 11 / 12 / 13 / 14 / 15 / 16 / 17 / 18 / 19 / 20 / 21 / 22 / 23 / 24 / 26 / 27 / 28 / 29 / 30 / 31 / 32 / 33 / 34 / 35 / 36 retrospective.
 
 ---
 
@@ -1250,6 +1253,180 @@ TRADE-OFF: editor-heavy users get hot first /editor/* calls
 at the cost of ~21s extra boot; default-off users keep
 current boot speed + lazy-init fallback. 3 commits (2 doc +
 1 numbered) — the planned single-numbered shape held.
+
+### Wave 36 — Path E partial: 13-of-22 test-suite stabilisation, bucket A (in progress 2026-05-05)
+
+Theme: address Path E from the post-Wave-35 backlog — the 22
+pre-existing test failures the Wave 35 sweep surfaced (and that
+the W35 retro flagged as a candidate for a future "mass-fix"
+wave). These failures were confirmed as pre-existing during W35
+implementation via a `git stash` round-trip showing the same
+22 failures without the W35 changes; they're not caused by W35
+and are not blocking it. Wave 36 ships fixes for the 13
+most-targeted failures (the bucket A piece below); the
+remaining 9 (bucket B — signal regressions in
+`test_images_service.py` + `test_huggingface.py`) are deferred
+to Wave 37+ pending per-failure investigation.
+
+The 22 failures break down into two clean buckets:
+
+  * **Bucket A** (15 tests, 13 cleanly addressable by Wave 36):
+    test files where source attributes were renamed / relocated
+    during prior refactors but tests weren't migrated. Fix
+    shape is uniform — restore the missing surface (helpers
+    on the controller / re-export from `routers.images` /
+    extract a method) + adjust monkeypatches to point at the
+    new home. The other 2 of bucket A's 15 (the
+    `test_load_model_*` pair) get fixed alongside IMPROVE-170
+    via the same monkeypatch update so they ride for free.
+    - `test_ollama.py` (7 fails): `OllamaController._extract_model_names`
+      / `_extract_model_infos` / `_get_client` /
+      `_enrich_capabilities_from_show` all moved to the
+      `OllamaProvider` wrapper class or were dropped during
+      the provider/controller split (the controller now
+      delegates via `self._provider`).
+    - `test_images_enhance_prompt.py` (6 fails):
+      `enhance_image_prompt` moved from `api_server.py` to
+      `api/routers/images.py` during the [IMPROVE-1] router
+      split (Wave 5+) but the test still imports via
+      `api_server`; patches also targeted the wrong namespace
+      because the endpoint looks up `_pick_small_ollama_model`
+      + `_ollama_generate_via_router` in its OWN module scope.
+    - `test_agents.py` (2 fails):
+      `AgentOrchestrator._build_agent_graph` was inlined into
+      `_chat_with_react_agent` after the LangGraph-prebuilt
+      integration; tests still expect the extracted helper as
+      the testable seam for the retry-without-tools fallback
+      logic.
+
+  * **Bucket B** (7 tests, deferred to Wave 37+): real
+    signal regressions where the test fixture exercises a
+    code path that has materially changed. Fixing these
+    requires source-side investigation, not just monkeypatch
+    alignment.
+    - `test_images_service.py` (6 fails): HF cache scan
+      misses the test-fixture `model_index.json`; doctor's
+      `local_models` check signal is inverted; `validate_model`
+      returns `None` for `folder_size_bytes`;
+      `_run_diffusers_isolated` patch target is no longer
+      the call site for `generate()` (which uses the
+      in-process `_run_diffusers` at `service.py:9914` /
+      `:10361`, not the subprocess variant at `:8603`).
+      These need `ImageGenerationService` refactor traces,
+      not test fixes.
+    - `test_huggingface.py::test_model_metadata_from_local_config`
+      (1 fail): `meta["installed"]` returns `False` when the
+      test sets up a local config that should mark it
+      installed.
+
+Wave 36 design (multi-numbered: 3 IMPROVE-N items in 3
+commits + 2 doc commits = 5 total):
+
+  * **IMPROVE-170** — Restore `OllamaController` surface for
+    `test_ollama.py`:
+    - Add `@staticmethod _extract_model_names(payload)` and
+      `@staticmethod _extract_model_infos(payload)` on
+      `OllamaController`. Both handle the 3 envelope shapes
+      (dict, pydantic-like via `model_dump`, object with
+      `.models` attribute) and the 4 model-item shapes (bare
+      string, dict with `name`, dict with `model`, object
+      with `.model`). The provider's `list_models` keeps its
+      own inline parser — no DRY refactor in this fix wave
+      to keep blast radius small.
+    - Add `_get_client(self) -> Any` instance method that
+      delegates to `self._provider._get_client()`.
+    - Add `_enrich_capabilities_from_show(self, infos)` that
+      calls `self._get_client().show(name)` per info and
+      updates `supports_generate` / `supports_tools` /
+      `supports_vision` based on the returned capabilities
+      list.
+    - Update 3 monkeypatches in `tests/test_ollama.py` from
+      `controller._get_client` to `controller._provider._get_client`
+      so the patch reaches the actual call site (which goes
+      through `provider.pull_model` → `provider._get_client()`).
+
+  * **IMPROVE-171** — `test_images_enhance_prompt.py`
+    routing alignment:
+    - Update test imports: `from local_ai_platform.api.routers
+      import images as images_router` (replaces `import api_server`).
+    - Replace `api_server.enhance_image_prompt(...)` →
+      `images_router.enhance_image_prompt(...)`.
+    - Replace `patch.object(api_server, "_pick_small_ollama_model", ...)`
+      → `patch.object(images_router, "_pick_small_ollama_model", ...)`
+      (and same for `_ollama_generate_via_router`). The
+      router function looks up these names in its own module
+      scope at line 600 / 649 of `api/routers/images.py`;
+      patching the `api_server` re-export doesn't reach
+      those lookups.
+    - Test-only change. No source modifications — the
+      router and helpers all work as-shipped at HEAD =
+      4648a25; the test just had stale import paths from
+      before [IMPROVE-1] split the file.
+
+  * **IMPROVE-172** — Extract `AgentOrchestrator._build_agent_graph`:
+    - Add `_build_agent_graph(self, definition, allow_tools=True) -> Any`
+      that builds the LangGraph ReAct agent
+      (`create_react_agent(model=llm, tools=tools_or_empty,
+      prompt=..., checkpointer=...)`). `allow_tools=False`
+      substitutes an empty tools list so the same
+      `create_react_agent` shape returns for the retry path.
+    - Refactor `_chat_with_react_agent` to use
+      `_build_agent_graph(definition, allow_tools=True)`
+      first, catching the "does not support tools" exception
+      and retrying with `allow_tools=False` (via a fresh
+      `_build_agent_graph` call). On the retry path, add the
+      model to `_models_without_tool_support` BEFORE the
+      retry call.
+    - Adjust empty-messages fallback text to "No response
+      returned." (was "No response.") to match the
+      pre-refactor contract pinned in
+      `tests/test_agents.py::test_chat_with_agent_retries_without_tools`.
+    - Keep `_chat_via_router` as the secondary fallback when
+      `langgraph` itself isn't importable (ImportError path).
+
+Test surface 1978 → 1993 (+15 from Wave 36 fixes; the W35
+documented baseline pinned 1978 expected "passed"). Sweep
+file count 103 unchanged (no NEW test files; only existing
+tests fix). Routes 189 unchanged (test-only IMPROVE-171 +
+small source helpers in IMPROVE-170 / IMPROVE-172, no HTTP
+surface change). Flutter widget tests 182 unchanged
+(Wave 36 is backend-only).
+
+| # | Tag | SHA | What landed | Tests |
+|---|---|---|---|---:|
+| 1 | (doc)         | this    | Wave 36 mid-wave (start) — register Wave 36 in §10.5 + §10.6 with the bucket-A 13-fix design + Path E partial framing + post-Wave-36 backlog footer. Updates §10.1 wave-status + §10.4 reservation rows for IMPROVE-170 / IMPROVE-171 / IMPROVE-172. | 0 |
+| 2 | [IMPROVE-170] | TBD     | NEW static helpers `_extract_model_names` / `_extract_model_infos` + instance helpers `_get_client` / `_enrich_capabilities_from_show` on `OllamaController`. 3 monkeypatch targets updated in `tests/test_ollama.py`. Tier 1 grows by 7. | +7 |
+| 3 | [IMPROVE-171] | TBD     | Test-only: rewired `tests/test_images_enhance_prompt.py` to patch `routers.images` namespace + call `images_router.enhance_image_prompt` directly. Tier 1 grows by 6. | +6 |
+| 4 | [IMPROVE-172] | TBD     | NEW `AgentOrchestrator._build_agent_graph(definition, allow_tools=True)` extracted from `_chat_with_react_agent`. Refactored caller uses it with retry-without-tools fallback. Tier 1 grows by 2. | +2 |
+| 5 | (doc)         | TBD     | Wave 36 end-wave retrospective. Bumps mid-doc 169 → 172 in §10.4 header. Adds IMPROVE-170/171/172 SHAs. Flips Wave 36 status (in progress → ✓ shipped). NEW Wave 36 architectural impact subsection. | 0 |
+
+Why 13 of 22 (and not a single-shot 22-fix wave): the
+remaining 9 (bucket B above) are signal regressions where
+the test exercises a code path that has materially changed.
+A few examples:
+  * `test_run_diffusers_isolated` patches the wrong method —
+    `generate()` uses the in-process `_run_diffusers` at
+    line 9914 / 10361 of `service.py`, not the subprocess
+    `_run_diffusers_isolated` at line 8603. Fixing requires
+    either updating the test to patch `_run_diffusers` or
+    confirming the contract change was intentional and
+    updating the fixture.
+  * `test_doctor_reports_local_models_missing` asserts
+    `local_check['ok'] is False` when no local models exist;
+    today the check returns `True` even with empty
+    `tmp_path/hub`. The signal direction was inverted at
+    some point (or the meaning of the check changed).
+  * `test_hf_cache_scan_detects_diffusers_model` writes a
+    fake snapshot to `tmp_path/hub/...` but the scan doesn't
+    pick it up. The cache-scan logic may have changed
+    (filter on a different signal, different folder layout
+    expected, etc.).
+
+Bucket B fixes need investigation per failure rather than a
+uniform pattern; ship-smallest-first per the W28 pattern
+recommends ship bucket A first as proof-of-shape, then
+queue bucket B as Wave 37 (estimated ~0.5-1d for the 6
+image-service fixes; the huggingface one is single-test).
 
 ### Wave 35 — Tranche E sub-piece: per-step metrics caching (✓ shipped 2026-05-05)
 
@@ -2238,7 +2415,7 @@ Rejection criteria (per the Wave 17 cleanup pass):
 
 ---
 
-## 10.6 Wave 5 + Wave 6 + Wave 7 + Wave 8 + Wave 9 + Wave 10 + Wave 11 + Wave 12 + Wave 13 + Wave 14 + Wave 15 + Wave 16 + Wave 17 + Wave 18 + Wave 19 + Wave 20 + Wave 21 + Wave 22 + Wave 23 + Wave 24 + Wave 25 + Wave 26 + Wave 27 + Wave 28 + Wave 29 + Wave 30 + Wave 31 + Wave 32 + Wave 33 + Wave 34 + Wave 35 retrospective
+## 10.6 Wave 5 + Wave 6 + Wave 7 + Wave 8 + Wave 9 + Wave 10 + Wave 11 + Wave 12 + Wave 13 + Wave 14 + Wave 15 + Wave 16 + Wave 17 + Wave 18 + Wave 19 + Wave 20 + Wave 21 + Wave 22 + Wave 23 + Wave 24 + Wave 25 + Wave 26 + Wave 27 + Wave 28 + Wave 29 + Wave 30 + Wave 31 + Wave 32 + Wave 33 + Wave 34 + Wave 35 + Wave 36 retrospective
 
 > **Status as of 2026-04-30:** Wave 5 fully shipped (12 commits, +216
 > tests). Wave 6 fully shipped (12 commits, +118 tests across 8
@@ -3272,6 +3449,22 @@ held end-to-end.
 
   * **Flutter widget tests 182 unchanged**. Path D is
     backend-only (settings + lifespan).
+
+### Wave 36 (in progress)
+
+| # | Tag | SHA | What landed | Tests |
+|---|---|---|---|---:|
+| 1 | (doc)         | this    | Wave 36 mid-wave (start) — register Wave 36 in §10.5 + §10.6 with bucket-A 13-fix design + Path E partial framing + post-Wave-36 backlog footer. Updates §10.1 wave-status + §10.4 reservation rows for IMPROVE-170 / 171 / 172. | 0 |
+| 2 | [IMPROVE-170] | TBD     | NEW static helpers `_extract_model_names` / `_extract_model_infos` + instance helpers `_get_client` / `_enrich_capabilities_from_show` on `OllamaController`. 3 monkeypatch targets updated. | +7 |
+| 3 | [IMPROVE-171] | TBD     | Test-only: rewired `tests/test_images_enhance_prompt.py` to patch `routers.images` namespace + call `images_router.enhance_image_prompt` directly. | +6 |
+| 4 | [IMPROVE-172] | TBD     | NEW `AgentOrchestrator._build_agent_graph` extracted from `_chat_with_react_agent`. Refactor uses it with retry-without-tools fallback. | +2 |
+| 5 | (doc)         | TBD     | Wave 36 end-wave retrospective. Bumps 169 → 172 in §10.1 + §10.4. Fills 3 IMPROVE-N SHAs. NEW Wave 36 architectural impact subsection. | 0 |
+
+Net: +15 Tier 1 "passed" tests (1978 → 1993). Sweep file
+count 103 unchanged. Routes 189 unchanged. Flutter widget
+tests 182 unchanged. Multi-numbered: 3 numbered + 2 doc =
+5 commits — first multi-numbered wave since Wave 19's
+Tranche A 2-piece + standalone + tests + doc shape.
 
 ### Wave 35 (✓ shipped)
 
@@ -4958,12 +5151,12 @@ Wave 24+ priorities at the user's pace.
 ## 10.8 Where to go from here
 
 - **Read chapter 1 → 9 if you haven't.** This chapter is the index; the others have the details.
-- **Pick a Wave 35+ item and ship it** — see §10.5 Wave 18 deferred queue (the trimmed Wave 17 cleanup output: NEW candidates IMPROVE-NEW-2/7/8/10 + Wave-15-audit FILTER_AXIS_TYPES registry + 7 Wave-16-audit-spawned items + Wave-13/12/11/10-audit triggered items + themed tranches B/D/E/F/G + carry-overs gated on §10.7 questions — most of which are now ungated since Wave 20 closed Q1 / Q4 / Q7 / Q15 / Q16). Tranche A (Flutter editor v2) shipped fully in Wave 18 — IMPROVE-138 through IMPROVE-144. Wave 19 Tranche A closed the GDPR Article 20 round-trip with the partner-import host ([IMPROVE-145]) + export button ([IMPROVE-146]). Wave 20 cleanup wave (✓ shipped) closed §10.7 gating questions + shipped a Q7=b deletion ([IMPROVE-147]) + 5 Q4=c TTS pipeline quick wins ([IMPROVE-148] / [IMPROVE-149] / [IMPROVE-150] / [IMPROVE-151] / [IMPROVE-152]). Wave 21 (✓ shipped) closed the cross-cutting startup contention with 3 chain fixes ([IMPROVE-153] / [IMPROVE-154] / [IMPROVE-155]) — ~47s of cold-startup blocking unwound. Wave 22 (✓ shipped) closed the Wave 21-spawned true-async ``_init_mem0`` follow-up via [IMPROVE-156] — httpx.AsyncClient pre-warm of Ollama embed + ``asyncio.create_task`` fire-and-forget Mem0 init at lifespan, moving the ~22s Chain 2 cost off the user's first request entirely. Wave 23 (✓ shipped) closed the Wave 20-spawned Kokoro create_stream piece via [IMPROVE-157] (backend stream_synthesize via ``async for`` over ``Kokoro.create_stream``) + [IMPROVE-158] (Flutter ``buildMiniWavForChunk`` + per-sentence StreamController + ``await for``-driven progressive playback) — ~60-80% TTFA reduction on long-paragraph synth. Wave 24 (✓ shipped) closed the Wave 23-spawned server-side parallel synth-while-LLM-streams piece via [IMPROVE-159] — phrase-boundary fallback in ``PartnerEngine.astream_chat`` firing on ``,`` ``;`` ``:`` once the clause is ≥ 30 chars, so TTS begins synthesising while the LLM keeps streaming later words. Wave 25 (deferred-by-investigation) inspected chatterbox-tts 0.1.7 source and confirmed neither ``ChatterboxTTS.generate`` nor ``ChatterboxTTSTurbo.generate`` has a streaming surface — true streaming requires forking the library (~3-5d), deferred pending upstream feature OR justified fork investment. Wave 26 (✓ shipped) pinned the cold-startup wins from Waves 21+22 + the TTFA wins from Waves 23+24 against future regressions via a new startup-timing benchmark harness ([IMPROVE-160]) — 4 deterministic timing pins on the actual ``api_server.app`` (no mocks). Wave 27 (✓ shipped) closed the Wave 21-residue Path D piece via [IMPROVE-161] — opt-in ``LIFESPAN_EAGER_EDITOR_WARMUP`` flag that pre-builds the editor service at lifespan time so editor-heavy users get hot first /editor/* calls at the cost of ~21s extra boot. Default-off preserves current boot speed. Wave 28 (✓ shipped) closed Tranche G partial — preset JSON export/import via [IMPROVE-162] — adding 2 new editor preset endpoints (export + import) with v=1 schema versioning so power users can share their tuned editor recipes via JSON files. Wave 29 (✓ shipped) closed Tranche B partial — voice persistence via [IMPROVE-163] — adding ``data/partner/voice_settings.json`` (sibling of profile.json / user_profile.json / memory_decay.json) loaded at PartnerEngine init + written on every set_voice_id / set_voice_gender / set_tts_mode success, so a user's voice / gender / mode picks survive backend restart. Wave 30 (✓ shipped) closed Tranche E partial — editor session TTL cleanup via [IMPROVE-164] — adding ``EDITOR_SESSION_TTL_DAYS`` settings field + a fire-and-forget lifespan task that walks the [IMPROVE-53] archive directory and deletes date-buckets older than the configured threshold (mirrors Wave 22's IMPROVE-156 fire-and-forget pattern; default 0 = disabled preserves "archives accumulate forever" semantics). Wave 31 (✓ shipped) closed Tranche D piece 1 — LLM-summarized inter-node DAG context via [IMPROVE-165] — adding ``DAG_INTER_NODE_SUMMARIZATION_MODEL`` opt-in env-var that replaces the legacy elision marker in ``_build_inter_node_context`` with a one-shot LLM summary of dropped entries (default empty = disabled preserves truncation-only behaviour; failure paths fall back to the legacy marker). Wave 32 (✓ shipped) closed Tranche D piece 2 — per-edge "pass" config via [IMPROVE-166] — adding 3 edge.rule.pass modes (``all`` default / ``source_only`` / ``none``) so DAG authors can scope which prior outputs each downstream agent sees (default ``all`` preserves pre-Wave-32 behaviour; invalid pass_mode silently falls back to ``all``). Wave 33 (✓ shipped) closed Tranche D piece 3 + the entire Tranche D umbrella — classifier confidence threshold via [IMPROVE-167] — adding ``DAG_CLASSIFIER_CONFIDENCE_THRESHOLD`` opt-in env-var with heuristic confidence ``1 / matched_count`` that rejects ambiguous llm_router classifications (multiple options match the response) so the always-fallback edge fires instead of a low-confidence pick (default 0.0 = no filtering preserves current behaviour). Wave 34 (✓ shipped) closed Tranche F + the user's "in order A, B, C, D" batch end-to-end — real-LLM enhancer eval suite via [IMPROVE-168] — adding ``tests/eval/test_edit_prompt_enhancer_real_llm.py`` with 8 curated test cases that pin ``enhance_edit_prompt`` against real Ollama LLMs (gated by ``LOCAL_AI_EVAL_REAL_LLM=1`` env-var; default-off skips all eval tests so CI + most local dev pay zero cost). Wave 35 (✓ shipped) closed a Tranche E sub-piece — per-step metrics caching via [IMPROVE-169] — adding a ``metrics_cache: dict[tuple[str, str], dict[str, Any]]`` field on ``EditSession`` keyed by ``(path_a, path_b)`` so repeated ``GET /editor/{session_id}/compare?metrics=true`` calls return the cached dict instead of recomputing the SSIM + region-map base64 per call (lossless cache, no env-var gate — first behaviour-change wave to ship without an opt-in flag because the cache is provably backwards-compatible; bounded by session lifetime + close_session purge). The natural Wave 36+ paths: (a) deferred-queue picks (NEW carry-overs / Wave-N-audit items + remaining Tranche E sub-pieces: LPIPS metric + cropped-patch optimization), or (b) emergent work surfaced by ongoing usage. Items previously considered + rejected are archived in §10.5.1.
-- **Keep `[IMPROVE-N]` references alive.** When you fix one, grep `docs/features/` for that ID and cross out. If you add new ones in future work, number them IMPROVE-170+ (1-169 are taken; the IMPROVE-NEW-* tags graduate to permanent numbers on acceptance) and note them in the originating chapter.
+- **Pick a Wave 37+ item and ship it** — see §10.5 Wave 18 deferred queue (the trimmed Wave 17 cleanup output: NEW candidates IMPROVE-NEW-2/7/8/10 + Wave-15-audit FILTER_AXIS_TYPES registry + 7 Wave-16-audit-spawned items + Wave-13/12/11/10-audit triggered items + themed tranches B/D/E/F/G + carry-overs gated on §10.7 questions — most of which are now ungated since Wave 20 closed Q1 / Q4 / Q7 / Q15 / Q16). Tranche A (Flutter editor v2) shipped fully in Wave 18 — IMPROVE-138 through IMPROVE-144. Wave 19 Tranche A closed the GDPR Article 20 round-trip with the partner-import host ([IMPROVE-145]) + export button ([IMPROVE-146]). Wave 20 cleanup wave (✓ shipped) closed §10.7 gating questions + shipped a Q7=b deletion ([IMPROVE-147]) + 5 Q4=c TTS pipeline quick wins ([IMPROVE-148] / [IMPROVE-149] / [IMPROVE-150] / [IMPROVE-151] / [IMPROVE-152]). Wave 21 (✓ shipped) closed the cross-cutting startup contention with 3 chain fixes ([IMPROVE-153] / [IMPROVE-154] / [IMPROVE-155]) — ~47s of cold-startup blocking unwound. Wave 22 (✓ shipped) closed the Wave 21-spawned true-async ``_init_mem0`` follow-up via [IMPROVE-156] — httpx.AsyncClient pre-warm of Ollama embed + ``asyncio.create_task`` fire-and-forget Mem0 init at lifespan, moving the ~22s Chain 2 cost off the user's first request entirely. Wave 23 (✓ shipped) closed the Wave 20-spawned Kokoro create_stream piece via [IMPROVE-157] (backend stream_synthesize via ``async for`` over ``Kokoro.create_stream``) + [IMPROVE-158] (Flutter ``buildMiniWavForChunk`` + per-sentence StreamController + ``await for``-driven progressive playback) — ~60-80% TTFA reduction on long-paragraph synth. Wave 24 (✓ shipped) closed the Wave 23-spawned server-side parallel synth-while-LLM-streams piece via [IMPROVE-159] — phrase-boundary fallback in ``PartnerEngine.astream_chat`` firing on ``,`` ``;`` ``:`` once the clause is ≥ 30 chars, so TTS begins synthesising while the LLM keeps streaming later words. Wave 25 (deferred-by-investigation) inspected chatterbox-tts 0.1.7 source and confirmed neither ``ChatterboxTTS.generate`` nor ``ChatterboxTTSTurbo.generate`` has a streaming surface — true streaming requires forking the library (~3-5d), deferred pending upstream feature OR justified fork investment. Wave 26 (✓ shipped) pinned the cold-startup wins from Waves 21+22 + the TTFA wins from Waves 23+24 against future regressions via a new startup-timing benchmark harness ([IMPROVE-160]) — 4 deterministic timing pins on the actual ``api_server.app`` (no mocks). Wave 27 (✓ shipped) closed the Wave 21-residue Path D piece via [IMPROVE-161] — opt-in ``LIFESPAN_EAGER_EDITOR_WARMUP`` flag that pre-builds the editor service at lifespan time so editor-heavy users get hot first /editor/* calls at the cost of ~21s extra boot. Default-off preserves current boot speed. Wave 28 (✓ shipped) closed Tranche G partial — preset JSON export/import via [IMPROVE-162] — adding 2 new editor preset endpoints (export + import) with v=1 schema versioning so power users can share their tuned editor recipes via JSON files. Wave 29 (✓ shipped) closed Tranche B partial — voice persistence via [IMPROVE-163] — adding ``data/partner/voice_settings.json`` (sibling of profile.json / user_profile.json / memory_decay.json) loaded at PartnerEngine init + written on every set_voice_id / set_voice_gender / set_tts_mode success, so a user's voice / gender / mode picks survive backend restart. Wave 30 (✓ shipped) closed Tranche E partial — editor session TTL cleanup via [IMPROVE-164] — adding ``EDITOR_SESSION_TTL_DAYS`` settings field + a fire-and-forget lifespan task that walks the [IMPROVE-53] archive directory and deletes date-buckets older than the configured threshold (mirrors Wave 22's IMPROVE-156 fire-and-forget pattern; default 0 = disabled preserves "archives accumulate forever" semantics). Wave 31 (✓ shipped) closed Tranche D piece 1 — LLM-summarized inter-node DAG context via [IMPROVE-165] — adding ``DAG_INTER_NODE_SUMMARIZATION_MODEL`` opt-in env-var that replaces the legacy elision marker in ``_build_inter_node_context`` with a one-shot LLM summary of dropped entries (default empty = disabled preserves truncation-only behaviour; failure paths fall back to the legacy marker). Wave 32 (✓ shipped) closed Tranche D piece 2 — per-edge "pass" config via [IMPROVE-166] — adding 3 edge.rule.pass modes (``all`` default / ``source_only`` / ``none``) so DAG authors can scope which prior outputs each downstream agent sees (default ``all`` preserves pre-Wave-32 behaviour; invalid pass_mode silently falls back to ``all``). Wave 33 (✓ shipped) closed Tranche D piece 3 + the entire Tranche D umbrella — classifier confidence threshold via [IMPROVE-167] — adding ``DAG_CLASSIFIER_CONFIDENCE_THRESHOLD`` opt-in env-var with heuristic confidence ``1 / matched_count`` that rejects ambiguous llm_router classifications (multiple options match the response) so the always-fallback edge fires instead of a low-confidence pick (default 0.0 = no filtering preserves current behaviour). Wave 34 (✓ shipped) closed Tranche F + the user's "in order A, B, C, D" batch end-to-end — real-LLM enhancer eval suite via [IMPROVE-168] — adding ``tests/eval/test_edit_prompt_enhancer_real_llm.py`` with 8 curated test cases that pin ``enhance_edit_prompt`` against real Ollama LLMs (gated by ``LOCAL_AI_EVAL_REAL_LLM=1`` env-var; default-off skips all eval tests so CI + most local dev pay zero cost). Wave 35 (✓ shipped) closed a Tranche E sub-piece — per-step metrics caching via [IMPROVE-169] — adding a ``metrics_cache: dict[tuple[str, str], dict[str, Any]]`` field on ``EditSession`` keyed by ``(path_a, path_b)`` so repeated ``GET /editor/{session_id}/compare?metrics=true`` calls return the cached dict instead of recomputing the SSIM + region-map base64 per call (lossless cache, no env-var gate — first behaviour-change wave to ship without an opt-in flag because the cache is provably backwards-compatible; bounded by session lifetime + close_session purge). Wave 36 (in progress) closes Path E partial — bucket A 13-of-22 pre-existing test failures via IMPROVE-170 (`OllamaController` static helpers + `_get_client` + `_enrich_capabilities_from_show` for `test_ollama.py` — 7 fixes) + IMPROVE-171 (`test_images_enhance_prompt.py` rewired to patch `routers.images` namespace after the [IMPROVE-1] router split — 6 fixes; test-only) + IMPROVE-172 (`AgentOrchestrator._build_agent_graph(definition, allow_tools=True)` extracted from `_chat_with_react_agent` to expose the retry-without-tools seam — 2 fixes); bucket B 9 signal regressions in `test_images_service.py` + `test_huggingface.py` deferred to Wave 37+ pending per-failure investigation. The natural Wave 37+ paths: (a) bucket B mass-fix wave for the remaining 9 pre-existing failures (~0.5-1d), (b) deferred-queue picks (NEW carry-overs / Wave-N-audit items + remaining Tranche E sub-pieces: LPIPS metric + cropped-patch optimization), or (c) emergent work surfaced by ongoing usage. Items previously considered + rejected are archived in §10.5.1.
+- **Keep `[IMPROVE-N]` references alive.** When you fix one, grep `docs/features/` for that ID and cross out. If you add new ones in future work, number them IMPROVE-173+ (1-172 are taken; the IMPROVE-NEW-* tags graduate to permanent numbers on acceptance) and note them in the originating chapter.
 - **The `MEMORY.md` in `~/.claude/projects/...` contains the feedback rule** that improvement suggestions should cite 2025–2026 sources. Every item here has citations in its origin chapter.
 
 ---
 
 **Guide complete.** `docs/features/README.md` → `01-architecture.md` → `02-llm-infrastructure.md` → `03-chat.md` → `04-agents-tools.md` → `05-systems.md` → `06-image-generation.md` → `07-image-editor.md` → `08-partner.md` → `09-observability.md` → `10-improvements.md` *(this file)*.
 
-Every major feature of the Local AI Platform is now documented end-to-end, with **169** research-backed improvement ideas cross-referenced into one prioritized plan. Waves 1-24 + Wave 26 + Wave 27 + Wave 28 + Wave 29 + Wave 30 + Wave 31 + Wave 32 + Wave 33 + Wave 34 + Wave 35 fully shipped + Wave 25 deferred-by-investigation; post-Wave-35 backlog in deferred queue.
+Every major feature of the Local AI Platform is now documented end-to-end, with **172** research-backed improvement ideas cross-referenced into one prioritized plan. Waves 1-24 + Wave 26 + Wave 27 + Wave 28 + Wave 29 + Wave 30 + Wave 31 + Wave 32 + Wave 33 + Wave 34 + Wave 35 fully shipped + Wave 25 deferred-by-investigation + Wave 36 in progress; post-Wave-36 backlog in deferred queue.
