@@ -718,6 +718,41 @@ class AgentOrchestrator:
         response = self.router.chat(model, messages, settings)
         return response.content
 
+    def _build_agent_graph(
+        self,
+        definition: AgentDefinition,
+        allow_tools: bool = True,
+    ) -> Any:
+        """[IMPROVE-172] Build a LangGraph ReAct agent graph for this
+        definition.
+
+        Extracted from ``_chat_with_react_agent`` so the build step is a
+        testable seam — tests/test_agents.py monkeypatches this method
+        to inject stub graphs that simulate "model does not support
+        tools" + retry-without-tools flows. ``allow_tools=False``
+        substitutes an empty tools list so the same
+        ``create_react_agent`` shape returns for the retry path.
+
+        Signature deliberately minimal (definition + allow_tools only)
+        to match the testable contract; per-call kwargs (thread_id,
+        callbacks) are applied at ``invoke()`` time via the ``config``
+        kwarg, which is invariant of build state.
+
+        Raises ImportError when langgraph is not installed; callers
+        decide whether to fall back to ``_chat_via_router`` or re-raise.
+        """
+        from langgraph.prebuilt import create_react_agent
+
+        llm = self._build_langchain_llm(definition)
+        tools = self._tools_for_agent(definition.name) if allow_tools else []
+
+        return create_react_agent(
+            model=llm,
+            tools=tools,
+            prompt=self._inject_date(definition.system_prompt),
+            checkpointer=self.checkpointer,
+        )
+
     def _chat_with_react_agent(
         self,
         definition: AgentDefinition,
@@ -731,56 +766,64 @@ class AgentOrchestrator:
     ) -> str:
         """Chat using a LangGraph ReAct agent with tool-calling loop and checkpointing."""
         try:
-            from langgraph.prebuilt import create_react_agent
+            # [IMPROVE-172] Probe import here so the ImportError fallback
+            # to _chat_via_router fires before _build_agent_graph runs.
+            from langgraph.prebuilt import create_react_agent  # noqa: F401
         except ImportError:
             logger.warning("langgraph.prebuilt not available, falling back to direct chat")
             return self._chat_via_router(definition, user_input, history, conv_id=conv_id)
 
-        llm = self._build_langchain_llm(definition, settings_override=settings_override)
         tools = self._tools_for_agent(definition.name)
-
-        if not tools or definition.model_name in self._models_without_tool_support:
+        if not tools:
             return self._chat_via_router(definition, user_input, history, conv_id=conv_id)
 
+        # [IMPROVE-172] Pre-flight: skip tools entirely when this model
+        # is already known to lack tool support. Otherwise try with
+        # tools first and retry without tools on the runtime error.
+        allow_tools = definition.model_name not in self._models_without_tool_support
+
+        graph = self._build_agent_graph(definition, allow_tools=allow_tools)
+
+        # With checkpointer: only send new message (history replayed from checkpoint)
+        # Without: send full history
+        if thread_id:
+            messages = [HumanMessage(content=user_input)]
+        else:
+            lc_history = chat_messages_to_langchain(history)
+            lc_history.append(HumanMessage(content=user_input))
+            messages = lc_history
+
+        cfg: dict[str, Any] = {}
+        if thread_id:
+            cfg["configurable"] = {"thread_id": thread_id}
+        if callbacks:
+            cfg["callbacks"] = callbacks
+
         try:
-            agent = create_react_agent(
-                model=llm,
-                tools=tools,
-                prompt=self._inject_date(definition.system_prompt),
-                checkpointer=self.checkpointer if thread_id else None,
-            )
-
-            # With checkpointer: only send new message (history replayed from checkpoint)
-            # Without: send full history
-            if thread_id:
-                messages = [HumanMessage(content=user_input)]
+            if cfg:
+                result = graph.invoke({"messages": messages}, config=cfg)
             else:
-                lc_history = chat_messages_to_langchain(history)
-                lc_history.append(HumanMessage(content=user_input))
-                messages = lc_history
-
-            cfg: dict[str, Any] = {}
-            if thread_id:
-                cfg["configurable"] = {"thread_id": thread_id}
-            if callbacks:
-                cfg["callbacks"] = callbacks
-
-            result = agent.invoke({"messages": messages}, config=cfg if cfg else None)
-
-            # Extract final AI message
-            out_messages = result.get("messages", [])
-            final = next(
-                (m for m in reversed(out_messages) if isinstance(m, AIMessage)),
-                None,
-            )
-            return self._stringify_content(getattr(final, "content", "No response."))
-
+                result = graph.invoke({"messages": messages})
         except Exception as exc:
-            if "does not support tools" in str(exc).lower():
+            if allow_tools and "does not support tools" in str(exc).lower():
                 self._models_without_tool_support.add(definition.model_name)
-                logger.info("Model %s doesn't support tools, falling back", definition.model_name)
-                return self._chat_via_router(definition, user_input, history)
-            raise
+                logger.info("Model %s doesn't support tools, retrying without", definition.model_name)
+                graph = self._build_agent_graph(definition, allow_tools=False)
+                if cfg:
+                    result = graph.invoke({"messages": messages}, config=cfg)
+                else:
+                    result = graph.invoke({"messages": messages})
+            else:
+                raise
+
+        out_messages = result.get("messages", []) if isinstance(result, dict) else []
+        final = next(
+            (m for m in reversed(out_messages) if isinstance(m, AIMessage)),
+            None,
+        )
+        if final is None:
+            return "No response returned."
+        return self._stringify_content(getattr(final, "content", "No response returned."))
 
     def _build_langchain_llm(self, definition: AgentDefinition, settings_override: dict | None = None) -> Any:
         """Build a LangChain-compatible LLM for agent graphs.
