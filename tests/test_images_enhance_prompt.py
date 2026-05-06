@@ -21,7 +21,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 from fastapi import HTTPException
 
-import api_server
+from local_ai_platform.api.routers import images as images_router
 
 
 # ── Primary router call ──────────────────────────────────────────────
@@ -38,10 +38,10 @@ def test_endpoint_routes_primary_call_through_helper():
         "prompt": "masterpiece, a cat, highly detailed",
         "negative_prompt": "blurry, deformed",
     })
-    with patch.object(api_server, "_pick_small_ollama_model", return_value="gemma3:1b"), \
-         patch.object(api_server, "_ollama_generate_via_router",
+    with patch.object(images_router, "_pick_small_ollama_model", return_value="gemma3:1b"), \
+         patch.object(images_router, "_ollama_generate_via_router",
                       new=AsyncMock(return_value=fake_json)) as mock_gen:
-        result = asyncio.run(api_server.enhance_image_prompt({"prompt": "a cat"}))
+        result = asyncio.run(images_router.enhance_image_prompt({"prompt": "a cat"}))
 
     assert result["prompt"] == "masterpiece, a cat, highly detailed"
     assert result["negative_prompt"] == "blurry, deformed"
@@ -49,11 +49,14 @@ def test_endpoint_routes_primary_call_through_helper():
     assert result["original_prompt"] == "a cat"
 
     # Helper called exactly once with the resolved model + image-prompt settings.
+    # Helper signature is (router, model, prompt, *, ...) — args[0] is the
+    # Depends(get_router) sentinel when invoked directly without HTTP, so
+    # we pin args[1] (model) and args[2] (assembled prompt) instead.
     assert mock_gen.await_count == 1
     args, kwargs = mock_gen.await_args
-    assert args[0] == "gemma3:1b"
-    assert "Stable Diffusion sdxl prompt" in args[1]
-    assert "a cat" in args[1]
+    assert args[1] == "gemma3:1b"
+    assert "Stable Diffusion sdxl prompt" in args[2]
+    assert "a cat" in args[2]
     assert kwargs == {"temperature": 0.7, "max_tokens": 256, "timeout_sec": 120}
 
 
@@ -63,28 +66,28 @@ def test_endpoint_uses_explicit_ollama_model_without_picker():
     Also exercises the qwen-specific /no_think prefix path.
     """
     fake_json = json.dumps({"prompt": "x", "negative_prompt": ""})
-    with patch.object(api_server, "_pick_small_ollama_model") as mock_pick, \
-         patch.object(api_server, "_ollama_generate_via_router",
+    with patch.object(images_router, "_pick_small_ollama_model") as mock_pick, \
+         patch.object(images_router, "_ollama_generate_via_router",
                       new=AsyncMock(return_value=fake_json)) as mock_gen:
-        asyncio.run(api_server.enhance_image_prompt({
+        asyncio.run(images_router.enhance_image_prompt({
             "prompt": "a cat",
             "ollama_model": "qwen2.5:1.5b",
         }))
 
     mock_pick.assert_not_called()
     args, _ = mock_gen.await_args
-    assert args[0] == "qwen2.5:1.5b"
+    assert args[1] == "qwen2.5:1.5b"
     # Qwen models get a /no_think prefix prepended to the assembled prompt.
-    assert args[1].startswith("/no_think")
+    assert args[2].startswith("/no_think")
 
 
 def test_endpoint_threads_timeout_sec_to_helper():
     """body.timeout_sec must propagate as the helper's timeout_sec kwarg."""
     fake_json = json.dumps({"prompt": "x", "negative_prompt": ""})
-    with patch.object(api_server, "_pick_small_ollama_model", return_value="gemma3:1b"), \
-         patch.object(api_server, "_ollama_generate_via_router",
+    with patch.object(images_router, "_pick_small_ollama_model", return_value="gemma3:1b"), \
+         patch.object(images_router, "_ollama_generate_via_router",
                       new=AsyncMock(return_value=fake_json)) as mock_gen:
-        asyncio.run(api_server.enhance_image_prompt({
+        asyncio.run(images_router.enhance_image_prompt({
             "prompt": "a cat",
             "timeout_sec": 30,
         }))
@@ -97,11 +100,11 @@ def test_endpoint_threads_timeout_sec_to_helper():
 
 def test_endpoint_503_when_no_ollama_model_available():
     """No models from the router → 503 without ever calling the helper."""
-    with patch.object(api_server, "_pick_small_ollama_model", return_value=None), \
-         patch.object(api_server, "_ollama_generate_via_router",
+    with patch.object(images_router, "_pick_small_ollama_model", return_value=None), \
+         patch.object(images_router, "_ollama_generate_via_router",
                       new=AsyncMock()) as mock_gen:
         with pytest.raises(HTTPException) as excinfo:
-            asyncio.run(api_server.enhance_image_prompt({"prompt": "a cat"}))
+            asyncio.run(images_router.enhance_image_prompt({"prompt": "a cat"}))
     assert excinfo.value.status_code == 503
     assert "ollama" in str(excinfo.value.detail).lower()
     mock_gen.assert_not_called()
@@ -116,11 +119,11 @@ def test_endpoint_propagates_router_http_exception_unchanged():
     The new structure wraps only the urllib fallback, with `except
     HTTPException: raise` guarding the router's status codes.
     """
-    with patch.object(api_server, "_pick_small_ollama_model", return_value="gemma3:1b"), \
-         patch.object(api_server, "_ollama_generate_via_router",
+    with patch.object(images_router, "_pick_small_ollama_model", return_value="gemma3:1b"), \
+         patch.object(images_router, "_ollama_generate_via_router",
                       new=AsyncMock(side_effect=HTTPException(504, "timed out"))):
         with pytest.raises(HTTPException) as excinfo:
-            asyncio.run(api_server.enhance_image_prompt({"prompt": "a cat"}))
+            asyncio.run(images_router.enhance_image_prompt({"prompt": "a cat"}))
     # 504 from helper, NOT rewrapped to 500.
     assert excinfo.value.status_code == 504
     assert "timed out" in str(excinfo.value.detail).lower()
@@ -144,10 +147,10 @@ def test_endpoint_emits_image_enhance_prompt_event():
         captured.append((subsystem, action, kwargs.get("status")))
 
     with patch("local_ai_platform.observability.emit", side_effect=_spy), \
-         patch.object(api_server, "_pick_small_ollama_model", return_value="gemma3:1b"), \
-         patch.object(api_server, "_ollama_generate_via_router",
+         patch.object(images_router, "_pick_small_ollama_model", return_value="gemma3:1b"), \
+         patch.object(images_router, "_ollama_generate_via_router",
                       new=AsyncMock(return_value=fake_json)):
-        asyncio.run(api_server.enhance_image_prompt({"prompt": "a cat"}))
+        asyncio.run(images_router.enhance_image_prompt({"prompt": "a cat"}))
 
     # Expect at minimum: ("image", "enhance_prompt.start", "start") and
     # ("image", "enhance_prompt", "ok"). Other subsystems (e.g. router
