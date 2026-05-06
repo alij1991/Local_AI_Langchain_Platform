@@ -101,7 +101,7 @@ def test_extract_model_infos_with_size_and_features():
 
 def test_load_model_generate_unsupported_is_non_fatal(monkeypatch):
     controller = OllamaController(config=type("C", (), {"ollama_base_url": "http://127.0.0.1:11434"})())
-    monkeypatch.setattr(controller, "_get_client", lambda: _ClientGenerateUnsupported())
+    monkeypatch.setattr(controller._provider, "_get_client", lambda: _ClientGenerateUnsupported())
 
     result = controller.load_model("qwen3-embedding:latest")
 
@@ -111,7 +111,7 @@ def test_load_model_generate_unsupported_is_non_fatal(monkeypatch):
 
 def test_load_model_generate_ok(monkeypatch):
     controller = OllamaController(config=type("C", (), {"ollama_base_url": "http://127.0.0.1:11434"})())
-    monkeypatch.setattr(controller, "_get_client", lambda: _ClientGenerateOk())
+    monkeypatch.setattr(controller._provider, "_get_client", lambda: _ClientGenerateOk())
 
     result = controller.load_model("gemma3:1b")
 
@@ -122,7 +122,7 @@ def test_load_model_generate_ok(monkeypatch):
 def test_list_loaded_models_includes_running_and_recent(monkeypatch):
     controller = OllamaController(config=type("C", (), {"ollama_base_url": "http://127.0.0.1:11434"})())
     fake_client = _ClientLoadedModels()
-    monkeypatch.setattr(controller, "_get_client", lambda: fake_client)
+    monkeypatch.setattr(controller._provider, "_get_client", lambda: fake_client)
 
     controller.load_model("qwen3:8b")
     result = controller.list_loaded_models()
