@@ -68,7 +68,7 @@ def _save(img: Image.Image, dest: str) -> str:
 
 
 def test_metrics_keys_match_documented_shape(tmp_image_pair):
-    """The metrics dict carries the exact 11 keys the doc + Flutter
+    """The metrics dict carries the exact 12 keys the doc + Flutter
     side rely on. If a future refactor renames a key, the UI breaks
     silently — pin the contract.
 
@@ -76,8 +76,12 @@ def test_metrics_keys_match_documented_shape(tmp_image_pair):
     appended ``ssim_patch`` + ``patch_bbox`` (8 -> 10 keys).
 
     [IMPROVE-176] Wave 39 — LPIPS perceptual metric appended
-    ``lpips`` (10 -> 11 keys). The field is always present;
-    None when EDITOR_METRICS_LPIPS_ENABLED is unset (default).
+    ``lpips`` (10 -> 11 keys).
+
+    [IMPROVE-177] Wave 40 — LPIPS-on-cropped-patch appended
+    ``lpips_patch`` (11 -> 12 keys). Falls back to full-frame
+    ``lpips`` when no useful crop applies OR the crop compute
+    fails.
     """
     from local_ai_platform.images.editor import _compute_diff_metrics
 
@@ -91,6 +95,7 @@ def test_metrics_keys_match_documented_shape(tmp_image_pair):
         "ssim_patch",
         "patch_bbox",
         "lpips",
+        "lpips_patch",
         "region_map_base64",
         "width",
         "height",

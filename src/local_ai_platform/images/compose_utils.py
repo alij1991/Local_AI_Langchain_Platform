@@ -192,6 +192,7 @@ def compute_diff_metrics(path_a: str, path_b: str) -> dict[str, Any]:
           "patch_bbox": {"x0": int, "y0": int, "x1": int,
                          "y1": int, "frac": float} | None,
           "lpips": float | None,
+          "lpips_patch": float | None,
           "region_map_base64": str,
           "width": int,
           "height": int,
@@ -228,6 +229,18 @@ def compute_diff_metrics(path_a: str, path_b: str) -> dict[str, Any]:
     module scope, so the per-call cost amortizes across the
     process. Failure (missing dep, compute exception) falls back
     to None — same shape as the existing ssim failure contract.
+
+    [IMPROVE-177] ``lpips_patch`` is the perceptual-distance
+    analogue of ``ssim_patch``: when LPIPS is enabled AND the
+    W38 ``patch_bbox`` is not None (a localized edit with a
+    useful crop), runs the lpips.LPIPS forward pass on the
+    bbox-cropped slices alongside the full-frame compute. Falls
+    back to the full-frame ``lpips`` value when no useful crop
+    applies OR the crop compute fails (so callers can ALWAYS
+    reference ``lpips_patch`` without a separate None branch
+    beyond the existing LPIPS-disabled / compute-failure cases).
+    Rides the same env-var gate as ``lpips``; reuses the same
+    module-scope model cache (no extra model load).
 
     Heavy deps (numpy, skimage, lpips/torch) are imported lazily
     so this module stays cheap to import at app startup. The
@@ -389,6 +402,16 @@ def compute_diff_metrics(path_a: str, path_b: str) -> dict[str, Any]:
     # existing ssim_val try/except: a metrics request never
     # escalates into a 500 just because LPIPS tripped.
     lpips_val: float | None = None
+    # [IMPROVE-177] Cropped-patch LPIPS variant. When LPIPS is
+    # enabled AND the W38 [IMPROVE-175] bbox crop applies, run a
+    # SECOND forward pass on the bbox-cropped slices alongside the
+    # full-frame compute. Same fallback shape as W38 ssim_patch:
+    # falls back to the full-frame `lpips_val` when no useful crop
+    # OR the crop compute fails. Defaults to `lpips_val` so the
+    # field is always non-None when LPIPS is enabled + the full-
+    # frame compute succeeds; only diverges when the crop pass
+    # actually runs.
+    lpips_patch: float | None = None
     if _lpips_enabled():
         try:
             model = _get_lpips_model(_LPIPS_NET_DEFAULT)
@@ -401,11 +424,47 @@ def compute_diff_metrics(path_a: str, path_b: str) -> dict[str, Any]:
             # default forward output shape).
             distance = model(tensor_a, tensor_b)
             lpips_val = float(distance)
+            # [IMPROVE-177] lpips_patch starts as the full-frame
+            # value (fallback shape) so the field is always non-
+            # None when LPIPS is enabled + full-frame compute
+            # succeeded. Only the bbox-crop branch below diverges.
+            lpips_patch = lpips_val
+            if patch_bbox is not None:
+                try:
+                    crop_a = arr_a[
+                        patch_bbox["y0"]:patch_bbox["y1"],
+                        patch_bbox["x0"]:patch_bbox["x1"],
+                        :,
+                    ]
+                    crop_b = arr_b[
+                        patch_bbox["y0"]:patch_bbox["y1"],
+                        patch_bbox["x0"]:patch_bbox["x1"],
+                        :,
+                    ]
+                    tensor_crop_a = _lpips_pkg.im2tensor(crop_a)
+                    tensor_crop_b = _lpips_pkg.im2tensor(crop_b)
+                    distance_patch = model(tensor_crop_a, tensor_crop_b)
+                    lpips_patch = float(distance_patch)
+                except Exception as exc:
+                    # Inner try/except mirrors the W38 ssim_patch
+                    # fallback: a crop-only failure (e.g. LPIPS
+                    # AlexNet conv layers can't run on a 7x7 crop
+                    # because the kernel is 11x11) shouldn't
+                    # poison the full-frame value. Fall back to
+                    # the full-frame lpips_val that was already
+                    # computed successfully.
+                    logger.debug(
+                        "lpips_patch compute failed (%s); falling "
+                        "back to full-frame lpips",
+                        exc,
+                    )
+                    lpips_patch = lpips_val
         except Exception as exc:
             logger.debug(
                 "lpips compute failed (%s); returning None", exc,
             )
             lpips_val = None
+            lpips_patch = None
 
     # ── region_map_base64 ────────────────────────────────────────
     # Desaturated A as background, red overlay where diff exceeds
@@ -441,6 +500,10 @@ def compute_diff_metrics(path_a: str, path_b: str) -> dict[str, Any]:
         # compute raises — same shape as the ssim field's failure
         # contract.
         "lpips": lpips_val,
+        # [IMPROVE-177] LPIPS-on-cropped-patch (Wave 40). Falls
+        # back to lpips_val when no useful crop OR crop compute
+        # fails — same shape as W38 ssim_patch's fallback to ssim.
+        "lpips_patch": lpips_patch,
         "region_map_base64": region_map_base64,
         "width": out_w,
         "height": out_h,

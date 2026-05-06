@@ -140,6 +140,11 @@ def test_compute_diff_metrics_shape(tmp_path):
         # None when EDITOR_METRICS_LPIPS_ENABLED is unset OR when
         # the compute raises (matches the ssim failure contract).
         "lpips",
+        # [IMPROVE-177] Wave 40 — LPIPS-on-cropped-patch appended.
+        # Falls back to the full-frame lpips value when no useful
+        # crop applies OR the crop compute fails (same shape as
+        # W38 ssim_patch's fallback to ssim).
+        "lpips_patch",
         "region_map_base64",
         "width",
         "height",
@@ -437,6 +442,183 @@ def test_lpips_model_cache_loads_once_across_calls(tmp_path, monkeypatch):
         assert m["lpips"] == pytest.approx(0.5, abs=1e-6)
 
     assert instantiate_count["n"] == 1
+
+
+# ── [IMPROVE-177] LPIPS-on-cropped-patch (Wave 40) ───────────────
+
+
+def test_lpips_patch_is_none_when_disabled_default(tmp_path, monkeypatch):
+    """Without EDITOR_METRICS_LPIPS_ENABLED set, the `lpips_patch`
+    field is None (matches the `lpips` field's disabled behaviour;
+    `_get_lpips_model` is NOT called). Sentinel-fail-loud pin via
+    the same raise-if-called shape from W39 — protects against a
+    regression that flips the default to enabled and triggers the
+    244MB AlexNet download in CI.
+    """
+    from local_ai_platform.images import compose_utils as cu
+
+    monkeypatch.delenv("EDITOR_METRICS_LPIPS_ENABLED", raising=False)
+
+    def _should_not_be_called(net):
+        raise AssertionError(
+            f"_get_lpips_model called with net={net!r} but the env-var "
+            f"is unset, so the LPIPS path should be skipped entirely."
+        )
+    monkeypatch.setattr(cu, "_get_lpips_model", _should_not_be_called)
+
+    a_path = tmp_path / "a.png"
+    b_path = tmp_path / "b.png"
+    Image.new("RGB", (32, 32), color=(255, 0, 0)).save(a_path)
+    Image.new("RGB", (32, 32), color=(0, 255, 0)).save(b_path)
+
+    m = cu.compute_diff_metrics(str(a_path), str(b_path))
+    assert m["lpips"] is None
+    assert m["lpips_patch"] is None
+
+
+def test_lpips_patch_matches_full_frame_when_no_crop_applies(
+    tmp_path, monkeypatch,
+):
+    """When the full image changes, `patch_bbox` is None (W38 90%-
+    frac gate fires); `lpips_patch` should fall back to the full-
+    frame `lpips` value. Mocked LPIPS returns a fixed scalar; since
+    only the full-frame compute runs, both fields equal that scalar.
+    """
+    from local_ai_platform.images import compose_utils as cu
+
+    monkeypatch.setenv("EDITOR_METRICS_LPIPS_ENABLED", "1")
+    monkeypatch.setattr(cu, "_lpips_model_cache", {})
+
+    class _FakeLpipsModel:
+        def __call__(self, tensor_a, tensor_b):
+            import torch
+            return torch.tensor(0.42)
+
+    monkeypatch.setattr(cu, "_get_lpips_model", lambda net: _FakeLpipsModel())
+
+    # 32x32 pure-red vs pure-green forces patch_bbox to None (W38
+    # frac >= 0.9 gate fires).
+    a_path = tmp_path / "a.png"
+    b_path = tmp_path / "b.png"
+    Image.new("RGB", (32, 32), color=(255, 0, 0)).save(a_path)
+    Image.new("RGB", (32, 32), color=(0, 255, 0)).save(b_path)
+
+    m = cu.compute_diff_metrics(str(a_path), str(b_path))
+    # Confirm the W38 gate fired (no useful crop).
+    assert m["patch_bbox"] is None
+    # lpips_patch falls back to lpips (no second forward pass ran).
+    assert m["lpips"] == pytest.approx(0.42, abs=1e-6)
+    assert m["lpips_patch"] == m["lpips"]
+
+
+def test_lpips_patch_uses_crop_when_localized_edit(tmp_path, monkeypatch):
+    """Localized edit (16x16 white square in 64x64 black) -> W38
+    `patch_bbox` is set. Mocked LPIPS returns DIFFERENT scalars
+    based on input tensor SHAPE (large vs small) so the test can
+    distinguish full-frame vs cropped calls. Verify lpips_patch
+    differs from lpips AND the model was called twice (once full
+    + once crop).
+    """
+    import numpy as np
+    from local_ai_platform.images import compose_utils as cu
+
+    monkeypatch.setenv("EDITOR_METRICS_LPIPS_ENABLED", "1")
+    monkeypatch.setattr(cu, "_lpips_model_cache", {})
+
+    call_log: list[tuple[int, int]] = []
+
+    class _ShapeAwareFakeModel:
+        def __call__(self, tensor_a, tensor_b):
+            import torch
+            # tensor shape is (1, 3, H, W) per lpips.im2tensor.
+            h, w = tensor_a.shape[2], tensor_a.shape[3]
+            call_log.append((h, w))
+            # Full-frame (64x64) -> 0.10; cropped (smaller) -> 0.50.
+            # Pin via the H dim only since both H and W shrink for
+            # the crop. The values are arbitrary, just need to be
+            # different so lpips_patch != lpips.
+            if h == 64:
+                return torch.tensor(0.10)
+            return torch.tensor(0.50)
+
+    monkeypatch.setattr(cu, "_get_lpips_model", lambda net: _ShapeAwareFakeModel())
+
+    # 64x64 black image with a 16x16 white square in B (top-left).
+    a_arr = np.zeros((64, 64, 3), dtype=np.uint8)
+    b_arr = a_arr.copy()
+    b_arr[0:16, 0:16, :] = 255
+    a_path = tmp_path / "a.png"
+    b_path = tmp_path / "b.png"
+    Image.fromarray(a_arr, "RGB").save(a_path)
+    Image.fromarray(b_arr, "RGB").save(b_path)
+
+    m = cu.compute_diff_metrics(str(a_path), str(b_path))
+    # Confirm W38 crop applies (sanity check on the test setup).
+    assert m["patch_bbox"] is not None
+    # Two forward passes ran: full + crop.
+    assert len(call_log) == 2
+    # First call was full-frame (64x64).
+    assert call_log[0] == (64, 64)
+    # Second call was the crop (smaller).
+    assert call_log[1][0] < 64 and call_log[1][1] < 64
+    # lpips != lpips_patch (full vs crop returned different scalars).
+    assert m["lpips"] == pytest.approx(0.10, abs=1e-6)
+    assert m["lpips_patch"] == pytest.approx(0.50, abs=1e-6)
+    assert m["lpips"] != m["lpips_patch"]
+
+
+def test_lpips_patch_falls_back_to_lpips_on_crop_failure(
+    tmp_path, monkeypatch,
+):
+    """When LPIPS is enabled + a useful crop applies + the SECOND
+    forward pass raises (e.g. crop is below AlexNet's 11x11 conv
+    minimum), `lpips_patch` falls back to the full-frame `lpips`
+    value. The full-frame compute itself succeeded, so `lpips` is
+    non-None — only the crop pass tripped, and the fallback
+    preserves the working full-frame value.
+    """
+    import numpy as np
+    from local_ai_platform.images import compose_utils as cu
+
+    monkeypatch.setenv("EDITOR_METRICS_LPIPS_ENABLED", "1")
+    monkeypatch.setattr(cu, "_lpips_model_cache", {})
+
+    class _CropFailingFakeModel:
+        def __init__(self):
+            self.calls = 0
+
+        def __call__(self, tensor_a, tensor_b):
+            import torch
+            self.calls += 1
+            if self.calls == 1:
+                # Full-frame compute succeeds.
+                return torch.tensor(0.30)
+            # Second call (the crop) raises.
+            raise RuntimeError(
+                "synthetic crop compute failure (e.g. AlexNet conv "
+                "kernel won't fit on 7x7 input)"
+            )
+
+    monkeypatch.setattr(
+        cu, "_get_lpips_model",
+        lambda net: _CropFailingFakeModel(),
+    )
+
+    # 64x64 black image with a 16x16 white square (W38 crop applies).
+    a_arr = np.zeros((64, 64, 3), dtype=np.uint8)
+    b_arr = a_arr.copy()
+    b_arr[0:16, 0:16, :] = 255
+    a_path = tmp_path / "a.png"
+    b_path = tmp_path / "b.png"
+    Image.fromarray(a_arr, "RGB").save(a_path)
+    Image.fromarray(b_arr, "RGB").save(b_path)
+
+    m = cu.compute_diff_metrics(str(a_path), str(b_path))
+    assert m["patch_bbox"] is not None  # sanity: W38 crop applies
+    # Full-frame succeeded.
+    assert m["lpips"] == pytest.approx(0.30, abs=1e-6)
+    # lpips_patch falls back to lpips (the crop pass raised).
+    assert m["lpips_patch"] == m["lpips"]
 
 
 # ── weighted_blend ───────────────────────────────────────────────
