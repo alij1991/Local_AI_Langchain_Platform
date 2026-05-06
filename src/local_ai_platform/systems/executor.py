@@ -436,23 +436,57 @@ def classify_llm_router_edges(
         ).strip()
         text_lc = text.lower()
 
-        # Pick the FIRST option that appears as a substring. Most
-        # local models echo the option name verbatim; some wrap
-        # it in punctuation or a sentence.
-        for opt in options:
-            if opt.lower() in text_lc:
-                logger.info(
-                    "[IMPROVE-35] llm_router chose %r from %s",
-                    opt, options,
-                )
-                return opt
+        # [IMPROVE-167] Wave 33 — count how many options appear
+        # in the response so we can compute a heuristic confidence
+        # for the routing decision. Multi-match = ambiguous = low
+        # confidence; clean single-match = high confidence.
+        matched_options = [
+            opt for opt in options if opt.lower() in text_lc
+        ]
+        if not matched_options:
+            logger.warning(
+                "[IMPROVE-35] llm_router output didn't match any "
+                "option. options=%s response=%r",
+                options, text[:120],
+            )
+            return None
 
-        logger.warning(
-            "[IMPROVE-35] llm_router output didn't match any option. "
-            "options=%s response=%r",
-            options, text[:120],
+        # First-match is the chosen option (preserves pre-Wave-33
+        # selection semantics); confidence captures how many other
+        # options ALSO matched (signaling ambiguity).
+        chosen = matched_options[0]
+        confidence = 1.0 / len(matched_options)
+
+        # [IMPROVE-167] Wave 33 — apply opt-in threshold. Default
+        # 0.0 in AppSettings means any match wins (pre-Wave-33
+        # behaviour). When the threshold is non-zero, ambiguous
+        # responses are rejected so the always-fallback edge
+        # fires instead of a low-confidence pick.
+        try:
+            from ..config import get_settings
+            threshold = float(
+                get_settings().dag_classifier_confidence_threshold,
+            )
+        except Exception:
+            threshold = 0.0
+
+        if threshold > 0.0 and confidence < threshold:
+            logger.warning(
+                "[IMPROVE-167] llm_router classification rejected: "
+                "confidence %.3f < threshold %.3f (matched %d of %d "
+                "options); chosen=%r response=%r",
+                confidence, threshold, len(matched_options),
+                len(options), chosen, text[:120],
+            )
+            return None
+
+        logger.info(
+            "[IMPROVE-35] llm_router chose %r from %s "
+            "(confidence %.3f, matched %d of %d)",
+            chosen, options, confidence, len(matched_options),
+            len(options),
         )
-        return None
+        return chosen
     except Exception as exc:
         logger.warning(
             "[IMPROVE-35] llm_router call failed (%s); no edges fire",

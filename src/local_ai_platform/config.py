@@ -244,6 +244,17 @@ class AppSettings(BaseSettings):
     # (default) preserves pre-Wave-31 truncation-only behaviour.
     # Opt-in via env-var ``DAG_INTER_NODE_SUMMARIZATION_MODEL=...``.
     dag_inter_node_summarization_model: str = Field(default="")
+    # [IMPROVE-167] Wave 33 — DAG llm_router classifier
+    # confidence threshold (Tranche D piece 3). When set above
+    # 0.0, ``classify_llm_router_edges`` rejects classifications
+    # with computed confidence below the threshold (treats as no
+    # llm_router edge fires; the always-fallback edge takes over
+    # if present). Heuristic confidence = ``1 / matched_count``
+    # where matched_count is the number of options that appear
+    # as substrings in the LLM's response. Default 0.0 preserves
+    # pre-Wave-33 behaviour (any single-match response wins).
+    # Opt-in via env-var ``DAG_CLASSIFIER_CONFIDENCE_THRESHOLD``.
+    dag_classifier_confidence_threshold: float = Field(default=0.0)
 
     # ── Tracing ───────────────────────────────────────────────────
     trace_enabled: bool = Field(default=True)
