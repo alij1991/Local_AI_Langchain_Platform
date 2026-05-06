@@ -358,7 +358,7 @@ Sortable if you paste into a spreadsheet. Chapter column links back to the origi
 | 172 | 4 | ✓ `AgentOrchestrator._build_agent_graph` extraction — NEW `_build_agent_graph(self, definition, allow_tools=True)` method extracted from `_chat_with_react_agent`; substitutes empty tools list when `allow_tools=False` so the same `create_react_agent` shape returns for the retry path. Refactor uses it with retry-without-tools fallback: catch the "does not support tools" exception, add the model to `_models_without_tool_support`, build a fresh no-tools graph, retry. Empty-messages fallback text adjusted from "No response." to "No response returned." to match the pre-refactor contract pinned in `tests/test_agents.py` (Wave 36 — closes 2 of 22 pre-existing failures, bucket A piece 3) | ⋆ | 🔨 | Tools |
 | 173 | 6 | ✓ HF_HOME-isolated test fixture for HF cache scan tests — NEW `reset_settings_cache(monkeypatch)` fixture in `tests/conftest.py` clears `local_ai_platform.config._SETTINGS` so `monkeypatch.setenv('HF_HOME', tmp_path)` propagates to all `get_settings().hf_home` call sites in production (`images/service.py::_hf_cache_dir` / `_scan_hf_cache_models` / `_hf_repo_root`, `providers/huggingface_provider.py::_hf_root` / `_hf_hub_cache`, `providers/llamacpp_provider.py::_hf_cache_dir`, `api/routers/models.py` x2). Without the cache reset, `AppSettings` is constructed once on first `get_settings()` call and cached for the rest of the process so env-var changes after first construction silently no-op. 5 tests updated (4 in `tests/test_images_service.py` + 1 in `tests/test_huggingface.py`) plus secondary-regression fixes (drop the `cached_files_count` assertion since the field was a pre-IMPROVE-69 contract the post-W7 refactor removed; monkeypatch `_dir_size` to bypass the 50 MB metadata-only filter for the diffusers detection test; update the `device_candidate` assertion to handle the `'cuda:N'` shape `effective_device` now returns) (Wave 37 — closes 5 of 7 bucket B failures from the post-Wave-36 backlog Path E) | ⋆ | 🔨 | Architecture |
 | 174 | 6 | ✓ `_run_diffusers` patch target alignment — `tests/test_images_service.py::test_generate_uses_cpu_fallback_when_gpu_required_but_unavailable` and `::test_generate_uses_timeout_and_returns_effective_settings` patched `svc._run_diffusers_isolated` (the subprocess-isolated worker at `images/service.py:8603`), but `ImageGenerationService.generate()` calls `self._run_diffusers` directly (the in-process variant at `images/service.py:9914 / :10361 / :10408 / :10507 / :10539`). The patch target diverged from the call site over the course of the [IMPROVE-44] OOM retry ladder + persistent worker-pool refactors that promoted in-process `_run_diffusers` as the primary path. Test-only change updating both patch targets to `_run_diffusers` plus the cpu_fallback test gains a `build_image_execution_plan` patch returning a CPU plan so the gate at `service.py:10315` actually fires on developer machines with a real GPU; production code is correct. 2 tests fixed (Wave 37 — closes 2 of 7 bucket B failures from the post-Wave-36 backlog Path E) | ⋆ | 🔨 | Image |
-| 175 | 7 | Cropped-patch SSIM optimization for `compute_diff_metrics` — extracts the bounding box of the changed-pixels mask (already computed at `compose_utils.py:149` for the `region_map_base64` overlay, free to reuse), crops both `arr_a` and `arr_b` to that bbox, runs `skimage.metrics.structural_similarity` on the crop. New `ssim_patch` (float \| None) + `patch_bbox` ({"x0", "y0", "x1", "y1", "frac"} dict \| None) fields appended to the existing 8-key metrics dict; the original `ssim` field stays full-frame for backward compat. The crop is applied only when worthwhile: bbox area must be < 90% of the frame (otherwise crop wouldn't reduce the compute meaningfully) AND both bbox dimensions must be ≥ skimage's default `win_size=7` (smaller windows would `raise`); when either gate fails, `ssim_patch` falls back to the full-frame `ssim` value and `patch_bbox` is `None`. Failure inside the crop SSIM compute also falls back to the full-frame value (matches the existing `ssim_val` try/except shape). Pairs with [IMPROVE-169] W35 per-step metrics caching: the new fields are part of the same dict that gets cached on `EditSession.metrics_cache`, so a localized-edit metrics call computes once and serves the patch + bbox + region-map for free on every repeat call (Wave 38 — closes Tranche E sub-piece from the post-Wave-37 backlog; lossless additive optimization, no env-var gate; bbox coordinates are in post-resize-to-1024 image space, matching the existing `width`/`height`/`region_map_base64` reference frame so Flutter callers don't need to re-scale) | ⋆⋆ | 🔨 | UX |
+| 175 | 7 | ✓ Cropped-patch SSIM optimization for `compute_diff_metrics` — extracts the bounding box of the changed-pixels mask (already computed at `compose_utils.py:149` for the `region_map_base64` overlay, free to reuse), crops both `arr_a` and `arr_b` to that bbox, runs `skimage.metrics.structural_similarity` on the crop. New `ssim_patch` (float \| None) + `patch_bbox` ({"x0", "y0", "x1", "y1", "frac"} dict \| None) fields appended to the existing 8-key metrics dict; the original `ssim` field stays full-frame for backward compat. The crop is applied only when worthwhile: bbox area must be < 90% of the frame (otherwise crop wouldn't reduce the compute meaningfully) AND both bbox dimensions must be ≥ skimage's default `win_size=7` (smaller windows would `raise`); when either gate fails, `ssim_patch` falls back to the full-frame `ssim` value and `patch_bbox` is `None`. Failure inside the crop SSIM compute also falls back to the full-frame value (matches the existing `ssim_val` try/except shape). Pairs with [IMPROVE-169] W35 per-step metrics caching: the new fields are part of the same dict that gets cached on `EditSession.metrics_cache`, so a localized-edit metrics call computes once and serves the patch + bbox + region-map for free on every repeat call (Wave 38 — closes Tranche E sub-piece from the post-Wave-37 backlog; lossless additive optimization, no env-var gate; bbox coordinates are in post-resize-to-1024 image space, matching the existing `width`/`height`/`region_map_base64` reference frame so Flutter callers don't need to re-scale) | ⋆⋆ | 🔨 | UX |
 
 *Impact for [IMPROVE-59] is ⋆⋆⋆⋆⋆ if the app is ever distributed, ⋆⋆ if it stays local-only.
 
@@ -1257,7 +1257,7 @@ at the cost of ~21s extra boot; default-off users keep
 current boot speed + lazy-init fallback. 3 commits (2 doc +
 1 numbered) — the planned single-numbered shape held.
 
-### Wave 38 — Tranche E sub-piece: cropped-patch SSIM optimization (in progress)
+### Wave 38 — Tranche E sub-piece: cropped-patch SSIM optimization (✓ shipped 2026-05-06)
 
 Theme: address the second Tranche E "editor advanced" sub-piece
 flagged in the post-Wave-37 backlog — cropped-patch SSIM
@@ -1389,9 +1389,9 @@ behavioural cost; W38's optimization has none.
 
 | # | Tag | SHA | What landed | Tests |
 |---|---|---|---|---:|
-| 1 | (doc)         | this    | Wave 38 mid-wave (start) — register Wave 38 in §10.5 + §10.6 with the cropped-patch SSIM optimization design + Tranche E sub-piece framing + post-Wave-38 backlog footer. Updates §10.1 wave-status + §10.4 reservation row for IMPROVE-175. | 0 |
-| 2 | [IMPROVE-175] | pending | MODIFIED `compute_diff_metrics` in `compose_utils.py` to compute the changed-pixels bbox, gate on `frac < 0.9` AND both bbox dims `>= 7`, run SSIM on the cropped view, surface `ssim_patch` + `patch_bbox` fields. 2 shape pins extended, 4 NEW behaviour tests. Tier 1 grows by 4. | +4 |
-| 3 | (doc)         | pending | Wave 38 end-wave retrospective. Bumps 174 → 175 in §10.4 header. Fills in mid-wave + numbered SHA placeholders. Flips Wave 38 status (in progress → ✓ shipped). NEW Wave 38 architectural impact subsection. | 0 |
+| 1 | (doc)         | b6c608d | Wave 38 mid-wave (start) — register Wave 38 in §10.5 + §10.6 with the cropped-patch SSIM optimization design + Tranche E sub-piece framing + post-Wave-38 backlog footer. Updates §10.1 wave-status + §10.4 reservation row for IMPROVE-175. | 0 |
+| 2 | [IMPROVE-175] | e59b7d6 | MODIFIED `compute_diff_metrics` in `compose_utils.py` to compute the changed-pixels bbox, gate on `frac < 0.9` AND both bbox dims `>= 7`, run SSIM on the cropped view, surface `ssim_patch` + `patch_bbox` fields. 2 shape pins extended, 4 NEW behaviour tests. Tier 1 grows by 4. | +4 |
+| 3 | (doc)         | this    | Wave 38 end-wave retrospective. Adds ✓ prefix on §10.4 IMPROVE-175 row. Fills in mid-wave + numbered SHA placeholders. Flips Wave 38 status (in progress → ✓ shipped). NEW Wave 38 architectural impact subsection. | 0 |
 
 Net: +4 Tier 1 "passed" tests (2000 → 2004 vs the
 documented Wave-37-close baseline). Sweep file count 103
@@ -3739,13 +3739,13 @@ held end-to-end.
   * **Flutter widget tests 182 unchanged**. Path D is
     backend-only (settings + lifespan).
 
-### Wave 38 (in progress)
+### Wave 38 (✓ shipped)
 
 | # | Tag | SHA | What landed | Tests |
 |---|---|---|---|---:|
-| 1 | (doc)         | this    | Wave 38 mid-wave (start) — register Wave 38 in §10.5 + §10.6 with the cropped-patch SSIM optimization design + Tranche E sub-piece framing + post-Wave-38 backlog footer. Updates §10.1 wave-status + §10.4 reservation row for IMPROVE-175. | 0 |
-| 2 | [IMPROVE-175] | pending | MODIFIED `compute_diff_metrics` in `src/local_ai_platform/images/compose_utils.py` to compute the changed-pixels bbox + gate on `frac < 0.9` AND both bbox dims `>= 7` + run SSIM on the cropped view + surface `ssim_patch` + `patch_bbox` fields appended to the existing 8-key dict. 2 shape pins extended (`test_compose_utils.py::test_compute_diff_metrics_shape` + `test_editor_compare_metrics.py::test_metrics_keys_match_documented_shape`); 4 NEW behaviour tests in `tests/test_compose_utils.py`. | +4 |
-| 3 | (doc)         | pending | Wave 38 end-wave retrospective. Bumps 174 → 175 in §10.4 header. Fills in mid-wave + numbered SHA placeholders. Flips Wave 38 status (in progress → ✓ shipped). NEW Wave 38 architectural impact subsection. | 0 |
+| 1 | (doc)         | b6c608d | Wave 38 mid-wave (start) — register Wave 38 in §10.5 + §10.6 with the cropped-patch SSIM optimization design + Tranche E sub-piece framing + post-Wave-38 backlog footer. Updates §10.1 wave-status + §10.4 reservation row for IMPROVE-175. | 0 |
+| 2 | [IMPROVE-175] | e59b7d6 | MODIFIED `compute_diff_metrics` in `src/local_ai_platform/images/compose_utils.py` to compute the changed-pixels bbox + gate on `frac < 0.9` AND both bbox dims `>= 7` + run SSIM on the cropped view + surface `ssim_patch` + `patch_bbox` fields appended to the existing 8-key dict. 2 shape pins extended (`test_compose_utils.py::test_compute_diff_metrics_shape` + `test_editor_compare_metrics.py::test_metrics_keys_match_documented_shape`); 4 NEW behaviour tests in `tests/test_compose_utils.py`. | +4 |
+| 3 | (doc)         | this    | Wave 38 end-wave retrospective. Flips Wave 38 status (in progress → ✓ shipped). Adds ✓ prefix on §10.4 IMPROVE-175 row. NEW Wave 38 architectural impact subsection. | 0 |
 
 Net: +4 Tier 1 "passed" tests (2000 → 2004 vs the
 documented Wave-37-close baseline). Sweep file count 103
@@ -3757,6 +3757,146 @@ returned to multi-numbered for the heterogeneous Path E
 backlog). Wave 38 returns to single-numbered because the
 cropped-patch optimization is one cohesive change with
 one root cause + one review pattern.
+
+### Wave 38 architectural impact
+
+  * **Lossless-additive-fields pattern (continued from
+    W35) [IMPROVE-175]**: When a wave's optimization
+    improves the semantics of an existing metric, prefer
+    adding NEW fields alongside the existing one rather
+    than changing the meaning of the existing field.
+    Existing callers see no change; new callers opt in
+    by reading the new keys. W35 [IMPROVE-169] added a
+    cache layer (the same `metrics` dict, served from
+    cache instead of recomputed); W38 [IMPROVE-175]
+    adds two fields (`ssim_patch`, `patch_bbox`) to the
+    same dict. Both waves follow the "purely additive,
+    no env-var gate, lossless when fallback applies"
+    shape that's emerged for the Tranche E sub-pieces.
+    The pattern requires the optimization to be either
+    (a) a strict superset of what the existing field
+    provides (W35: same dict, faster on cache hit) or
+    (b) a strict alternative metric where falling back
+    to the existing value preserves the contract (W38:
+    `ssim_patch == ssim` when the crop wouldn't help).
+
+  * **Free-reuse of upstream-computed derivatives
+    [IMPROVE-175]**: If upstream code already computes a
+    derivative for one purpose, a downstream
+    optimization that needs the same derivative can
+    reuse it for free. The bbox derivation is a single
+    `np.where(changed_mask)` call on the
+    `compose_utils.py:149` mask that already gets
+    computed for the `region_map_base64` overlay; no
+    new mask compute is added. This keeps the no-op
+    path (no change → no bbox → fall back) at zero
+    additional cost vs. the pre-Wave-38 path. Pattern:
+    when a feature needs a derived value upstream code
+    already computes for another purpose, don't re-
+    derive it; reuse it. Module-internal helpers can be
+    re-organized later if the reuse becomes
+    structurally awkward, but at first surface the
+    "compute it twice" path is what bloats compute
+    budgets.
+
+  * **Bbox-area + dim-floor double gate [IMPROVE-175]**:
+    When the optimization-applies condition has multiple
+    independent failure modes, gate on each separately
+    rather than collapsing into one heuristic. W38 has
+    two:
+        - "Would cropping reduce the compute meaningfully?"
+          → `frac < _BBOX_CROP_FRAC_THRESHOLD = 0.9`.
+        - "Would skimage's SSIM accept the crop dims?"
+          → `bbox_h >= _SSIM_DEFAULT_WIN_SIZE = 7` AND
+          `bbox_w >= _SSIM_DEFAULT_WIN_SIZE = 7`.
+    A single-gate variant ("crop if bbox is small AND
+    above some heuristic dim threshold") would conflate
+    the two checks and require the heuristic to encode
+    both meaningfulness and skimage's library-internal
+    constraint. The double-gate makes each check
+    independently legible and tunable: the meaningfulness
+    threshold can move (e.g. to 0.85 or 0.95) without
+    touching the dim floor; the dim floor binds to
+    skimage's documented default and only changes if
+    the upstream library does. Pattern: when an
+    optimization is gated by multiple independent
+    conditions, name each gate via its own constant +
+    test it against its own behaviour pin.
+
+  * **Failure-mode preservation [IMPROVE-175]**: New
+    code paths should have failure modes that are a
+    subset of the existing path's, never a superset.
+    The new `ssim_patch` compute can fail on the same
+    skimage edge cases as the full-frame `ssim`, but
+    never in NEW ways the existing tests don't catch
+    — by falling back to the same `ssim_val` on
+    exception. This means no new error shapes for
+    callers to handle. The pin via
+    `test_patch_bbox_is_none_when_bbox_too_small_for_ssim_window`
+    documents this contract: when the dim floor would
+    cause SSIM to raise, the gate prevents the call AND
+    the fallback restores the existing semantics.
+    Pattern: a new code path's exception surface should
+    be a subset (preferably empty net new) of the path
+    it augments. If the new path can fail in ways the
+    old path can't, the pin tests need to enumerate
+    those failure modes — at which point the addition
+    is no longer "purely additive" by the W35
+    [IMPROVE-169] criteria.
+
+  * **Pre-hoc constant naming [IMPROVE-175]**: Define
+    optimization-tuning thresholds as named module-level
+    constants rather than magic numbers in the gate
+    expressions. `_BBOX_CROP_FRAC_THRESHOLD = 0.9` and
+    `_SSIM_DEFAULT_WIN_SIZE = 7` let a future tuning
+    round adjust either gate in one place without re-
+    touching the cropping logic. The constants also
+    document the upstream binding: `_SSIM_DEFAULT_WIN_SIZE`
+    binds to skimage's documented default; if skimage
+    changes its default in a future release, the gate
+    self-documents the binding via the constant name +
+    comment. Pattern: any number that the
+    optimization's correctness depends on should be a
+    named constant, even if it's used in only one
+    expression — the compiler-level cost is zero; the
+    review-time legibility cost saved is non-zero.
+
+  * **Tranche E continues, three of four shipped (W30 +
+    W35 + W38)**: Tranche E "editor advanced" originally
+    flagged 4 sub-pieces from the Wave 18 deferred queue
+    audit: TTL cleanup cron, LPIPS metric, per-step
+    metrics caching, cropped-patch optimization. W30
+    [IMPROVE-164] shipped TTL cleanup. W35 [IMPROVE-169]
+    shipped per-step caching. W38 [IMPROVE-175] ships
+    cropped-patch optimization. The remaining sub-piece
+    (LPIPS metric) requires a dependency-add (`lpips`
+    Python package install — verified absent from
+    `.venv` during W38 planning), which makes it a
+    multi-piece wave shape: dependency-add as one piece,
+    metric integration as another. Tranche E ratio:
+    3 of 4 sub-pieces shipped over 8 waves (W30→W35→W38);
+    the remaining 1 of 4 is gated on the dependency
+    decision rather than design / implementation
+    blockers. Pattern: tranche-style backlogs ship
+    incrementally; later sub-pieces can require
+    different wave shapes than earlier ones (W30 + W35
+    + W38 are all single-numbered, but the LPIPS sub-
+    piece will likely be multi-piece).
+
+  * **Tier 1 baseline 2000 → 2004 at Wave 38 close
+    (passed)**. Sweep file count 103 unchanged (no NEW
+    test files; 4 new tests added to the existing
+    `tests/test_compose_utils.py`).
+
+  * **Routes 189 unchanged at Wave 38 close**. Wave 38
+    is internal to the metrics-compute helper; no new
+    HTTP surface.
+
+  * **Flutter widget tests 182 unchanged**. Wave 38 is
+    backend-only — Flutter callers can read the new
+    `ssim_patch` + `patch_bbox` fields without any
+    Dart-side change; they're just two more keys in
+    the existing JSON response.
 
 ### Wave 37 (✓ shipped)
 
@@ -5711,7 +5851,7 @@ Wave 24+ priorities at the user's pace.
 ## 10.8 Where to go from here
 
 - **Read chapter 1 → 9 if you haven't.** This chapter is the index; the others have the details.
-- **Pick a Wave 38+ item and ship it** — see §10.5 Wave 18 deferred queue (the trimmed Wave 17 cleanup output: NEW candidates IMPROVE-NEW-2/7/8/10 + Wave-15-audit FILTER_AXIS_TYPES registry + 7 Wave-16-audit-spawned items + Wave-13/12/11/10-audit triggered items + themed tranches B/D/E/F/G + carry-overs gated on §10.7 questions — most of which are now ungated since Wave 20 closed Q1 / Q4 / Q7 / Q15 / Q16). Tranche A (Flutter editor v2) shipped fully in Wave 18 — IMPROVE-138 through IMPROVE-144. Wave 19 Tranche A closed the GDPR Article 20 round-trip with the partner-import host ([IMPROVE-145]) + export button ([IMPROVE-146]). Wave 20 cleanup wave (✓ shipped) closed §10.7 gating questions + shipped a Q7=b deletion ([IMPROVE-147]) + 5 Q4=c TTS pipeline quick wins ([IMPROVE-148] / [IMPROVE-149] / [IMPROVE-150] / [IMPROVE-151] / [IMPROVE-152]). Wave 21 (✓ shipped) closed the cross-cutting startup contention with 3 chain fixes ([IMPROVE-153] / [IMPROVE-154] / [IMPROVE-155]) — ~47s of cold-startup blocking unwound. Wave 22 (✓ shipped) closed the Wave 21-spawned true-async ``_init_mem0`` follow-up via [IMPROVE-156] — httpx.AsyncClient pre-warm of Ollama embed + ``asyncio.create_task`` fire-and-forget Mem0 init at lifespan, moving the ~22s Chain 2 cost off the user's first request entirely. Wave 23 (✓ shipped) closed the Wave 20-spawned Kokoro create_stream piece via [IMPROVE-157] (backend stream_synthesize via ``async for`` over ``Kokoro.create_stream``) + [IMPROVE-158] (Flutter ``buildMiniWavForChunk`` + per-sentence StreamController + ``await for``-driven progressive playback) — ~60-80% TTFA reduction on long-paragraph synth. Wave 24 (✓ shipped) closed the Wave 23-spawned server-side parallel synth-while-LLM-streams piece via [IMPROVE-159] — phrase-boundary fallback in ``PartnerEngine.astream_chat`` firing on ``,`` ``;`` ``:`` once the clause is ≥ 30 chars, so TTS begins synthesising while the LLM keeps streaming later words. Wave 25 (deferred-by-investigation) inspected chatterbox-tts 0.1.7 source and confirmed neither ``ChatterboxTTS.generate`` nor ``ChatterboxTTSTurbo.generate`` has a streaming surface — true streaming requires forking the library (~3-5d), deferred pending upstream feature OR justified fork investment. Wave 26 (✓ shipped) pinned the cold-startup wins from Waves 21+22 + the TTFA wins from Waves 23+24 against future regressions via a new startup-timing benchmark harness ([IMPROVE-160]) — 4 deterministic timing pins on the actual ``api_server.app`` (no mocks). Wave 27 (✓ shipped) closed the Wave 21-residue Path D piece via [IMPROVE-161] — opt-in ``LIFESPAN_EAGER_EDITOR_WARMUP`` flag that pre-builds the editor service at lifespan time so editor-heavy users get hot first /editor/* calls at the cost of ~21s extra boot. Default-off preserves current boot speed. Wave 28 (✓ shipped) closed Tranche G partial — preset JSON export/import via [IMPROVE-162] — adding 2 new editor preset endpoints (export + import) with v=1 schema versioning so power users can share their tuned editor recipes via JSON files. Wave 29 (✓ shipped) closed Tranche B partial — voice persistence via [IMPROVE-163] — adding ``data/partner/voice_settings.json`` (sibling of profile.json / user_profile.json / memory_decay.json) loaded at PartnerEngine init + written on every set_voice_id / set_voice_gender / set_tts_mode success, so a user's voice / gender / mode picks survive backend restart. Wave 30 (✓ shipped) closed Tranche E partial — editor session TTL cleanup via [IMPROVE-164] — adding ``EDITOR_SESSION_TTL_DAYS`` settings field + a fire-and-forget lifespan task that walks the [IMPROVE-53] archive directory and deletes date-buckets older than the configured threshold (mirrors Wave 22's IMPROVE-156 fire-and-forget pattern; default 0 = disabled preserves "archives accumulate forever" semantics). Wave 31 (✓ shipped) closed Tranche D piece 1 — LLM-summarized inter-node DAG context via [IMPROVE-165] — adding ``DAG_INTER_NODE_SUMMARIZATION_MODEL`` opt-in env-var that replaces the legacy elision marker in ``_build_inter_node_context`` with a one-shot LLM summary of dropped entries (default empty = disabled preserves truncation-only behaviour; failure paths fall back to the legacy marker). Wave 32 (✓ shipped) closed Tranche D piece 2 — per-edge "pass" config via [IMPROVE-166] — adding 3 edge.rule.pass modes (``all`` default / ``source_only`` / ``none``) so DAG authors can scope which prior outputs each downstream agent sees (default ``all`` preserves pre-Wave-32 behaviour; invalid pass_mode silently falls back to ``all``). Wave 33 (✓ shipped) closed Tranche D piece 3 + the entire Tranche D umbrella — classifier confidence threshold via [IMPROVE-167] — adding ``DAG_CLASSIFIER_CONFIDENCE_THRESHOLD`` opt-in env-var with heuristic confidence ``1 / matched_count`` that rejects ambiguous llm_router classifications (multiple options match the response) so the always-fallback edge fires instead of a low-confidence pick (default 0.0 = no filtering preserves current behaviour). Wave 34 (✓ shipped) closed Tranche F + the user's "in order A, B, C, D" batch end-to-end — real-LLM enhancer eval suite via [IMPROVE-168] — adding ``tests/eval/test_edit_prompt_enhancer_real_llm.py`` with 8 curated test cases that pin ``enhance_edit_prompt`` against real Ollama LLMs (gated by ``LOCAL_AI_EVAL_REAL_LLM=1`` env-var; default-off skips all eval tests so CI + most local dev pay zero cost). Wave 35 (✓ shipped) closed a Tranche E sub-piece — per-step metrics caching via [IMPROVE-169] — adding a ``metrics_cache: dict[tuple[str, str], dict[str, Any]]`` field on ``EditSession`` keyed by ``(path_a, path_b)`` so repeated ``GET /editor/{session_id}/compare?metrics=true`` calls return the cached dict instead of recomputing the SSIM + region-map base64 per call (lossless cache, no env-var gate — first behaviour-change wave to ship without an opt-in flag because the cache is provably backwards-compatible; bounded by session lifetime + close_session purge). Wave 36 (✓ shipped) closed Path E partial — bucket A 13-of-22 pre-existing test failures via IMPROVE-170 (`OllamaController` static helpers + `_get_client` + `_enrich_capabilities_from_show` for `test_ollama.py` — 7 fixes) + IMPROVE-171 (`test_images_enhance_prompt.py` rewired to patch `routers.images` namespace after the [IMPROVE-1] router split — 6 fixes; test-only) + IMPROVE-172 (`AgentOrchestrator._build_agent_graph(definition, allow_tools=True)` extracted from `_chat_with_react_agent` to expose the retry-without-tools seam — 2 fixes); bucket B 7 signal regressions in `test_images_service.py` + `test_huggingface.py` deferred to Wave 37 pending per-failure investigation. Wave 37 (✓ shipped) closed Path E bucket B end-to-end via IMPROVE-173 (`reset_settings_cache(monkeypatch)` fixture in `tests/conftest.py` so HF_HOME monkeypatching propagates to all `get_settings().hf_home` call sites — 5 fixes) + IMPROVE-174 (test-only patch-target update from `_run_diffusers_isolated` to `_run_diffusers` in 2 tests, since `generate()` calls the in-process variant directly — 2 fixes); brings Path E to 20-of-22 (the remaining 2 of 22 ride for free per the bucket A "for-free 2" footnote, per the W36 IMPROVE-170 monkeypatch update). Wave 38 (in progress) closes a Tranche E sub-piece — cropped-patch SSIM optimization via IMPROVE-175 — adding `ssim_patch` (float \| None) + `patch_bbox` (dict \| None) fields to the `compute_diff_metrics` return dict; bbox is computed from the existing changed-pixels mask, the SSIM compute crops both arrays to that bbox before running skimage's `structural_similarity`, falling back to the full-frame `ssim` value when the bbox covers ≥ 90% of the frame OR is too small for SSIM's default `win_size=7` window OR no pixels changed; pairs with W35's metrics cache via natural inclusion in the cached dict (no cache-layer change). The natural Wave 39+ paths: (a) deferred-queue picks (NEW carry-overs / Wave-N-audit items + remaining Tranche E sub-piece: LPIPS metric — requires `lpips` package install which is a sub-piece of the wave shape), (b) Path C logprob-based classifier confidence (W33 IMPROVE-167 follow-up — upgrade the heuristic `1 / matched_count` to provider-logprob-driven), (c) Path D voice-settings export bundle integration (W29 IMPROVE-163 follow-up — add `voice_settings.json` to `/partner/export` round-trip), or (d) emergent work surfaced by ongoing usage. Items previously considered + rejected are archived in §10.5.1.
+- **Pick a Wave 38+ item and ship it** — see §10.5 Wave 18 deferred queue (the trimmed Wave 17 cleanup output: NEW candidates IMPROVE-NEW-2/7/8/10 + Wave-15-audit FILTER_AXIS_TYPES registry + 7 Wave-16-audit-spawned items + Wave-13/12/11/10-audit triggered items + themed tranches B/D/E/F/G + carry-overs gated on §10.7 questions — most of which are now ungated since Wave 20 closed Q1 / Q4 / Q7 / Q15 / Q16). Tranche A (Flutter editor v2) shipped fully in Wave 18 — IMPROVE-138 through IMPROVE-144. Wave 19 Tranche A closed the GDPR Article 20 round-trip with the partner-import host ([IMPROVE-145]) + export button ([IMPROVE-146]). Wave 20 cleanup wave (✓ shipped) closed §10.7 gating questions + shipped a Q7=b deletion ([IMPROVE-147]) + 5 Q4=c TTS pipeline quick wins ([IMPROVE-148] / [IMPROVE-149] / [IMPROVE-150] / [IMPROVE-151] / [IMPROVE-152]). Wave 21 (✓ shipped) closed the cross-cutting startup contention with 3 chain fixes ([IMPROVE-153] / [IMPROVE-154] / [IMPROVE-155]) — ~47s of cold-startup blocking unwound. Wave 22 (✓ shipped) closed the Wave 21-spawned true-async ``_init_mem0`` follow-up via [IMPROVE-156] — httpx.AsyncClient pre-warm of Ollama embed + ``asyncio.create_task`` fire-and-forget Mem0 init at lifespan, moving the ~22s Chain 2 cost off the user's first request entirely. Wave 23 (✓ shipped) closed the Wave 20-spawned Kokoro create_stream piece via [IMPROVE-157] (backend stream_synthesize via ``async for`` over ``Kokoro.create_stream``) + [IMPROVE-158] (Flutter ``buildMiniWavForChunk`` + per-sentence StreamController + ``await for``-driven progressive playback) — ~60-80% TTFA reduction on long-paragraph synth. Wave 24 (✓ shipped) closed the Wave 23-spawned server-side parallel synth-while-LLM-streams piece via [IMPROVE-159] — phrase-boundary fallback in ``PartnerEngine.astream_chat`` firing on ``,`` ``;`` ``:`` once the clause is ≥ 30 chars, so TTS begins synthesising while the LLM keeps streaming later words. Wave 25 (deferred-by-investigation) inspected chatterbox-tts 0.1.7 source and confirmed neither ``ChatterboxTTS.generate`` nor ``ChatterboxTTSTurbo.generate`` has a streaming surface — true streaming requires forking the library (~3-5d), deferred pending upstream feature OR justified fork investment. Wave 26 (✓ shipped) pinned the cold-startup wins from Waves 21+22 + the TTFA wins from Waves 23+24 against future regressions via a new startup-timing benchmark harness ([IMPROVE-160]) — 4 deterministic timing pins on the actual ``api_server.app`` (no mocks). Wave 27 (✓ shipped) closed the Wave 21-residue Path D piece via [IMPROVE-161] — opt-in ``LIFESPAN_EAGER_EDITOR_WARMUP`` flag that pre-builds the editor service at lifespan time so editor-heavy users get hot first /editor/* calls at the cost of ~21s extra boot. Default-off preserves current boot speed. Wave 28 (✓ shipped) closed Tranche G partial — preset JSON export/import via [IMPROVE-162] — adding 2 new editor preset endpoints (export + import) with v=1 schema versioning so power users can share their tuned editor recipes via JSON files. Wave 29 (✓ shipped) closed Tranche B partial — voice persistence via [IMPROVE-163] — adding ``data/partner/voice_settings.json`` (sibling of profile.json / user_profile.json / memory_decay.json) loaded at PartnerEngine init + written on every set_voice_id / set_voice_gender / set_tts_mode success, so a user's voice / gender / mode picks survive backend restart. Wave 30 (✓ shipped) closed Tranche E partial — editor session TTL cleanup via [IMPROVE-164] — adding ``EDITOR_SESSION_TTL_DAYS`` settings field + a fire-and-forget lifespan task that walks the [IMPROVE-53] archive directory and deletes date-buckets older than the configured threshold (mirrors Wave 22's IMPROVE-156 fire-and-forget pattern; default 0 = disabled preserves "archives accumulate forever" semantics). Wave 31 (✓ shipped) closed Tranche D piece 1 — LLM-summarized inter-node DAG context via [IMPROVE-165] — adding ``DAG_INTER_NODE_SUMMARIZATION_MODEL`` opt-in env-var that replaces the legacy elision marker in ``_build_inter_node_context`` with a one-shot LLM summary of dropped entries (default empty = disabled preserves truncation-only behaviour; failure paths fall back to the legacy marker). Wave 32 (✓ shipped) closed Tranche D piece 2 — per-edge "pass" config via [IMPROVE-166] — adding 3 edge.rule.pass modes (``all`` default / ``source_only`` / ``none``) so DAG authors can scope which prior outputs each downstream agent sees (default ``all`` preserves pre-Wave-32 behaviour; invalid pass_mode silently falls back to ``all``). Wave 33 (✓ shipped) closed Tranche D piece 3 + the entire Tranche D umbrella — classifier confidence threshold via [IMPROVE-167] — adding ``DAG_CLASSIFIER_CONFIDENCE_THRESHOLD`` opt-in env-var with heuristic confidence ``1 / matched_count`` that rejects ambiguous llm_router classifications (multiple options match the response) so the always-fallback edge fires instead of a low-confidence pick (default 0.0 = no filtering preserves current behaviour). Wave 34 (✓ shipped) closed Tranche F + the user's "in order A, B, C, D" batch end-to-end — real-LLM enhancer eval suite via [IMPROVE-168] — adding ``tests/eval/test_edit_prompt_enhancer_real_llm.py`` with 8 curated test cases that pin ``enhance_edit_prompt`` against real Ollama LLMs (gated by ``LOCAL_AI_EVAL_REAL_LLM=1`` env-var; default-off skips all eval tests so CI + most local dev pay zero cost). Wave 35 (✓ shipped) closed a Tranche E sub-piece — per-step metrics caching via [IMPROVE-169] — adding a ``metrics_cache: dict[tuple[str, str], dict[str, Any]]`` field on ``EditSession`` keyed by ``(path_a, path_b)`` so repeated ``GET /editor/{session_id}/compare?metrics=true`` calls return the cached dict instead of recomputing the SSIM + region-map base64 per call (lossless cache, no env-var gate — first behaviour-change wave to ship without an opt-in flag because the cache is provably backwards-compatible; bounded by session lifetime + close_session purge). Wave 36 (✓ shipped) closed Path E partial — bucket A 13-of-22 pre-existing test failures via IMPROVE-170 (`OllamaController` static helpers + `_get_client` + `_enrich_capabilities_from_show` for `test_ollama.py` — 7 fixes) + IMPROVE-171 (`test_images_enhance_prompt.py` rewired to patch `routers.images` namespace after the [IMPROVE-1] router split — 6 fixes; test-only) + IMPROVE-172 (`AgentOrchestrator._build_agent_graph(definition, allow_tools=True)` extracted from `_chat_with_react_agent` to expose the retry-without-tools seam — 2 fixes); bucket B 7 signal regressions in `test_images_service.py` + `test_huggingface.py` deferred to Wave 37 pending per-failure investigation. Wave 37 (✓ shipped) closed Path E bucket B end-to-end via IMPROVE-173 (`reset_settings_cache(monkeypatch)` fixture in `tests/conftest.py` so HF_HOME monkeypatching propagates to all `get_settings().hf_home` call sites — 5 fixes) + IMPROVE-174 (test-only patch-target update from `_run_diffusers_isolated` to `_run_diffusers` in 2 tests, since `generate()` calls the in-process variant directly — 2 fixes); brings Path E to 20-of-22 (the remaining 2 of 22 ride for free per the bucket A "for-free 2" footnote, per the W36 IMPROVE-170 monkeypatch update). Wave 38 (✓ shipped) closes a Tranche E sub-piece — cropped-patch SSIM optimization via [IMPROVE-175] — adding `ssim_patch` (float \| None) + `patch_bbox` (dict \| None) fields to the `compute_diff_metrics` return dict; bbox is computed from the existing changed-pixels mask, the SSIM compute crops both arrays to that bbox before running skimage's `structural_similarity`, falling back to the full-frame `ssim` value when the bbox covers ≥ 90% of the frame OR is too small for SSIM's default `win_size=7` window OR no pixels changed; pairs with W35's metrics cache via natural inclusion in the cached dict (no cache-layer change). The natural Wave 39+ paths: (a) deferred-queue picks (NEW carry-overs / Wave-N-audit items + remaining Tranche E sub-piece: LPIPS metric — requires `lpips` package install which is a sub-piece of the wave shape), (b) Path C logprob-based classifier confidence (W33 IMPROVE-167 follow-up — upgrade the heuristic `1 / matched_count` to provider-logprob-driven), (c) Path D voice-settings export bundle integration (W29 IMPROVE-163 follow-up — add `voice_settings.json` to `/partner/export` round-trip), or (d) emergent work surfaced by ongoing usage. Items previously considered + rejected are archived in §10.5.1.
 - **Keep `[IMPROVE-N]` references alive.** When you fix one, grep `docs/features/` for that ID and cross out. If you add new ones in future work, number them IMPROVE-176+ (1-175 are taken; the IMPROVE-NEW-* tags graduate to permanent numbers on acceptance) and note them in the originating chapter.
 - **The `MEMORY.md` in `~/.claude/projects/...` contains the feedback rule** that improvement suggestions should cite 2025–2026 sources. Every item here has citations in its origin chapter.
 
@@ -5719,4 +5859,4 @@ Wave 24+ priorities at the user's pace.
 
 **Guide complete.** `docs/features/README.md` → `01-architecture.md` → `02-llm-infrastructure.md` → `03-chat.md` → `04-agents-tools.md` → `05-systems.md` → `06-image-generation.md` → `07-image-editor.md` → `08-partner.md` → `09-observability.md` → `10-improvements.md` *(this file)*.
 
-Every major feature of the Local AI Platform is now documented end-to-end, with **175** research-backed improvement ideas cross-referenced into one prioritized plan. Waves 1-24 + Wave 26 + Wave 27 + Wave 28 + Wave 29 + Wave 30 + Wave 31 + Wave 32 + Wave 33 + Wave 34 + Wave 35 + Wave 36 + Wave 37 fully shipped + Wave 25 deferred-by-investigation + Wave 38 in progress; post-Wave-38 backlog in deferred queue.
+Every major feature of the Local AI Platform is now documented end-to-end, with **175** research-backed improvement ideas cross-referenced into one prioritized plan. Waves 1-24 + Wave 26 + Wave 27 + Wave 28 + Wave 29 + Wave 30 + Wave 31 + Wave 32 + Wave 33 + Wave 34 + Wave 35 + Wave 36 + Wave 37 + Wave 38 fully shipped + Wave 25 deferred-by-investigation; post-Wave-38 backlog in deferred queue.
