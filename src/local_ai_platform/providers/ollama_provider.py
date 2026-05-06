@@ -105,6 +105,18 @@ class OllamaProvider(BaseProvider):
         }
         if tools:
             kwargs["tools"] = tools
+        # [IMPROVE-179] Wave 42 — pass logprobs to the Ollama
+        # client (v0.6.1+ exposes them natively in chat() +
+        # generate()). Default-off; only adds kwargs when the
+        # caller explicitly requested logprobs via
+        # ``GenerationSettings(logprobs=True)``. The response
+        # dict carries the resulting ``logprobs`` array at the
+        # top level; ``raw=resp_dict`` below preserves it for
+        # callers that read ``ChatResponse.raw``.
+        if settings.logprobs:
+            kwargs["logprobs"] = True
+            if settings.top_logprobs is not None:
+                kwargs["top_logprobs"] = settings.top_logprobs
 
         logger.info("Ollama chat: model=%s msgs=%d temp=%.1f ctx=%s tools=%d",
                      model, len(messages), settings.temperature,
@@ -179,6 +191,15 @@ class OllamaProvider(BaseProvider):
             }
             if tools:
                 kwargs["tools"] = tools
+            # [IMPROVE-179] Wave 42 — async-side mirror of the
+            # sync chat() logprobs passthrough above. Same
+            # default-off discipline so achat() callers without
+            # logprobs explicitly enabled stay on the pre-W42
+            # code path.
+            if settings.logprobs:
+                kwargs["logprobs"] = True
+                if settings.top_logprobs is not None:
+                    kwargs["top_logprobs"] = settings.top_logprobs
 
             response = await aclient.chat(**kwargs)
             resp_dict = response if isinstance(response, dict) else (response.model_dump() if hasattr(response, "model_dump") else {})

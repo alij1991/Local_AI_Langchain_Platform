@@ -30,6 +30,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import math
 import re
 import time as _time
 import uuid
@@ -341,6 +342,71 @@ def _build_summarizer(
 # ── Edge classification ──────────────────────────────────────────
 
 
+def _compute_logprob_confidence(response: Any) -> float | None:
+    """[IMPROVE-179] Wave 42 — Extract the first-token logprob
+    from the response and map to a confidence in [0, 1].
+
+    Returns ``exp(first_token_logprob)`` when the response
+    carries an Ollama-shape ``logprobs`` array (top-level field
+    in ``response.raw``); returns ``None`` for every other
+    case so callers can fall back to the W33 heuristic
+    cleanly:
+
+      * ``response.raw`` is None / not a dict (the W18-era
+        ``ChatResponse.raw`` escape hatch's contract — non-
+        Ollama providers don't populate it with logprobs).
+      * ``logprobs`` key missing (caller didn't pass
+        ``GenerationSettings(logprobs=True)``, OR Ollama
+        version too old to expose logprobs).
+      * ``logprobs`` is empty / not a list (defensive — the
+        Ollama Python client v0.6.1's response shape carries
+        a list, but a corrupt response should fall back
+        gracefully rather than raise).
+      * First-entry's ``logprob`` field missing / not numeric
+        (defensive against future Ollama API shape changes).
+
+    The simple ``exp(first_token_logprob)`` formulation
+    (rather than normalizing across ``top_logprobs``
+    alternatives) is sufficient for the W33 IMPROVE-167
+    classifier: classifier responses are short option-name
+    strings emitted at temperature=0.2, and the first
+    content-bearing token's logprob captures the LLM's
+    commitment to its answer. Live audit during the W42
+    audit confirmed: a high-confidence "Yes" answer had
+    first logprob -0.0825 (exp = 0.92 = 92% confidence)
+    while the second-best alternative "yes" was -2.54
+    (exp = 0.08 = 8%) — a 12x ratio that the heuristic
+    1/matched_count couldn't surface.
+
+    Sources (2025-2026):
+      * Ollama Python client v0.6.1 — ``logprobs`` /
+        ``top_logprobs`` parameters in chat() + generate().
+        https://github.com/ollama/ollama-python
+      * Ollama HTTP API logprobs — first added in late-
+        2024 ollama core releases; verified live during
+        W42 audit on a local install (gemma3:1b returned
+        structured logprobs array on a real chat call).
+    """
+    raw = getattr(response, "raw", None)
+    if not isinstance(raw, dict):
+        return None
+    logprobs_list = raw.get("logprobs")
+    if not isinstance(logprobs_list, list) or not logprobs_list:
+        return None
+    first = logprobs_list[0]
+    if not isinstance(first, dict):
+        return None
+    lp = first.get("logprob")
+    if not isinstance(lp, (int, float)):
+        return None
+    try:
+        return math.exp(float(lp))
+    except (OverflowError, ValueError):
+        # Defensive: a logprob beyond float-range shouldn't
+        # exist in practice, but never let the helper raise.
+        return None
+
+
 def classify_llm_router_edges(
     orch: "AgentOrchestrator",
     edges: list[tuple[str, str, str, dict[str, Any]]],
@@ -423,10 +489,29 @@ def classify_llm_router_edges(
             "Reply with ONLY the chosen option's name. No quotes, no "
             "explanation, no preamble."
         )
+        # [IMPROVE-179] Wave 42 — Opt-in logprobs request. Read
+        # the env-var inline so changes take effect without a
+        # restart of the orchestrator (matches the W33
+        # IMPROVE-167 threshold-read pattern at the rejection
+        # branch below). When disabled (default), no logprobs
+        # are requested and the chat call's bandwidth + Ollama
+        # work is identical to pre-W42.
+        try:
+            from ..config import get_settings
+            logprobs_enabled = bool(
+                get_settings().dag_classifier_logprobs_enabled,
+            )
+        except Exception:
+            logprobs_enabled = False
+        classify_settings = GenerationSettings(
+            temperature=0.2,
+            max_tokens=64,
+            logprobs=logprobs_enabled,
+        )
         response = orch.router.chat(
             model,
             [ChatMessage(role="user", content=classify_prompt)],
-            GenerationSettings(temperature=0.2, max_tokens=64),
+            classify_settings,
         )
         text = (response.content or "").strip()
         # Strip qwen3/r1 thinking tags (same idiom as the prompt
@@ -455,7 +540,28 @@ def classify_llm_router_edges(
         # selection semantics); confidence captures how many other
         # options ALSO matched (signaling ambiguity).
         chosen = matched_options[0]
+
+        # [IMPROVE-179] Wave 42 — Prefer logprob-derived
+        # confidence when available. The helper returns None on
+        # any non-Ollama-shape input (logprobs missing, env-var
+        # disabled so no logprobs were requested, response.raw
+        # not a dict, malformed array, etc.); fall back to the
+        # W33 heuristic ``1 / matched_count`` cleanly. The
+        # threshold check below works identically with either
+        # source — both produce values in [0, 1].
+        confidence_source = "heuristic"
         confidence = 1.0 / len(matched_options)
+        if logprobs_enabled:
+            logprob_conf = _compute_logprob_confidence(response)
+            if logprob_conf is not None:
+                confidence = logprob_conf
+                confidence_source = "logprob"
+            else:
+                logger.debug(
+                    "[IMPROVE-179] logprob confidence unavailable "
+                    "(env on, response.raw lacks logprobs); "
+                    "falling back to W33 heuristic",
+                )
 
         # [IMPROVE-167] Wave 33 — apply opt-in threshold. Default
         # 0.0 in AppSettings means any match wins (pre-Wave-33
@@ -473,18 +579,19 @@ def classify_llm_router_edges(
         if threshold > 0.0 and confidence < threshold:
             logger.warning(
                 "[IMPROVE-167] llm_router classification rejected: "
-                "confidence %.3f < threshold %.3f (matched %d of %d "
-                "options); chosen=%r response=%r",
-                confidence, threshold, len(matched_options),
-                len(options), chosen, text[:120],
+                "confidence %.3f (%s) < threshold %.3f (matched %d "
+                "of %d options); chosen=%r response=%r",
+                confidence, confidence_source, threshold,
+                len(matched_options), len(options), chosen,
+                text[:120],
             )
             return None
 
         logger.info(
             "[IMPROVE-35] llm_router chose %r from %s "
-            "(confidence %.3f, matched %d of %d)",
-            chosen, options, confidence, len(matched_options),
-            len(options),
+            "(confidence %.3f source=%s, matched %d of %d)",
+            chosen, options, confidence, confidence_source,
+            len(matched_options), len(options),
         )
         return chosen
     except Exception as exc:

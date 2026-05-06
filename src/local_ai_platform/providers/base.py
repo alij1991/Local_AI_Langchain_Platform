@@ -67,6 +67,27 @@ class GenerationSettings:
     # HuggingFace: turboquant bit width derived from this (3-bit for q4_0, 4-bit for q8_0)
     # None = provider default (usually f16 / no compression)
     kv_cache_quant: str | None = None
+    # [IMPROVE-179] Wave 42 — Logprob support. Opt-in flags so
+    # callers (e.g. the W33 IMPROVE-167 classifier) can request
+    # token-level emission probabilities; providers pass them
+    # through to the underlying client when supported and stash
+    # the resulting logprobs array in ``ChatResponse.raw`` (the
+    # existing escape hatch — no abstract-surface change).
+    # Default off so all existing GenerationSettings() callers
+    # stay on the pre-W42 path. Providers that don't support
+    # logprobs (HF, llama.cpp, OpenAI-compat) ignore the fields
+    # silently — the classifier's ``_compute_logprob_confidence``
+    # helper falls back to the W33 heuristic when the response
+    # doesn't carry the field.
+    logprobs: bool = False
+    # Number of top alternative-token logprobs to request per
+    # position (Ollama: int >= 0; None = don't request top
+    # alternatives). The W42 classifier's
+    # ``exp(first_token_logprob)`` formulation only needs
+    # ``logprobs=True``; ``top_logprobs`` is plumbed for future
+    # callers that want richer signal (relative confidence vs
+    # alternatives) without re-threading the abstraction.
+    top_logprobs: int | None = None
 
     @classmethod
     def from_dict(cls, raw: dict[str, Any] | None) -> GenerationSettings:
@@ -85,6 +106,15 @@ class GenerationSettings:
             num_batch=int(raw["num_batch"]) if raw.get("num_batch") is not None else None,
             num_gpu=int(raw["num_gpu"]) if raw.get("num_gpu") is not None else None,
             kv_cache_quant=raw.get("kv_cache_quant"),
+            # [IMPROVE-179] Wave 42 — additive parse with
+            # default off-equivalent values so legacy raw dicts
+            # without the new keys parse identically to pre-W42.
+            logprobs=bool(raw.get("logprobs", False)),
+            top_logprobs=(
+                int(raw["top_logprobs"])
+                if raw.get("top_logprobs") is not None
+                else None
+            ),
         )
 
 

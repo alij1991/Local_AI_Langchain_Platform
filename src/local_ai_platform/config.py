@@ -256,6 +256,25 @@ class AppSettings(BaseSettings):
     # Opt-in via env-var ``DAG_CLASSIFIER_CONFIDENCE_THRESHOLD``.
     dag_classifier_confidence_threshold: float = Field(default=0.0)
 
+    # [IMPROVE-179] Wave 42 — Logprob-based classifier confidence
+    # (Path C from the post-Wave-41 backlog). Pre-W42, the W33
+    # IMPROVE-167 classifier confidence is a heuristic
+    # (``1 / matched_count``) that misses the single-match-with-
+    # low-overall-confidence case (the LLM emitted exactly one
+    # option-name token but with low logprob — heuristic returns
+    # 1.0, but the LLM was uncertain). When this opt-in flag is
+    # set, ``classify_llm_router_edges`` asks the LLM for
+    # logprobs and derives confidence as
+    # ``exp(first_token_logprob)`` — the LLM's actual emission
+    # probability for its first content-bearing token, in [0, 1].
+    # Falls back to the W33 heuristic when logprobs are missing
+    # OR provider doesn't support them OR response.raw doesn't
+    # carry the field, so the change is safe to enable on
+    # multi-provider deployments. Default off preserves pre-W42
+    # behaviour. Opt-in via env-var
+    # ``DAG_CLASSIFIER_LOGPROBS_ENABLED``.
+    dag_classifier_logprobs_enabled: bool = Field(default=False)
+
     # ── Tracing ───────────────────────────────────────────────────
     trace_enabled: bool = Field(default=True)
     trace_verbose: bool = Field(default=False)
