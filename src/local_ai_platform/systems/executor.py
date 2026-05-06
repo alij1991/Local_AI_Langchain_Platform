@@ -83,6 +83,24 @@ _INTER_NODE_CONTEXT_BUDGET_TOKENS = 4000
 # Pinned by ``test_estimate_tokens_uses_4chars_per_token``.
 _INTER_NODE_CHARS_PER_TOKEN = 4
 
+# [IMPROVE-166] Wave 32 — per-edge "pass" config (Tranche D piece
+# 2). Edge.rule.pass values control which prior outputs the
+# downstream agent sees in its context block. Default "all"
+# preserves pre-Wave-32 behaviour; "source_only" + "none" are the
+# scoped variants. An invalid pass value silently falls back to
+# "all" — same forward-compat semantics as the existing
+# ``_evaluate_edge_rule`` "unknown rule_type = always follow"
+# branch (rule schema additions in newer builds shouldn't crash
+# older builds).
+#
+# Multi-incoming-edge policy: when more than one edge fires into
+# the same target Y, the LAST-fired edge's pass + source wins
+# (overwrite-on-fire). Deliberate simplification — alternative
+# policies (intersection / most-restrictive) are queued for a
+# future wave if the multi-incoming case becomes load-bearing.
+_VALID_PASS_MODES = ("all", "source_only", "none")
+_DEFAULT_PASS_MODE = "all"
+
 
 def _estimate_tokens(text: str) -> int:
     """Rough token-count estimate without a real tokenizer.
@@ -101,6 +119,8 @@ def _build_inter_node_context(
     budget_tokens: int = _INTER_NODE_CONTEXT_BUDGET_TOKENS,
     *,
     summarizer: Callable[[list[dict[str, Any]]], "str | None"] | None = None,
+    pass_mode: str = _DEFAULT_PASS_MODE,
+    source_node_id: str | None = None,
 ) -> str:
     """[IMPROVE-33] Build a token-budgeted prior-context block.
 
@@ -128,8 +148,39 @@ def _build_inter_node_context(
     LLM never makes the executor worse than pre-Wave-31. Default
     ``summarizer=None`` preserves pre-Wave-31 truncation-only
     behaviour.
+
+    [IMPROVE-166] Wave 32 — per-edge pass config:
+
+      * ``pass_mode="all"`` (default) — full inter-node context
+        as above; pre-Wave-32 behaviour unchanged.
+      * ``pass_mode="none"`` — returns "" immediately. The
+        downstream agent sees only the user input.
+      * ``pass_mode="source_only"`` — filters ``node_outputs`` to
+        entries with ``node == source_node_id`` so the downstream
+        agent sees ONLY its immediate predecessor. Used in
+        pipeline-style DAGs where node N+1 should consume only
+        node N, not earlier history.
+
+    An unknown ``pass_mode`` (typo / future schema addition)
+    silently falls back to "all" — forward-compat with rule-shape
+    additions in newer builds, mirroring ``_evaluate_edge_rule``'s
+    unknown-rule-type semantics.
     """
+    if pass_mode == "none":
+        return ""
+
     usable = [r for r in node_outputs if r.get("status") == "ok"]
+
+    if pass_mode == "source_only":
+        if source_node_id is None:
+            # Without a source, source_only collapses to no
+            # context — equivalent to "none" for an edge that
+            # didn't track its source (defensive guard).
+            return ""
+        usable = [r for r in usable if r.get("node") == source_node_id]
+    # ``pass_mode`` not in _VALID_PASS_MODES → fall through to the
+    # "all" path with the unfiltered usable list.
+
     if not usable:
         return ""
 
@@ -570,6 +621,8 @@ async def _run_parallel_wave_or_fallback(
     system_name: str,
     step: int,
     streaming: bool = False,
+    last_pass_per_node: "dict[str, str] | None" = None,
+    last_source_per_node: "dict[str, str] | None" = None,
 ) -> _ParallelWaveResult:
     """[IMPROVE-83] Shared parallel-wave pre-pass for both executors.
 
@@ -666,18 +719,31 @@ async def _run_parallel_wave_or_fallback(
     pre_wave_summarizer = _build_summarizer(
         orch, get_settings().dag_inter_node_summarization_model,
     )
-    pre_wave_ctx = _build_inter_node_context(
-        node_outputs, budget_tokens=context_budget,
-        summarizer=pre_wave_summarizer,
-    )
+    # [IMPROVE-166] Wave 32 — per-edge pass config means each
+    # node in the wave may need a different context block (the
+    # edges into different nodes can specify different pass
+    # modes). Build context per-node inside ``_preload`` rather
+    # than once-per-wave. The dict-lookups are cheap; the heavy
+    # cost is the LLM summarizer if it fires, which is independent
+    # of how many nodes are in the wave.
+    _last_pass = last_pass_per_node or {}
+    _last_source = last_source_per_node or {}
 
     async def _preload(_nid: str):
         _node_def = node_map[_nid]
         _agent = _node_def.get("agent", "")
-        if pre_wave_ctx:
+        _pass_mode = _last_pass.get(_nid, _DEFAULT_PASS_MODE)
+        _source_id = _last_source.get(_nid)
+        _ctx = _build_inter_node_context(
+            node_outputs, budget_tokens=context_budget,
+            summarizer=pre_wave_summarizer,
+            pass_mode=_pass_mode,
+            source_node_id=_source_id,
+        )
+        if _ctx:
             _prompt = (
                 f"{user_input}\n\nContext from prior agents:\n"
-                f"{pre_wave_ctx}"
+                f"{_ctx}"
             )
         else:
             _prompt = user_input
@@ -807,6 +873,13 @@ async def execute_graph(
         ),
     )
     visited: set[str] = set()
+    # [IMPROVE-166] Wave 32 — per-target per-edge pass tracking.
+    # Updated in the edge-firing loop below; consulted at the top
+    # of each per-node run to decide which prior outputs to
+    # include in the inter-node context. Last-fired-edge wins
+    # the multi-incoming-edge case.
+    last_pass_per_node: dict[str, str] = {}
+    last_source_per_node: dict[str, str] = {}
     max_steps = len(nodes) * 2  # prevent infinite loops
 
     emit_typed("system", "run.start", status="start",
@@ -872,6 +945,8 @@ async def execute_graph(
             system_name=system_name,
             step=step,
             streaming=False,
+            last_pass_per_node=last_pass_per_node,
+            last_source_per_node=last_source_per_node,
         )
         preloaded_outputs = _wave_result.preloaded_outputs
         parallel_waves_used += _wave_result.parallel_waves_used
@@ -911,13 +986,19 @@ async def execute_graph(
             # [IMPROVE-165] Wave 31 — opt-in LLM summarizer
             # replaces the elision marker with a 1-2 sentence
             # digest when the setting is non-empty.
+            # [IMPROVE-166] Wave 32 — per-edge pass config
+            # filters which prior outputs the current node sees.
             from ..config import get_settings
             _summarizer = _build_summarizer(
                 orch, get_settings().dag_inter_node_summarization_model,
             )
+            _pass_mode = last_pass_per_node.get(nid, _DEFAULT_PASS_MODE)
+            _source_id = last_source_per_node.get(nid)
             ctx_block = _build_inter_node_context(
                 node_outputs, budget_tokens=context_budget,
                 summarizer=_summarizer,
+                pass_mode=_pass_mode,
+                source_node_id=_source_id,
             )
             if ctx_block:
                 prompt = (
@@ -990,6 +1071,13 @@ async def execute_graph(
                     rule_type, rule_notes, output,
                     chosen_option, target,
                 ):
+                    # [IMPROVE-166] Wave 32 — capture per-edge
+                    # pass config for the target. Last-fired-edge
+                    # wins multi-incoming case.
+                    last_pass_per_node[target] = _rule.get(
+                        "pass", _DEFAULT_PASS_MODE,
+                    )
+                    last_source_per_node[target] = nid
                     if target not in next_nodes:
                         next_nodes.append(target)
 
@@ -1097,6 +1185,10 @@ async def astream_graph(
         ),
     )
     visited: set[str] = set()
+    # [IMPROVE-166] Wave 32 — same per-target tracking as the
+    # sync executor (last-fired-edge-wins for multi-incoming).
+    last_pass_per_node: dict[str, str] = {}
+    last_source_per_node: dict[str, str] = {}
     max_steps = len(nodes) * 2
 
     emit_typed("system", "run.start", status="start",
@@ -1148,6 +1240,8 @@ async def astream_graph(
             system_name=system_name,
             step=step,
             streaming=True,
+            last_pass_per_node=last_pass_per_node,
+            last_source_per_node=last_source_per_node,
         )
         preloaded_outputs = _wave_result.preloaded_outputs
         parallel_waves_used += _wave_result.parallel_waves_used
@@ -1285,13 +1379,21 @@ async def astream_graph(
                 # [IMPROVE-33] same budgeted context builder as sync.
                 # [IMPROVE-165] Wave 31 — same opt-in summarizer
                 # as the sync sibling above.
+                # [IMPROVE-166] Wave 32 — same per-edge pass
+                # config as the sync sibling.
                 from ..config import get_settings
                 _summarizer = _build_summarizer(
                     orch, get_settings().dag_inter_node_summarization_model,
                 )
+                _pass_mode = last_pass_per_node.get(
+                    nid, _DEFAULT_PASS_MODE,
+                )
+                _source_id = last_source_per_node.get(nid)
                 ctx_block = _build_inter_node_context(
                     node_outputs, budget_tokens=context_budget,
                     summarizer=_summarizer,
+                    pass_mode=_pass_mode,
+                    source_node_id=_source_id,
                 )
                 if ctx_block:
                     prompt = (
@@ -1450,6 +1552,12 @@ async def astream_graph(
                     rule_type, rule_notes, output,
                     chosen_option, target,
                 ):
+                    # [IMPROVE-166] Wave 32 — same per-target
+                    # tracking as the sync executor.
+                    last_pass_per_node[target] = _rule.get(
+                        "pass", _DEFAULT_PASS_MODE,
+                    )
+                    last_source_per_node[target] = nid
                     if target not in next_nodes:
                         next_nodes.append(target)
 
