@@ -10,6 +10,7 @@ Bundle contents:
   profile.json              — AI persona (PartnerProfile)
   user_profile.json         — BigFive + emotional trajectory
   memory_decay.json         — Ebbinghaus decay tunables (IMPROVE-87)
+  voice_settings.json       — voice_id / voice_gender / tts_mode (IMPROVE-178)
   facts.jsonl               — partner_core_facts rows
   key_memories.jsonl        — partner_key_memories rows
   archived.jsonl            — partner_memories_archive rows
@@ -64,11 +65,16 @@ _EXPORT_TABLES: dict[str, str] = {
 # /partner/import/dry-run. Per Q2=A in the Wave 11 plan: CSV
 # vocabulary mirrors GitHub API scope conventions.
 #
-# 9 scopes total: 3 JSON files (profile, user_profile, memory_decay)
-# + 6 SQLite tables (the jsonl filenames with the ``.jsonl`` suffix
-# stripped). The first two overlap with ``reset.py:RESET_SCOPES``;
-# memory_decay is unique to the export bundle (reset.py keeps decay
-# config across resets per IMPROVE-77's persistence contract).
+# [IMPROVE-178] Wave 41 — extended from 9 to 10 scopes by adding
+# ``voice_settings`` (the W29 [IMPROVE-163] sibling JSON file
+# alongside profile.json / user_profile.json / memory_decay.json).
+#
+# 10 scopes total: 4 JSON files (profile, user_profile, memory_decay,
+# voice_settings) + 6 SQLite tables (the jsonl filenames with the
+# ``.jsonl`` suffix stripped). The first two overlap with
+# ``reset.py:RESET_SCOPES``; memory_decay + voice_settings are unique
+# to the export bundle (reset.py keeps both across resets per the
+# IMPROVE-77 / IMPROVE-163 persistence contracts).
 #
 # Adding a new bundle component requires updating BOTH this constant
 # AND the relevant restore branch in ``restore_from_bundle`` — the
@@ -78,6 +84,7 @@ RESTORE_SCOPES: frozenset[str] = frozenset({
     "profile",
     "user_profile",
     "memory_decay",
+    "voice_settings",
     "facts",
     "key_memories",
     "archived",
@@ -183,6 +190,16 @@ def build_export_bundle(engine: Any) -> bytes:
         # ride along in the export ZIP. Best-effort: a missing file
         # (user never customised the decay config) silently skips.
         _write_memory_decay(zf)
+        # [IMPROVE-178] Wave 41 — voice settings ride-along.
+        # IMPROVE-163 (Wave 29) added persistence to
+        # data/partner/voice_settings.json; this commit closes the
+        # W29 spawned-followup that asked for export bundling once
+        # the dataclass shape stabilised. Same best-effort pattern
+        # as memory_decay above: missing source file silently skips
+        # (most common case = user never customised away from
+        # defaults), corrupt JSON logs+skips so the rest of the
+        # bundle still lands.
+        _write_voice_settings(zf)
         # ── SQLite tables (JSONL files) ──────────────────────────
         for filename, table in _EXPORT_TABLES.items():
             _write_table_jsonl(zf, filename, table)
@@ -462,6 +479,63 @@ def _write_memory_decay(zf: zipfile.ZipFile) -> None:
         )
 
 
+def _write_voice_settings(zf: zipfile.ZipFile) -> None:
+    """[IMPROVE-178] Wave 41 — bundle ``data/partner/voice_settings.json``
+    (the W29 [IMPROVE-163] persisted file from
+    ``partner/voice_settings.py``) into the export ZIP as
+    ``voice_settings.json``.
+
+    Best-effort: a missing source file means the user never
+    customised the voice / gender / tts_mode picks away from
+    defaults — silently skip rather than write a stub. Catches
+    the W29 IMPROVE-163 spawned-followup that listed export
+    bundling as a one-line addition once the dataclass shape
+    stabilised; the dataclass has been stable since 2aac437 so
+    the schema-stability gate is satisfied.
+
+    Read happens via the live module's ``_VOICE_SETTINGS_PATH``
+    so test fixtures that ``monkeypatch`` the path to a tmp dir
+    for isolation also affect this read — keeps the export
+    tests hermetic with no real ``data/partner/`` writes.
+
+    Mirrors ``_write_memory_decay`` (W8 IMPROVE-87) — same
+    safety discipline: missing source OK, corrupt JSON logs +
+    skips so the rest of the bundle still lands, valid JSON
+    gets reformatted with indent=2 for readability even if the
+    on-disk file was minified.
+    """
+    try:
+        from .voice_settings import _VOICE_SETTINGS_PATH
+    except Exception as exc:
+        logger.debug(
+            "[IMPROVE-178] voice settings path import failed "
+            "(%s); skipping voice_settings.json in export", exc,
+        )
+        return
+
+    try:
+        if not _VOICE_SETTINGS_PATH.exists():
+            # User never customised — no file to bundle. Don't
+            # write a stub; the consumer that imports this ZIP
+            # can use the application's defaults instead.
+            return
+        raw = _VOICE_SETTINGS_PATH.read_text(encoding="utf-8")
+        # Reformat with indent=2 so the bundle's view is human-
+        # readable even if the on-disk file was minified.
+        data = json.loads(raw)
+        zf.writestr(
+            "voice_settings.json", json.dumps(data, indent=2, default=str),
+        )
+    except Exception as exc:
+        # A corrupt / unreadable on-disk file should NOT brick
+        # the export. Log + skip so the user still gets
+        # profile.json + the SQLite tables.
+        logger.warning(
+            "[IMPROVE-178] voice_settings.json export failed "
+            "(%s); continuing without it", exc,
+        )
+
+
 def _write_table_jsonl(
     zf: zipfile.ZipFile, filename: str, table: str,
 ) -> None:
@@ -530,6 +604,13 @@ or to satisfy data-portability requests.
   tunables (per IMPROVE-77 / IMPROVE-78). Only present if you
   changed the defaults via `POST /partner/memory/decay` or one
   of the named presets. Mirrors `data/partner/memory_decay.json`.
+- `voice_settings.json` — [IMPROVE-163 / IMPROVE-178] Your
+  partner voice configuration (voice_id / voice_gender /
+  tts_mode). Only present if you customised any of these via
+  the partner voice picker UI. Mirrors
+  `data/partner/voice_settings.json`. On restore, the engine's
+  in-memory voice fields are also updated so a running partner
+  picks up the restored picks without a backend restart.
 - `facts.jsonl` — Durable facts the partner extracted about you
   (one fact per line). Backs `partner_core_facts` table.
 - `key_memories.jsonl` — Notable conversation moments with
@@ -593,6 +674,16 @@ def restore_from_bundle(
       * ``memory_decay.json`` → ``set_decay_config(**data)``
         (the IMPROVE-77 helper validates types + ranges and
         persists to disk).
+      * [IMPROVE-178] ``voice_settings.json`` →
+        ``save_voice_settings(VoiceSettings(...))`` after
+        inline field validation (voice_id Optional[str],
+        voice_gender ∈ _VALID_GENDERS, tts_mode ∈
+        _VALID_TTS_MODES). Outside dry-run mode, the
+        engine's ``_voice_id`` / ``_voice_gender`` /
+        ``_tts_mode`` fields are also mutated directly so
+        a running partner picks up restored picks without
+        a backend restart (mirror of the IMPROVE-94
+        ``engine.profile = ...`` swap above).
       * Each ``.jsonl`` table file → ``INSERT OR IGNORE`` for
         each row (default; ``overwrite=True`` does a
         ``DELETE`` first then ``INSERT``).
@@ -631,6 +722,15 @@ def restore_from_bundle(
         "profile_restored": False,
         "user_profile_restored": False,
         "memory_decay_restored": False,
+        # [IMPROVE-178] Wave 41 — voice settings round-trip.
+        # Sibling of memory_decay_restored above; True when the
+        # bundle's voice_settings.json was successfully parsed +
+        # validated + persisted (and engine in-memory fields
+        # mutated outside dry-run mode). False when missing from
+        # the bundle, when ?scope= excludes voice_settings, or
+        # on parse / validation failure (errors list will carry
+        # the detail).
+        "voice_settings_restored": False,
         "tables_restored": {},
         # [IMPROVE-105] Per-table diff with rows_seen / rows_inserted
         # / rows_conflicted counts (always populated) + per-row
@@ -792,6 +892,97 @@ def restore_from_bundle(
                     )
                     summary["errors"].append(
                         f"memory_decay.json: {exc}",
+                    )
+
+            # ── voice_settings.json ──────────────────────────
+            # [IMPROVE-178] Wave 41 — voice settings round-trip.
+            # Mirrors the memory_decay branch above (W8
+            # IMPROVE-87 + W9 IMPROVE-94 patterns), with two
+            # differences: (1) validation is inline rather than
+            # delegated to a setter helper because VoiceSettings
+            # field rules are simple (Optional[str] + 2-element
+            # enums) and there's no per-field range check; (2)
+            # in non-dry-run mode the engine's in-memory
+            # `_voice_id` / `_voice_gender` / `_tts_mode` fields
+            # are mutated DIRECTLY (mirror of the W9 IMPROVE-94
+            # `engine.profile = ...` swap) so a running partner
+            # picks up the restored picks without a backend
+            # restart. Skip when ?scope= excludes "voice_settings".
+            if (
+                "voice_settings.json" in names
+                and _in_scope("voice_settings")
+            ):
+                try:
+                    data = json.loads(zf.read("voice_settings.json"))
+                    if not isinstance(data, dict):
+                        raise ValueError(
+                            "voice_settings.json must be a JSON object"
+                        )
+                    from .voice_settings import (
+                        VoiceSettings,
+                        _VALID_GENDERS,
+                        _VALID_TTS_MODES,
+                        save_voice_settings,
+                    )
+                    # voice_id: Optional[str]; non-string and
+                    # whitespace-only values are rejected (the
+                    # W29 load_voice_settings is more lenient
+                    # because corrupt-on-disk should fall back
+                    # to defaults, but a restore from a bundle
+                    # the user explicitly chose to import should
+                    # surface validation errors so they can fix
+                    # the source bundle).
+                    raw_voice_id = data.get("voice_id")
+                    if raw_voice_id is not None and not (
+                        isinstance(raw_voice_id, str)
+                        and raw_voice_id.strip()
+                    ):
+                        raise ValueError(
+                            f"invalid voice_id: {raw_voice_id!r}"
+                        )
+                    raw_gender = data.get("voice_gender", "female")
+                    if raw_gender not in _VALID_GENDERS:
+                        raise ValueError(
+                            f"invalid voice_gender: {raw_gender!r}; "
+                            f"must be one of {list(_VALID_GENDERS)}"
+                        )
+                    raw_mode = data.get("tts_mode", "kokoro")
+                    if raw_mode not in _VALID_TTS_MODES:
+                        raise ValueError(
+                            f"invalid tts_mode: {raw_mode!r}; "
+                            f"must be one of {list(_VALID_TTS_MODES)}"
+                        )
+                    new_settings = VoiceSettings(
+                        voice_id=raw_voice_id,
+                        voice_gender=raw_gender,
+                        tts_mode=raw_mode,
+                    )
+                    if not dry_run:
+                        save_voice_settings(new_settings)
+                        # Mutate engine in-memory state so a
+                        # running partner picks up restored
+                        # values without backend restart. The
+                        # PartnerEngine attributes are private
+                        # by convention (leading underscore)
+                        # but the W29 IMPROVE-163
+                        # `_persist_voice_settings` shows this
+                        # is the canonical mutation seam — the
+                        # set_voice_id / set_voice_gender /
+                        # set_tts_mode setters write the same
+                        # fields then call _persist on success.
+                        engine._voice_id = new_settings.voice_id
+                        engine._voice_gender = (
+                            new_settings.voice_gender
+                        )
+                        engine._tts_mode = new_settings.tts_mode
+                    summary["voice_settings_restored"] = True
+                except Exception as exc:
+                    logger.warning(
+                        "[IMPROVE-178] voice_settings.json "
+                        "restore failed: %s", exc,
+                    )
+                    summary["errors"].append(
+                        f"voice_settings.json: {exc}",
                     )
 
             # ── SQLite tables (JSONL) ────────────────────────

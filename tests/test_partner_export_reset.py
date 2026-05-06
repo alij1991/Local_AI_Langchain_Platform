@@ -55,10 +55,20 @@ def tmp_partner_db(monkeypatch, tmp_path):
 @pytest.fixture
 def tmp_partner_data_dir(monkeypatch, tmp_path):
     """Redirect file-backed partner state (profile.json,
-    user_profile.json) to a tmp dir so resets don't touch the
-    developer's real partner files."""
+    user_profile.json, voice_settings.json) to a tmp dir so
+    resets don't touch the developer's real partner files.
+
+    [IMPROVE-178] Wave 41 — extended to also redirect
+    voice_settings._VOICE_SETTINGS_PATH so the W41 voice-
+    settings export bundle integration's read of the live
+    module's path lands in the tmp dir alongside the existing
+    profile / user_profile redirects. Without this redirect,
+    a dev install with a real ``data/partner/voice_settings.json``
+    on disk leaked into bundle-shape tests + tripped the
+    expected-file-count pin."""
     from local_ai_platform.partner import profile as profile_mod
     from local_ai_platform.partner import user_profile as user_profile_mod
+    from local_ai_platform.partner import voice_settings as vs_mod
 
     partner_dir = tmp_path / "partner"
     partner_dir.mkdir(parents=True, exist_ok=True)
@@ -66,6 +76,11 @@ def tmp_partner_data_dir(monkeypatch, tmp_path):
     monkeypatch.setattr(
         user_profile_mod, "USER_PROFILE_PATH",
         partner_dir / "user_profile.json",
+    )
+    # [IMPROVE-178] Wave 41 — voice settings path redirect.
+    monkeypatch.setattr(
+        vs_mod, "_VOICE_SETTINGS_PATH",
+        partner_dir / "voice_settings.json",
     )
     return partner_dir
 
@@ -688,6 +703,133 @@ def test_export_bundle_readme_documents_memory_decay_entry(
     assert "IMPROVE-77" in readme or "IMPROVE-78" in readme
 
 
+# ── [IMPROVE-178] Wave 41 — voice_settings.json export tests ─
+
+
+def test_export_bundle_includes_voice_settings_when_present(
+    tmp_partner_db, stub_engine, tmp_path, monkeypatch,
+):
+    """[IMPROVE-178] When the user has customised voice
+    settings (and W29 IMPROVE-163's ``_persist_voice_settings``
+    has written to ``data/partner/voice_settings.json``), the
+    bundle includes a ``voice_settings.json`` entry mirroring
+    that file. Mirrors
+    ``test_export_bundle_includes_memory_decay_when_present``
+    (W8 IMPROVE-87)."""
+    import json
+    import zipfile
+    from io import BytesIO
+
+    from local_ai_platform.partner import voice_settings as vs_mod
+    from local_ai_platform.partner.export import build_export_bundle
+
+    settings_path = tmp_path / "voice_settings.json"
+    custom_settings = {
+        "voice_id": "af_bella",
+        "voice_gender": "female",
+        "tts_mode": "kokoro",
+    }
+    settings_path.write_text(json.dumps(custom_settings))
+    monkeypatch.setattr(
+        vs_mod, "_VOICE_SETTINGS_PATH", settings_path,
+    )
+
+    bundle = build_export_bundle(stub_engine)
+    with zipfile.ZipFile(BytesIO(bundle), "r") as zf:
+        names = zf.namelist()
+        assert "voice_settings.json" in names
+        settings_in_zip = json.loads(zf.read("voice_settings.json"))
+        assert settings_in_zip == custom_settings
+
+
+def test_export_bundle_silently_skips_voice_settings_when_missing(
+    tmp_partner_db, stub_engine, tmp_path, monkeypatch,
+):
+    """[IMPROVE-178] When the user never customised voice
+    settings (no ``data/partner/voice_settings.json`` on
+    disk), the bundle omits ``voice_settings.json`` entirely.
+    Defaults will be picked up by the consumer of the bundle.
+    Pinned so a future "always write a stub" regression
+    doesn't bloat the ZIP."""
+    import zipfile
+    from io import BytesIO
+
+    from local_ai_platform.partner import voice_settings as vs_mod
+    from local_ai_platform.partner.export import build_export_bundle
+
+    nonexistent = tmp_path / "voice_settings.json"
+    # Sanity: ensure the file isn't there.
+    assert not nonexistent.exists()
+    monkeypatch.setattr(
+        vs_mod, "_VOICE_SETTINGS_PATH", nonexistent,
+    )
+
+    bundle = build_export_bundle(stub_engine)
+    with zipfile.ZipFile(BytesIO(bundle), "r") as zf:
+        names = zf.namelist()
+        assert "voice_settings.json" not in names
+        # Other expected files still land — pin via profile.json.
+        assert "profile.json" in names
+
+
+def test_export_bundle_skips_voice_settings_on_corrupt_file(
+    tmp_partner_db, stub_engine, tmp_path, monkeypatch, caplog,
+):
+    """[IMPROVE-178] A corrupt ``voice_settings.json`` (e.g.
+    half-written from a previous power-cut) must NOT brick
+    the export. Log + skip; the user still gets profile.json
+    + the SQLite tables. Pinned mirror of the W8 IMPROVE-87
+    memory_decay safety discipline."""
+    import logging
+    import zipfile
+    from io import BytesIO
+
+    from local_ai_platform.partner import voice_settings as vs_mod
+    from local_ai_platform.partner.export import build_export_bundle
+
+    settings_path = tmp_path / "voice_settings.json"
+    settings_path.write_text("{not-json")  # corrupt
+    monkeypatch.setattr(
+        vs_mod, "_VOICE_SETTINGS_PATH", settings_path,
+    )
+
+    with caplog.at_level(
+        logging.WARNING, logger="local_ai_platform.partner.export",
+    ):
+        bundle = build_export_bundle(stub_engine)
+
+    with zipfile.ZipFile(BytesIO(bundle), "r") as zf:
+        names = zf.namelist()
+        assert "voice_settings.json" not in names
+        assert "profile.json" in names
+    # Warning logged so the operator can investigate.
+    assert any(
+        "voice_settings.json export failed" in r.getMessage()
+        for r in caplog.records
+    )
+
+
+def test_export_bundle_readme_documents_voice_settings_entry(
+    tmp_partner_db, stub_engine,
+):
+    """[IMPROVE-178] The bundle README.md mentions the
+    voice_settings.json file so a user reading the archive
+    contents knows what it is. Pin so a future README
+    rewrite doesn't drop the entry."""
+    import zipfile
+    from io import BytesIO
+
+    from local_ai_platform.partner.export import build_export_bundle
+
+    bundle = build_export_bundle(stub_engine)
+    with zipfile.ZipFile(BytesIO(bundle), "r") as zf:
+        readme = zf.read("README.md").decode("utf-8")
+    assert "voice_settings.json" in readme
+    # Cross-reference the IMPROVE-N tags so a future doc
+    # rebuild still links to the right history.
+    assert "IMPROVE-163" in readme or "IMPROVE-178" in readme
+
+
 # ── [IMPROVE-94] /partner/import — restore_from_bundle round-trip ─
 
 
@@ -930,6 +1072,81 @@ def test_restore_from_bundle_restores_memory_decay_json(
     cfg_after = partner_memory.get_decay_config()
     assert cfg_after["importance_floor"] == 7
     assert abs(cfg_after["archive_threshold"] - 0.85) < 1e-6
+
+
+def test_restore_from_bundle_restores_voice_settings_json(
+    tmp_partner_db, tmp_partner_data_dir, stub_engine,
+    tmp_path, monkeypatch,
+):
+    """[IMPROVE-178] Wave 41 — voice_settings.json round-trips
+    via ``save_voice_settings(VoiceSettings(...))`` + engine
+    in-memory state mutation. Pin a non-default value so a
+    silent skip surfaces here. Verify both the on-disk file
+    AND the engine's ``_voice_id`` / ``_voice_gender`` /
+    ``_tts_mode`` fields are restored (mirror of the W9
+    IMPROVE-94 ``engine.profile = ...`` swap pattern)."""
+    import json
+
+    from local_ai_platform.partner import voice_settings as vs_mod
+    from local_ai_platform.partner.export import (
+        build_export_bundle,
+        restore_from_bundle,
+    )
+
+    # Redirect _VOICE_SETTINGS_PATH so the test doesn't write
+    # to the dev install's data/partner/.
+    settings_path = tmp_path / "voice_settings.json"
+    monkeypatch.setattr(
+        vs_mod, "_VOICE_SETTINGS_PATH", settings_path,
+    )
+
+    # Customise the voice settings + persist (W29 path).
+    customised = vs_mod.VoiceSettings(
+        voice_id="af_bella",
+        voice_gender="female",
+        tts_mode="kokoro",
+    )
+    vs_mod.save_voice_settings(customised)
+    assert settings_path.exists()
+
+    # Pre-populate the stub engine to mirror what the runtime
+    # would carry: a different (default-ish) state that the
+    # restore should override. Mock attributes on MagicMock
+    # so the test's assertions later see the post-restore
+    # values rather than auto-generated MagicMock objects.
+    stub_engine._voice_id = None
+    stub_engine._voice_gender = "male"
+    stub_engine._tts_mode = "kokoro"
+
+    bundle = build_export_bundle(stub_engine)
+
+    # Reset on-disk state to defaults (simulating a fresh
+    # install that needs to be restored from the bundle).
+    settings_path.unlink()
+    assert not settings_path.exists()
+    # Also reset engine in-memory state to verify the
+    # restore mutation actually fires (otherwise the engine
+    # could carry the original customised values from above
+    # and the assertion would pass for the wrong reason).
+    stub_engine._voice_id = None
+    stub_engine._voice_gender = "male"
+    stub_engine._tts_mode = "chatterbox"
+
+    summary = restore_from_bundle(stub_engine, bundle)
+    assert summary["voice_settings_restored"] is True
+
+    # On-disk file restored.
+    assert settings_path.exists()
+    restored_data = json.loads(settings_path.read_text())
+    assert restored_data["voice_id"] == "af_bella"
+    assert restored_data["voice_gender"] == "female"
+    assert restored_data["tts_mode"] == "kokoro"
+
+    # Engine in-memory state mutated (so a running partner
+    # picks up the restored picks without backend restart).
+    assert stub_engine._voice_id == "af_bella"
+    assert stub_engine._voice_gender == "female"
+    assert stub_engine._tts_mode == "kokoro"
 
 
 def test_restore_from_bundle_invalid_zip_returns_error_not_raises(
@@ -1972,13 +2189,19 @@ def test_parse_scopes_unknown_raises_value_error():
 
 def test_restore_scopes_constant_matches_implementation():
     """[IMPROVE-104] The RESTORE_SCOPES frozenset must contain
-    exactly the 9 components ``restore_from_bundle`` knows how
-    to filter (3 JSON files + 6 SQLite tables). Pin the
+    exactly the 10 components ``restore_from_bundle`` knows
+    how to filter (4 JSON files + 6 SQLite tables). Pin the
     inventory so a future component addition without updating
-    RESTORE_SCOPES surfaces here."""
+    RESTORE_SCOPES surfaces here.
+
+    [IMPROVE-178] Wave 41 — extended from 9 to 10 scopes by
+    adding ``voice_settings`` (the W29 IMPROVE-163 sibling
+    JSON file alongside profile.json / user_profile.json /
+    memory_decay.json)."""
     from local_ai_platform.partner.export import RESTORE_SCOPES
     expected = {
         "profile", "user_profile", "memory_decay",
+        "voice_settings",
         "facts", "key_memories", "archived",
         "journal", "messages", "knowledge_graph",
     }
