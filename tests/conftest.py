@@ -5,6 +5,40 @@ This file is auto-loaded by pytest for any test under ``tests/``
 fixture defined here is visible to all tests below it without
 explicit imports.
 
+## reset_settings_cache
+
+[IMPROVE-173] Wave 37 — HF_HOME-isolated test fixture for HF
+cache scan tests in ``test_images_service.py`` and
+``test_huggingface.py``.
+
+These tests use ``monkeypatch.setenv('HF_HOME', str(tmp_path))``
+to redirect HF cache paths to a per-test temp dir. Production
+code reads ``get_settings().hf_home`` (NOT ``os.environ['HF_HOME']``
+directly), and ``get_settings()`` is module-level singleton-cached
+in ``local_ai_platform.config._SETTINGS = AppSettings()`` on
+first call. Once ``AppSettings`` is constructed (any earlier
+``get_settings()`` call in the process — e.g. via a different
+test, fixture, or import-time side effect), the cached instance
+carries whatever ``HF_HOME`` was visible at construction time.
+``monkeypatch.setenv`` AFTER first construction has no effect:
+the cached ``AppSettings.hf_home`` doesn't re-read environ.
+
+The fixture invalidates the cache via
+``monkeypatch.setattr(cfg_mod, '_SETTINGS', None)`` so the next
+``get_settings()`` call re-reads the monkeypatched env. Because
+the reset goes through ``monkeypatch.setattr``, it's automatically
+reverted to the pre-test value when the test ends — no manual
+teardown.
+
+Why test-side rather than production-side: a production-side
+fix (e.g. having ``_hf_cache_dir`` read ``os.environ['HF_HOME']``
+first and fall back to ``get_settings().hf_home``) would invert
+the project's documented ".env priority > shell env" convention
+per ``AppSettings.settings_customise_sources`` at
+``config.py:340-359``. Test-side fix follows the W36 IMPROVE-171
+"test-only fix shape" pattern: when production code is correct
+but tests are stale, update the tests.
+
 ## obs_test_client
 
 [IMPROVE-115]'s post-startup ``DELETE FROM app_events``
@@ -53,6 +87,36 @@ Sources (2025-2026):
 from __future__ import annotations
 
 import pytest
+
+
+@pytest.fixture
+def reset_settings_cache(monkeypatch):
+    """[IMPROVE-173] Wave 37 — Reset the AppSettings singleton so
+    ``monkeypatch.setenv('HF_HOME', tmp_path)`` propagates to all
+    ``get_settings().hf_home`` call sites in production.
+
+    ``local_ai_platform.config._SETTINGS`` is a module-level cache
+    populated by ``get_settings()`` on first call; subsequent calls
+    return the same instance regardless of subsequent env-var
+    changes. This fixture clears the cache via ``monkeypatch.setattr``
+    so the next ``get_settings()`` call re-reads ``os.environ`` —
+    including any HF_HOME override the test sets via
+    ``monkeypatch.setenv``.
+
+    monkeypatch.setattr restores ``_SETTINGS`` to its pre-test
+    value when the test ends, so cross-test state doesn't leak.
+
+    Tests opt in by adding ``reset_settings_cache`` to their
+    parameter list; the fixture body runs before the test body
+    even though the test doesn't reference the returned value.
+
+    Pairs with ``monkeypatch.setenv('HF_HOME', str(tmp_path))`` —
+    the env-var change is the active redirection; this fixture
+    just ensures the change actually takes effect.
+    """
+    import local_ai_platform.config as cfg_mod
+    monkeypatch.setattr(cfg_mod, "_SETTINGS", None)
+    monkeypatch.setattr(cfg_mod, "_SETTINGS_EMITTED", False)
 
 
 @pytest.fixture

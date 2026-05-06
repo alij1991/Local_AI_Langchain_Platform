@@ -27,7 +27,7 @@ def test_configured_models_includes_default():
     assert "tiiuae/falcon-rw-1b" in models
 
 
-def test_model_metadata_from_local_config(monkeypatch, tmp_path):
+def test_model_metadata_from_local_config(monkeypatch, tmp_path, reset_settings_cache):
     ctl = HuggingFaceController(_config())
     model_id = "acme/test-model"
     root = tmp_path / "hub" / "models--acme--test-model" / "snapshots" / "abc"
@@ -41,5 +41,10 @@ def test_model_metadata_from_local_config(monkeypatch, tmp_path):
     assert meta["context_length"] == 8192
     assert str(meta["parameters"]).startswith("~")
     assert meta["size_bytes"] is not None
-    assert meta["cached_files_count"] is not None
     assert meta["resolved_snapshot_path"] is not None
+    # [IMPROVE-173] Wave 37 — cached_files_count was a pre-IMPROVE-69
+    # field the provider no longer computes (the post-W7 refactor moved
+    # to a `scan_cache_dir`-driven shape that surfaces size_on_disk +
+    # commit_hash but drops the file-count metric). The test asserted
+    # this pre-refactor contract; the field is intentionally absent
+    # in current production.

@@ -33,7 +33,7 @@ def _setup_hf_cache(tmp_path: Path, model_id: str, files: dict[str, str] | None 
     return snapshot
 
 
-def test_hf_cache_scan_detects_diffusers_model(tmp_path, monkeypatch):
+def test_hf_cache_scan_detects_diffusers_model(tmp_path, monkeypatch, reset_settings_cache):
     cfg = _cfg()
     monkeypatch.setenv('HF_HOME', str(tmp_path))
 
@@ -43,6 +43,12 @@ def test_hf_cache_scan_detects_diffusers_model(tmp_path, monkeypatch):
     })
 
     svc = ImageGenerationService(cfg)
+    # [IMPROVE-173] Wave 37 — _scan_hf_cache_models filters out repos
+    # < 50 MB (metadata-only HF cache entries: model cards, config
+    # files cached when browsing). The test fixture writes ~2 bytes
+    # of model_index.json which trips this filter; bypass it for
+    # the test by returning a large fake size.
+    monkeypatch.setattr(svc, '_dir_size', lambda path: 100 * 1024 * 1024)
     body = svc.refresh_models()
 
     assert any(m['model_id'] == 'test-org/img-model' for m in body['items'])
@@ -66,7 +72,7 @@ def test_hf_cache_scan_ignores_text_models(tmp_path, monkeypatch):
     assert not any(m['model_id'] == 'test-org/text-model' for m in body['items'])
 
 
-def test_doctor_reports_local_models_missing(tmp_path, monkeypatch):
+def test_doctor_reports_local_models_missing(tmp_path, monkeypatch, reset_settings_cache):
     cfg = _cfg()
     monkeypatch.setenv('HF_HOME', str(tmp_path))
     # Create empty hub dir so scan runs but finds nothing
@@ -113,7 +119,7 @@ def test_generate_uses_cpu_fallback_when_gpu_required_but_unavailable(tmp_path, 
     assert result.metadata and 'warning' in result.metadata
 
 
-def test_validate_model_reports_missing_files(tmp_path, monkeypatch):
+def test_validate_model_reports_missing_files(tmp_path, monkeypatch, reset_settings_cache):
     cfg = _cfg()
     monkeypatch.setenv('HF_HOME', str(tmp_path))
 
@@ -125,7 +131,7 @@ def test_validate_model_reports_missing_files(tmp_path, monkeypatch):
     assert report['loadable'] is False
 
 
-def test_validate_model_includes_memory_estimates(tmp_path, monkeypatch):
+def test_validate_model_includes_memory_estimates(tmp_path, monkeypatch, reset_settings_cache):
     cfg = _cfg()
     monkeypatch.setenv('HF_HOME', str(tmp_path))
 
@@ -139,7 +145,12 @@ def test_validate_model_includes_memory_estimates(tmp_path, monkeypatch):
     report = svc.validate_model('test-org/ok-model')
     assert report['folder_size_bytes'] is not None
     assert report['estimated_ram_required_bytes'] is not None
-    assert report['device_candidate'] in {'cpu', 'cuda'}
+    # [IMPROVE-173] Wave 37 — `device_candidate` reads
+    # `effective_device` from `get_device_status()` which now includes
+    # the device index ('cuda:0' / 'cuda:1') rather than the bare
+    # family name. Check the device family prefix to accept either
+    # shape.
+    assert report['device_candidate'].split(':')[0] in {'cpu', 'cuda'}
 
 
 def test_recommended_settings_returns_defaults(tmp_path, monkeypatch):
