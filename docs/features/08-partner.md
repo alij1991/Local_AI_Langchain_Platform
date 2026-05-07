@@ -150,7 +150,7 @@ Relationships mentioned: Alex (partner), Sam (sister).
 
 ## 8.4 Memory — five tiers
 
-[partner/memory.py](../../src/local_ai_platform/partner/memory.py). 761 lines. Five SQLite tables (all prefixed `partner_`) + optional Mem0/ChromaDB vector store.
+[partner/memory.py](../../src/local_ai_platform/partner/memory.py). 1,336 lines (post-Wave-22 [IMPROVE-156] async warmup additions). Five SQLite tables (all prefixed `partner_`) + optional Mem0/ChromaDB vector store + the W22 lifespan async warmup helpers.
 
 ### Tier 1: Core facts (`partner_core_facts`)
 
@@ -249,7 +249,7 @@ Mem0 handles the "find similar past exchanges" semantic search that SQLite keywo
 
 ### `_build_messages(user_input)` — assembly order
 
-[engine.py:114](../../src/local_ai_platform/partner/engine.py:114). Produces the full prompt:
+[engine.py:233](../../src/local_ai_platform/partner/engine.py:233). Produces the full prompt:
 
 1. **`memory.build_memory_context(user_input)`** — all 5 tiers + Mem0 search merged.
 2. **`user_profile.build_context_block()`** — prepended as `## User Profile`.
@@ -263,7 +263,7 @@ Then the actual `system` message is `profile.build_system_prompt(mem_context, mo
 
 ### `chat(user_input, model=None)` — synchronous
 
-[engine.py:264](../../src/local_ai_platform/partner/engine.py:264). The non-streamed path. Flow:
+[engine.py:383](../../src/local_ai_platform/partner/engine.py:383). The non-streamed path. Flow:
 
 ```
 1. model = model or self._get_best_model()             # qwen3:8b > gemma4:e4b > ...
@@ -284,7 +284,7 @@ Then the actual `system` message is `profile.build_system_prompt(mem_context, mo
 
 ### `astream_chat(user_input, model, enable_thinking_pause)` — async streaming
 
-[engine.py:327](../../src/local_ai_platform/partner/engine.py:327). Same flow but yields typed events:
+[engine.py:509](../../src/local_ai_platform/partner/engine.py:509). Same flow but yields typed events:
 
 ```python
 yield {"type": "thinking_pause", "duration_ms": 1500}  # if enabled
@@ -302,7 +302,7 @@ The `sentence_complete` events are what the TTS WebSocket consumes to synthesize
 
 ## 8.6 `POST /partner/chat/stream` — the SSE wrapper
 
-[api_server.py:4371](../../api_server.py:4371). Wraps `astream_chat` into SSE:
+[routers/partner.py:298](../../src/local_ai_platform/api/routers/partner.py:298). Wraps `astream_chat` into SSE:
 
 ```
 event: start     { partner: "Aria" }
@@ -324,7 +324,7 @@ All voice components are **lazy-loaded on first use** via `init_voice()`. Before
 
 ### `POST /partner/voice/init`
 
-[api_server.py:4423](../../api_server.py:4423). Steps:
+[routers/partner.py:662](../../src/local_ai_platform/api/routers/partner.py:662). Steps:
 
 1. `_free_gpu_for_partner()` — unload every cached image editing + generation pipeline (`_instruct_pipes` in `ai_enhance.py` + `_pipelines` in `service.py`), `torch.cuda.empty_cache()`. This is the voice-side counterpart to `_evict_ollama_from_gpu` from chapter 7 — the editor evicts Ollama to load Kontext; the partner evicts image pipelines to free room for its TTS + LLM. Both subsystems coordinate coarsely. Same [IMPROVE-50] applies.
 2. `PartnerEngine.init_voice()`:
@@ -370,7 +370,7 @@ Covered in §8.6 above.
 
 ### 2. `WebSocket /partner/voice/tts-stream` — client-push TTS
 
-[api_server.py:4505](../../api_server.py:4505). Client sends JSON text frames, server sends a mix of JSON control frames and binary PCM16 chunks:
+[routers/partner.py:776](../../src/local_ai_platform/api/routers/partner.py:776). Client sends JSON text frames, server sends a mix of JSON control frames and binary PCM16 chunks:
 
 ```
 Client → { "text": "That's wonderful news!", "emotion": "happy" }
@@ -387,7 +387,7 @@ The server-side generator is `PartnerEngine.stream_synthesize(text, emotion) →
 
 ### 3. `WebSocket /partner/voice/stream-transcribe` — client-push STT
 
-[api_server.py:4612](../../api_server.py:4612). Client sends PCM16 binary, server returns partial transcriptions:
+[routers/partner.py:1009](../../src/local_ai_platform/api/routers/partner.py:1009). Client sends PCM16 binary, server returns partial transcriptions:
 
 ```
 Client → <bytes: PCM16 chunk 1 (16kHz mono)>
@@ -521,7 +521,7 @@ Crisis detection is currently **prompt-based only** — the LLM is supposed to r
 - **AI disclosure requirements collide with persona.** The persona is designed to *never* admit it's an AI. NY state law now requires upfront + periodic AI disclosure. [IMPROVE-59]
 - **Crisis detection is LLM-only.** No guardrail classifier. A prompt injection or aligned-but-wrong model could skip the safety response. [IMPROVE-60]
 - **Mem0 init is one-shot.** If Mem0/ChromaDB isn't installed at first call, `_mem0_available=False` for the process lifetime. Installing later requires a server restart. [IMPROVE-62]
-- **Silero VAD loads but isn't used in streaming.** The WS STT path uses an RMS-energy heuristic (`SILENCE_RMS_THRESHOLD=500`). Silero would be more robust on noisy inputs. [IMPROVE-65]
+- **Silero VAD loads but isn't used in streaming.** The WS STT path uses an RMS-energy heuristic (`SILENCE_RMS_THRESHOLD=500`). Silero would be more robust on noisy inputs (deferred per §10.7 carry-overs). [IMPROVE-65]
 - **Profile reset doesn't touch memory.** `DELETE /partner/user-profile` wipes BigFive + emotional trajectory, but leaves facts / key memories / knowledge graph intact. The user may expect a full reset. [IMPROVE-67]
 - **`get_best_model` probes Ollama on every startup.** The preference chain assumes qwen3/gemma4 availability — if only gemma3 is installed, the partner silently uses a weaker model. UI doesn't surface this.
 - **Stored facts can contradict.** Temporal supersession handles value changes, but two simultaneously-valid contradicting facts don't produce a warning.
@@ -533,11 +533,13 @@ Crisis detection is currently **prompt-based only** — the LLM is supposed to r
 
 ## 8.14 Improvement ideas
 
-### [IMPROVE-58] Route partner LLM calls through the unified router (partial — some paths still use urllib)
+### [IMPROVE-58] Route partner LLM calls through the unified router (✓ shipped — partial; some discovery paths still use urllib)
 
-**Problem:** most partner chat paths use `self.router` correctly. A few code paths (e.g., the `_get_best_model` probe at [engine.py:84](../../src/local_ai_platform/partner/engine.py:84)) use `urllib.request` directly to `{ollama_base_url}/api/tags`, and Mem0's internal config points at Ollama directly. Same flavor as [IMPROVE-14] from chapter 3.
+**Problem (historical):** most partner chat paths used `self.router` correctly. A few code paths (e.g., `_get_best_model` probe at [engine.py:173](../../src/local_ai_platform/partner/engine.py:173)) used `urllib.request` directly to `{ollama_base_url}/api/tags`, and Mem0's internal config pointed at Ollama directly.
 
-**Proposal:** expose a `router.list_models("ollama")` shortcut and use it. Mem0 config should receive `config.ollama_base_url` rather than re-reading env. Consistency wins; no functional change.
+**Outcome:** the core partner LLM chat path now uses `self.router.chat`/`achat` end-to-end (W17 commit 074d07e). The chat + streaming flows in `engine.py:chat()` and `engine.py:astream_chat()` go through the router. The discovery probes (`_get_best_model` checking which qwen3/gemma4 variants are installed via the Ollama tags API) remain on direct urllib — listed model availability is a discovery-time concern, not a generation-time concern, so router consistency is less critical there. Same trade-off as [IMPROVE-14] from chapter 3.
+
+**Proposal (historical):** expose a `router.list_models("ollama")` shortcut and use it. Mem0 config should receive `config.ollama_base_url` rather than re-reading env. Consistency wins; no functional change.
 
 **Sources:** internal consistency; cross-ref [IMPROVE-14].
 
@@ -574,11 +576,13 @@ Also: store a `safety_events` table for review. The user (or a caregiver with co
 - [International AI Safety Report 2026 Examines AI Capabilities, Risks, and Safeguards (Inside Privacy)](https://www.insideprivacy.com/artificial-intelligence/international-ai-safety-report-2026-examines-ai-capabilities-risks-and-safeguards/)
 - [Let 2026 be the year the world comes together for AI safety (Nature)](https://www.nature.com/articles/d41586-025-04106-0)
 
-### [IMPROVE-61] Expose decay parameters as configuration
+### [IMPROVE-61] Expose decay parameters as configuration (✓ shipped)
 
-**Problem:** `_compute_retention(last_accessed, access_count, importance, ...)` and the 0.5 archive threshold are hard-coded. Users may want memories to persist longer (close relationship) or shorter (work-focused companion).
+**Problem (historical):** `_compute_retention(last_accessed, access_count, importance, ...)` and the 0.5 archive threshold were hard-coded.
 
-**Proposal:** surface as UserProfile settings:
+**Outcome:** memory decay parameters are now configurable via UserProfile (per §10.4 row 247). The `data/partner/memory_decay.json` settings file persists half-life days, archive threshold, importance floor, and enabled flag — round-tripped via the partner export bundle (W8 [IMPROVE-87] memory_decay export pattern + W41 [IMPROVE-178] voice_settings sibling).
+
+**Proposal (historical):** surface as UserProfile settings:
 
 ```python
 memory_decay: {
@@ -635,7 +639,7 @@ UI: a simple "Memory persistence" slider (Low / Balanced / High) that sets sensi
 
 ### [IMPROVE-66] Evaluate SimulStreaming for the STT path
 
-**Problem:** the manual sliding-window STT in [api_server.py:4612](../../api_server.py:4612) is hand-rolled. Each trigger re-transcribes a 10s window. Works but has known latency/accuracy tradeoffs.
+**Problem:** the manual sliding-window STT in [routers/partner.py:1009](../../src/local_ai_platform/api/routers/partner.py:1009) is hand-rolled. Each trigger re-transcribes a 10s window. Works but has known latency/accuracy tradeoffs.
 
 **Proposal:** evaluate [SimulStreaming](https://github.com/ufal/SimulStreaming) (the 2026 successor to WhisperStreaming — much faster and more accurate on streaming workloads). If it integrates cleanly with `faster-whisper`, the WebSocket handler becomes thinner and partial transcriptions get better.
 
@@ -645,11 +649,19 @@ Not a must-do — the current approach works. Queue this for when someone has a 
 - [Whisper realtime streaming (ufal/whisper_streaming, GitHub)](https://github.com/ufal/whisper_streaming) — references SimulStreaming as the next-gen replacement
 - [Using Voice Activity Detection in Transcription Programs (vici0549, Mar 2026)](https://medium.com/@vici0549/voice-activity-detection-testing-and-analysis-78b3f1767019)
 
-### [IMPROVE-67] Scoped reset + export before delete
+### [IMPROVE-67] Scoped reset + export before delete (✓ partial — export shipped, granular delete NOT)
 
-**Problem:** `DELETE /partner/user-profile` is one-click destructive. Clears BigFive + emotional trajectory. Doesn't touch facts / key memories / knowledge graph (which often have more personal data than the profile). No export.
+**Problem (historical):** `DELETE /partner/user-profile` was one-click destructive. Clears BigFive + emotional trajectory. Doesn't touch facts / key memories / knowledge graph (which often have more personal data than the profile). No export.
 
-**Proposal:** two endpoints:
+**Outcome (export side, ✓ shipped):** GDPR-style data portability shipped via:
+- W9 [IMPROVE-94] POST /partner/import endpoint round-trips the export bundle
+- W11 [IMPROVE-104] differential restore via `?scope=facts,key_memories,...` CSV filter on POST /partner/import + POST /partner/import/dry-run
+- W41 [IMPROVE-178] voice_settings.json bundle integration (NEW `voice_settings` scope added to `RESTORE_SCOPES`)
+- The full bundle ships profile.json + user_profile.json + memory_decay.json + voice_settings.json + all memory tables as JSONL + a README
+
+**Outcome (delete side, NOT shipped):** the granular `DELETE /partner/profile/{scope}` endpoint with per-tier delete scopes (facts / key_memories / knowledge_graph / journal / messages / archived / all) NOT shipped. Current `DELETE /partner/user-profile` still only resets BigFive + emotional. Trigger for the delete side: when 2+ users request granular reset, OR when GDPR legal requirement surfaces.
+
+**Proposal (historical):** two endpoints:
 
 1. `GET /partner/export` — returns a ZIP of profile.json, user_profile.json, all memory tables as JSON, and a README. Users get their data before nuking.
 2. `DELETE /partner/profile/{scope}` where scope is one of `{profile, user_profile, facts, key_memories, knowledge_graph, journal, messages, archived, all}`. The UI shows granular checkboxes: "reset profile" / "forget everything about me" / "keep facts but forget emotional history."
@@ -662,7 +674,38 @@ Maps to GDPR-style data portability expectations. Aligns with the "data access +
 
 ---
 
-## 8.15 Open questions
+## 8.15 Voice pipeline updates (post-Wave-22 build-up)
+
+The partner subsystem absorbed five waves of voice/persona work after the original chapter 08 was written. Consolidating the build-up here (per the W47 [IMPROVE-188] feature-consolidation-subsection pattern):
+
+### W22 [IMPROVE-156] — true-async _init_mem0
+
+The `_init_mem0()` Mem0 + ChromaDB initialization was a ~22-second blocking call on first /partner/memories request. W22 shipped `_async_warmup_partner_memory()` at [memory.py:663](../../src/local_ai_platform/partner/memory.py:663) — an asyncio fire-and-forget lifespan task that:
+
+1. **Phase 1**: pre-warms nomic-embed-text in Ollama RAM via `httpx.AsyncClient.post(ollama_base_url + '/api/embed', json={'model': partner_embed_model, 'input': 'warmup'})`.
+2. **Phase 2**: runs `_init_mem0` off-thread via `asyncio.to_thread`.
+
+Wired into `api_server.py` lifespan as one of the 3 fire-and-forget background tasks (chapter 1 §1.12). Threading.Lock + double-checked locking inside `_init_mem0` (split into `_init_mem0` fast-path + `_init_mem0_locked` slow-path body) so concurrent calls don't double-init. The W22 work moved the ~22s Chain 2 cost OFF the user's first request entirely.
+
+### W23 [IMPROVE-157/158] — Kokoro create_stream chunked TTFA
+
+Pre-W23 the Kokoro path was full-synth-then-chunk: synthesize the entire sentence into a WAV, then split into chunks for streaming. W23 [IMPROVE-157] shipped `stream_synthesize` via `kokoro_onnx.create_stream` — Kokoro emits PCM batches AS THEY'RE PRODUCED. Pairs with W23 [IMPROVE-158] Flutter progressive playback (`buildMiniWavForChunk` top-level helper + per-sentence StreamController fan-out + audioplayers play-as-they-arrive consumer). End-to-end: ~60-80% TTFA win on long-paragraph synth.
+
+### W24 [IMPROVE-159] — phrase-boundary fallback in PartnerEngine.astream_chat
+
+Pre-W24, `sentence_complete` events fired only on full sentence boundaries (`.`/`?`/`!`). For long sentences, TTS waited until the LLM finished the period before starting synthesis. W24 added phrase-boundary fallback firing on `,`/`;`/`:` once a clause is ≥30 chars long. TTS now begins synthesising while the LLM is still emitting later words. Closes the server-side parallel synth-while-LLM-streams piece that the chunked-TTFA work flagged.
+
+### W29 [IMPROVE-163] — voice_settings persistence
+
+Pre-W29, the PartnerEngine fields `_voice_id` / `_voice_gender` / `_tts_mode` reset every backend restart. W29 shipped `data/partner/voice_settings.json` (sibling of profile.json / user_profile.json / memory_decay.json) at [voice_settings.py](../../src/local_ai_platform/partner/voice_settings.py) — loads at PartnerEngine init + writes on every set_voice_id / set_voice_gender / set_tts_mode success. User's voice / gender / mode picks survive backend restart.
+
+### W41 [IMPROVE-178] — voice_settings export bundle integration
+
+Closes the W29 [IMPROVE-163] schema-stability follow-up. The `data/partner/voice_settings.json` is now bundled into the `partner-export.zip` archive (sibling of profile.json / user_profile.json / memory_decay.json) with a matching read in `restore_from_bundle`. NEW `voice_settings` scope added to `RESTORE_SCOPES` so users can opt into a `?scope=voice_settings` partial restore. Engine in-memory `_voice_id` / `_voice_gender` / `_tts_mode` fields are mutated alongside the on-disk write so a running partner picks up restored values without a backend restart.
+
+---
+
+## 8.16 Open questions
 
 1. Are any of the safety features ([IMPROVE-59], [IMPROVE-60]) actual requirements for your use case, or is this a local-only personal tool where self-imposed regulation isn't the primary concern?
 2. `_last_detected_emotion` drives avatar animation in the Flutter UI. Is the avatar actually visible/used, or is it unused code?

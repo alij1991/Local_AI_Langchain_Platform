@@ -241,7 +241,7 @@ Sortable if you paste into a spreadsheet. Chapter column links back to the origi
 | 55 | 7 | ✓ Regression tests for edit-prompt enhancer — W34 [IMPROVE-168] shipped the real-LLM enhancer eval suite at `tests/eval/test_edit_prompt_enhancer_real_llm.py` (gated by `LOCAL_AI_EVAL_REAL_LLM=1`; 8 curated test cases pin content-word preservation + forbidden-phrase rejection + multi-model behaviour) (closure marker added in Wave 47 [IMPROVE-188]) | ⋆⋆ | 🔨🔨 | UX |
 | 56 | 7 | ✓ Diff metrics from /editor/compare — initial endpoint shipped + extensively built upon: W35 [IMPROVE-169] per-step metrics cache + W38 [IMPROVE-175] ssim_patch + patch_bbox + W39 [IMPROVE-176] lpips + W40 [IMPROVE-177] lpips_patch + W43 [IMPROVE-180/181] LPIPS knobs (closure marker + new §7.14 metrics pipeline subsection added in Wave 47 [IMPROVE-188]) | ⋆⋆ | 🔨🔨 | UX |
 | 57 | 7 | Mask-composite post-processing for Kontext | ⋆⋆⋆ | 🔨🔨 | AI/ML |
-| 58 | 8 | Partner LLM through router | ⋆⋆ | 🔨 | Architecture |
+| 58 | 8 | ✓ Partner LLM through router — core chat + streaming flows in `engine.py:chat()` + `astream_chat()` go through `self.router.chat`/`achat` (W17 commit 074d07e); discovery probes (`_get_best_model` Ollama tags lookup) remain on direct urllib (closure marker added in Wave 48 [IMPROVE-189]) | ⋆⋆ | 🔨 | Architecture |
 | 59 | 8 | AI disclosure (NY Safeguard Law) | ⋆⋆⋆⋆⋆* | 🔨🔨 | Security |
 | 60 | 8 | Crisis-detection guardrail | ⋆⋆⋆⋆⋆ | 🔨🔨🔨 | Security |
 | 61 | 8 | ✓ Memory decay configuration | ⋆⋆ | 🔨🔨 | Memory |
