@@ -91,7 +91,7 @@ data/images/editor/{session_id}/
 
 ## 7.3 Operation dispatch — how `apply_edit` picks a function
 
-[`ImageEditorService.apply_edit(session_id, operation, params)`](../../src/local_ai_platform/images/editor.py:241):
+[`ImageEditorService.apply_edit(session_id, operation, params)`](../../src/local_ai_platform/images/editor.py:707):
 
 ```
 1. Load session (from memory or DB).
@@ -124,7 +124,7 @@ The `_use_original = operation in ("preset", "auto_enhance", "lut")` branch is s
 
 ## 7.4 Classical processors — the biggest registry
 
-[`processors.py`](../../src/local_ai_platform/images/processors.py). 1,275 lines. Pure algorithmic operations using PIL, NumPy, and OpenCV (when installed). No neural inference.
+[`processors.py`](../../src/local_ai_platform/images/processors.py). 1,287 lines. Pure algorithmic operations using PIL, NumPy, and OpenCV (when installed). No neural inference.
 
 ### Categories (condensed)
 
@@ -155,7 +155,7 @@ Presets are hard-coded recipes (not user-extensible today) — each preset is a 
 
 ## 7.5 AI enhance operations (`ai_enhance.py`)
 
-The biggest file in the project (3,610 lines) and the most landmine-heavy. Exports an `AI_OPERATIONS` dict with 7 operations plus the central `instruct_edit` entry point.
+The biggest file in the project (4,107 lines, post-Wave-43 [IMPROVE-180/181] LPIPS knobs + W44 accelerate-probe-related growth) and the most landmine-heavy. Exports an `AI_OPERATIONS` dict with 7 operations plus the central `instruct_edit` entry point.
 
 | Operation | Library | GPU | Est. time | What it does |
 |---|---|:---:|---:|---|
@@ -173,7 +173,7 @@ The biggest file in the project (3,610 lines) and the most landmine-heavy. Expor
 
 ## 7.6 The three instruct-edit models
 
-`INSTRUCT_MODELS` dict at [ai_enhance.py:433](../../src/local_ai_platform/images/ai_enhance.py:433):
+`INSTRUCT_MODELS` dict at [ai_enhance.py:472](../../src/local_ai_platform/images/ai_enhance.py:472):
 
 | Key | Display name | Default guidance | Default steps | Approx. VRAM |
 |---|---|---:|---:|---|
@@ -183,7 +183,7 @@ The biggest file in the project (3,610 lines) and the most landmine-heavy. Expor
 
 ### `instruct_edit(image, instruction, model, …)`
 
-[ai_enhance.py:1943](../../src/local_ai_platform/images/ai_enhance.py:1943). The entry point. Dispatch:
+[ai_enhance.py:2103](../../src/local_ai_platform/images/ai_enhance.py:2103). The entry point. Dispatch:
 
 1. **`model == "nunchaku"`** — rewritten to `model="kontext"` with a `_nunchaku_mode=True` flag. Nunchaku and Kontext share *all* inference logic; only the pipeline loader differs (`_load_nunchaku_pipeline` vs `_load_kontext_pipeline`).
 2. **`model == "kontext"`** — the shared inference block (lines 2013–~3070): VRAM precheck, Ollama eviction, image resize to `KONTEXT_MAX_SIDE` (default 768), pipeline load under `_kontext_lock`, SDPA kernel forced to flash + efficient, optional true CFG (when `true_cfg_scale > 1.0` + negative prompt), per-step callback with VRAM logging.
@@ -191,7 +191,7 @@ The biggest file in the project (3,610 lines) and the most landmine-heavy. Expor
 
 ### Kontext GGUF (`_load_kontext_pipeline`)
 
-[ai_enhance.py:960](../../src/local_ai_platform/images/ai_enhance.py:960). Download + load flow:
+[ai_enhance.py:1100](../../src/local_ai_platform/images/ai_enhance.py:1100). Download + load flow:
 
 1. Pick quant via `_get_kontext_gguf_variant()` — reads `KONTEXT_GGUF_QUANT` env, defaults to `Q3_K_S` (best fit for 8GB). Supported: Q2_K, Q3_K_S, Q3_K_M, Q4_0, Q4_K_S, Q4_K_M, Q5_K_S, Q5_K_M, Q6_K, Q8_0.
 2. Download `flux1-kontext-dev-{QUANT}.gguf` from `city96/FLUX.1-Kontext-dev-gguf` using `hf_hub_download` with `HF_TOKEN`.
@@ -203,7 +203,7 @@ The biggest file in the project (3,610 lines) and the most landmine-heavy. Expor
 
 ### Nunchaku (`_load_kontext_nunchaku` + `_load_nunchaku_pipeline`)
 
-[ai_enhance.py:771](../../src/local_ai_platform/images/ai_enhance.py:771). Same pipeline shape but transformer comes from `nunchaku-ai`'s `NunchakuFluxTransformer2dModel.from_pretrained(...)` with SVDQuant INT4 weights. Specific constraints (every one of these has burned this project before):
+[ai_enhance.py:1081](../../src/local_ai_platform/images/ai_enhance.py:1081). Same pipeline shape but transformer comes from `nunchaku-ai`'s `NunchakuFluxTransformer2dModel.from_pretrained(...)` with SVDQuant INT4 weights. Specific constraints (every one of these has burned this project before):
 
 - **Package name:** `nunchaku-ai` (not `nunchaku` — PyPI has an unrelated statistics library).
 - **Class name:** `NunchakuFluxTransformer2dModel` with lowercase `d` in `Flux2dModel`.
@@ -221,7 +221,7 @@ All of the above is enforced in `_load_nunchaku_pipeline`. Any future code that 
 
 ### CosXL (`_load_cosxl_pipeline`)
 
-[ai_enhance.py:1735](../../src/local_ai_platform/images/ai_enhance.py:1735). Uses `StableDiffusionXLInstructPix2PixPipeline` (the diffusers class that corresponds to the SDXL InstructPix2Pix variant). Loads weights from `cosxl_edit.safetensors` (one-shot download from `stabilityai/cosxl`). The code comments reference "IP2P" internally — that's not legacy; it's the literal diffusers class name.
+[ai_enhance.py:1895](../../src/local_ai_platform/images/ai_enhance.py:1895). Uses `StableDiffusionXLInstructPix2PixPipeline` (the diffusers class that corresponds to the SDXL InstructPix2Pix variant). Loads weights from `cosxl_edit.safetensors` (one-shot download from `stabilityai/cosxl`). The code comments reference "IP2P" internally — that's not legacy; it's the literal diffusers class name.
 
 ### Model selection flow
 
@@ -238,9 +238,9 @@ Flutter EditorPage → model chip (kontext / nunchaku / cosxl)
 
 Kontext and Nunchaku each need ~7 GB VRAM on an 8 GB card. That leaves no room for an Ollama model sharing the GPU. The editor's answer is to **kill other GPU processes** proactively:
 
-- [`_check_vram_available(min_free_gb=7.0)`](../../src/local_ai_platform/images/ai_enhance.py:490): queries `torch.cuda.mem_get_info`, logs `[KONTEXT] VRAM precheck`, raises `RuntimeError` with a list of VRAM-hogging processes if insufficient.
-- [`_evict_ollama_from_gpu`](../../src/local_ai_platform/images/ai_enhance.py:535): runs before pipeline load *and* again right before inference (in case Ollama auto-reloaded during the 12s load). Uses `subprocess` + nvidia-smi's process list + `taskkill`/`kill` to stop Ollama's child processes.
-- [`_restart_ollama_service`](../../src/local_ai_platform/images/ai_enhance.py:613): called after editing completes, spawning a background thread to bring Ollama back up. Gated by `KONTEXT_KILL_OLLAMA` env var (default true).
+- [`_check_vram_available(min_free_gb=7.0)`](../../src/local_ai_platform/images/ai_enhance.py:526): queries `torch.cuda.mem_get_info`, logs `[KONTEXT] VRAM precheck`, raises `RuntimeError` with a list of VRAM-hogging processes if insufficient.
+- [`_evict_ollama_from_gpu`](../../src/local_ai_platform/images/ai_enhance.py:652): runs before pipeline load *and* again right before inference (in case Ollama auto-reloaded during the 12s load). Uses `subprocess` + nvidia-smi's process list + `taskkill`/`kill` to stop Ollama's child processes.
+- [`_restart_ollama_service`](../../src/local_ai_platform/images/ai_enhance.py:729): called after editing completes, spawning a background thread to bring Ollama back up. Gated by `KONTEXT_KILL_OLLAMA` env var (default true).
 
 This is blunt. But the alternative — asking the user to manually shut down their chat LLM before editing — was worse. [IMPROVE-50]
 
@@ -263,7 +263,7 @@ _instruct_lock  = threading.Lock()     # outer coordinator
 
 ## 7.9 ONNX + CV composite operations (`ai_models.py`)
 
-The other half of the AI surface. 830 lines. All CPU-only (ONNX Runtime or OpenCV). Small models (≤ 208 MB) — first-use download to `data/models/onnx/`. Registered in `AI_CV_OPERATIONS`:
+The other half of the AI surface. 847 lines. All CPU-only (ONNX Runtime or OpenCV). Small models (≤ 208 MB) — first-use download to `data/models/onnx/`. Registered in `AI_CV_OPERATIONS`:
 
 | Operation | Model | Size | Time | Notes |
 |---|---|---:|---:|---|
@@ -278,7 +278,7 @@ The other half of the AI surface. 830 lines. All CPU-only (ONNX Runtime or OpenC
 
 ### `analyze_image_quality` — the smart-suggestions input
 
-[ai_models.py:143](../../src/local_ai_platform/images/ai_models.py:143). Returns a dict with brightness, contrast, saturation, sharpness, color_cast, is_low_light / is_hazy / is_noisy / is_blurry flags, faces (via OpenCV Haar cascade), BRISQUE perceptual score if available, and **`suggested_tools: list[str]`** — a human-readable list of recommended operations based on the analysis.
+[ai_models.py:161](../../src/local_ai_platform/images/ai_models.py:161). Returns a dict with brightness, contrast, saturation, sharpness, color_cast, is_low_light / is_hazy / is_noisy / is_blurry flags, faces (via OpenCV Haar cascade), BRISQUE perceptual score if available, and **`suggested_tools: list[str]`** — a human-readable list of recommended operations based on the analysis.
 
 This is what `POST /editor/{sid}/analyze` returns. The Flutter editor surfaces the suggestions as chips the user can click to one-click-apply.
 
@@ -286,7 +286,7 @@ This is what `POST /editor/{sid}/analyze` returns. The Flutter editor surfaces t
 
 ## 7.10 Edit prompt enhancement
 
-`POST /editor/enhance-prompt {instruction, model}` ([api_server.py:4855](../../api_server.py:4855)) → [`ai_enhance.enhance_edit_prompt(instruction, router, config, model)`](../../src/local_ai_platform/images/ai_enhance.py:3135).
+`POST /editor/enhance-prompt {instruction, model}` ([routers/editor.py:82](../../src/local_ai_platform/api/routers/editor.py:82)) → [`ai_enhance.enhance_edit_prompt(instruction, router, config, model)`](../../src/local_ai_platform/images/ai_enhance.py:3408).
 
 Takes a user's plain-English instruction ("make it sunset") and rewrites it into an enhanced version tuned to the target edit model:
 
@@ -358,11 +358,13 @@ All the items below are cross-referenced to `src/local_ai_platform/images/CLAUDE
 
 ## 7.13 Improvement ideas
 
-### [IMPROVE-49] Per-call GGUF quant override, not env-only
+### [IMPROVE-49] Per-call GGUF quant override, not env-only (✓ shipped)
 
-**Problem:** `KONTEXT_GGUF_QUANT` (env, default `Q3_K_S`) controls Kontext quant globally. Changing it requires a server restart. Users with a 12 GB card who'd benefit from Q5_K_M quality can't opt-in per-call.
+**Problem (historical):** `KONTEXT_GGUF_QUANT` (env, default `Q3_K_S`) controlled Kontext quant globally. Changing it required a server restart.
 
-**Proposal:** `params.gguf_quant` passed through from Flutter → `/editor/{sid}/edit` → `instruct_edit(... gguf_quant=None)` → `_load_kontext_pipeline(quant=...)`. Cache is keyed `(model, quant)` so different quants can coexist when there's VRAM for both (rare on 8 GB, common on 16+ GB). Env stays as the default.
+**Outcome:** `params.gguf_quant` threads from Flutter → `/editor/{sid}/edit` → `instruct_edit(..., gguf_quant=...)` → `_resolve_kontext_gguf_quant(requested)` at [ai_enhance.py:826](../../src/local_ai_platform/images/ai_enhance.py:826) → `_load_kontext_pipeline(gguf_quant=...)`. Per-call override falls back to the env-var default when the param is None. The W43 [IMPROVE-181] `EDITOR_METRICS_LPIPS_TRUNK_NET` env-var pattern (invalid value silent fallback + debug log) inspired the per-call resolution shape.
+
+**Proposal (historical):** `params.gguf_quant` passed through from Flutter → `/editor/{sid}/edit` → `instruct_edit(... gguf_quant=None)` → `_load_kontext_pipeline(quant=...)`. Cache is keyed `(model, quant)` so different quants can coexist when there's VRAM for both (rare on 8 GB, common on 16+ GB). Env stays as the default.
 
 **Sources:**
 - [black-forest-labs/FLUX.1-Kontext-dev (HF model card)](https://huggingface.co/black-forest-labs/FLUX.1-Kontext-dev)
@@ -408,27 +410,33 @@ Each subsystem registers an "on_eviction" callback (Ollama: unload via API; edit
 **Sources:**
 - Interaction pattern common in Lightroom / Photoshop; no specific 2026 citation.
 
-### [IMPROVE-53] Archive-on-close instead of destructive delete
+### [IMPROVE-53] Archive-on-close instead of destructive delete (✓ shipped)
 
-**Problem:** closing a session defaults to `cleanup_files=True` → `shutil.rmtree(session_dir)`. Accidental close = lost work. The DB row stays but points at nothing.
+**Problem (historical):** closing a session defaulted to `cleanup_files=True` → `shutil.rmtree(session_dir)`. Accidental close = lost work.
 
-**Proposal:** default to `cleanup_files=False` + a separate "Archive" endpoint that moves the session dir to `data/images/editor/_archive/{date}/{sid}/` with a TTL cleanup job (e.g. 30 days). Users get "recently closed" in the UI without manual re-open. Only true "delete" is explicit.
+**Outcome:** archive-on-close shipped via the editor session lifecycle — closing a session moves the session dir to `data/images/editor/_archive/{YYYY-MM-DD}/{sid}/` rather than rmtree-ing. W30 [IMPROVE-164] added the opt-in `EDITOR_SESSION_TTL_DAYS=N` lifespan TTL cleanup task ([editor_ttl.py](../../src/local_ai_platform/images/editor_ttl.py)) that walks date-bucket subdirs older than N days and drops them via `shutil.rmtree` + DELETEs corresponding `editor_sessions` rows. Default 0 = disabled preserves "archives accumulate forever" semantics until the operator explicitly opts in. `GET /editor/archived` exposes the archive list.
+
+**Proposal (historical):** default to `cleanup_files=False` + a separate "Archive" endpoint that moves the session dir to `data/images/editor/_archive/{date}/{sid}/` with a TTL cleanup job (e.g. 30 days).
 
 **Sources:** UX convention; no external citation.
 
-### [IMPROVE-54] User-defined presets
+### [IMPROVE-54] User-defined presets (✓ shipped)
 
-**Problem:** `apply_preset` uses hard-coded recipes. Users who find a good combination of 5-8 ops can't save it.
+**Problem (historical):** `apply_preset` used hard-coded recipes only.
 
-**Proposal:** `POST /editor/{sid}/preset/save {name, description}` records the last N steps as a preset JSON in a new `presets` table (or a simple JSON file in `data/presets/`). `POST /editor/{sid}/preset/apply {preset_name}` replays the ops in order. `GET /editor/presets` lists them. Presets apply fresh (like current built-ins) by reloading from source.
+**Outcome:** user-defined editor presets shipped via W28 [IMPROVE-162] (preset JSON export+import endpoints `GET /editor/presets/{preset_id}/export` + `POST /editor/presets/import`) + a full preset CRUD surface in [routers/editor.py](../../src/local_ai_platform/api/routers/editor.py): `GET /editor/presets` (list), `DELETE /editor/presets/{preset_id}`, `POST /editor/{session_id}/preset/save` (persist last N steps as preset row in the new `editor_presets` SQLite table), `POST /editor/{session_id}/preset/apply/{preset_id}` (replay ops). W43 [IMPROVE-182] added JSON-Schema 2020-12 validation against `data/registries/schemas/presets.schema.json` to catch operator-edit typos in imported preset payloads.
+
+**Proposal (historical):** `POST /editor/{sid}/preset/save {name, description}` records the last N steps as a preset JSON in a new `presets` table (or a simple JSON file in `data/presets/`). `POST /editor/{sid}/preset/apply {preset_name}` replays the ops in order. `GET /editor/presets` lists them. Presets apply fresh (like current built-ins) by reloading from source.
 
 **Sources:** extension of the existing preset pattern; no external citation.
 
-### [IMPROVE-55] Test the edit prompt enhancer against each target model
+### [IMPROVE-55] Test the edit prompt enhancer against each target model (✓ shipped)
 
-**Problem:** the `target-state` vs `imperative` format split in `enhance_edit_prompt` is correct in the system prompt, but a small local LLM (the default) often drifts back to imperative even when asked for target-state. No regression tests, no evaluation.
+**Problem (historical):** the `target-state` vs `imperative` format split in `enhance_edit_prompt` was correct in the system prompt, but a small local LLM (the default) often drifted back to imperative even when asked for target-state. No regression tests, no evaluation.
 
-**Proposal:** write a small eval suite (`tests/eval/edit_prompt_enhancer.py`):
+**Outcome:** W34 [IMPROVE-168] shipped the real-LLM enhancer eval suite at `tests/eval/test_edit_prompt_enhancer_real_llm.py`. Gated by `LOCAL_AI_EVAL_REAL_LLM=1` env-var (default-off so CI + most local dev pay zero cost); 8 curated test cases pin content-word preservation + forbidden-phrase rejection + multi-model behaviour (kontext target-state vs cosxl imperative format) + the canonical "make the girls kiss" regression case. Pass-rate-per-LLM tracking lets the user pick an enhancer that works well.
+
+**Proposal (historical):** write a small eval suite (`tests/eval/edit_prompt_enhancer.py`):
 
 - Inputs: 20 hand-picked instructions covering common edit patterns.
 - For each instruction × target model × enhancer LLM combination: run the enhancer, validate the output matches the target format (heuristic regex: starts with "change" or imperative verb for pix2pix/cosxl; is a noun-phrase description for kontext).
@@ -439,11 +447,21 @@ A related simpler fix: when `_validate_enhanced_prompt` fails, instead of silent
 **Sources:**
 - [anthropic-skills:skill-creator eval patterns](https://docs.anthropic.com) — eval-driven prompt tuning
 
-### [IMPROVE-56] Return diff metrics from compare
+### [IMPROVE-56] Return diff metrics from compare (✓ shipped + extensively built upon)
 
-**Problem:** `GET /editor/{sid}/compare?a=&b=` returns two image paths. The UI side-by-sides them. No "what actually changed?" summary.
+**Problem (historical):** `GET /editor/{sid}/compare?a=&b=` returned two image paths. No "what actually changed?" summary.
 
-**Proposal:** extend the endpoint with an opt-in `metrics=true` flag that computes:
+**Outcome:** the diff metrics endpoint shipped + has grown across 6 waves. Current `compute_diff_metrics` in [compose_utils.py](../../src/local_ai_platform/images/compose_utils.py) returns a 10+ field dict (see §7.14 below for the full pipeline narrative). Build-up:
+
+- **Initial ship**: `mean_pixel_diff`, `changed_pixels_pct`, `region_map_base64`, `histogram_delta`, full-frame `ssim`.
+- **W35 [IMPROVE-169]**: per-step metrics caching keyed by `(path_a, path_b)` on `EditSession.metrics_cache`.
+- **W38 [IMPROVE-175]**: `ssim_patch` + `patch_bbox` fields. Bbox computed from changed-pixels mask; SSIM compute crops both arrays to that bbox before running `skimage.metrics.structural_similarity`.
+- **W39 [IMPROVE-176]**: `lpips` field gated by opt-in `EDITOR_METRICS_LPIPS_ENABLED=1` env-var (default trunk net `alex`).
+- **W40 [IMPROVE-177]**: `lpips_patch` field paired with W38 `patch_bbox` (perceptual variant of cropped-patch optimization).
+- **W43 [IMPROVE-180]**: `EDITOR_METRICS_LPIPS_PATCH_MIN_DIM` env-var gate (default 11 — AlexNet kernel minimum).
+- **W43 [IMPROVE-181]**: `EDITOR_METRICS_LPIPS_TRUNK_NET` env-var (alex / vgg / squeeze).
+
+**Proposal (historical):** extend the endpoint with an opt-in `metrics=true` flag that computes:
 
 - `mean_pixel_diff` (per-channel RGB)
 - `changed_pixels_pct` (threshold 8 / 255)
@@ -471,7 +489,48 @@ A more ambitious version would run Kontext only on the masked patch (cropped + p
 
 ---
 
-## 7.14 Open questions
+## 7.14 Metrics pipeline — `compute_diff_metrics`
+
+The editor's diff metrics surface lives in [`compose_utils.py:compute_diff_metrics`](../../src/local_ai_platform/images/compose_utils.py). [IMPROVE-56] shipped the initial endpoint; W35-W43 built on top. Current return shape:
+
+| Field | Type | Notes |
+|---|---|---|
+| `mean_pixel_diff` | dict (per-channel RGB) | always present |
+| `changed_pixels_pct` | float | threshold 8 / 255 |
+| `region_map_base64` | str (small PNG) | overlay of changed regions |
+| `histogram_delta` | dict per channel | RGB histogram diff |
+| `ssim` | float \| None | full-frame SSIM (W14 baseline) |
+| `ssim_patch` | float \| None | bbox-cropped SSIM (W38 [IMPROVE-175]) |
+| `patch_bbox` | dict \| None | `{x0, y0, x1, y1, frac}` of the changed-pixels bbox |
+| `lpips` | float \| None | full-frame LPIPS, opt-in (W39 [IMPROVE-176]) |
+| `lpips_patch` | float \| None | bbox-cropped LPIPS (W40 [IMPROVE-177]) |
+| `width`, `height` | int | post-resize dimensions |
+
+### Env-var knobs
+
+| Variable | Default | Notes |
+|---|---|---|
+| `EDITOR_METRICS_LPIPS_ENABLED` | `0` (off) | Opt-in gate for both `lpips` + `lpips_patch` (W39 [IMPROVE-176]). |
+| `EDITOR_METRICS_LPIPS_TRUNK_NET` | `alex` | Trunk net selection (W43 [IMPROVE-181]) — `alex` / `vgg` / `squeeze`. Invalid value silent fallback to `alex` + debug log. |
+| `EDITOR_METRICS_LPIPS_PATCH_MIN_DIM` | `11` | Minimum bbox dimension for the cropped-patch LPIPS variant (W43 [IMPROVE-180] — AlexNet's 11×11 kernel minimum). Sub-min bboxes fall back to full-frame LPIPS. |
+
+### Caching
+
+W35 [IMPROVE-169] added a per-step metrics cache: `EditSession.metrics_cache: dict[tuple[str, str], dict[str, Any]]` keyed by `(path_a, path_b)`. Repeated `GET /editor/{session_id}/compare?metrics=true` calls for the same step pair return the cached dict instead of recomputing the SSIM + region-map base64. Path-based keys are invariant under undo / redo / new-edit-after-undo per the [IMPROVE-53] file-stability invariant — no cache invalidation needed.
+
+### Failure modes (all degrade gracefully)
+
+- LPIPS disabled → `lpips` and `lpips_patch` are `None`.
+- `lpips` package not installed → `lpips` and `lpips_patch` are `None` (best-effort skip).
+- Bbox covers ≥90% of frame OR bbox is too small for `win_size=7` SSIM window → `ssim_patch` falls back to full-frame `ssim` value.
+- Bbox dimension < `EDITOR_METRICS_LPIPS_PATCH_MIN_DIM` → `lpips_patch` falls back to full-frame `lpips` value.
+- Inner crop SSIM/LPIPS compute raises → falls back to full-frame value (defence-in-depth, even past the explicit gates).
+
+The overall discipline mirrors the W31-W34-W42 default-off env-var pattern: every new metric is opt-in, every failure path falls back gracefully, and pre-existing behaviour is preserved when the new feature is disabled.
+
+---
+
+## 7.15 Open questions
 
 1. Is `_evict_ollama_from_gpu` causing user-visible pain, or is the restart fast enough that nobody notices? Answers shape [IMPROVE-50] urgency.
 2. Have users asked for custom presets ([IMPROVE-54]) or for deeper history tools ([IMPROVE-52])? Different audiences.

@@ -232,14 +232,14 @@ Sortable if you paste into a spreadsheet. Chapter column links back to the origi
 | 46 | 6 | ✓ Latent / SDXL upscaler option | ⋆⋆ | 🔨🔨 | AI/ML |
 | 47 | 6 | Read safetensors metadata | ⋆⋆ | 🔨 | AI/ML |
 | 48 | 6 | Warmup after pipeline load | ⋆⋆ | 🔨 | AI/ML |
-| 49 | 7 | Per-call GGUF quant override | ⋆⋆ | 🔨 | AI/ML |
+| 49 | 7 | ✓ Per-call GGUF quant override — `params.gguf_quant` threading through `instruct_edit(..., gguf_quant=...)` → `_resolve_kontext_gguf_quant(requested)` at `ai_enhance.py:826` → `_load_kontext_pipeline(gguf_quant=...)`; per-call override falls back to `KONTEXT_GGUF_QUANT` env-var when None (shipped pre-Wave-43; closure marker added in Wave 47 [IMPROVE-188]) | ⋆⋆ | 🔨 | AI/ML |
 | 50 | 7 | VRAM coordinator (replace _evict_ollama) | ⋆⋆⋆⋆ | 🔨🔨🔨 | Resources |
 | 51 | 7 | Weights-readiness reporting | ⋆⋆⋆ | 🔨🔨 | UX |
 | 52 | 7 | Partial undo / blend slider | ⋆⋆⋆ | 🔨🔨 | UX |
-| 53 | 7 | Archive-on-close for editor sessions | ⋆⋆⋆ | 🔨 | UX |
-| 54 | 7 | User-defined editor presets | ⋆⋆⋆ | 🔨🔨🔨 | UX |
-| 55 | 7 | Regression tests for edit-prompt enhancer | ⋆⋆ | 🔨🔨 | UX |
-| 56 | 7 | Diff metrics from /editor/compare | ⋆⋆ | 🔨🔨 | UX |
+| 53 | 7 | ✓ Archive-on-close for editor sessions — closing a session moves the dir to `data/images/editor/_archive/{YYYY-MM-DD}/{sid}/` rather than rmtree-ing; W30 [IMPROVE-164] added the `EDITOR_SESSION_TTL_DAYS=N` lifespan TTL cleanup task; `GET /editor/archived` exposes the archive list (shipped pre-Wave-43; closure marker added in Wave 47 [IMPROVE-188]) | ⋆⋆⋆ | 🔨 | UX |
+| 54 | 7 | ✓ User-defined editor presets — full preset CRUD surface in `routers/editor.py` (list / save / apply / export / import / delete) + new `editor_presets` SQLite table; W28 [IMPROVE-162] added export+import endpoints + W43 [IMPROVE-182] added JSON-Schema 2020-12 validation against `data/registries/schemas/presets.schema.json` (shipped pre-Wave-43; closure marker added in Wave 47 [IMPROVE-188]) | ⋆⋆⋆ | 🔨🔨🔨 | UX |
+| 55 | 7 | ✓ Regression tests for edit-prompt enhancer — W34 [IMPROVE-168] shipped the real-LLM enhancer eval suite at `tests/eval/test_edit_prompt_enhancer_real_llm.py` (gated by `LOCAL_AI_EVAL_REAL_LLM=1`; 8 curated test cases pin content-word preservation + forbidden-phrase rejection + multi-model behaviour) (closure marker added in Wave 47 [IMPROVE-188]) | ⋆⋆ | 🔨🔨 | UX |
+| 56 | 7 | ✓ Diff metrics from /editor/compare — initial endpoint shipped + extensively built upon: W35 [IMPROVE-169] per-step metrics cache + W38 [IMPROVE-175] ssim_patch + patch_bbox + W39 [IMPROVE-176] lpips + W40 [IMPROVE-177] lpips_patch + W43 [IMPROVE-180/181] LPIPS knobs (closure marker + new §7.14 metrics pipeline subsection added in Wave 47 [IMPROVE-188]) | ⋆⋆ | 🔨🔨 | UX |
 | 57 | 7 | Mask-composite post-processing for Kontext | ⋆⋆⋆ | 🔨🔨 | AI/ML |
 | 58 | 8 | Partner LLM through router | ⋆⋆ | 🔨 | Architecture |
 | 59 | 8 | AI disclosure (NY Safeguard Law) | ⋆⋆⋆⋆⋆* | 🔨🔨 | Security |
