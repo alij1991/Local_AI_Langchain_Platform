@@ -111,7 +111,7 @@ The Flutter AgentsPage (`agents_page.dart`, 958 lines) is mostly a form wrapper 
 
 ## 4.5 Default agents — "assistant" and "chat"
 
-Created in `lifespan` ([api_server.py:188-207](../../api_server.py:188)) if they don't already exist:
+Created in `lifespan` (api_server.py — see the lifespan block) if they don't already exist:
 
 - `assistant` and `chat` — same system prompt, both use `config.default_model`, both get bound to the four "web + utility" tools (`web_search`, `fetch_webpage`, `calculator`, `utc_now`).
 - These are the defaults the Chat page and other "just want an agent" callers fall back to.
@@ -125,13 +125,13 @@ Use web_search when the user asks for current information, prices, availability,
 or anything that requires up-to-date data. Always provide accurate, current information.
 ```
 
-Then `_inject_date` ([agents.py:348-356](../../src/local_ai_platform/agents.py:348)) re-appends today's date on every turn unless the prompt already mentions a date — so even if the defaults are rebuilt with a stale prompt, the date stays fresh.
+Then `_inject_date` ([agents.py:643](../../src/local_ai_platform/agents.py:643)) re-appends today's date on every turn unless the prompt already mentions a date — so even if the defaults are rebuilt with a stale prompt, the date stays fresh.
 
 ---
 
 ## 4.6 Supervisor agents — LLM-driven routing
 
-`POST /agents/supervisor {name, model_name, specialist_agents, provider}` creates a supervisor agent ([agents.py:774-822](../../src/local_ai_platform/agents.py:774)):
+`POST /agents/supervisor {name, model_name, specialist_agents, provider}` creates a supervisor agent ([agents.py:1287](../../src/local_ai_platform/agents.py:1287)):
 
 1. For each specialist, register an `add_agent_delegate_tool(f"delegate_to_{agent}", agent)`:
    ```python
@@ -210,7 +210,7 @@ The sandbox check is `str(resolved).startswith(str(WORKSPACE_ROOT))` after `.res
 | `web_search(query, max_results=5)` | **Tavily** if `TAVILY_API_KEY` is set, else **DuckDuckGo** (via `duckduckgo-search`). |
 | `fetch_webpage(url, max_chars=5000)` | `httpx.get(..., follow_redirects=True)`, then HTML-strip via regex. Falls back to stdlib `urllib` if httpx missing. |
 
-Tavily is a 2024-era agent-oriented search API with cleaner JSON and citations. DuckDuckGo is the no-API-key fallback — returns `{title, body, href}`. The presence check (`GET /tools/tavily/status`) peeks at the env var directly — it doesn't read from the DB tool config ([api_server.py:3944-3948](../../api_server.py:3944)). [IMPROVE-22]
+Tavily is a 2024-era agent-oriented search API with cleaner JSON and citations. DuckDuckGo is the no-API-key fallback — returns `{title, body, href}`. The presence check (`GET /tools/tavily/status`) peeks at the env var directly — it doesn't read from the DB tool config (now in [routers/tools.py](../../src/local_ai_platform/api/routers/tools.py) post the [IMPROVE-1] router split). [IMPROVE-22]
 
 ### 4.7.5 Image (`image_tools.py`)
 
@@ -339,7 +339,7 @@ Two transports supported end-to-end:
 
 ## 4.11 Dangerous-tools and human-in-the-loop — the bridge to chapter 3
 
-`_has_dangerous_tools(agent_name)` ([agents.py:176-179](../../src/local_ai_platform/agents.py:176)) checks whether any of the agent's bound tools has `metadata.dangerous == True`. Today that's `run_python`, `run_shell`, and nothing else.
+`_has_dangerous_tools(agent_name)` ([agents.py:219](../../src/local_ai_platform/agents.py:219)) checks whether any of the agent's bound tools has `metadata.dangerous == True`. Today that's `run_python`, `run_shell`, and nothing else.
 
 If the agent has any dangerous tool, `astream_chat_with_agent` creates the LangGraph agent with `interrupt_before=["tools"]`. The run pauses before each tool node, emits the `interrupt` typed event, and the Flutter UI surfaces an approval dialog. Resume via `/chat/resume` (chapter 3 §3.10).
 
