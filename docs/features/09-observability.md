@@ -90,13 +90,13 @@ Each trace JSON has top-level metadata + `events: [...]`. Event shape:
 | Voice partner (`/partner/chat`) | ❌ | `partner_conversations` has emotional tone; no trace file |
 | MCP tool invocation (`/mcp/servers/.../invoke`) | ❌ | Direct call — no recorder |
 
-The trace store is **chat-centric**. Other subsystems have their own persistence (image sessions, edit history, partner conversations) but don't produce unified trace JSONs. [IMPROVE-4 / IMPROVE-38]
+The trace store is **chat-centric**. Other subsystems have their own persistence (image sessions, edit history, partner conversations) but don't produce unified trace JSONs. [IMPROVE-4 / IMPROVE-38] — partial: W31 [IMPROVE-165] adds `conversation_summaries` for inter-node DAG context that surfaces per-system run, but full unified trace integration NOT yet shipped.
 
 ---
 
 ## 9.3 Runs endpoints
 
-[api_server.py:5975-6015](../../api_server.py:5975).
+Observability routes now live in [routers/observability.py](../../src/local_ai_platform/api/routers/observability.py) (post the [IMPROVE-1] router split shipped pre-Wave-43).
 
 ### `GET /runs?limit=20&agent=<name>`
 
