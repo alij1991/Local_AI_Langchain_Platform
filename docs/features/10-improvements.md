@@ -1365,7 +1365,7 @@ Wave 50 is wave 5 of 5 (FINAL) in the Phase 2 capstone audit arc per the §10.5.
     widget tests 182 unchanged. Phase 2 was 100%
     documentation work — no code changes shipped.
 
-## Phase 2 close summary
+### Phase 2 close summary
 
 Phase 2 of the §10.5.2 closure plan SHIPPED across 5
 waves + 18 commits + 8 NEW IMPROVE-N items:
@@ -1402,7 +1402,7 @@ Phase 2 was 100% documentation work — no code changes
 shipped, no test deltas, no route changes. Project
 enters "fully audited v1.0" state.
 
-## What stays deferred after Phase 2 (per §10.5.2)
+### What stays deferred after Phase 2 (per §10.5.2)
 
   * **Trigger-gated audit-spawned items** (~14): wait
     for explicit triggers (Nth consumer, real hardware
@@ -1440,7 +1440,7 @@ enters "fully audited v1.0" state.
   * **Path F emergent work**: any new requirements
     that surface during use.
 
-## What follows after Phase 2
+### What follows after Phase 2
 
 **Phase 3 follows ONLY after explicit user direction** —
 the project is at the natural "fully audited v1.0" pause
