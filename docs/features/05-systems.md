@@ -16,7 +16,7 @@
 
 Don't let the shared prefix fool you — the "template deploys an agent; the system executes a DAG" split is load-bearing.
 
-**Naming heads-up:** the file `system_info.py` is *not* the DAG execution engine (despite what `CLAUDE_SYSTEMS.md` currently claims). `system_info.py` holds hardware detection + model recommendations (chapter 2, §2.10). The DAG executor is `AgentOrchestrator.execute_system_graph` in [agents.py:901](../../src/local_ai_platform/agents.py:901). See §5.12 for what to correct in `CLAUDE_SYSTEMS.md`.
+**Naming heads-up:** the file `system_info.py` is *not* the DAG execution engine. `system_info.py` holds hardware detection + model recommendations (chapter 2, §2.10). The DAG executor is `AgentOrchestrator.execute_system_graph` in [agents.py:1431](../../src/local_ai_platform/agents.py:1431). The `CLAUDE_SYSTEMS.md` landmine doc was corrected via [IMPROVE-30] (✓ shipped pre-Wave-43); it now correctly points at `agents.py::execute_system_graph` and describes the actual cycle-handling shape (Kahn check at save via [IMPROVE-37], `visited` set + `max_steps` safety cap at runtime).
 
 ---
 
@@ -139,7 +139,7 @@ Clicking Save → `PUT /systems/{name}` with `{name, definition}` where `definit
 
 ## 5.5 DAG execution — `execute_system_graph`
 
-[agents.py:901-1041](../../src/local_ai_platform/agents.py:901). This is the part that's easy to miss. Walk it once carefully.
+[agents.py:1431+](../../src/local_ai_platform/agents.py:1431). This is the part that's easy to miss. Walk it once carefully.
 
 ### Graph prep
 
@@ -225,7 +225,7 @@ No trace is written to disk. The trace store (chapter 1 §1.9) isn't engaged for
 
 ## 5.6 `POST /systems/{name}/chat`
 
-[api_server.py:4199-4231](../../api_server.py:4199). The minimal wrapper:
+[routers/systems.py:411](../../src/local_ai_platform/api/routers/systems.py:411). The minimal wrapper:
 
 ```
 1. Parse request body (accepts JSON or multipart; only uses {message, conversation_id}).
@@ -323,11 +323,13 @@ That decoupling is *good* in that systems compose cleanly over agents, but the m
 
 ## 5.11 Improvement ideas
 
-### [IMPROVE-30] Fix `CLAUDE_SYSTEMS.md` and add a real executor reference
+### [IMPROVE-30] Fix `CLAUDE_SYSTEMS.md` and add a real executor reference (✓ shipped pre-Wave-43)
 
-**Problem:** the landmine doc lies about where the DAG engine is and how cycle detection works. Anyone following its guidance will look in the wrong place and reason from wrong assumptions.
+**Problem (historical):** the landmine doc lied about where the DAG engine was and how cycle detection works.
 
-**Proposal:** amend `src/local_ai_platform/CLAUDE_SYSTEMS.md`:
+**Outcome:** `src/local_ai_platform/CLAUDE_SYSTEMS.md` was corrected. The file now points at `agents.py::execute_system_graph` and accurately describes the cycle-handling shape (Kahn check at save via [IMPROVE-37], `visited` + `max_steps` safety cap at runtime).
+
+**Proposal (historical):** amend `src/local_ai_platform/CLAUDE_SYSTEMS.md`:
 
 - Correct "execution engine: system_info.py" → point to `agents.py::execute_system_graph`.
 - Correct "Cycle detection uses Kahn's algorithm" → "No explicit cycle detection; `visited` set plus `max_steps = 2 * len(nodes)` safety cap. A cycle silently collapses to the first traversal order."
@@ -379,11 +381,13 @@ Reject bad input at the boundary with a 400 containing the validator's message. 
 - [FastAPI Best Practices for Production (fastlaunchapi.dev, 2026)](https://fastlaunchapi.dev/blog/fastapi-best-practices-production-2026) — validation at boundaries
 - [Pydantic V2 model_validator docs](https://docs.pydantic.dev/latest/concepts/validators/#model-validators)
 
-### [IMPROVE-32] Stream system execution
+### [IMPROVE-32] Stream system execution (✓ shipped)
 
-**Problem:** `execute_system_graph` is sync and returns the full result at the end. The user waits through N agent calls with no visible progress.
+**Problem (historical):** `execute_system_graph` was sync and returned the full result at the end. The user waited through N agent calls with no visible progress.
 
-**Proposal:** a streaming variant `astream_system_graph` that yields typed events mirroring the chat stream:
+**Outcome:** the streaming variant lives at [routers/systems.py:539](../../src/local_ai_platform/api/routers/systems.py:539) as `POST /systems/{name}/chat/stream` — emits typed events (node_start / token / tool_call / tool_result / node_end / done) via SSE. Wires through `astream_chat_with_agent` per node so each node produces its own stream and the system stream interleaves node-scoped events.
+
+**Proposal (historical):** a streaming variant `astream_system_graph` that yields typed events mirroring the chat stream:
 
 ```
 event: node_start       { node, agent, role }
@@ -454,11 +458,13 @@ At runtime, the router calls a small local model (the same one `prompt_builder_m
 - [DAG-First Agent Orchestration: Why Linear Chains Break at Scale (tianpan.co, 2026-04-10)](https://tianpan.co/blog/2026-04-10-dag-first-agent-orchestration-linear-chains-scale) — parallelism via proper DAG execution
 - [Multi-Agent Orchestration in LangGraph: Supervisor vs Swarm (dev.to)](https://dev.to/focused_dot_io/multi-agent-orchestration-in-langgraph-supervisor-vs-swarm-tradeoffs-and-architecture-1b7e)
 
-### [IMPROVE-37] Explicit cycle detection with Kahn
+### [IMPROVE-37] Explicit cycle detection with Kahn (✓ shipped pre-Wave-43)
 
-**Problem:** cycles are handled by `visited` (collapsed silently) + `max_steps` (never tripped in practice). That's fine for correctness but misleading — a user can't tell from a save whether their graph is acyclic, and the executor will "succeed" on a cyclic graph by skipping the cycle entirely.
+**Problem (historical):** cycles were handled by `visited` (collapsed silently) + `max_steps` (never tripped in practice). The user couldn't tell from a save whether their graph was acyclic.
 
-**Proposal:** run Kahn's topological sort on save (in the validator from [IMPROVE-31]). If `len(topo_order) < len(nodes)` → reject the save with a clear "cycle detected on nodes: [...]" error. This matches what `CLAUDE_SYSTEMS.md` *claims* we do today.
+**Outcome:** Kahn-based cycle check shipped in `src/local_ai_platform/systems_validator.py` — runs at save time before persistence. Cyclic graphs are rejected with a clear "cycle detected on nodes: [...]" error. The runtime `visited` + `max_steps` safety cap in `execute_system_graph` remains as defense-in-depth.
+
+**Proposal (historical):** run Kahn's topological sort on save (in the validator from [IMPROVE-31]). If `len(topo_order) < len(nodes)` → reject the save with a clear "cycle detected on nodes: [...]" error. This matches what `CLAUDE_SYSTEMS.md` *claims* we do today.
 
 **Sources:**
 - [Cycle detection in graphs does not have to be hard (gaultier.github.io)](https://gaultier.github.io/blog/kahns_algorithm.html)
@@ -481,7 +487,49 @@ At runtime, the router calls a small local model (the same one `prompt_builder_m
 
 ---
 
-## 5.12 Open questions
+## 5.12 Classifier confidence arc (W31-W42 build-up)
+
+[IMPROVE-33] (bounded inter-node context) and [IMPROVE-35] (LLM-driven edge routing) shipped originally as proposals; they have since grown into a four-wave classifier-confidence arc. Consolidating here per the W47 [IMPROVE-188] feature-consolidation pattern.
+
+### W31 [IMPROVE-165] — LLM-summarized inter-node DAG context
+
+Pre-W31, the inter-node context builder fell back to a `[... N earlier output(s) elided ...]` truncation marker when the context budget was exceeded. W31 added an opt-in `DAG_INTER_NODE_SUMMARIZATION_MODEL=...` env-var: when set, the executor calls a one-shot LLM summary of the dropped entries instead of the legacy marker. Failure paths (LLM unreachable, summary too long, etc.) fall back to the legacy marker so the executor stays robust.
+
+Implementation: [systems/executor.py:118 `_build_inter_node_context`](../../src/local_ai_platform/systems/executor.py:118). Default empty env-var = disabled preserves truncation-only behaviour.
+
+### W32 [IMPROVE-166] — per-edge `pass` config
+
+Pre-W32, every downstream node received the FULL accumulated context from all prior nodes. W32 added the `edge.rule.pass` field with 3 modes (`all` default / `source_only` / `none`) so DAG authors can scope which prior outputs each downstream agent sees. Per-target tracking with last-fired-edge-wins for the multi-incoming case. Helper signature gains `pass_mode` + `source_node_id` kwargs.
+
+Default `all` preserves pre-W32 behaviour. Invalid `pass_mode` silently falls back to `all` + a debug log line (W43 invalid-value silent-fallback pattern).
+
+### W33 [IMPROVE-167] — DAG classifier confidence threshold
+
+Pre-W33, the `llm_router` rule type accepted whatever the LLM emitted as the next branch. W33 added an opt-in `DAG_CLASSIFIER_CONFIDENCE_THRESHOLD=...` env-var (default 0.0 = disabled) with a heuristic confidence `1 / matched_count` that rejects ambiguous llm_router classifications (multiple options match the response) so the always-fallback edge fires instead of a low-confidence pick.
+
+Implementation: [systems/executor.py:410 `classify_llm_router_edges`](../../src/local_ai_platform/systems/executor.py:410). Provider-agnostic heuristic — works regardless of which LLM provider is running.
+
+### W42 [IMPROVE-179] — logprob-based classifier confidence
+
+Pre-W42, the W33 confidence used a heuristic `1 / matched_count`. W42 added an opt-in `DAG_CLASSIFIER_LOGPROBS_ENABLED=1` env-var that asks the LLM for logprobs on the W33 classifier call (via NEW `logprobs` / `top_logprobs` fields on `GenerationSettings` + Ollama provider passthrough leveraging the existing `ChatResponse.raw` escape hatch). When enabled + the response carries logprobs, derives confidence as `exp(first_token_logprob)` — the LLM's actual probability assigned to its first content-bearing token, in [0, 1] with no rescaling.
+
+Falls back to the W33 heuristic when logprobs are missing OR the env-var is disabled OR the provider doesn't expose logprobs (non-Ollama provider, older Ollama version, request didn't enable logprobs) — graceful degradation across every non-supporting code path. The threshold check (`confidence < threshold` → reject + always-fallback edge fires) works the same way regardless of confidence source.
+
+### Composability
+
+The four waves stack:
+
+- **W31 alone**: better context at budget-exceeded boundary. Independent of other env-vars.
+- **W31 + W32**: scope which prior outputs reach each node + summarize when budget exceeded.
+- **W33 alone**: reject ambiguous llm_router classifications via heuristic.
+- **W33 + W42**: reject ambiguous classifications via the LLM's actual emission probability.
+- **W31 + W32 + W33 + W42**: full classifier-confidence arc — bounded context, scoped pass, threshold-based rejection, logprob-based confidence.
+
+Each is independently opt-in via its own env-var. The W17 cleanup YAGNI principle applies: don't bundle the env-vars into a single mega-config; let operators pick which features to enable.
+
+---
+
+## 5.13 Open questions
 
 1. Is parallel wave execution ([IMPROVE-36]) actually desired? The comment chain says sequential is intentional for predictable token budget — but the token budget argument matters less now that the provider layer has KV-cache compression (chapter 2 §2.5). Worth revisiting.
 2. Are you using any of the 6 templates, or has everyone graduated to the custom designer? That shapes whether [IMPROVE-34] (renaming) is worth the churn.

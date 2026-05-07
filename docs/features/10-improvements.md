@@ -213,14 +213,14 @@ Sortable if you paste into a spreadsheet. Chapter column links back to the origi
 | 27 | 4 | Shaped input for /tools/{id}/test | ⋆⋆ | 🔨 | Tools |
 | 28 | 4 | Wire MCP tools into agent registry | ⋆⋆⋆⋆ | 🔨🔨🔨 | Tools |
 | 29 | 4 | Per-call dangerous-tool interrupts | ⋆⋆⋆ | 🔨🔨 | Tools |
-| 30 | 5 | Fix CLAUDE_SYSTEMS.md | ⋆⋆⋆ | 🔨 | Architecture |
+| 30 | 5 | ✓ Fix CLAUDE_SYSTEMS.md — pointed at `agents.py::execute_system_graph` + accurate cycle-handling description (Kahn check at save via [IMPROVE-37] + `visited` + `max_steps` safety cap at runtime) (shipped pre-Wave-43; closure marker added in Wave 49 [IMPROVE-191]) | ⋆⋆⋆ | 🔨 | Architecture |
 | 31 | 5 | Pydantic validation at /systems boundary | ⋆⋆⋆ | 🔨🔨 | Systems |
-| 32 | 5 | Stream system execution | ⋆⋆⋆ | 🔨🔨🔨 | Streaming |
+| 32 | 5 | ✓ Stream system execution — `POST /systems/{name}/chat/stream` at routers/systems.py:539 emits typed events (node_start / token / tool_call / tool_result / node_end / done) via SSE (closure marker added in Wave 49 [IMPROVE-191]) | ⋆⋆⋆ | 🔨🔨🔨 | Streaming |
 | 33 | 5 | Bounded inter-node context | ⋆⋆⋆ | 🔨🔨 | Memory |
 | 34 | 5 | Rename /systems/deploy → /agents/from-template | ⋆⋆ | 🔨 | Systems |
 | 35 | 5 | LLM-driven edge routing (`llm_router`) | ⋆⋆⋆ | 🔨🔨🔨 | Systems |
 | 36 | 5 | Parallel wave execution | ⋆⋆ | 🔨🔨🔨 | Systems |
-| 37 | 5 | Explicit Kahn cycle detection | ⋆⋆ | 🔨 | Systems |
+| 37 | 5 | ✓ Explicit Kahn cycle detection — at save time in `systems_validator.py`; cyclic graphs rejected with "cycle detected on nodes: [...]" error before persistence (shipped pre-Wave-43; closure marker added in Wave 49 [IMPROVE-191]) | ⋆⋆ | 🔨 | Systems |
 | 38 | 5 | Trace + conversation for system runs | ⋆⋆⋆ | 🔨🔨 | Observability |
 | 39 | 6 | Structural model family detection | ⋆⋆⋆ | 🔨🔨 | AI/ML |
 | 40 | 6 | Declarative _plan_optimizations | ⋆⋆⋆ | 🔨🔨🔨 | AI/ML |
