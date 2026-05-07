@@ -8,9 +8,9 @@
 
 ## 10.1 Summary
 
-- **182 improvements** flagged inline as `[IMPROVE-N]` in chapters 1–9 + the Wave 5/6/7/8/9/10/11/12/13/14/15/16/18/19/20/21/22/23/24/26/27/28/29/30/31/32/33/34/35/36/37/38/39/40/41/42/43 audits (NEW from Wave 6 audit: 71/72/73/74; NEW from Wave 7: 75/76/77/78/79/80/81/82; NEW from Wave 8: 83/84/85/86/87/88; NEW from Wave 9: 89/90/91/92/93/94; NEW from Wave 10: 95/96/97/98/99/100; NEW from Wave 11: 101/102/103/104/105/106; NEW from Wave 12: 107/108/109/110/111/112; NEW from Wave 13: 113/114/115/116/117/118; NEW from Wave 14: 119/120/121/122/123/124/125; NEW from Wave 15: 126/127/128/129/130/131; NEW from Wave 16: 132/133/134/135/136/137; NEW from Wave 18: 138/139/140/141/142/143/144; NEW from Wave 19 Tranche A: 145/146; NEW from Wave 20 cleanup wave: 147/148/149/150/151/152; NEW from Wave 21 startup-contention fix: 153/154/155; NEW from Wave 22 true-async _init_mem0: 156; NEW from Wave 23 Kokoro create_stream chunked TTFA: 157/158; NEW from Wave 24 server-side parallel synth-while-LLM-streams: 159; NEW from Wave 26 startup-timing benchmark harness: 160; NEW from Wave 27 lifespan eager editor warm-up flag: 161; NEW from Wave 28 Tranche G partial preset export/import: 162; NEW from Wave 29 Tranche B voice persistence: 163; NEW from Wave 30 Tranche E partial editor session TTL cleanup: 164; NEW from Wave 31 Tranche D piece 1 LLM-summarized inter-node DAG context: 165; NEW from Wave 32 Tranche D piece 2 per-edge pass config: 166; NEW from Wave 33 Tranche D piece 3 classifier confidence threshold: 167; NEW from Wave 34 Tranche F real-LLM enhancer eval suite: 168; NEW from Wave 35 Tranche E sub-piece per-step metrics caching: 169; NEW from Wave 36 Path E partial test-suite stabilisation bucket A: 170/171/172; NEW from Wave 37 Path E partial test-suite stabilisation bucket B: 173/174; NEW from Wave 38 Tranche E sub-piece cropped-patch SSIM optimization: 175; NEW from Wave 39 Tranche E sub-piece LPIPS perceptual metric: 176; NEW from Wave 40 Tranche E expansion LPIPS-on-cropped-patch: 177; NEW from Wave 41 Path D voice-settings export bundle integration: 178; NEW from Wave 42 Path C logprob-based classifier confidence: 179; NEW from Wave 43 Phase 1 cleanup wave 1 Tranche E + G polish: 180/181/182).
+- **184 improvements** flagged inline as `[IMPROVE-N]` in chapters 1–9 + the Wave 5/6/7/8/9/10/11/12/13/14/15/16/18/19/20/21/22/23/24/26/27/28/29/30/31/32/33/34/35/36/37/38/39/40/41/42/43/44 audits (NEW from Wave 6 audit: 71/72/73/74; NEW from Wave 7: 75/76/77/78/79/80/81/82; NEW from Wave 8: 83/84/85/86/87/88; NEW from Wave 9: 89/90/91/92/93/94; NEW from Wave 10: 95/96/97/98/99/100; NEW from Wave 11: 101/102/103/104/105/106; NEW from Wave 12: 107/108/109/110/111/112; NEW from Wave 13: 113/114/115/116/117/118; NEW from Wave 14: 119/120/121/122/123/124/125; NEW from Wave 15: 126/127/128/129/130/131; NEW from Wave 16: 132/133/134/135/136/137; NEW from Wave 18: 138/139/140/141/142/143/144; NEW from Wave 19 Tranche A: 145/146; NEW from Wave 20 cleanup wave: 147/148/149/150/151/152; NEW from Wave 21 startup-contention fix: 153/154/155; NEW from Wave 22 true-async _init_mem0: 156; NEW from Wave 23 Kokoro create_stream chunked TTFA: 157/158; NEW from Wave 24 server-side parallel synth-while-LLM-streams: 159; NEW from Wave 26 startup-timing benchmark harness: 160; NEW from Wave 27 lifespan eager editor warm-up flag: 161; NEW from Wave 28 Tranche G partial preset export/import: 162; NEW from Wave 29 Tranche B voice persistence: 163; NEW from Wave 30 Tranche E partial editor session TTL cleanup: 164; NEW from Wave 31 Tranche D piece 1 LLM-summarized inter-node DAG context: 165; NEW from Wave 32 Tranche D piece 2 per-edge pass config: 166; NEW from Wave 33 Tranche D piece 3 classifier confidence threshold: 167; NEW from Wave 34 Tranche F real-LLM enhancer eval suite: 168; NEW from Wave 35 Tranche E sub-piece per-step metrics caching: 169; NEW from Wave 36 Path E partial test-suite stabilisation bucket A: 170/171/172; NEW from Wave 37 Path E partial test-suite stabilisation bucket B: 173/174; NEW from Wave 38 Tranche E sub-piece cropped-patch SSIM optimization: 175; NEW from Wave 39 Tranche E sub-piece LPIPS perceptual metric: 176; NEW from Wave 40 Tranche E expansion LPIPS-on-cropped-patch: 177; NEW from Wave 41 Path D voice-settings export bundle integration: 178; NEW from Wave 42 Path C logprob-based classifier confidence: 179; NEW from Wave 43 Phase 1 cleanup wave 1 Tranche E + G polish: 180/181/182; NEW from Wave 44 Phase 1 cleanup wave 2 Provider + DAG consolidation: 183/184).
 - **10 themes** — security, architecture, observability, tracing, UX, memory & context, model & inference, background tasks, voice, and tools/MCP.
-- **41 waves fully shipped + Wave 25 deferred-by-investigation** (Waves 1-16 numbered + Wave 17 doc-only cleanup + Wave 18 Tranche A Flutter editor v2 + Wave 19 Tranche A partner-import host + Wave 20 cleanup wave: §10.7 walkthrough closing Q1/Q4/Q7/Q15/Q16 + 1 deletion + 5 TTS quick wins + Wave 21 startup-contention fix targeting the 3 lazy-init chains the user's startup log surfaced + Wave 22 true-async _init_mem0 — IMPROVE-156 background-task warmup at lifespan via httpx.AsyncClient pre-warm of nomic-embed-text + asyncio.create_task fire-and-forget Mem0 init, moving the ~22s Chain 2 cost OFF the user's first request entirely + Wave 23 Kokoro create_stream chunked TTFA — IMPROVE-157 backend stream_synthesize via kokoro_onnx.create_stream + IMPROVE-158 Flutter progressive playback delivering ~60-80% TTFA win on long-paragraph synth + Wave 24 server-side parallel synth-while-LLM-streams — IMPROVE-159 phrase-boundary fallback in PartnerEngine.astream_chat firing on ``,`` ``;`` ``:`` once a clause is ≥ 30 chars long, so TTS can begin synthesising while the LLM is still emitting later words + Wave 25 Chatterbox sidecar streaming investigation — chatterbox-tts 0.1.7 has no streaming surface in either ChatterboxTTS.generate or ChatterboxTTSTurbo.generate; deferred pending upstream feature OR justified 3-5d fork investment + Wave 29 voice persistence: IMPROVE-163 `data/partner/voice_settings.json` survives backend restart so a user's voice_id / voice_gender / tts_mode picks don't reset on every uvicorn cycle, closing Tranche B partial from the Wave 18 deferred queue + Wave 30 editor session TTL cleanup: IMPROVE-164 opt-in `EDITOR_SESSION_TTL_DAYS=N` env-var triggers a fire-and-forget lifespan task that walks the [IMPROVE-53] archive directory + deletes date-buckets older than N days, closing Tranche E partial from the Wave 18 deferred queue + Wave 31 LLM-summarized inter-node DAG context: IMPROVE-165 opt-in `DAG_INTER_NODE_SUMMARIZATION_MODEL` env-var replaces the legacy `[... N earlier output(s) elided ...]` truncation marker with a one-shot LLM summary of the dropped entries when context budget is exceeded, closing Tranche D piece 1 of 3 + Wave 32 per-edge "pass" config: IMPROVE-166 adds 3 edge.rule.pass modes (`all` default / `source_only` / `none`) so DAG authors can scope which prior outputs each downstream agent sees, closing Tranche D piece 2 of 3 + Wave 33 classifier confidence threshold: IMPROVE-167 opt-in `DAG_CLASSIFIER_CONFIDENCE_THRESHOLD` env-var with heuristic confidence ``1 / matched_count`` rejects ambiguous llm_router classifications so the always-fallback edge fires instead, closing Tranche D piece 3 of 3 + the entire Tranche D umbrella + Wave 34 real-LLM enhancer eval suite: IMPROVE-168 opt-in `LOCAL_AI_EVAL_REAL_LLM=1` env-var runs `enhance_edit_prompt` against real Ollama LLMs with 8 curated test cases that pin content-word preservation + forbidden-phrase rejection + multi-model behaviour, closing Tranche F from the Wave 18 deferred queue + the IMPROVE-55 spawned-follow-up callout + the user's "in order A, B, C, D" batch + Wave 35 per-step metrics caching: IMPROVE-169 caches the [IMPROVE-56] diff-metrics dict per `(path_a, path_b)` pair on `EditSession` so repeated `GET /editor/{session_id}/compare?metrics=true` calls return the cached dict instead of recomputing the SSIM + region-map base64 (~80ms+ saved on cache hit), closing Tranche E sub-piece from the post-Wave-34 backlog + Wave 36 Path E partial test-suite stabilisation: IMPROVE-170 restores `OllamaController` static helpers + `_get_client` + `_enrich_capabilities_from_show` for `test_ollama.py` (7 fixes) + IMPROVE-171 rewires `test_images_enhance_prompt.py` to patch the `routers.images` namespace after the [IMPROVE-1] router split (6 fixes) + IMPROVE-172 extracts `AgentOrchestrator._build_agent_graph(definition, allow_tools=True)` from `_chat_with_react_agent` to expose the retry-without-tools seam (2 fixes), closing bucket A 13 of 22 known pre-existing failures from the post-Wave-35 backlog Path E + Wave 37 Path E partial test-suite stabilisation bucket B: IMPROVE-173 NEW `reset_settings_cache(monkeypatch)` fixture in `tests/conftest.py` clears `local_ai_platform.config._SETTINGS` so `monkeypatch.setenv('HF_HOME', tmp_path)` propagates to all `get_settings().hf_home` call sites in production (5 fixes — 4 in `test_images_service.py` + 1 in `test_huggingface.py`) + IMPROVE-174 `_run_diffusers` patch-target alignment for 2 tests in `test_images_service.py` whose patches were on the subprocess-isolated `_run_diffusers_isolated` worker but `generate()` calls the in-process `_run_diffusers` directly (2 fixes), closing bucket B 7 of the 22 pre-existing failures from the post-Wave-35 backlog Path E end-to-end + Wave 38 cropped-patch SSIM optimization: IMPROVE-175 NEW `ssim_patch` (float | None) + `patch_bbox` (dict | None) fields in the `compute_diff_metrics` return dict; bbox is computed from the changed-pixels mask and the SSIM compute crops both arrays to that bbox before running skimage's `structural_similarity`, falling back to the full-frame `ssim` value when the bbox covers ≥90% of the frame OR the bbox is too small for SSIM's default `win_size=7` window OR no pixels changed; pairs with W35's metrics cache via natural inclusion in the cached dict (no cache-layer change), closing Tranche E sub-piece from the post-Wave-37 backlog + Wave 39 LPIPS perceptual metric: IMPROVE-176 opt-in `EDITOR_METRICS_LPIPS_ENABLED=1` env-var triggers a `lpips`-package perceptual-distance compute on the post-resize arrays (default net `alex`, module-scope model cache via lazy-init on first enabled call), surfaces the result as a NEW `lpips` field in the `compute_diff_metrics` return dict (None when disabled or compute fails — same shape as the existing `ssim` field's failure mode); pairs with W35's metrics cache via natural inclusion (the cached dict gains 1 new key, no cache-layer change), closing the final Tranche E sub-piece + the entire Tranche E "editor advanced" umbrella from the Wave 18 deferred queue + Wave 40 LPIPS-on-cropped-patch (Tranche E expansion): IMPROVE-177 NEW `lpips_patch` (float | None) field paired with the existing W38 `patch_bbox`; when LPIPS is enabled AND the W38 bbox crop applies, runs the lpips.LPIPS forward pass on the bbox-cropped arrays (mirrors the W38 ssim_patch shape — perceptual variant of the same "isolate the actual edit region" optimization); falls back to the full-frame `lpips` value when no useful crop applies OR the crop compute fails; same env-var gate as W39 IMPROVE-176 — disabled stays disabled, no new env-var + Wave 41 voice-settings export bundle integration (Path D): IMPROVE-178 NEW `voice_settings.json` entry in the `partner-export.zip` bundle (sibling of `profile.json` / `user_profile.json` / `memory_decay.json`) + matching read in `restore_from_bundle`; closes the W29 IMPROVE-163 follow-up that the schema-stability gate had deferred (the dataclass shape from W29 — voice_id / voice_gender / tts_mode — is now stable); rides the existing `?scope=` CSV filter via NEW `voice_settings` scope added to `RESTORE_SCOPES`; engine in-memory `_voice_id` / `_voice_gender` / `_tts_mode` fields are mutated alongside the on-disk write so a running partner picks up restored values without a backend restart (mirror of the existing `engine.profile = ...` swap in the W9 IMPROVE-94 profile.json restore path) + Wave 42 logprob-based classifier confidence (Path C): IMPROVE-179 opt-in `DAG_CLASSIFIER_LOGPROBS_ENABLED=1` env-var that asks the LLM for logprobs on the W33 IMPROVE-167 classifier call (via NEW `logprobs` / `top_logprobs` fields on `GenerationSettings` + Ollama provider passthrough leveraging the existing `ChatResponse.raw` escape hatch); when enabled + the response carries logprobs, derives confidence as `exp(first_token_logprob)` (the LLM's actual probability assigned to its first content-bearing token, in [0, 1]); falls back to the W33 heuristic `1 / matched_count` when logprobs are missing OR the env-var is disabled OR the provider doesn't expose logprobs (non-Ollama provider, older Ollama version, request didn't enable logprobs) — graceful degradation preserves W33 behaviour for every non-supporting code path) + Wave 43 Phase 1 cleanup wave 1 of 3 Tranche E + G polish (✓ shipped 2026-05-06): IMPROVE-180 explicit `EDITOR_METRICS_LPIPS_PATCH_MIN_DIM` env-var gate (default 11 — AlexNet kernel minimum) tightening the W40 [IMPROVE-177] crop branch's soft edge so a sub-AlexNet bbox falls back to full-frame LPIPS earlier without paying the inner-try cost + IMPROVE-181 `EDITOR_METRICS_LPIPS_TRUNK_NET` env-var knob (default `alex` preserves W39 [IMPROVE-176] behaviour; `vgg` / `squeeze` opt-in for power users — the W39 module-scope cache already keys by trunk-net name so multi-trunk coexistence is free) + IMPROVE-182 closing Tranche G remainder by adding `data/registries/schemas/presets.schema.json` + JSON-Schema 2020-12 validation in `editor_presets.py::import_preset` (mirrors the W14 [IMPROVE-125] voices + instruct-models registries + W15 [IMPROVE-131] schema validation pattern; pins the v=1 `schema_version` envelope shape against operator-edit typos); **1** standing in deferred queues (post-Wave-43 backlog).
+- **41 waves fully shipped + Wave 25 deferred-by-investigation** (Waves 1-16 numbered + Wave 17 doc-only cleanup + Wave 18 Tranche A Flutter editor v2 + Wave 19 Tranche A partner-import host + Wave 20 cleanup wave: §10.7 walkthrough closing Q1/Q4/Q7/Q15/Q16 + 1 deletion + 5 TTS quick wins + Wave 21 startup-contention fix targeting the 3 lazy-init chains the user's startup log surfaced + Wave 22 true-async _init_mem0 — IMPROVE-156 background-task warmup at lifespan via httpx.AsyncClient pre-warm of nomic-embed-text + asyncio.create_task fire-and-forget Mem0 init, moving the ~22s Chain 2 cost OFF the user's first request entirely + Wave 23 Kokoro create_stream chunked TTFA — IMPROVE-157 backend stream_synthesize via kokoro_onnx.create_stream + IMPROVE-158 Flutter progressive playback delivering ~60-80% TTFA win on long-paragraph synth + Wave 24 server-side parallel synth-while-LLM-streams — IMPROVE-159 phrase-boundary fallback in PartnerEngine.astream_chat firing on ``,`` ``;`` ``:`` once a clause is ≥ 30 chars long, so TTS can begin synthesising while the LLM is still emitting later words + Wave 25 Chatterbox sidecar streaming investigation — chatterbox-tts 0.1.7 has no streaming surface in either ChatterboxTTS.generate or ChatterboxTTSTurbo.generate; deferred pending upstream feature OR justified 3-5d fork investment + Wave 29 voice persistence: IMPROVE-163 `data/partner/voice_settings.json` survives backend restart so a user's voice_id / voice_gender / tts_mode picks don't reset on every uvicorn cycle, closing Tranche B partial from the Wave 18 deferred queue + Wave 30 editor session TTL cleanup: IMPROVE-164 opt-in `EDITOR_SESSION_TTL_DAYS=N` env-var triggers a fire-and-forget lifespan task that walks the [IMPROVE-53] archive directory + deletes date-buckets older than N days, closing Tranche E partial from the Wave 18 deferred queue + Wave 31 LLM-summarized inter-node DAG context: IMPROVE-165 opt-in `DAG_INTER_NODE_SUMMARIZATION_MODEL` env-var replaces the legacy `[... N earlier output(s) elided ...]` truncation marker with a one-shot LLM summary of the dropped entries when context budget is exceeded, closing Tranche D piece 1 of 3 + Wave 32 per-edge "pass" config: IMPROVE-166 adds 3 edge.rule.pass modes (`all` default / `source_only` / `none`) so DAG authors can scope which prior outputs each downstream agent sees, closing Tranche D piece 2 of 3 + Wave 33 classifier confidence threshold: IMPROVE-167 opt-in `DAG_CLASSIFIER_CONFIDENCE_THRESHOLD` env-var with heuristic confidence ``1 / matched_count`` rejects ambiguous llm_router classifications so the always-fallback edge fires instead, closing Tranche D piece 3 of 3 + the entire Tranche D umbrella + Wave 34 real-LLM enhancer eval suite: IMPROVE-168 opt-in `LOCAL_AI_EVAL_REAL_LLM=1` env-var runs `enhance_edit_prompt` against real Ollama LLMs with 8 curated test cases that pin content-word preservation + forbidden-phrase rejection + multi-model behaviour, closing Tranche F from the Wave 18 deferred queue + the IMPROVE-55 spawned-follow-up callout + the user's "in order A, B, C, D" batch + Wave 35 per-step metrics caching: IMPROVE-169 caches the [IMPROVE-56] diff-metrics dict per `(path_a, path_b)` pair on `EditSession` so repeated `GET /editor/{session_id}/compare?metrics=true` calls return the cached dict instead of recomputing the SSIM + region-map base64 (~80ms+ saved on cache hit), closing Tranche E sub-piece from the post-Wave-34 backlog + Wave 36 Path E partial test-suite stabilisation: IMPROVE-170 restores `OllamaController` static helpers + `_get_client` + `_enrich_capabilities_from_show` for `test_ollama.py` (7 fixes) + IMPROVE-171 rewires `test_images_enhance_prompt.py` to patch the `routers.images` namespace after the [IMPROVE-1] router split (6 fixes) + IMPROVE-172 extracts `AgentOrchestrator._build_agent_graph(definition, allow_tools=True)` from `_chat_with_react_agent` to expose the retry-without-tools seam (2 fixes), closing bucket A 13 of 22 known pre-existing failures from the post-Wave-35 backlog Path E + Wave 37 Path E partial test-suite stabilisation bucket B: IMPROVE-173 NEW `reset_settings_cache(monkeypatch)` fixture in `tests/conftest.py` clears `local_ai_platform.config._SETTINGS` so `monkeypatch.setenv('HF_HOME', tmp_path)` propagates to all `get_settings().hf_home` call sites in production (5 fixes — 4 in `test_images_service.py` + 1 in `test_huggingface.py`) + IMPROVE-174 `_run_diffusers` patch-target alignment for 2 tests in `test_images_service.py` whose patches were on the subprocess-isolated `_run_diffusers_isolated` worker but `generate()` calls the in-process `_run_diffusers` directly (2 fixes), closing bucket B 7 of the 22 pre-existing failures from the post-Wave-35 backlog Path E end-to-end + Wave 38 cropped-patch SSIM optimization: IMPROVE-175 NEW `ssim_patch` (float | None) + `patch_bbox` (dict | None) fields in the `compute_diff_metrics` return dict; bbox is computed from the changed-pixels mask and the SSIM compute crops both arrays to that bbox before running skimage's `structural_similarity`, falling back to the full-frame `ssim` value when the bbox covers ≥90% of the frame OR the bbox is too small for SSIM's default `win_size=7` window OR no pixels changed; pairs with W35's metrics cache via natural inclusion in the cached dict (no cache-layer change), closing Tranche E sub-piece from the post-Wave-37 backlog + Wave 39 LPIPS perceptual metric: IMPROVE-176 opt-in `EDITOR_METRICS_LPIPS_ENABLED=1` env-var triggers a `lpips`-package perceptual-distance compute on the post-resize arrays (default net `alex`, module-scope model cache via lazy-init on first enabled call), surfaces the result as a NEW `lpips` field in the `compute_diff_metrics` return dict (None when disabled or compute fails — same shape as the existing `ssim` field's failure mode); pairs with W35's metrics cache via natural inclusion (the cached dict gains 1 new key, no cache-layer change), closing the final Tranche E sub-piece + the entire Tranche E "editor advanced" umbrella from the Wave 18 deferred queue + Wave 40 LPIPS-on-cropped-patch (Tranche E expansion): IMPROVE-177 NEW `lpips_patch` (float | None) field paired with the existing W38 `patch_bbox`; when LPIPS is enabled AND the W38 bbox crop applies, runs the lpips.LPIPS forward pass on the bbox-cropped arrays (mirrors the W38 ssim_patch shape — perceptual variant of the same "isolate the actual edit region" optimization); falls back to the full-frame `lpips` value when no useful crop applies OR the crop compute fails; same env-var gate as W39 IMPROVE-176 — disabled stays disabled, no new env-var + Wave 41 voice-settings export bundle integration (Path D): IMPROVE-178 NEW `voice_settings.json` entry in the `partner-export.zip` bundle (sibling of `profile.json` / `user_profile.json` / `memory_decay.json`) + matching read in `restore_from_bundle`; closes the W29 IMPROVE-163 follow-up that the schema-stability gate had deferred (the dataclass shape from W29 — voice_id / voice_gender / tts_mode — is now stable); rides the existing `?scope=` CSV filter via NEW `voice_settings` scope added to `RESTORE_SCOPES`; engine in-memory `_voice_id` / `_voice_gender` / `_tts_mode` fields are mutated alongside the on-disk write so a running partner picks up restored values without a backend restart (mirror of the existing `engine.profile = ...` swap in the W9 IMPROVE-94 profile.json restore path) + Wave 42 logprob-based classifier confidence (Path C): IMPROVE-179 opt-in `DAG_CLASSIFIER_LOGPROBS_ENABLED=1` env-var that asks the LLM for logprobs on the W33 IMPROVE-167 classifier call (via NEW `logprobs` / `top_logprobs` fields on `GenerationSettings` + Ollama provider passthrough leveraging the existing `ChatResponse.raw` escape hatch); when enabled + the response carries logprobs, derives confidence as `exp(first_token_logprob)` (the LLM's actual probability assigned to its first content-bearing token, in [0, 1]); falls back to the W33 heuristic `1 / matched_count` when logprobs are missing OR the env-var is disabled OR the provider doesn't expose logprobs (non-Ollama provider, older Ollama version, request didn't enable logprobs) — graceful degradation preserves W33 behaviour for every non-supporting code path) + Wave 43 Phase 1 cleanup wave 1 of 3 Tranche E + G polish (✓ shipped 2026-05-06): IMPROVE-180 explicit `EDITOR_METRICS_LPIPS_PATCH_MIN_DIM` env-var gate (default 11 — AlexNet kernel minimum) tightening the W40 [IMPROVE-177] crop branch's soft edge so a sub-AlexNet bbox falls back to full-frame LPIPS earlier without paying the inner-try cost + IMPROVE-181 `EDITOR_METRICS_LPIPS_TRUNK_NET` env-var knob (default `alex` preserves W39 [IMPROVE-176] behaviour; `vgg` / `squeeze` opt-in for power users — the W39 module-scope cache already keys by trunk-net name so multi-trunk coexistence is free) + IMPROVE-182 closing Tranche G remainder by adding `data/registries/schemas/presets.schema.json` + JSON-Schema 2020-12 validation in `editor_presets.py::import_preset` (mirrors the W14 [IMPROVE-125] voices + instruct-models registries + W15 [IMPROVE-131] schema validation pattern; pins the v=1 `schema_version` envelope shape against operator-edit typos) + Wave 44 in progress — Phase 1 cleanup wave 2 of 3 Provider + DAG consolidation per §10.5.2 closure plan: IMPROVE-183 NEW `src/local_ai_platform/images/accelerate_probe.py` lifespan probe that detects whether `accelerate.enable_model_cpu_offload()` hooks load successfully; surfaces the result via observability event + WARNING log at the OOM ladder's stage 4 fallback callsites + bundle.json provenance field; runs as fire-and-forget asyncio.create_task at lifespan (W22 [IMPROVE-156] pattern) + IMPROVE-184 unify token-budget primitive — extracts `_get_tiktoken_encoding(model)` helper into `src/local_ai_platform/token_counting.py` with module-scope cache; refactors `memory.py:TokenCounter._init_tokenizer` + `count_tokens`'s tier 2 `_tiktoken_count` to share the helper (executor's `_estimate_tokens` 4-char heuristic stays AS-IS); pure refactor preserving the tokenizer-first ordering of TokenCounter + the cl100k_base default of count_tokens; **1** standing in deferred queues (post-Wave-43 backlog).
 
 All improvements are traceable back to a chapter + a 2025–2026 citation. This chapter is pure planning — *what* + *why this order*; *how* is in each origin chapter.
 
@@ -178,7 +178,7 @@ Smaller items that improve day-to-day use.
 
 ---
 
-## 10.4 The complete table (all 182)
+## 10.4 The complete table (all 184)
 
 Sortable if you paste into a spreadsheet. Chapter column links back to the originating doc.
 
@@ -366,10 +366,12 @@ Sortable if you paste into a spreadsheet. Chapter column links back to the origi
 | 180 | 7 | ✓ `EDITOR_METRICS_LPIPS_PATCH_MIN_DIM` env-var gate — explicit minimum-bbox-dim threshold (default 11 = AlexNet's 11x11 kernel minimum) for the W40 [IMPROVE-177] cropped-patch LPIPS variant. Pre-Wave-43 the W40 implementation relied on the inner try/except to catch sub-AlexNet bboxes (kernel raises when input dim < kernel dim); W43 adds an explicit gate that skips the crop compute earlier (no inner-try cost) + surfaces the threshold to operators as a tunable env-var. Same default-equivalent behaviour: bboxes ≥ 11 dim continue through the W40 crop path; bboxes < 11 dim now fall back to the full-frame `lpips` value via the existing W40 fallback branch without the inner-try detour. Pattern: tightens the W40 implementation's soft edge via the W42 lesson "exhaustively enumerate failure modes + treat each as a fallback signal" — the inner try/except remains as defence-in-depth for unexpected exceptions (Wave 43 — Phase 1 cleanup wave 1 of 3, Tranche E polish from the post-Wave-42 backlog) | ⋆ | 🔨 | UX |
 | 181 | 7 | ✓ `EDITOR_METRICS_LPIPS_TRUNK_NET` env-var knob — three-valued env-var (`alex` default / `vgg` / `squeeze`) gating the W39 [IMPROVE-176] LPIPS trunk net selection. Pre-Wave-43 W39 hard-codes `_LPIPS_NET_DEFAULT = "alex"` at module scope; W43 makes the trunk net runtime-tunable. Power-user use cases: `vgg` for higher perceptual fidelity (~528MB torchvision weights vs alex's 244MB; per-call forward pass ~2x slower), `squeeze` for the tiny-model trunk (smallest, fastest, but less accurate). Default `alex` preserves W39 behaviour exactly. The W39 module-scope `_lpips_model_cache` already keys by trunk-net name so multi-trunk coexistence is free (an operator who flips the env-var mid-process pays the model-load cost once per trunk net then reuses on subsequent calls). Invalid env-var values (anything other than `alex` / `vgg` / `squeeze`) silently fall back to `alex` + a debug log line — same shape as W32's invalid-pass_mode fallback (Wave 43 — Phase 1 cleanup wave 1 of 3, Tranche E polish from the post-Wave-42 backlog) | ⋆ | 🔨 | UX |
 | 182 | 7 | ✓ Preset JSON schema registry — NEW `data/registries/schemas/presets.schema.json` JSON-Schema 2020-12 document defining the export-bundle envelope shape `{schema_version: 1, name: str, description: str, steps: list[dict], exported_at: str (ISO-8601)}` + each step dict's `{operation: str, params: dict}` shape. Hooked into `editor_presets.py::import_preset` via the existing `local_ai_platform.registries._validate_against_schema` helper (W15 [IMPROVE-131] best-effort validation pattern); a payload that doesn't match the schema raises `jsonschema.ValidationError` → re-raised as ValueError → caller maps to 400 (replaces the previous adhoc isinstance + non-empty-name + steps-list-of-dicts checks with a single declarative source-of-truth that ALSO catches operator-edit typos like `"schema_version": "1"` string-vs-int + `"steps": null` instead of a list + missing required keys + extra unknown top-level / step-level properties). Closes Tranche G remainder from the Wave 18 deferred queue + the [IMPROVE-162] schema_version=1 follow-up that flagged "operator-edit typo defence" as a design gap. Mirrors the W14 [IMPROVE-125] voices + instruct-models registries + W15 [IMPROVE-131] schema validation pattern — same registries dir, same schemas/ subdir, same `_validate_against_schema(filename)` helper, same best-effort discipline (skips silently when jsonschema unavailable) (Wave 43 — Phase 1 cleanup wave 1 of 3, Tranche G remainder from the post-Wave-42 backlog) | ⋆⋆ | 🔨 | UX |
+| 183 | 6 | HF accelerate offload manager probe — NEW `src/local_ai_platform/images/accelerate_probe.py` lifespan probe that imports `accelerate` + checks whether `accelerate.hooks.AlignDevicesHook` and the `enable_model_cpu_offload`-supporting fields are reachable. Result cached at module scope as `{functional: bool, reason: str | None, accelerate_version: str | None}`. Hooked into lifespan via `asyncio.create_task` fire-and-forget (W22 [IMPROVE-156] pattern); failure to load `accelerate` is non-fatal — the probe records `functional: False` + a `reason` string operators can read for diagnostics. Surfaces in three places: (a) NEW `accelerate_probe` field in `partner/export.py:bundle.json` provenance (W12 [IMPROVE-112] pattern — discoverable from exported snapshots), (b) NEW `images.accelerate_probe` observability event emitted on probe completion, (c) NEW WARNING log at the OOM ladder's stage 4 fallback callsites (`service.py` near 2991 / 3002 / 3008) reading the cached result + warning operators that "model CPU offload was attempted but the lifespan probe reported accelerate hooks non-functional" (Wave 44 — Phase 1 cleanup wave 2 of 3, NEW-7 graduation from the post-Wave-42 backlog) | ⋆⋆ | 🔨 | Architecture |
+| 184 | 6 | Unify token-budget primitive — NEW `_get_tiktoken_encoding(model: str \| None = None) -> Any \| None` shared helper in `src/local_ai_platform/token_counting.py` with a module-scope `_tiktoken_encoding_cache` dict. Tries `tiktoken.encoding_for_model(model)` first when `model` is supplied, falls back to `tiktoken.get_encoding("cl100k_base")` on `KeyError`, returns None on `ImportError` (no tiktoken). MODIFIED `memory.py:TokenCounter._init_tokenizer` to use the helper for the tiktoken tier (the transformers fallback + char-count fallback stay inline — different tokenizer family, different consumer profile). MODIFIED `count_tokens`'s tier 2 `_tiktoken_count` to use the helper for the cl100k_base case. The executor's `_estimate_tokens` 4-char heuristic at `systems/executor.py` stays AS-IS — it's the hot-path optimization for DAG inter-node context that the closure plan deliberately preserves. Pure refactor; no behaviour change for any existing call site. Tests pin: helper returns the right encoding per model, cache hit on second call, falls back to cl100k_base on KeyError, returns None on ImportError, both consumer call sites get the same encoding from the helper (Wave 44 — Phase 1 cleanup wave 2 of 3, NEW-2 graduation from the post-Wave-42 backlog) | ⋆⋆ | 🔨 | Architecture |
 
 *Impact for [IMPROVE-59] is ⋆⋆⋆⋆⋆ if the app is ever distributed, ⋆⋆ if it stays local-only.
 
-**Legend:** A ``✓`` prefix marks items that have shipped. See §10.6 for the Wave 5 / 6 / 7 / 8 / 9 / 10 / 11 / 12 / 13 / 14 / 15 / 16 / 17 / 18 / 19 / 20 / 21 / 22 / 23 / 24 / 26 / 27 / 28 / 29 / 30 / 31 / 32 / 33 / 34 / 35 / 36 / 37 / 38 / 39 / 40 / 41 / 42 / 43 retrospective.
+**Legend:** A ``✓`` prefix marks items that have shipped. See §10.6 for the Wave 5 / 6 / 7 / 8 / 9 / 10 / 11 / 12 / 13 / 14 / 15 / 16 / 17 / 18 / 19 / 20 / 21 / 22 / 23 / 24 / 26 / 27 / 28 / 29 / 30 / 31 / 32 / 33 / 34 / 35 / 36 / 37 / 38 / 39 / 40 / 41 / 42 / 43 / 44 retrospective.
 
 ---
 
@@ -1263,6 +1265,160 @@ TRADE-OFF: editor-heavy users get hot first /editor/* calls
 at the cost of ~21s extra boot; default-off users keep
 current boot speed + lazy-init fallback. 3 commits (2 doc +
 1 numbered) — the planned single-numbered shape held.
+
+### Wave 44 — Phase 1 cleanup wave 2 of 3: Provider + DAG consolidation (in progress 2026-05-06)
+
+Theme: continue Phase 1 of the §10.5.2 closure plan with
+two consolidations that both compose existing waves'
+infrastructure (the W40-W43 lesson). IMPROVE-183 promotes
+the NEW-7 HF accelerate offload manager probe candidate
+from the post-Wave-42 backlog; IMPROVE-184 promotes the
+NEW-2 token-budget primitive unification candidate.
+
+Multi-numbered shape (1 mid-doc + 2 sequential numbered +
+1 retro = 4 commits) — each item modifies a distinct
+file/concern (a NEW probe module + observability/log
+hooks for IMPROVE-183; a tokenizer helper consolidation
+for IMPROVE-184) so per-item numbered commits keep the
+diffs locally readable.
+
+  * IMPROVE-183 — HF accelerate offload manager probe
+    (~1d). The image generation OOM ladder's stage 4
+    fallback (service.py near 2991 / 3002 / 3008)
+    attempts `pipe.enable_model_cpu_offload()` /
+    `pipe.enable_sequential_cpu_offload()`. When
+    accelerate's hooks are subtly broken (version
+    drift, partial install), these calls succeed at
+    the call site but the resulting pipeline OOMs at
+    inference time — the user sees "out of memory"
+    with no signal that the offload manager itself
+    was broken. W44 IMPROVE-183 adds a lifespan probe
+    that detects this case + surfaces it in three
+    places (bundle.json, observability event, OOM
+    ladder WARNING log).
+
+      - NEW `src/local_ai_platform/images/accelerate_probe.py`
+        with a single `probe_accelerate() -> dict`
+        function returning `{functional: bool, reason:
+        str | None, accelerate_version: str | None}`.
+        Imports accelerate; checks
+        `accelerate.hooks.AlignDevicesHook` is reachable
+        + `accelerate.cpu_offload_with_hook` is callable;
+        returns `{functional: True, ...}` on success.
+        On any exception, returns `{functional: False,
+        reason: str(exc), ...}`.
+
+      - NEW module-scope `_probe_result: dict | None`
+        cache + `get_probe_result()` accessor used by
+        the OOM ladder + bundle.json provenance code.
+
+      - MODIFIED `api_server.py` lifespan to call
+        `asyncio.create_task(...)` running the probe
+        (W22 [IMPROVE-156] fire-and-forget pattern).
+        Failure is non-fatal; `_probe_result` stays
+        None until the task completes (the OOM ladder
+        + bundle.json code handle the None case
+        gracefully).
+
+      - MODIFIED `service.py` OOM ladder's stage 4
+        fallback (the `enable_model_cpu_offload`
+        callsite around line 2991): on entry, read
+        `get_probe_result()` + emit a WARNING log if
+        `functional is False` so operators can see
+        the connection between "accelerate broken"
+        and "OOM at inference time".
+
+      - MODIFIED `partner/export.py::build_export_bundle`
+        to include `accelerate_probe` in the
+        bundle.json provenance dict (W12 [IMPROVE-112]
+        pattern). Discoverable from exported
+        snapshots; supports debugging across machine
+        migrations.
+
+      - NEW `local_ai_platform.observability_events`
+        registration: `images.accelerate_probe` event
+        with `{functional: bool, reason: str | None,
+        accelerate_version: str | None,
+        duration_ms: int}` context schema.
+
+      - NEW `tests/test_accelerate_probe.py` pinning:
+        probe returns the documented dict shape on
+        success, returns `{functional: False, reason:
+        ...}` on synthetic ImportError, observability
+        event emitted on probe completion, OOM ladder
+        WARNING log fires when probe reports
+        non-functional.
+
+  * IMPROVE-184 — Unify token-budget primitive
+    (~1d). The pre-Wave-44 codebase has two
+    independent tiktoken loaders:
+        - `memory.py:TokenCounter._init_tokenizer` —
+          tries `tiktoken.encoding_for_model(model)`,
+          falls back to `cl100k_base`, then to
+          transformers AutoTokenizer, then to char
+          count. ~30 LoC.
+        - `token_counting.py:_tiktoken_count` — uses
+          `cl100k_base` only. ~15 LoC.
+
+    Both call the same tiktoken APIs but with
+    different fallback chains + different cache
+    semantics (TokenCounter caches the encoding at
+    init; _tiktoken_count re-fetches per call but
+    relies on tiktoken's internal cache). The
+    duplicate is the encoding-loading logic.
+
+    W44 IMPROVE-184 extracts the shared loader into
+    `_get_tiktoken_encoding(model)` with a
+    module-scope cache. Both call sites use the
+    helper. The transformers fallback + char-count
+    fallback in TokenCounter stay inline (they're
+    tier-3+ behaviour, separate from tiktoken loading).
+    The executor's `_estimate_tokens` 4-char heuristic
+    is left untouched — it's the hot-path
+    optimization for DAG inter-node context that the
+    closure plan deliberately preserves.
+
+      - MODIFIED `src/local_ai_platform/token_counting.py`
+        — NEW module-scope `_tiktoken_encoding_cache:
+        dict[str, Any] = {}` + NEW
+        `_get_tiktoken_encoding(model: str | None =
+        None) -> Any | None` helper. Returns cached
+        encoding for `model` (key = model name or
+        `"cl100k_base"` when model is None); on cache
+        miss tries `tiktoken.encoding_for_model(model)`
+        when model is supplied, falls back to
+        `cl100k_base` on KeyError; returns None on
+        ImportError (no tiktoken).
+
+      - MODIFIED `_tiktoken_count` to use
+        `_get_tiktoken_encoding()` for the
+        cl100k_base case.
+
+      - MODIFIED `memory.py:TokenCounter._init_tokenizer`
+        to use `_get_tiktoken_encoding(self._model)`
+        for the tiktoken tier. Transformers fallback
+        + char-count fallback stay inline.
+
+      - NEW `tests/test_token_counting_helpers.py`
+        pinning: helper returns right encoding per
+        model, cache hit on second call, KeyError
+        falls back to cl100k_base, ImportError
+        returns None, both call sites get same
+        encoding from helper.
+
+| # | Tag | SHA | What landed | Tests |
+|---|---|---|---|---:|
+| 1 | (doc)         | this    | Wave 44 mid-wave (start) — register Wave 44 in §10.5 + §10.6 with the Provider + DAG consolidation design + Phase 1 cleanup wave 2 of 3 framing per §10.5.2 closure plan. Updates §10.1 wave-status + §10.4 reservation rows for IMPROVE-183 / 184. | 0 |
+| 2 | [IMPROVE-183] | TBD     | NEW `src/local_ai_platform/images/accelerate_probe.py` + module-scope cache + `get_probe_result()` accessor + lifespan task in `api_server.py` + WARNING log at OOM ladder fallback + bundle.json provenance + observability event registration. NEW `tests/test_accelerate_probe.py`. | TBD |
+| 3 | [IMPROVE-184] | TBD     | NEW `_get_tiktoken_encoding(model)` helper + module-scope cache in `token_counting.py`. MODIFIED `_tiktoken_count` + `TokenCounter._init_tokenizer` to use helper. NEW `tests/test_token_counting_helpers.py`. | TBD |
+| 4 | (doc)         | TBD     | Wave 44 end-wave retrospective. Flips Wave 44 status (in progress → ✓ shipped). Adds ✓ prefix on §10.4 IMPROVE-183/184 rows. NEW Wave 44 architectural impact subsection. | 0 |
+
+Wave 44 is wave 2 of 3 in the §10.5.2 closure plan
+Phase 1 cleanup arc. Multi-numbered shape: 4 commits
+(1 mid-doc + 2 numbered + 1 retro). Composes existing
+waves' infrastructure (W22 lifespan task + W12
+bundle.json provenance + W7 probe pattern for
+IMPROVE-183; W13/W16 tiktoken loading for IMPROVE-184).
 
 ### Wave 43 — Phase 1 cleanup wave 1 of 3: Tranche E + G polish (✓ shipped 2026-05-06)
 
@@ -3720,7 +3876,7 @@ event inventory + schema coverage.
 
 ---
 
-## 10.6 Wave 5 + Wave 6 + Wave 7 + Wave 8 + Wave 9 + Wave 10 + Wave 11 + Wave 12 + Wave 13 + Wave 14 + Wave 15 + Wave 16 + Wave 17 + Wave 18 + Wave 19 + Wave 20 + Wave 21 + Wave 22 + Wave 23 + Wave 24 + Wave 25 + Wave 26 + Wave 27 + Wave 28 + Wave 29 + Wave 30 + Wave 31 + Wave 32 + Wave 33 + Wave 34 + Wave 35 + Wave 36 + Wave 37 + Wave 38 + Wave 39 + Wave 40 + Wave 41 + Wave 42 + Wave 43 retrospective
+## 10.6 Wave 5 + Wave 6 + Wave 7 + Wave 8 + Wave 9 + Wave 10 + Wave 11 + Wave 12 + Wave 13 + Wave 14 + Wave 15 + Wave 16 + Wave 17 + Wave 18 + Wave 19 + Wave 20 + Wave 21 + Wave 22 + Wave 23 + Wave 24 + Wave 25 + Wave 26 + Wave 27 + Wave 28 + Wave 29 + Wave 30 + Wave 31 + Wave 32 + Wave 33 + Wave 34 + Wave 35 + Wave 36 + Wave 37 + Wave 38 + Wave 39 + Wave 40 + Wave 41 + Wave 42 + Wave 43 + Wave 44 retrospective
 
 > **Status as of 2026-04-30:** Wave 5 fully shipped (12 commits, +216
 > tests). Wave 6 fully shipped (12 commits, +118 tests across 8
@@ -4754,6 +4910,20 @@ held end-to-end.
 
   * **Flutter widget tests 182 unchanged**. Path D is
     backend-only (settings + lifespan).
+
+### Wave 44 (in progress)
+
+| # | Tag | SHA | What landed | Tests |
+|---|---|---|---|---:|
+| 1 | (doc)         | this    | Wave 44 mid-wave (start) — register Wave 44 in §10.5 + §10.6 with the Provider + DAG consolidation design + Phase 1 cleanup wave 2 of 3 framing per §10.5.2 closure plan + post-Wave-43 backlog promotion. Updates §10.1 wave-status + §10.4 reservation rows for IMPROVE-183 / 184. | 0 |
+| 2 | [IMPROVE-183] | TBD     | NEW `src/local_ai_platform/images/accelerate_probe.py` lifespan probe + module-scope cache + `get_probe_result()` accessor + fire-and-forget lifespan task in `api_server.py` (W22 [IMPROVE-156] pattern) + WARNING log at OOM ladder stage 4 fallback callsites in `service.py` + `accelerate_probe` field in `partner/export.py:bundle.json` provenance + NEW `images.accelerate_probe` observability event. NEW `tests/test_accelerate_probe.py`. | TBD |
+| 3 | [IMPROVE-184] | TBD     | NEW `_get_tiktoken_encoding(model: str \| None = None)` shared helper + module-scope `_tiktoken_encoding_cache` in `token_counting.py`. MODIFIED `_tiktoken_count` to use the helper for cl100k_base. MODIFIED `memory.py:TokenCounter._init_tokenizer` to use the helper for the tiktoken tier (transformers + char-count fallbacks stay inline). NEW `tests/test_token_counting_helpers.py`. | TBD |
+| 4 | (doc)         | TBD     | Wave 44 end-wave retrospective. Flips Wave 44 status (in progress → ✓ shipped). Adds ✓ prefix on §10.4 IMPROVE-183/184 rows. Fills in mid-wave + numbered SHA placeholders. NEW Wave 44 architectural impact subsection. | 0 |
+
+Wave 44 is wave 2 of 3 in the §10.5.2 closure plan
+Phase 1 cleanup arc. Multi-numbered shape: 4 commits
+(1 mid-doc + 2 numbered + 1 retro). Same wave shape as
+W43 (5 commits) reduced to 4 (one fewer numbered item).
 
 ### Wave 43 (✓ shipped)
 
