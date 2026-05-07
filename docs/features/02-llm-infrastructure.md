@@ -110,7 +110,7 @@ That's not accidental: Ollama's model format uses `name:tag`, and the router spe
 
 ## 2.4 OllamaProvider — the default path
 
-[providers/ollama_provider.py](../../src/local_ai_platform/providers/ollama_provider.py). 329 lines. Uses the official `ollama` Python SDK.
+[providers/ollama_provider.py](../../src/local_ai_platform/providers/ollama_provider.py). 354 lines (post-Wave-42 [IMPROVE-179] logprobs passthrough additions). Uses the official `ollama` Python SDK.
 
 ### Key design choices
 
@@ -118,10 +118,11 @@ That's not accidental: Ollama's model format uses `name:tag`, and the router spe
 - **Chat is sync, `achat` is native async.** The async path calls `ollama.AsyncClient`, not a thread wrapper.
 - **Streaming iterates the SDK's generator.** Each chunk's `message.content` is yielded as a plain string.
 - **Tool call normalization.** Ollama returns `tool_calls` as dicts with `function.name` + `function.arguments`; the provider wraps them with a synthetic `id=f"call_{i}"` to match the OpenAI shape agents expect downstream.
+- **Logprobs passthrough** (W42 [IMPROVE-179]). When `GenerationSettings.logprobs=True` is set, the provider passes `logprobs` + `top_logprobs` to the Ollama Python client v0.6.1's `chat()` (which exposes them natively in late-2024+ versions). The response's `logprobs` array lands in `ChatResponse.raw` (existing escape hatch — no abstract-surface change). The W33 [IMPROVE-167] DAG classifier in `systems/executor.py::classify_llm_router_edges` derives `confidence = exp(first_token_logprob)` when available; falls back to the W33 heuristic when logprobs are missing.
 
 ### Settings → options mapping
 
-`_settings_to_options` ([ollama_provider.py:58-83](../../src/local_ai_platform/providers/ollama_provider.py:58)) translates our `GenerationSettings` into Ollama's `options` dict:
+`_settings_to_options` ([ollama_provider.py:63](../../src/local_ai_platform/providers/ollama_provider.py:63)) translates our `GenerationSettings` into Ollama's `options` dict:
 
 | GenerationSettings | Ollama `options` | Notes |
 |---|---|---|
