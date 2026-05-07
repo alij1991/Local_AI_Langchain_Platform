@@ -1,0 +1,58 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://local-ai-platform.local/registries/presets.schema.json",
+  "title": "Editor preset export bundle",
+  "description": "JSON-Schema document for editor preset export bundles produced by GET /editor/presets/{preset_id}/export and consumed by POST /editor/presets/import. The schema_version envelope is pinned at 1; future shape changes bump the version + add a v1->v2 import migration in editor_presets.py. Hooked into import_preset via local_ai_platform.registries._validate_against_schema (IMPROVE-131 best-effort discipline).",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "name",
+    "steps"
+  ],
+  "properties": {
+    "schema_version": {
+      "type": "integer",
+      "const": 1,
+      "description": "Envelope schema version. Pinned at 1 for the W28 IMPROVE-162 baseline; future bumps require a v1->v2 migration in editor_presets.py::import_preset."
+    },
+    "name": {
+      "type": "string",
+      "minLength": 1,
+      "description": "User-facing preset name. Trimmed at import time; empty-after-strip names are rejected."
+    },
+    "description": {
+      "type": "string",
+      "description": "Optional prose summary. Empty string is valid (defaults to '' if absent at import time)."
+    },
+    "steps": {
+      "type": "array",
+      "minItems": 0,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "operation",
+          "params"
+        ],
+        "properties": {
+          "operation": {
+            "type": "string",
+            "minLength": 1,
+            "description": "Operation key (e.g. 'brightness_contrast', 'gaussian_blur'). Operation names are NOT validated by the schema; the apply path raises ValueError on unknown ops at replay time."
+          },
+          "params": {
+            "type": "object",
+            "description": "Operation-specific kwargs (free-form object). Per-operation param shapes are NOT validated here — the apply path's per-op handlers do that work."
+          }
+        }
+      },
+      "description": "Ordered list of edit operations to replay. An empty list is valid (a preset that does nothing is still a valid preset, e.g. for testing infrastructure)."
+    },
+    "exported_at": {
+      "type": "string",
+      "minLength": 1,
+      "description": "ISO-8601 timestamp recorded by the export endpoint. Optional + informational only — import_preset mints a fresh created_at on the receiving side rather than carrying this value into the receiver's database."
+    }
+  }
+}

@@ -179,12 +179,27 @@ def import_preset(payload: dict[str, Any]) -> dict[str, Any]:
     payload.
 
     Validates:
+      * [IMPROVE-182] Wave 43 — payload shape against
+        ``data/registries/schemas/presets.schema.json`` via the
+        existing W15 [IMPROVE-131] ``_validate_against_schema``
+        helper. A schema-violation (wrong-type field, missing
+        required key, additionalProperties violation) raises
+        ``jsonschema.ValidationError`` → caller maps to 400.
+        Best-effort: skips silently when ``jsonschema`` package
+        isn't importable (the W15 discipline). The schema is the
+        declarative source-of-truth for the v=1 envelope shape.
+
       * ``schema_version`` matches ``PRESET_EXPORT_SCHEMA_VERSION``
         (raises ValueError on mismatch — caller maps to 400).
-      * ``name`` is a non-empty string after strip.
-      * ``steps`` is a list of dicts (basic shape check; deeper
-        validation happens at apply time, mirroring create_preset's
-        design).
+
+      * ``name`` is a non-empty string after strip (the schema
+        enforces minLength=1 BUT trim-then-check catches the
+        whitespace-only case the schema can't see).
+
+      * ``steps`` is a list of dicts (the schema enforces
+        type=array of objects; this isinstance check remains as
+        defence-in-depth for the W15 best-effort case where
+        ``jsonschema`` is unavailable).
 
     Returns the new preset dict (with fresh id + created_at).
     """
@@ -192,6 +207,39 @@ def import_preset(payload: dict[str, Any]) -> dict[str, Any]:
         raise ValueError(
             f"Import payload must be a JSON object; got {type(payload).__name__}",
         )
+    # [IMPROVE-182] Schema validation FIRST — catches operator-
+    # edit typos (string-vs-int schema_version, missing required
+    # keys, extra unknown keys) before the ad-hoc checks below.
+    # The ad-hoc checks remain as defence-in-depth for the W15
+    # best-effort case (jsonschema unavailable) + for the trim-
+    # then-check whitespace-only-name case the schema can't see.
+    #
+    # We re-raise jsonschema.ValidationError as ValueError so the
+    # FastAPI route's existing ValueError → 400 mapping fires
+    # uniformly for both schema-side and ad-hoc-side rejections;
+    # the route caller doesn't need to grow a second except clause.
+    # The original error message is preserved verbatim so operators
+    # still see the precise schema-side reason in the 400 detail.
+    from local_ai_platform.registries import _validate_against_schema
+
+    try:
+        _validate_against_schema(payload, "presets.schema.json")
+    except Exception as exc:
+        # jsonschema.ValidationError is a subclass of Exception;
+        # re-raise as ValueError to keep the existing route's
+        # 400-mapping. The W15 `_validate_against_schema` itself
+        # only raises jsonschema.ValidationError or
+        # jsonschema.SchemaError on the validation path; any
+        # other exception (e.g. file I/O on the schema file)
+        # would be a deployment-side issue and surfacing as a
+        # ValueError here is still the safe behaviour (mapped to
+        # 400 rather than 500).
+        if exc.__class__.__module__.startswith("jsonschema"):
+            raise ValueError(
+                f"Imported preset payload failed schema validation: {exc}"
+            ) from exc
+        raise
+
     schema_version = payload.get("schema_version")
     if schema_version != PRESET_EXPORT_SCHEMA_VERSION:
         raise ValueError(

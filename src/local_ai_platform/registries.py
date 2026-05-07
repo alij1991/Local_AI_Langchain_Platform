@@ -73,6 +73,20 @@ surfaces.
                            — JSON Schema (2020-12) pinning the
                              instruct_models.json shape
                              (IMPROVE-131).
+      presets.schema.json  — [IMPROVE-182] JSON Schema (2020-12)
+                             pinning the editor preset export-
+                             bundle envelope shape. Unlike the
+                             voices / instruct_models schemas,
+                             this one validates a TRANSIENT
+                             payload (passed to
+                             editor_presets.py::import_preset)
+                             rather than a static registry file
+                             — there is no
+                             data/registries/presets.json. The
+                             schema is the declarative source-
+                             of-truth for the v=1 envelope shape
+                             that GET /editor/presets/{id}/export
+                             produces.
 
 VS Code IDE association is operator-side opt-in (``.vscode/``
 is gitignored in this project). An operator can add to their
