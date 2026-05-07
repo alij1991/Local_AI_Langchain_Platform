@@ -30,8 +30,12 @@
 └────────────────────┬─────────────────────────────────────────────┘
                      │ HTTP / WS (127.0.0.1:8000)
 ┌────────────────────┴─────────────────────────────────────────────┐
-│ FastAPI (api_server.py, 6044 lines, ~70 endpoint groups)         │
+│ FastAPI (api_server.py, 678 lines — app + middleware + lifespan) │
 │   CORSMiddleware → RequestLoggingMiddleware → handler            │
+│                                                                  │
+│   11 routers at src/local_ai_platform/api/routers/*.py           │
+│   (182 APIRoute handlers + 2 WebSocket routes; 22 path prefixes  │
+│    /partner /images /editor /models /systems /agents /chat …)    │
 │                                                                  │
 │   Module-level globals (initialized in lifespan):                │
 │     router:         ProviderRouter   (ollama/hf/llamacpp/…)      │
@@ -76,16 +80,38 @@ The only piece of app-global state in Flutter is the `ApiClient` instance (one p
 ## 1.4 Backend layout
 
 ```
-api_server.py                          ← all HTTP endpoints (monolith, 6044 lines)
+api_server.py                          ← FastAPI app + middleware + lifespan + include_router (678 lines)
 src/local_ai_platform/
-├── config.py                          ← AppConfig dataclass + load_config()
+├── config.py                          ← AppSettings (pydantic-settings) + AppConfig (legacy shim)
 ├── db.py                              ← SQLite schema + get_conn() + AsyncDB
 ├── tracing.py                         ← TraceStore / TraceRecorder / LC callback
 ├── agents.py                          ← AgentOrchestrator (LangGraph)
-├── memory.py                          ← SmartMemory + message converters
+├── memory.py                          ← SmartMemory + TokenCounter + message converters
+├── token_counting.py                  ← shared count_tokens helper + tiktoken cache
 ├── huggingface.py                     ← HF wrapper (search/download)
 ├── ollama.py                          ← Ollama wrapper (pull/list/run)
+├── observability_events.py            ← typed-context event schemas + emit_typed
+├── registries.py                      ← data/registries/* loader + schema validation
 ├── formatting.py                      ← tiny helpers (format_bytes_human, …)
+│
+├── api/                               ← HTTP surface (extracted from api_server.py per [IMPROVE-1])
+│   ├── routers/                       ← 11 routers, 182 APIRoute handlers + 2 WebSocket routes
+│   │   ├── system.py                  ← /health, /providers, /system/info, /benchmark/*
+│   │   ├── observability.py           ← /observability/* (recent, summary, timeseries, rejections)
+│   │   ├── chat.py                    ← /chat/*, /conversations/*, /threads/*
+│   │   ├── tools.py                   ← /tools/*, /mcp/*
+│   │   ├── agents.py                  ← /agents/*
+│   │   ├── systems.py                 ← /systems/*
+│   │   ├── editor.py                  ← /editor/* (sessions, presets, compare/metrics)
+│   │   ├── models.py                  ← /models/*, /model-catalog
+│   │   ├── images.py                  ← /images/* (generate, upscale, ControlNet, …)
+│   │   ├── partner.py                 ← /partner/* (voice WebSockets, memory, import/export)
+│   │   └── settings.py                ← /settings/*
+│   ├── helpers.py                     ← shared route helpers
+│   ├── deps.py                        ← FastAPI dependency injectors
+│   ├── route_lint.py                  ← runtime route-mention validators
+│   ├── hf_progress.py                 ← HF download progress (per-byte SSE)
+│   └── hf_progress_watcher.py         ← progress aggregator
 │
 ├── providers/                         ← LLM provider backends
 │   ├── base.py                        ← ChatMessage / ChatResponse / GenerationSettings
@@ -111,25 +137,35 @@ src/local_ai_platform/
 │   ├── ai_models.py                   ← model registry + family/type detection
 │   ├── processors.py                  ← ControlNet / IP-Adapter / upscale / preprocess
 │   ├── editor.py                      ← editor session logic
+│   ├── editor_ttl.py                  ← TTL cleanup background task
+│   ├── compose_utils.py               ← compute_diff_metrics (SSIM/LPIPS, ssim_patch, lpips_patch)
+│   ├── accelerate_probe.py            ← lifespan probe of accelerate.hooks (Wave 44)
 │   └── instrumentation.py             ← per-generation metrics
 │
 ├── partner/                           ← voice companion
 │   ├── engine.py                      ← persona engine
-│   ├── memory.py                      ← facts / key / archived / graph
+│   ├── memory.py                      ← facts / key / archived / graph + Mem0 integration
 │   ├── profile.py                     ← persona definition
-│   └── user_profile.py                ← user-side profile
+│   ├── user_profile.py                ← user-side profile
+│   └── export.py                      ← partner-export.zip bundle (profile/memory/voice/decay)
 │
 ├── repositories/                      ← thin SQLite DAOs
 │   ├── conversations.py      ├── tools_repo.py        ├── systems.py
 │   ├── threads_repo.py       ├── agent_tools_repo.py  ├── models.py
 │   ├── agents_repo.py        ├── mcp_servers (in tools_repo)
-│   ├── prompt_drafts.py      └── images_repo.py
+│   ├── prompt_drafts.py      ├── images_repo.py
+│   ├── summaries.py          ← conversation summary store (Wave 31)
+│   └── editor_presets.py     ← editor preset registry (Wave 43)
 │
+├── systems/                           ← multi-agent DAG execution
+│   └── executor.py                    ← DAG executor + classifier
 ├── system_templates.py                ← hardcoded multi-agent template DAGs
-└── system_info.py                     ← DAG execution engine
+└── system_info.py                     ← DAG execution engine entrypoint
 ```
 
 All repository modules are deliberately thin: each one wraps a small number of `INSERT/SELECT/UPDATE/DELETE` statements around the schema in `db.py`. No ORM.
+
+The `api/` subtree is the result of the [IMPROVE-1] router split (shipped pre-Wave-43): `api_server.py` retained the `FastAPI()` app construction, middleware stack, lifespan, and `include_router()` calls; everything else moved to `src/local_ai_platform/api/`. The 11 routers add up to ~10,900 lines of route handler code; `api_server.py` itself is now 678 lines.
 
 ---
 
@@ -142,7 +178,7 @@ Worked example — a streaming chat message.
  2. ApiClient.postSse('/chat/stream', {agent:'assistant', message:'…'})
         POST + Accept: text/event-stream
  3. CORSMiddleware → RequestLoggingMiddleware → FastAPI router
- 4. Handler /chat/stream (api_server.py:3382)
+ 4. Handler /chat/stream (src/local_ai_platform/api/routers/chat.py:806)
         resolves agent from orchestrator.definitions
         creates TraceRecorder(run_id, conversation_id)
         calls orchestrator.astream_chat_with_agent(...)
@@ -168,7 +204,7 @@ Three things are worth internalizing from this flow:
 
 ## 1.6 Data storage
 
-### 1.6.1 SQLite — `data/app.db` (14 tables)
+### 1.6.1 SQLite — `data/app.db` (25 tables)
 
 Defined in [db.py](../../src/local_ai_platform/db.py). Foreign keys ON. Timestamps are **ISO-8601 UTC strings** (not Unix epoch — do not compare with `time.time()`).
 
@@ -187,9 +223,18 @@ Defined in [db.py](../../src/local_ai_platform/db.py). Foreign keys ON. Timestam
 | `prompt_drafts` | Prompt builder drafts | `inputs_json`, `output_prompt_text` |
 | `image_sessions` / `images` | Generated images + metadata | `session_id` → `images.parent_image_id` for lineage |
 | `editor_sessions` / `edit_history` | Editor step history (for undo/redo) | `step_number`, `result_image_path` |
+| `editor_presets` | User-saved editor preset DAGs (Wave 43) | `preset_id`, `name`, `steps_json`, `schema_version` |
 | `memory_store` | Key-value agent memory (namespaced) | `(namespace, key)` PK, `value_json` |
+| `app_events` | Typed observability events (Wave 12) | `subsystem`, `action`, `error_code`, `context_json`, `created_at` |
+| `conversation_summaries` | LLM-summarized inter-node DAG context (Wave 31) | `conversation_id`, `summary_text`, `last_message_id` |
+| `partner_conversations` | Partner persona chat history | `conversation_id`, `role`, `content`, `created_at` |
+| `partner_core_facts` | Partner long-term core facts | `fact_id`, `key`, `value`, `confidence` |
+| `partner_journal` | Partner journal entries | `entry_id`, `content`, `created_at` |
+| `partner_key_memories` | Partner key memories (high-salience) | `memory_id`, `content`, `weight` |
+| `partner_knowledge_graph` | Partner KG triples | `subject`, `predicate`, `object`, `created_at` |
+| `partner_memories_archive` | Partner archived (decayed) memories | `memory_id`, `archived_at`, `original_payload_json` |
 
-Migrations are ad-hoc in `init_db()` — it checks `PRAGMA table_info(messages)` and adds `run_id`/`perf_json` columns if missing. Any new column needs a similar guard. No migration framework (e.g. Alembic) is in use.
+Migrations are ad-hoc in `init_db()` — it checks `PRAGMA table_info(messages)` and adds `run_id`/`perf_json` columns if missing. Any new column needs a similar guard. No migration framework (e.g. Alembic) is in use. New tables are added by extending the `init_db()` schema script with `CREATE TABLE IF NOT EXISTS` so re-runs are idempotent.
 
 ### 1.6.2 SQLite — `data/checkpoints.db`
 
@@ -209,7 +254,11 @@ Managed by LangGraph's `SqliteSaver` (not our schema). Stores per-`thread_id` ag
 
 ## 1.7 Configuration
 
-Single dataclass: `AppConfig` in [config.py](../../src/local_ai_platform/config.py). ~60 fields, all loaded from env vars with defaults. There is no `.env` auto-loader in process — if you run `python -m uvicorn api_server:app` without a shell that loads `.env`, **`HF_TOKEN` will be missing and gated HF repos will silently fail**. See [IMPROVE-6].
+Two complementary types in [config.py](../../src/local_ai_platform/config.py):
+- `class AppSettings(BaseSettings)` — pydantic-settings schema, auto-loads `.env` at startup, covers every env var read across the codebase. **`.env` priority > shell env > default** (overridden via `settings_customise_sources`).
+- `@dataclass class AppConfig` — legacy dataclass kept as a backward-compat shim. `load_config()` populates `AppConfig` from `AppSettings` under the hood, so existing callers transparently start honoring `.env`. New code should call `get_settings()` directly.
+
+The `.env` auto-load was added by [IMPROVE-6] / [IMPROVE-69] (shipped pre-Wave-43); the pre-IMPROVE-6 footgun where `python -m uvicorn api_server:app` lost `HF_TOKEN` no longer applies.
 
 Grouping for fast orientation:
 
@@ -232,7 +281,7 @@ Chapter 9 consolidates this into a single master table.
 
 ## 1.8 Logging
 
-Two loggers are configured explicitly in [api_server.py:57-72](../../api_server.py:57):
+Two loggers are configured explicitly in [api_server.py:47-72](../../api_server.py:47):
 
 | Logger | Purpose |
 |---|---|
@@ -254,7 +303,7 @@ Two loggers are configured explicitly in [api_server.py:57-72](../../api_server.
 | `[SYSTEM]` | DAG execution *(note: singular, not `[SYSTEMS]`)* |
 | `[MODELS]` | HF discovery / download |
 
-`RequestLoggingMiddleware` ([api_server.py:235-252](../../api_server.py:235)) attaches to every request and emits:
+`RequestLoggingMiddleware` ([api_server.py:561-579](../../api_server.py:561)) attaches to every request and emits:
 
 - `ERROR` on 5xx
 - `WARNING` on 4xx
@@ -327,11 +376,11 @@ All routes go through `chat / stream / achat / astream`. Providers share one `Ch
 
 ## 1.12 Startup sequence
 
-From [api_server.py:131-212](../../api_server.py:131):
+From [api_server.py](../../api_server.py) lifespan:
 
 ```
 lifespan()
-├─ init_db()                     creates 14 tables + runs ad-hoc migrations
+├─ init_db()                     creates 25 tables + runs ad-hoc migrations
 ├─ build_router_from_config()    registers all providers
 ├─ AgentOrchestrator(config)
 │   └─ .ainit()                  upgrades InMemorySaver → SqliteSaver
@@ -341,10 +390,21 @@ lifespan()
 ├─ ImageGenerationService(config)
 ├─ image_service.refresh_models()    eager scan so first request is fast
 ├─ Restore saved agents from DB
-└─ Ensure default agents ('assistant', 'chat') exist with web tools
+├─ Ensure default agents ('assistant', 'chat') exist with web tools
+│
+└─ Schedule 3 fire-and-forget asyncio.create_task background tasks:
+   ├─ _async_warmup_partner_memory()                    [IMPROVE-156] Wave 22
+   │     pre-warms Ollama nomic-embed-text + inits Mem0 off-thread
+   ├─ probe_accelerate() via asyncio.to_thread          [IMPROVE-183] Wave 44
+   │     detects whether accelerate.hooks.AlignDevicesHook is functional
+   └─ _async_warmup_editor_session_ttl_cleanup(N)       [IMPROVE-164] Wave 30
+         conditional on EDITOR_SESSION_TTL_DAYS=N>0; walks
+         data/images/editor/_archive/ + drops date-buckets older than N days
 ```
 
-Shutdown is a no-op — SQLite handles are per-request, no background tasks to stop.
+These background tasks complete asynchronously *after* the lifespan `__aenter__` returns, so the FastAPI app accepts requests while they're still running. Each task emits typed observability events on entry/exit (e.g. `partner.mem0_embed_warmup`, `images.accelerate_probe`) so operators can grep for completion. The pattern is "boot doesn't wait" — the user's first request never blocks on these warmups.
+
+Shutdown is essentially a no-op — SQLite handles are per-request, the lifespan tasks self-complete, and there's nothing to gracefully stop. If a lifespan task is still running at shutdown, asyncio cancels it cleanly.
 
 ---
 
@@ -362,9 +422,9 @@ Shutdown is a no-op — SQLite handles are per-request, no background tasks to s
 
 ## 1.14 Known gotchas (architecture-level)
 
-- **`api_server.py` is 6,044 lines.** Project convention: grep first; never read top-to-bottom. Documented in the root `CLAUDE.md`. [IMPROVE-1]
-- **`CORSMiddleware` uses `allow_origins=["*"]`** ([api_server.py:215](../../api_server.py:215)). OK for a local-only app bound to `127.0.0.1`; risky if you ever expose the port. [IMPROVE-2]
-- **`.env` is not loaded in-process.** Env vars must already be in the shell. [IMPROVE-6]
+- **`api_server.py` is now 678 lines** (post the [IMPROVE-1] router split shipped pre-Wave-43); the 11 routers at `src/local_ai_platform/api/routers/*.py` total ~10,900 lines. Project convention: grep first when locating a route; the `CLAUDE.md` "don't read top-to-bottom" warning still applies to the routers (the largest is `models.py` at ~2,660 lines). [IMPROVE-1] (✓ shipped)
+- **`CORSMiddleware` uses `allow_origins=["*"]`** ([api_server.py:493](../../api_server.py:493)). OK for a local-only app bound to `127.0.0.1`; risky if you ever expose the port. [IMPROVE-2]
+- **`.env` is now auto-loaded in-process** via `pydantic-settings` `BaseSettings(env_file=".env")` (per [IMPROVE-6] / [IMPROVE-69], ✓ shipped). The pre-IMPROVE-6 footgun is gone — but note the source priority is `.env` file > shell env > default (flipped from pydantic-settings's default to match the pre-IMPROVE-6 `_read_env` semantics).
 - **Sync + async DB mix.** `get_conn()` (sync `sqlite3`) is used in nearly every repo; `AsyncDB` (aiosqlite) exists but is lightly used. No WAL mode, no pool. [IMPROVE-3]
 - **Trace is written once at end-of-run.** A server crash mid-run loses the trace (messages survive because they're committed per-turn).
 - **Migration style is ad-hoc.** New columns require a manual `PRAGMA table_info(...)` check in `init_db()`. No Alembic.
@@ -376,27 +436,28 @@ Shutdown is a no-op — SQLite handles are per-request, no background tasks to s
 
 Every idea below is grounded in a 2025–2026 source; links follow each block. Collected in chapter 10 with a priority ranking.
 
-### [IMPROVE-1] Split `api_server.py` into `APIRouter`s by domain
+### [IMPROVE-1] Split `api_server.py` into `APIRouter`s by domain (✓ shipped pre-Wave-43)
 
-**Problem:** 6,044 lines, ~70 endpoint groups, routing + helpers + business logic + globals all intermingled. Hard to navigate; touching any endpoint risks scrolling past unrelated code.
+**Problem (historical):** 6,044 lines, ~70 endpoint groups, routing + helpers + business logic + globals all intermingled. Hard to navigate; touching any endpoint risked scrolling past unrelated code.
 
-**Proposal:** adopt the standard FastAPI "bigger applications" layout. `api_server.py` becomes small — it just creates the `FastAPI()` app, adds middleware, and `include_router()`s each domain. One router per domain:
+**Outcome:** `api_server.py` is now 678 lines — `FastAPI()` app construction + middleware stack + lifespan + `include_router()` calls. The 182 APIRoute handlers + 2 WebSocket routes live across 11 router files at `src/local_ai_platform/api/routers/*.py`:
 
 ```
-src/local_ai_platform/routes/
-├── chat.py       (prefix=/chat)
-├── agents.py     (prefix=/agents)
-├── tools.py      (prefix=/tools, /mcp)
-├── models.py     (prefix=/models)
-├── images.py     (prefix=/images)
-├── editor.py     (prefix=/editor)
-├── partner.py    (prefix=/partner)
-├── systems.py    (prefix=/systems)
-├── runs.py       (prefix=/runs, /traces)
-└── system.py     (/health, /system/info, /benchmark/*)
+src/local_ai_platform/api/routers/
+├── system.py            (/health, /providers, /system/info, /benchmark/*)
+├── observability.py     (/observability/*)
+├── chat.py              (/chat, /conversations, /threads)
+├── tools.py             (/tools, /mcp)
+├── agents.py            (/agents, /generate-prompt)
+├── systems.py           (/systems)
+├── editor.py            (/editor)
+├── models.py            (/models, /model-catalog)
+├── images.py            (/images, /workflow)
+├── partner.py           (/partner — including 2 WebSocket endpoints)
+└── settings.py          (/settings)
 ```
 
-Endpoints stay thin; heavy logic already lives in service modules — this just tightens the boundary.
+The actual layout is `api/routers/` (under the `api/` package) rather than the `routes/` proposed above. Five sibling helper modules (`helpers.py`, `deps.py`, `route_lint.py`, `hf_progress.py`, `hf_progress_watcher.py`) cluster shared route concerns. Endpoints are thin; heavy logic still lives in service modules. The W36 [IMPROVE-171] follow-up cleaned up test-side imports that still pointed at `api_server`.
 
 **Sources:**
 - [Bigger Applications — Multiple Files (FastAPI official docs)](https://fastapi.tiangolo.com/tutorial/bigger-applications/)
@@ -466,14 +527,19 @@ Handlers become `async def chat(..., orchestrator: Annotated[AgentOrchestrator, 
 - [Structuring a FastAPI Project: Best Practices (dev.to, 2025)](https://dev.to/mohammad222pr/structuring-a-fastapi-project-best-practices-53l6)
 - [FastAPI Project Structure: Production Architecture Guide 2026 (zestminds)](https://www.zestminds.com/blog/fastapi-project-structure/)
 
-### [IMPROVE-6] Auto-load `.env` + migrate to `pydantic-settings`
+### [IMPROVE-6] / [IMPROVE-69] Auto-load `.env` + migrate to `pydantic-settings` (✓ shipped pre-Wave-43)
 
-**Problem:** `load_config()` is all `os.getenv`. No `.env` loader in process. Subtle footgun when launching via `python -m uvicorn api_server:app` — `HF_TOKEN` comes up empty and gated HF repos fail with confusing errors.
+**Problem (historical):** `load_config()` was all `os.getenv`. No `.env` loader in process. Subtle footgun when launching via `python -m uvicorn api_server:app` — `HF_TOKEN` came up empty and gated HF repos failed with confusing errors.
 
-**Proposal:** `pydantic-settings` `BaseSettings` (the current 2026 standard) subsumes `AppConfig`, auto-reads `.env`, types and validates fields, and gives cleaner error messages when a required value is missing. If the migration is too big, a one-line `load_dotenv()` at the top of `config.py` fixes the immediate symptom.
+**Outcome:** [config.py](../../src/local_ai_platform/config.py) now defines both:
+- `class AppSettings(BaseSettings)` — the canonical pydantic-settings schema with `model_config = SettingsConfigDict(env_file=".env", env_file_encoding="utf-8", case_sensitive=False, extra="ignore")`. Settings source order is flipped via `settings_customise_sources` so `.env` takes precedence over shell env (matching the pre-IMPROVE-6 `_read_env` semantics).
+- `@dataclass class AppConfig` — retained as a backward-compat shim. `load_config()` populates `AppConfig` from `AppSettings` so existing callers transparently start honoring `.env`. New code calls `get_settings()` directly. Per-module migrations landed across [IMPROVE-69] commits (HF cache paths, TRACE_*, `_get_hf_token`, etc.).
+
+A module-level `_SETTINGS` singleton caches the constructed `AppSettings`. The W37 [IMPROVE-173] `reset_settings_cache(monkeypatch)` fixture in `tests/conftest.py` exists specifically because `monkeypatch.setenv('HF_HOME', tmp_path)` after singleton construction silently no-ops; the fixture clears the cache so test-side env mutation propagates.
 
 **Sources:**
 - [FastAPI Best Practices for Production — 2026 Guide (fastlaunchapi.dev)](https://fastlaunchapi.dev/blog/fastapi-best-practices-production-2026) (pydantic-settings section)
+- [pydantic-settings v2 docs (v2.13, 2026-02)](https://docs.pydantic.dev/latest/concepts/pydantic_settings/)
 
 ---
 
