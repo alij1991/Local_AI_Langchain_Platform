@@ -1,6 +1,6 @@
 # 6 — Image Generation
 
-> **Goal of this chapter:** map the largest single feature in the platform — `images/service.py` (~7,400 LOC) plus ~20 endpoints and the Flutter images page. By the end you should know how a prompt lands on a GPU, which of 7 backends is picked and why, what the 13+ auto-enabled optimizations actually do, how LoRA/ControlNet/upscale/hires-fix/batch slot in, and where progress + cancel come from.
+> **Goal of this chapter:** map the largest single feature in the platform — `images/service.py` (~10,700 LOC, post-Wave-44 growth) plus ~25 endpoints in `routers/images.py` and the Flutter images page. By the end you should know how a prompt lands on a GPU, which of 7 backends is picked and why, what the 13+ auto-enabled optimizations actually do, how LoRA/ControlNet/upscale/hires-fix/batch slot in, where progress + cancel come from, and how the W44 [IMPROVE-183] accelerate probe surfaces broken-offload diagnostics at OOM-ladder fallback callsites.
 
 ---
 
@@ -36,7 +36,7 @@ Everything below unpacks pieces of that flow.
 
 ## 6.2 Core dataclasses
 
-From [service.py:166-292](../../src/local_ai_platform/images/service.py:166):
+From [service.py:170-215](../../src/local_ai_platform/images/service.py:170):
 
 | Class | Purpose |
 |---|---|
@@ -50,7 +50,7 @@ The profile is lazy and cached per service lifetime (`_get_hardware_profile` →
 
 ## 6.3 Model family detection
 
-[`_detect_model_hints(model_path)`](../../src/local_ai_platform/images/service.py:775). Single-responsibility function: read `model_index.json`, `scheduler/scheduler_config.json`, `text_encoder/config.json` from the local snapshot, then emit a dict of tuned defaults.
+[`_detect_model_hints(model_path)`](../../src/local_ai_platform/images/service.py:939). Single-responsibility function: read `model_index.json`, `scheduler/scheduler_config.json`, `text_encoder/config.json` from the local snapshot, then emit a dict of tuned defaults.
 
 Family matrix (simplified from the 200-line function):
 
@@ -81,9 +81,9 @@ The detection is **string-match over file paths and pipeline class names** — f
 
 ## 6.4 Hardware profile + backend scoring
 
-`_detect_hardware_profile()` ([service.py:328](../../src/local_ai_platform/images/service.py:328)) sniffs CUDA / MPS / XPU / DirectML / xformers / DeepCache / tomesd / sd.cpp / OpenVINO / ONNXRuntime / diffusers availability via import attempts plus `nvidia-smi`/`lspci`/macOS MPS checks. Result is a snapshot used to score backends.
+`_detect_hardware_profile()` ([service.py:332](../../src/local_ai_platform/images/service.py:332)) sniffs CUDA / MPS / XPU / DirectML / xformers / DeepCache / tomesd / sd.cpp / OpenVINO / ONNXRuntime / diffusers availability via import attempts plus `nvidia-smi`/`lspci`/macOS MPS checks. Result is a snapshot used to score backends.
 
-`_score_backends(hw, model_hints, folder_size, is_gguf)` ([service.py:3026](../../src/local_ai_platform/images/service.py:3026)) returns a ranked list of `{backend, score, device, reason}` dicts. Seven candidate backends, scored 0–100:
+`_score_backends(hw, model_hints, folder_size, is_gguf)` ([service.py:4780](../../src/local_ai_platform/images/service.py:4780)) returns a ranked list of `{backend, score, device, reason}` dicts. Seven candidate backends, scored 0–100:
 
 | Rank cue | Backend | Device | Typical score | Trigger |
 |---|---|---|---:|---|
@@ -104,7 +104,7 @@ The winner is written back into `execution_plan["inference_backend"]` and drives
 
 ## 6.5 Optimization plan — 13 levers, family-aware
 
-`_plan_optimizations(backend, model_hints, hw, steps, quality_tier, device)` ([service.py:3182](../../src/local_ai_platform/images/service.py:3182)) is **the** file you read if you want to understand why a given run is fast or slow. Each optimization has explicit family gating and a `quality_notes[]` entry surfaced in metadata.
+`_plan_optimizations(backend, model_hints, hw, steps, quality_tier, device)` ([service.py:4936](../../src/local_ai_platform/images/service.py:4936)) is **the** file you read if you want to understand why a given run is fast or slow. Each optimization has explicit family gating and a `quality_notes[]` entry surfaced in metadata.
 
 ### 6.5.1 The levers
 
@@ -150,7 +150,7 @@ That 200-line function is the most rule-heavy part of the service. [IMPROVE-40]
 
 ## 6.6 The execution plan
 
-`build_image_execution_plan(model_id, requested)` ([service.py:4267](../../src/local_ai_platform/images/service.py:4267)) is the single source of truth for "how am I going to run this?" Its output goes into `_run_diffusers` and ends up in the response metadata.
+`build_image_execution_plan(model_id, requested)` ([service.py:5941](../../src/local_ai_platform/images/service.py:5941)) is the single source of truth for "how am I going to run this?" Its output goes into `_run_diffusers` and ends up in the response metadata.
 
 Plan flow:
 
@@ -184,7 +184,7 @@ The plan ends up being a dict with 30+ keys — dtype, device, offload flags, re
 
 ## 6.7 `generate()` — the entry point
 
-[service.py:6823](../../src/local_ai_platform/images/service.py:6823). 530 lines. Four routes:
+[service.py:10083](../../src/local_ai_platform/images/service.py:10083). The current entry point. Routes:
 
 1. **Batch expansion** — if `num_images > 1`, loop sequentially with `seed, seed+1, seed+2, …`. Stops on first failure and returns partial list.
 2. **GGUF → sd.cpp** — `self._is_gguf_model(model_id)` → `_generate_sdcpp`. Separate code path, uses stable-diffusion.cpp's `sd` binary in a subprocess.
@@ -223,18 +223,25 @@ If `_run_diffusers` returns `error_code="nan_output"` (detected by checking for 
 
 Why: fp16 is numerically brittle with certain models + settings. bf16 has the same memory profile but bigger exponent range, typically resolves NaN.
 
-### 6.7.4 CPU fallback
+### 6.7.4 OOM retry ladder + CPU fallback (✓ shipped via [IMPROVE-44])
 
-If `hf_image_allow_cpu_fallback=true` (default) and CUDA run failed with one of `{out_of_memory, provider_unavailable, runtime_crash}`:
+If `hf_image_allow_cpu_fallback=true` (default) and CUDA run failed with one of `{out_of_memory, provider_unavailable, runtime_crash}`, the [IMPROVE-44] graduated OOM retry ladder fires (see [service.py:4393+](../../src/local_ai_platform/images/service.py:4393) "[IMPROVE-44] Graduated OOM retry ladder" comment block + `_run_oom_retry_ladder` at [service.py:9844](../../src/local_ai_platform/images/service.py:9844)):
 
 ```
-- Clear pipeline cache.
-- Rebuild plan as cpu_low_memory + float32 + attention_slicing + vae_tiling.
-- Clamp steps to 12-20 and resolution to 768 (CPU is slow at 1024²).
-- Rerun _run_diffusers with device="cpu", timeout ≥ 420s.
+1. Stage 1 — same GPU + reduced resolution. 1024² → 768² with vae_tiling.
+2. Stage 2 — same GPU + further reduced resolution. 768² → 512² + attention_slicing.
+3. Stage 3 — same GPU + model_cpu_offload. Streams transformer/UNet between CPU + GPU.
+4. Stage 4 — same GPU + sequential_cpu_offload. Layer-by-layer offload via accelerate.hooks.
+   ↳ NF4/FP8 fallback callsite at service.py:2991 logs WARNING reading the lifespan-cached
+     probe_accelerate() result (W44 [IMPROVE-183]) when accelerate hooks are non-functional.
+   ↳ Sequential CPU offload callsite at service.py:3002 logs WARNING similarly.
+   ↳ Model CPU offload callsite at service.py:3008 logs WARNING similarly.
+5. Stage 5 — pure CPU. Rebuild plan as cpu_low_memory + float32 + attention_slicing +
+   vae_tiling, clamp steps to 12-20, resolution 768. Rerun _run_diffusers with
+   device="cpu", timeout ≥ 420s.
 ```
 
-Heavy-handed — but for an 8GB card running Flux without quant, this is what keeps the UI from erroring out. [IMPROVE-44]
+Each stage surfaces a warning so the user knows what happened. The ladder fast-paths when the issue is resolution (stages 1-2 succeed often), and the CPU fallback is the last resort. The W44 [IMPROVE-183] accelerate probe pre-detects the case where stages 3-4 will silently fail because `accelerate.hooks.AlignDevicesHook` is unreachable — operators see "model CPU offload was attempted but the lifespan probe reported accelerate hooks non-functional" rather than an opaque OOM at inference time.
 
 ---
 
@@ -242,12 +249,12 @@ Heavy-handed — but for an 8GB card running Flux without quant, this is what ke
 
 All long-running backend code lives in **separate child processes** spawned via `multiprocessing`. Each worker takes a `payload: dict` and a result queue, sets up its own environment (CUDA DLL dirs, torch init), runs, writes stage markers to a file, sends result back on the queue.
 
-| Worker | File range | What |
+| Worker | File range (approx.) | What |
 |---|---|---|
-| `_sdcpp_worker` | 1257–1335 | stable-diffusion.cpp subprocess for GGUF models. Shell-out to the `sd` binary. |
-| `_openvino_worker` | 1337–1459 | OpenVINO's `OVStableDiffusionPipeline` / `OVStableDiffusionXLPipeline`. |
-| `_controlnet_worker` | 1517–1759 | `StableDiffusion(XL)ControlNetPipeline` with type-specific preprocessing. |
-| `_diffusers_worker` | 1761–2985 | **The big one.** ~1200 lines. Loads pipeline, applies every optimization selected, runs inference, handles step previews, writes stage markers. |
+| `_sdcpp_worker` | 1907+ | stable-diffusion.cpp subprocess for GGUF models. Shell-out to the `sd` binary. |
+| `_openvino_worker` | 1987+ | OpenVINO's `OVStableDiffusionPipeline` / `OVStableDiffusionXLPipeline`. |
+| `_controlnet_worker` | 2171+ | `StableDiffusion(XL)ControlNetPipeline` with type-specific preprocessing. |
+| `_diffusers_worker` | 2417+ | **The big one.** Loads pipeline, applies every optimization selected, runs inference, handles step previews, writes stage markers. |
 
 ### Why multiprocessing?
 
@@ -281,7 +288,7 @@ The current cache is process-local. If the worker process dies or is killed by c
 
 ## 6.10 LoRA management
 
-`list_available_loras()` ([service.py:3632](../../src/local_ai_platform/images/service.py:3632)) scans two locations:
+`list_available_loras()` ([service.py:5271](../../src/local_ai_platform/images/service.py:5271)) scans two locations:
 
 1. `./data/loras/` — user-downloaded LoRAs (via `POST /images/loras/download`).
 2. `~/.cache/huggingface/hub/models--*/` — HF-cached LoRA repos.
@@ -306,7 +313,7 @@ Multi-LoRA stacking is supported (SDXL + style + detail at different weights). T
 
 ## 6.11 Schedulers
 
-`GET /images/schedulers` returns a static list ([api_server.py:5278](../../api_server.py:5278)):
+`GET /images/schedulers` returns a static list ([routers/images.py:417](../../src/local_ai_platform/api/routers/images.py:417)):
 
 | ID | Name | Notes |
 |---|---|---|
@@ -320,7 +327,7 @@ Multi-LoRA stacking is supported (SDXL + style + detail at different weights). T
 | `heun` | Heun | Higher quality, 2× slower per step |
 | `pndm` | PNDM | Classic, stable |
 
-`_apply_scheduler(pipe, name)` ([service.py:121](../../src/local_ai_platform/images/service.py:121)) swaps the pipeline's scheduler in-place using diffusers' per-type factory methods. Works on the already-loaded pipeline (no reload).
+`_apply_scheduler(pipe, name)` ([service.py:125](../../src/local_ai_platform/images/service.py:125)) swaps the pipeline's scheduler in-place using diffusers' per-type factory methods. Works on the already-loaded pipeline (no reload).
 
 ---
 
@@ -328,7 +335,7 @@ Multi-LoRA stacking is supported (SDXL + style + detail at different weights). T
 
 `POST /images/preprocess` runs a preprocessor in isolation — useful for showing the user what their control image will look like before generation. `POST /images/generate` with `controlnet_type` set runs the full ControlNet pipeline.
 
-`GET /images/controlnet/types` lists the 6 types ([api_server.py:5945](../../api_server.py:5945)):
+`GET /images/controlnet/types` lists the 6 types ([routers/images.py:1565](../../src/local_ai_platform/api/routers/images.py:1565)):
 
 | Type | Needs `controlnet_aux` | Base models |
 |---|:---:|---|
@@ -345,7 +352,7 @@ The ControlNet model itself is loaded separately from the base model — `contro
 
 ## 6.13 Upscale
 
-`POST /images/upscale` ([api_server.py:5871](../../api_server.py:5871)) → `ImageGenerationService.upscale_image` ([service.py:4535](../../src/local_ai_platform/images/service.py:4535)).
+`POST /images/upscale` ([routers/images.py:1366](../../src/local_ai_platform/api/routers/images.py:1366)) → `ImageGenerationService.upscale_image` ([service.py:6209](../../src/local_ai_platform/images/service.py:6209)).
 
 Chain:
 
@@ -411,7 +418,7 @@ Currently stage file polling is the only progress channel — SSE streaming like
 
 ## 6.18 Prompt enhancement
 
-`POST /images/enhance-prompt` ([api_server.py:5347](../../api_server.py:5347)). Takes a user prompt + `model_family` (defaults to `sdxl`) + optional `hf_model` or `ollama_model` + `use_prompt_weighting` flag. Runs an LLM with a family-specific system prompt to produce an expanded SD-style prompt + negative prompt.
+`POST /images/enhance-prompt` ([routers/images.py:493](../../src/local_ai_platform/api/routers/images.py:493)). Takes a user prompt + `model_family` (defaults to `sdxl`) + optional `hf_model` or `ollama_model` + `use_prompt_weighting` flag. Runs an LLM with a family-specific system prompt to produce an expanded SD-style prompt + negative prompt.
 
 Enhancement surface is smart about model family — FLUX doesn't use negatives, Z-Image doesn't use negatives, SDXL Turbo is aggressive with quality tags. All via the LLM's system prompt, not hardcoded rewriting.
 
@@ -517,7 +524,7 @@ Like `/chat/enhance-prompt`, this also hand-rolls HTTP to Ollama with `urllib.re
 - **Pipeline cache dies with the worker process.** Cancel or fatal error → next generation pays 10-60s load cost. [IMPROVE-41]
 - **Progress is file-polled.** Stage file is read on each `GET /images/generate/progress` — with 500ms polling and multi-second steps, that's fine, but an SSE channel would be cleaner. [IMPROVE-42]
 - **Generation is not streamed.** Unlike chat, there's no per-step event stream. Step previews are stored then listed; the UI has to poll. [IMPROVE-43]
-- **CPU fallback is coarse.** On any CUDA OOM, the service rebuilds on CPU with clamped res + steps — but maybe the user just wanted a smaller resolution, not full CPU. [IMPROVE-44]
+- **OOM retry ladder is graduated** (✓ shipped via [IMPROVE-44]). On any CUDA OOM, the service tries 5 stages in order — 1024² → 768² + vae_tiling, then 512² + attention_slicing, then model_cpu_offload, then sequential_cpu_offload, then pure CPU. Most failures resolve at stage 1 or 2 without paying the CPU cost. The W44 [IMPROVE-183] accelerate probe additionally pre-warns when stages 3-4 will silently fail because `accelerate.hooks` is non-functional.
 - **Step previews are copied, not streamed.** The worker writes to a temp dir, the API copies them to the session dir after. A streaming endpoint would show them as they're produced. [IMPROVE-45]
 - **Upscale is RealESRGAN-only.** No SDXL upscaler, no latent upscaler. [IMPROVE-46]
 - **`_detect_model_hints` doesn't read safetensors metadata.** Pipeline-class detection from `model_index.json` is the main signal; `metadata.total_params` from safetensors header is ignored. [IMPROVE-47]
@@ -633,11 +640,13 @@ Reuse `_diffusers_worker`'s existing stage emissions; add a second multiprocessi
 - [Best Choices for Streaming Responses in LLM Applications (proagenticworkflows.ai)](https://proagenticworkflows.ai/best-practices-streaming-llm-responses-front-end-stack) — same pattern applies to any long-running job
 - [How to Use SSE vs WebSockets (OneUptime, 2026-01-27)](https://oneuptime.com/blog/post/2026-01-27-sse-vs-websockets/view)
 
-### [IMPROVE-44] Graduated OOM handling — don't jump straight to CPU
+### [IMPROVE-44] Graduated OOM handling — don't jump straight to CPU (✓ shipped pre-Wave-43)
 
-**Problem:** any CUDA OOM → full CPU fallback with clamped resolution. Often a 1024→768 retry on the *same* GPU would succeed; CPU takes 20× longer.
+**Problem (historical):** any CUDA OOM → full CPU fallback with clamped resolution. Often a 1024→768 retry on the *same* GPU would succeed; CPU takes 20× longer.
 
-**Proposal:** staged retry:
+**Outcome:** the staged retry shipped at [service.py:4393+](../../src/local_ai_platform/images/service.py:4393) ("[IMPROVE-44] Graduated OOM retry ladder" comment block) with `_run_oom_retry_ladder` at [service.py:9844](../../src/local_ai_platform/images/service.py:9844). Five stages fire in order before reaching pure CPU; W44 [IMPROVE-183] accelerate probe pairs with stages 3-4 to surface broken-offload diagnostics. See §6.7.4 for the current ladder shape.
+
+**Proposal (historical):** staged retry:
 
 ```
 1. OOM at 1024x1024 → retry at 768x768 on GPU with vae_tiling.
@@ -662,11 +671,13 @@ Each step surfaces a warning so the user knows what happened. Fast path when the
 **Sources:**
 - [How We Used SSE to Stream LLM Responses at Scale (Dani Akabani)](https://medium.com/@daniakabani/how-we-used-sse-to-stream-llm-responses-at-scale-fa0d30a6773f) — shape applies equally to image preview bytes
 
-### [IMPROVE-46] Add a latent / SDXL upscaler option
+### [IMPROVE-46] Add a latent / SDXL upscaler option (✓ shipped)
 
-**Problem:** upscale is RealESRGAN (trained on natural images, OK for photos) or LANCZOS (no detail recovery). For AI-generated outputs a latent upscaler or `stabilityai/sd-x2-latent-upscaler` often gives much better results.
+**Problem (historical):** upscale was RealESRGAN (trained on natural images, OK for photos) or LANCZOS (no detail recovery). For AI-generated outputs a latent upscaler or `stabilityai/sd-x2-latent-upscaler` often gives much better results.
 
-**Proposal:** add `method` param to `POST /images/upscale`:
+**Outcome:** the `method` param shipped on `POST /images/upscale`. Implementation in `routers/images.py` + `service.py:upscale_image`. Latent / tiled / lanczos / realesrgan modes all available.
+
+**Proposal (historical):** add `method` param to `POST /images/upscale`:
 
 ```
 realesrgan  (default, keep current)

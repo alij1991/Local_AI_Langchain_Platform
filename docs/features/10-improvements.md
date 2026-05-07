@@ -227,7 +227,7 @@ Sortable if you paste into a spreadsheet. Chapter column links back to the origi
 | 41 | 6 | Persistent worker pool | ⋆⋆⋆⋆ | 🔨🔨🔨🔨 | Resources |
 | 42 | 6 | Pub/sub progress channel | ⋆⋆ | 🔨🔨 | Observability |
 | 43 | 6 | Streaming image generation endpoint | ⋆⋆⋆⋆ | 🔨🔨🔨 | Streaming |
-| 44 | 6 | Graduated OOM retry | ⋆⋆⋆ | 🔨🔨 | Resources |
+| 44 | 6 | ✓ Graduated OOM retry — 5-stage ladder (1024² → 768² + vae_tiling, 512² + attention_slicing, model_cpu_offload, sequential_cpu_offload, pure CPU) at `service.py:4393+` + `_run_oom_retry_ladder` at `:9844` (shipped pre-Wave-43; closure marker added in Wave 47 [IMPROVE-187]). W44 [IMPROVE-183] accelerate probe pairs with stages 3-4 to surface broken-offload diagnostics. | ⋆⋆⋆ | 🔨🔨 | Resources |
 | 45 | 6 | Stream step previews as base64 | ⋆⋆⋆ | 🔨🔨 | Streaming |
 | 46 | 6 | ✓ Latent / SDXL upscaler option | ⋆⋆ | 🔨🔨 | AI/ML |
 | 47 | 6 | Read safetensors metadata | ⋆⋆ | 🔨 | AI/ML |
