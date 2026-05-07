@@ -8,9 +8,9 @@
 
 ## 10.1 Summary
 
-- **179 improvements** flagged inline as `[IMPROVE-N]` in chapters 1–9 + the Wave 5/6/7/8/9/10/11/12/13/14/15/16/18/19/20/21/22/23/24/26/27/28/29/30/31/32/33/34/35/36/37/38/39/40/41/42 audits (NEW from Wave 6 audit: 71/72/73/74; NEW from Wave 7: 75/76/77/78/79/80/81/82; NEW from Wave 8: 83/84/85/86/87/88; NEW from Wave 9: 89/90/91/92/93/94; NEW from Wave 10: 95/96/97/98/99/100; NEW from Wave 11: 101/102/103/104/105/106; NEW from Wave 12: 107/108/109/110/111/112; NEW from Wave 13: 113/114/115/116/117/118; NEW from Wave 14: 119/120/121/122/123/124/125; NEW from Wave 15: 126/127/128/129/130/131; NEW from Wave 16: 132/133/134/135/136/137; NEW from Wave 18: 138/139/140/141/142/143/144; NEW from Wave 19 Tranche A: 145/146; NEW from Wave 20 cleanup wave: 147/148/149/150/151/152; NEW from Wave 21 startup-contention fix: 153/154/155; NEW from Wave 22 true-async _init_mem0: 156; NEW from Wave 23 Kokoro create_stream chunked TTFA: 157/158; NEW from Wave 24 server-side parallel synth-while-LLM-streams: 159; NEW from Wave 26 startup-timing benchmark harness: 160; NEW from Wave 27 lifespan eager editor warm-up flag: 161; NEW from Wave 28 Tranche G partial preset export/import: 162; NEW from Wave 29 Tranche B voice persistence: 163; NEW from Wave 30 Tranche E partial editor session TTL cleanup: 164; NEW from Wave 31 Tranche D piece 1 LLM-summarized inter-node DAG context: 165; NEW from Wave 32 Tranche D piece 2 per-edge pass config: 166; NEW from Wave 33 Tranche D piece 3 classifier confidence threshold: 167; NEW from Wave 34 Tranche F real-LLM enhancer eval suite: 168; NEW from Wave 35 Tranche E sub-piece per-step metrics caching: 169; NEW from Wave 36 Path E partial test-suite stabilisation bucket A: 170/171/172; NEW from Wave 37 Path E partial test-suite stabilisation bucket B: 173/174; NEW from Wave 38 Tranche E sub-piece cropped-patch SSIM optimization: 175; NEW from Wave 39 Tranche E sub-piece LPIPS perceptual metric: 176; NEW from Wave 40 Tranche E expansion LPIPS-on-cropped-patch: 177; NEW from Wave 41 Path D voice-settings export bundle integration: 178; NEW from Wave 42 Path C logprob-based classifier confidence: 179).
+- **182 improvements** flagged inline as `[IMPROVE-N]` in chapters 1–9 + the Wave 5/6/7/8/9/10/11/12/13/14/15/16/18/19/20/21/22/23/24/26/27/28/29/30/31/32/33/34/35/36/37/38/39/40/41/42/43 audits (NEW from Wave 6 audit: 71/72/73/74; NEW from Wave 7: 75/76/77/78/79/80/81/82; NEW from Wave 8: 83/84/85/86/87/88; NEW from Wave 9: 89/90/91/92/93/94; NEW from Wave 10: 95/96/97/98/99/100; NEW from Wave 11: 101/102/103/104/105/106; NEW from Wave 12: 107/108/109/110/111/112; NEW from Wave 13: 113/114/115/116/117/118; NEW from Wave 14: 119/120/121/122/123/124/125; NEW from Wave 15: 126/127/128/129/130/131; NEW from Wave 16: 132/133/134/135/136/137; NEW from Wave 18: 138/139/140/141/142/143/144; NEW from Wave 19 Tranche A: 145/146; NEW from Wave 20 cleanup wave: 147/148/149/150/151/152; NEW from Wave 21 startup-contention fix: 153/154/155; NEW from Wave 22 true-async _init_mem0: 156; NEW from Wave 23 Kokoro create_stream chunked TTFA: 157/158; NEW from Wave 24 server-side parallel synth-while-LLM-streams: 159; NEW from Wave 26 startup-timing benchmark harness: 160; NEW from Wave 27 lifespan eager editor warm-up flag: 161; NEW from Wave 28 Tranche G partial preset export/import: 162; NEW from Wave 29 Tranche B voice persistence: 163; NEW from Wave 30 Tranche E partial editor session TTL cleanup: 164; NEW from Wave 31 Tranche D piece 1 LLM-summarized inter-node DAG context: 165; NEW from Wave 32 Tranche D piece 2 per-edge pass config: 166; NEW from Wave 33 Tranche D piece 3 classifier confidence threshold: 167; NEW from Wave 34 Tranche F real-LLM enhancer eval suite: 168; NEW from Wave 35 Tranche E sub-piece per-step metrics caching: 169; NEW from Wave 36 Path E partial test-suite stabilisation bucket A: 170/171/172; NEW from Wave 37 Path E partial test-suite stabilisation bucket B: 173/174; NEW from Wave 38 Tranche E sub-piece cropped-patch SSIM optimization: 175; NEW from Wave 39 Tranche E sub-piece LPIPS perceptual metric: 176; NEW from Wave 40 Tranche E expansion LPIPS-on-cropped-patch: 177; NEW from Wave 41 Path D voice-settings export bundle integration: 178; NEW from Wave 42 Path C logprob-based classifier confidence: 179; NEW from Wave 43 Phase 1 cleanup wave 1 Tranche E + G polish: 180/181/182).
 - **10 themes** — security, architecture, observability, tracing, UX, memory & context, model & inference, background tasks, voice, and tools/MCP.
-- **41 waves fully shipped + Wave 25 deferred-by-investigation** (Waves 1-16 numbered + Wave 17 doc-only cleanup + Wave 18 Tranche A Flutter editor v2 + Wave 19 Tranche A partner-import host + Wave 20 cleanup wave: §10.7 walkthrough closing Q1/Q4/Q7/Q15/Q16 + 1 deletion + 5 TTS quick wins + Wave 21 startup-contention fix targeting the 3 lazy-init chains the user's startup log surfaced + Wave 22 true-async _init_mem0 — IMPROVE-156 background-task warmup at lifespan via httpx.AsyncClient pre-warm of nomic-embed-text + asyncio.create_task fire-and-forget Mem0 init, moving the ~22s Chain 2 cost OFF the user's first request entirely + Wave 23 Kokoro create_stream chunked TTFA — IMPROVE-157 backend stream_synthesize via kokoro_onnx.create_stream + IMPROVE-158 Flutter progressive playback delivering ~60-80% TTFA win on long-paragraph synth + Wave 24 server-side parallel synth-while-LLM-streams — IMPROVE-159 phrase-boundary fallback in PartnerEngine.astream_chat firing on ``,`` ``;`` ``:`` once a clause is ≥ 30 chars long, so TTS can begin synthesising while the LLM is still emitting later words + Wave 25 Chatterbox sidecar streaming investigation — chatterbox-tts 0.1.7 has no streaming surface in either ChatterboxTTS.generate or ChatterboxTTSTurbo.generate; deferred pending upstream feature OR justified 3-5d fork investment + Wave 29 voice persistence: IMPROVE-163 `data/partner/voice_settings.json` survives backend restart so a user's voice_id / voice_gender / tts_mode picks don't reset on every uvicorn cycle, closing Tranche B partial from the Wave 18 deferred queue + Wave 30 editor session TTL cleanup: IMPROVE-164 opt-in `EDITOR_SESSION_TTL_DAYS=N` env-var triggers a fire-and-forget lifespan task that walks the [IMPROVE-53] archive directory + deletes date-buckets older than N days, closing Tranche E partial from the Wave 18 deferred queue + Wave 31 LLM-summarized inter-node DAG context: IMPROVE-165 opt-in `DAG_INTER_NODE_SUMMARIZATION_MODEL` env-var replaces the legacy `[... N earlier output(s) elided ...]` truncation marker with a one-shot LLM summary of the dropped entries when context budget is exceeded, closing Tranche D piece 1 of 3 + Wave 32 per-edge "pass" config: IMPROVE-166 adds 3 edge.rule.pass modes (`all` default / `source_only` / `none`) so DAG authors can scope which prior outputs each downstream agent sees, closing Tranche D piece 2 of 3 + Wave 33 classifier confidence threshold: IMPROVE-167 opt-in `DAG_CLASSIFIER_CONFIDENCE_THRESHOLD` env-var with heuristic confidence ``1 / matched_count`` rejects ambiguous llm_router classifications so the always-fallback edge fires instead, closing Tranche D piece 3 of 3 + the entire Tranche D umbrella + Wave 34 real-LLM enhancer eval suite: IMPROVE-168 opt-in `LOCAL_AI_EVAL_REAL_LLM=1` env-var runs `enhance_edit_prompt` against real Ollama LLMs with 8 curated test cases that pin content-word preservation + forbidden-phrase rejection + multi-model behaviour, closing Tranche F from the Wave 18 deferred queue + the IMPROVE-55 spawned-follow-up callout + the user's "in order A, B, C, D" batch + Wave 35 per-step metrics caching: IMPROVE-169 caches the [IMPROVE-56] diff-metrics dict per `(path_a, path_b)` pair on `EditSession` so repeated `GET /editor/{session_id}/compare?metrics=true` calls return the cached dict instead of recomputing the SSIM + region-map base64 (~80ms+ saved on cache hit), closing Tranche E sub-piece from the post-Wave-34 backlog + Wave 36 Path E partial test-suite stabilisation: IMPROVE-170 restores `OllamaController` static helpers + `_get_client` + `_enrich_capabilities_from_show` for `test_ollama.py` (7 fixes) + IMPROVE-171 rewires `test_images_enhance_prompt.py` to patch the `routers.images` namespace after the [IMPROVE-1] router split (6 fixes) + IMPROVE-172 extracts `AgentOrchestrator._build_agent_graph(definition, allow_tools=True)` from `_chat_with_react_agent` to expose the retry-without-tools seam (2 fixes), closing bucket A 13 of 22 known pre-existing failures from the post-Wave-35 backlog Path E + Wave 37 Path E partial test-suite stabilisation bucket B: IMPROVE-173 NEW `reset_settings_cache(monkeypatch)` fixture in `tests/conftest.py` clears `local_ai_platform.config._SETTINGS` so `monkeypatch.setenv('HF_HOME', tmp_path)` propagates to all `get_settings().hf_home` call sites in production (5 fixes — 4 in `test_images_service.py` + 1 in `test_huggingface.py`) + IMPROVE-174 `_run_diffusers` patch-target alignment for 2 tests in `test_images_service.py` whose patches were on the subprocess-isolated `_run_diffusers_isolated` worker but `generate()` calls the in-process `_run_diffusers` directly (2 fixes), closing bucket B 7 of the 22 pre-existing failures from the post-Wave-35 backlog Path E end-to-end + Wave 38 cropped-patch SSIM optimization: IMPROVE-175 NEW `ssim_patch` (float | None) + `patch_bbox` (dict | None) fields in the `compute_diff_metrics` return dict; bbox is computed from the changed-pixels mask and the SSIM compute crops both arrays to that bbox before running skimage's `structural_similarity`, falling back to the full-frame `ssim` value when the bbox covers ≥90% of the frame OR the bbox is too small for SSIM's default `win_size=7` window OR no pixels changed; pairs with W35's metrics cache via natural inclusion in the cached dict (no cache-layer change), closing Tranche E sub-piece from the post-Wave-37 backlog + Wave 39 LPIPS perceptual metric: IMPROVE-176 opt-in `EDITOR_METRICS_LPIPS_ENABLED=1` env-var triggers a `lpips`-package perceptual-distance compute on the post-resize arrays (default net `alex`, module-scope model cache via lazy-init on first enabled call), surfaces the result as a NEW `lpips` field in the `compute_diff_metrics` return dict (None when disabled or compute fails — same shape as the existing `ssim` field's failure mode); pairs with W35's metrics cache via natural inclusion (the cached dict gains 1 new key, no cache-layer change), closing the final Tranche E sub-piece + the entire Tranche E "editor advanced" umbrella from the Wave 18 deferred queue + Wave 40 LPIPS-on-cropped-patch (Tranche E expansion): IMPROVE-177 NEW `lpips_patch` (float | None) field paired with the existing W38 `patch_bbox`; when LPIPS is enabled AND the W38 bbox crop applies, runs the lpips.LPIPS forward pass on the bbox-cropped arrays (mirrors the W38 ssim_patch shape — perceptual variant of the same "isolate the actual edit region" optimization); falls back to the full-frame `lpips` value when no useful crop applies OR the crop compute fails; same env-var gate as W39 IMPROVE-176 — disabled stays disabled, no new env-var + Wave 41 voice-settings export bundle integration (Path D): IMPROVE-178 NEW `voice_settings.json` entry in the `partner-export.zip` bundle (sibling of `profile.json` / `user_profile.json` / `memory_decay.json`) + matching read in `restore_from_bundle`; closes the W29 IMPROVE-163 follow-up that the schema-stability gate had deferred (the dataclass shape from W29 — voice_id / voice_gender / tts_mode — is now stable); rides the existing `?scope=` CSV filter via NEW `voice_settings` scope added to `RESTORE_SCOPES`; engine in-memory `_voice_id` / `_voice_gender` / `_tts_mode` fields are mutated alongside the on-disk write so a running partner picks up restored values without a backend restart (mirror of the existing `engine.profile = ...` swap in the W9 IMPROVE-94 profile.json restore path) + Wave 42 logprob-based classifier confidence (Path C): IMPROVE-179 opt-in `DAG_CLASSIFIER_LOGPROBS_ENABLED=1` env-var that asks the LLM for logprobs on the W33 IMPROVE-167 classifier call (via NEW `logprobs` / `top_logprobs` fields on `GenerationSettings` + Ollama provider passthrough leveraging the existing `ChatResponse.raw` escape hatch); when enabled + the response carries logprobs, derives confidence as `exp(first_token_logprob)` (the LLM's actual probability assigned to its first content-bearing token, in [0, 1]); falls back to the W33 heuristic `1 / matched_count` when logprobs are missing OR the env-var is disabled OR the provider doesn't expose logprobs (non-Ollama provider, older Ollama version, request didn't enable logprobs) — graceful degradation preserves W33 behaviour for every non-supporting code path); **1** standing in deferred queues (post-Wave-42 backlog).
+- **41 waves fully shipped + Wave 25 deferred-by-investigation** (Waves 1-16 numbered + Wave 17 doc-only cleanup + Wave 18 Tranche A Flutter editor v2 + Wave 19 Tranche A partner-import host + Wave 20 cleanup wave: §10.7 walkthrough closing Q1/Q4/Q7/Q15/Q16 + 1 deletion + 5 TTS quick wins + Wave 21 startup-contention fix targeting the 3 lazy-init chains the user's startup log surfaced + Wave 22 true-async _init_mem0 — IMPROVE-156 background-task warmup at lifespan via httpx.AsyncClient pre-warm of nomic-embed-text + asyncio.create_task fire-and-forget Mem0 init, moving the ~22s Chain 2 cost OFF the user's first request entirely + Wave 23 Kokoro create_stream chunked TTFA — IMPROVE-157 backend stream_synthesize via kokoro_onnx.create_stream + IMPROVE-158 Flutter progressive playback delivering ~60-80% TTFA win on long-paragraph synth + Wave 24 server-side parallel synth-while-LLM-streams — IMPROVE-159 phrase-boundary fallback in PartnerEngine.astream_chat firing on ``,`` ``;`` ``:`` once a clause is ≥ 30 chars long, so TTS can begin synthesising while the LLM is still emitting later words + Wave 25 Chatterbox sidecar streaming investigation — chatterbox-tts 0.1.7 has no streaming surface in either ChatterboxTTS.generate or ChatterboxTTSTurbo.generate; deferred pending upstream feature OR justified 3-5d fork investment + Wave 29 voice persistence: IMPROVE-163 `data/partner/voice_settings.json` survives backend restart so a user's voice_id / voice_gender / tts_mode picks don't reset on every uvicorn cycle, closing Tranche B partial from the Wave 18 deferred queue + Wave 30 editor session TTL cleanup: IMPROVE-164 opt-in `EDITOR_SESSION_TTL_DAYS=N` env-var triggers a fire-and-forget lifespan task that walks the [IMPROVE-53] archive directory + deletes date-buckets older than N days, closing Tranche E partial from the Wave 18 deferred queue + Wave 31 LLM-summarized inter-node DAG context: IMPROVE-165 opt-in `DAG_INTER_NODE_SUMMARIZATION_MODEL` env-var replaces the legacy `[... N earlier output(s) elided ...]` truncation marker with a one-shot LLM summary of the dropped entries when context budget is exceeded, closing Tranche D piece 1 of 3 + Wave 32 per-edge "pass" config: IMPROVE-166 adds 3 edge.rule.pass modes (`all` default / `source_only` / `none`) so DAG authors can scope which prior outputs each downstream agent sees, closing Tranche D piece 2 of 3 + Wave 33 classifier confidence threshold: IMPROVE-167 opt-in `DAG_CLASSIFIER_CONFIDENCE_THRESHOLD` env-var with heuristic confidence ``1 / matched_count`` rejects ambiguous llm_router classifications so the always-fallback edge fires instead, closing Tranche D piece 3 of 3 + the entire Tranche D umbrella + Wave 34 real-LLM enhancer eval suite: IMPROVE-168 opt-in `LOCAL_AI_EVAL_REAL_LLM=1` env-var runs `enhance_edit_prompt` against real Ollama LLMs with 8 curated test cases that pin content-word preservation + forbidden-phrase rejection + multi-model behaviour, closing Tranche F from the Wave 18 deferred queue + the IMPROVE-55 spawned-follow-up callout + the user's "in order A, B, C, D" batch + Wave 35 per-step metrics caching: IMPROVE-169 caches the [IMPROVE-56] diff-metrics dict per `(path_a, path_b)` pair on `EditSession` so repeated `GET /editor/{session_id}/compare?metrics=true` calls return the cached dict instead of recomputing the SSIM + region-map base64 (~80ms+ saved on cache hit), closing Tranche E sub-piece from the post-Wave-34 backlog + Wave 36 Path E partial test-suite stabilisation: IMPROVE-170 restores `OllamaController` static helpers + `_get_client` + `_enrich_capabilities_from_show` for `test_ollama.py` (7 fixes) + IMPROVE-171 rewires `test_images_enhance_prompt.py` to patch the `routers.images` namespace after the [IMPROVE-1] router split (6 fixes) + IMPROVE-172 extracts `AgentOrchestrator._build_agent_graph(definition, allow_tools=True)` from `_chat_with_react_agent` to expose the retry-without-tools seam (2 fixes), closing bucket A 13 of 22 known pre-existing failures from the post-Wave-35 backlog Path E + Wave 37 Path E partial test-suite stabilisation bucket B: IMPROVE-173 NEW `reset_settings_cache(monkeypatch)` fixture in `tests/conftest.py` clears `local_ai_platform.config._SETTINGS` so `monkeypatch.setenv('HF_HOME', tmp_path)` propagates to all `get_settings().hf_home` call sites in production (5 fixes — 4 in `test_images_service.py` + 1 in `test_huggingface.py`) + IMPROVE-174 `_run_diffusers` patch-target alignment for 2 tests in `test_images_service.py` whose patches were on the subprocess-isolated `_run_diffusers_isolated` worker but `generate()` calls the in-process `_run_diffusers` directly (2 fixes), closing bucket B 7 of the 22 pre-existing failures from the post-Wave-35 backlog Path E end-to-end + Wave 38 cropped-patch SSIM optimization: IMPROVE-175 NEW `ssim_patch` (float | None) + `patch_bbox` (dict | None) fields in the `compute_diff_metrics` return dict; bbox is computed from the changed-pixels mask and the SSIM compute crops both arrays to that bbox before running skimage's `structural_similarity`, falling back to the full-frame `ssim` value when the bbox covers ≥90% of the frame OR the bbox is too small for SSIM's default `win_size=7` window OR no pixels changed; pairs with W35's metrics cache via natural inclusion in the cached dict (no cache-layer change), closing Tranche E sub-piece from the post-Wave-37 backlog + Wave 39 LPIPS perceptual metric: IMPROVE-176 opt-in `EDITOR_METRICS_LPIPS_ENABLED=1` env-var triggers a `lpips`-package perceptual-distance compute on the post-resize arrays (default net `alex`, module-scope model cache via lazy-init on first enabled call), surfaces the result as a NEW `lpips` field in the `compute_diff_metrics` return dict (None when disabled or compute fails — same shape as the existing `ssim` field's failure mode); pairs with W35's metrics cache via natural inclusion (the cached dict gains 1 new key, no cache-layer change), closing the final Tranche E sub-piece + the entire Tranche E "editor advanced" umbrella from the Wave 18 deferred queue + Wave 40 LPIPS-on-cropped-patch (Tranche E expansion): IMPROVE-177 NEW `lpips_patch` (float | None) field paired with the existing W38 `patch_bbox`; when LPIPS is enabled AND the W38 bbox crop applies, runs the lpips.LPIPS forward pass on the bbox-cropped arrays (mirrors the W38 ssim_patch shape — perceptual variant of the same "isolate the actual edit region" optimization); falls back to the full-frame `lpips` value when no useful crop applies OR the crop compute fails; same env-var gate as W39 IMPROVE-176 — disabled stays disabled, no new env-var + Wave 41 voice-settings export bundle integration (Path D): IMPROVE-178 NEW `voice_settings.json` entry in the `partner-export.zip` bundle (sibling of `profile.json` / `user_profile.json` / `memory_decay.json`) + matching read in `restore_from_bundle`; closes the W29 IMPROVE-163 follow-up that the schema-stability gate had deferred (the dataclass shape from W29 — voice_id / voice_gender / tts_mode — is now stable); rides the existing `?scope=` CSV filter via NEW `voice_settings` scope added to `RESTORE_SCOPES`; engine in-memory `_voice_id` / `_voice_gender` / `_tts_mode` fields are mutated alongside the on-disk write so a running partner picks up restored values without a backend restart (mirror of the existing `engine.profile = ...` swap in the W9 IMPROVE-94 profile.json restore path) + Wave 42 logprob-based classifier confidence (Path C): IMPROVE-179 opt-in `DAG_CLASSIFIER_LOGPROBS_ENABLED=1` env-var that asks the LLM for logprobs on the W33 IMPROVE-167 classifier call (via NEW `logprobs` / `top_logprobs` fields on `GenerationSettings` + Ollama provider passthrough leveraging the existing `ChatResponse.raw` escape hatch); when enabled + the response carries logprobs, derives confidence as `exp(first_token_logprob)` (the LLM's actual probability assigned to its first content-bearing token, in [0, 1]); falls back to the W33 heuristic `1 / matched_count` when logprobs are missing OR the env-var is disabled OR the provider doesn't expose logprobs (non-Ollama provider, older Ollama version, request didn't enable logprobs) — graceful degradation preserves W33 behaviour for every non-supporting code path) + Wave 43 in progress — Phase 1 cleanup wave 1 of 3 Tranche E + G polish per §10.5.2 closure plan: IMPROVE-180 explicit `EDITOR_METRICS_LPIPS_PATCH_MIN_DIM` env-var gate (default 11 — AlexNet kernel minimum) tightening the W40 [IMPROVE-177] crop branch's soft edge so a sub-AlexNet bbox falls back to full-frame LPIPS earlier without paying the inner-try cost + IMPROVE-181 `EDITOR_METRICS_LPIPS_TRUNK_NET` env-var knob (default `alex` preserves W39 [IMPROVE-176] behaviour; `vgg` / `squeeze` opt-in for power users — the W39 module-scope cache already keys by trunk-net name so multi-trunk coexistence is free) + IMPROVE-182 closing Tranche G remainder by adding `data/registries/schemas/presets.schema.json` + JSON-Schema 2020-12 validation in `editor_presets.py::import_preset` (mirrors the W14 [IMPROVE-125] voices + instruct-models registries + W15 [IMPROVE-131] schema validation pattern; pins the v=1 `schema_version` envelope shape against operator-edit typos); **1** standing in deferred queues (post-Wave-42 backlog).
 
 All improvements are traceable back to a chapter + a 2025–2026 citation. This chapter is pure planning — *what* + *why this order*; *how* is in each origin chapter.
 
@@ -178,7 +178,7 @@ Smaller items that improve day-to-day use.
 
 ---
 
-## 10.4 The complete table (all 179)
+## 10.4 The complete table (all 182)
 
 Sortable if you paste into a spreadsheet. Chapter column links back to the originating doc.
 
@@ -363,10 +363,13 @@ Sortable if you paste into a spreadsheet. Chapter column links back to the origi
 | 177 | 6 | ✓ LPIPS-on-cropped-patch — paired field for the W39 [IMPROVE-176] LPIPS metric. When `EDITOR_METRICS_LPIPS_ENABLED=1` AND the W38 [IMPROVE-175] `patch_bbox` is not None (a localized edit with a useful crop), runs the lpips.LPIPS forward pass on the bbox-cropped `arr_a` / `arr_b` slices alongside the existing full-frame compute; surfaces as NEW `lpips_patch` field (float \| None). Same fallback semantics as W38 `ssim_patch`: when no useful crop applies OR the crop compute fails, the field falls back to the full-frame `lpips` value (so callers can ALWAYS read `lpips_patch` without a separate None branch beyond the existing LPIPS-disabled / degenerate cases). The perceptual analogue of the W38 cropped-patch optimization: full-frame LPIPS dilutes the "how good is this edit" signal across unchanged regions; the cropped-patch variant isolates the actual edit area for a much more meaningful localized-edit perceptual score. No new env-var (rides the W39 `EDITOR_METRICS_LPIPS_ENABLED` gate); no new model load (reuses the W39 module-scope `_lpips_model_cache`); pairs with [IMPROVE-169] W35 metrics cache via natural inclusion (the cached dict gains 1 new key, no cache-layer change) (Wave 40 — Tranche E expansion beyond the original Wave 18 deferred-queue scope; symmetric with W38 `ssim_patch` shape) | ⋆⋆ | 🔨 | UX |
 | 179 | 5 | ✓ Logprob-based classifier confidence — opt-in `DAG_CLASSIFIER_LOGPROBS_ENABLED=1` env-var that upgrades the W33 [IMPROVE-167] heuristic confidence (`1 / matched_count`) to the LLM's actual emission probability via `logprobs=True` on the classifier's chat call. Closes the W33 spawned-followup that flagged "single-match-with-low-overall-confidence" as a missed case (the heuristic returns 1.0 when only 1 option matches but the LLM may have been uncertain even on that lone match — only logprobs surface that). Implementation threads NEW `logprobs: bool = False` + `top_logprobs: int | None = None` fields through `GenerationSettings` (additive, default-off so all existing callers stay on the pre-W42 path); `OllamaProvider.chat()` + `OllamaProvider.achat()` pass them to the Ollama Python client v0.6.1's `chat()` (which exposes `logprobs` / `top_logprobs` natively in late-2024+ versions); the response's `logprobs` array lands in `ChatResponse.raw` (existing escape hatch — no abstract-surface change). The classifier in `systems/executor.py::classify_llm_router_edges` derives `confidence = exp(first_token_logprob)` when available — the LLM's exact probability for its first content-bearing token, mapped to [0, 1] with no rescaling. Falls back to the W33 heuristic when logprobs are missing OR env-var is disabled OR provider doesn't carry the field (non-Ollama, older Ollama version, request didn't enable logprobs) — graceful degradation across every non-supporting path. The threshold check (`confidence < threshold` → reject + always-fallback edge fires) works the same way regardless of confidence source. No new env-var beyond `DAG_CLASSIFIER_LOGPROBS_ENABLED` (the W33 `DAG_CLASSIFIER_CONFIDENCE_THRESHOLD` continues to gate the rejection threshold; default 0.0 still preserves pre-Wave-33 behaviour). 2026 sources: Ollama Python client `logprobs` / `top_logprobs` parameters (v0.5.0+ added Dec 2024; v0.6.1 currently pinned in .venv, https://github.com/ollama/ollama-python). Wave 42 — Path C from the post-Wave-41 backlog; closes the W33 IMPROVE-167 follow-up; one-line ride-along on `ChatResponse.raw` with no provider-abstraction surface change | ⋆⋆ | 🔨🔨 | UX |
 | 178 | 8 | ✓ Voice-settings export bundle integration — bundles `data/partner/voice_settings.json` (the W29 [IMPROVE-163] sibling of `profile.json` / `user_profile.json` / `memory_decay.json`) into the `partner-export.zip` archive alongside the existing JSON+JSONL bundle contents, and pairs the export with a matching read in `restore_from_bundle` so users get round-trip preservation of voice / gender / tts_mode picks across machine migrations + factory resets + GDPR Article 20 portability requests. Wave 29 design deferred bundle integration until the dataclass shape stabilised (the schema-stability gate); the post-Wave-40 backlog Path D promotes that deferred follow-up. NEW `voice_settings` scope added to `RESTORE_SCOPES` so users can opt into a `?scope=voice_settings` partial restore from the existing W11 [IMPROVE-104] CSV filter on `POST /partner/import` + `POST /partner/import/dry-run`. Engine in-memory `_voice_id` / `_voice_gender` / `_tts_mode` fields are mutated alongside the on-disk write (mirror of the existing `engine.profile = ...` / `engine.user_profile = ...` swaps in the W9 [IMPROVE-94] profile / user-profile restore branches) so a running partner picks up restored picks without a backend restart. Best-effort skip on missing / corrupt source file (matches the W8 [IMPROVE-87] memory_decay export-pattern's safety discipline); README.md cross-reference + RESTORE_SCOPES inventory pin via the existing W11 [IMPROVE-104] `test_restore_scopes_constant_matches_implementation` test extended from 9 → 10 scopes (Wave 41 — Path D from the post-Wave-40 backlog; closes the W29 IMPROVE-163 follow-up; one-line ride-along on the IMPROVE-67 / IMPROVE-87 / IMPROVE-94 export+import infrastructure) | ⋆⋆ | 🔨 | UX |
+| 180 | 7 | `EDITOR_METRICS_LPIPS_PATCH_MIN_DIM` env-var gate — explicit minimum-bbox-dim threshold (default 11 = AlexNet's 11x11 kernel minimum) for the W40 [IMPROVE-177] cropped-patch LPIPS variant. Pre-Wave-43 the W40 implementation relied on the inner try/except to catch sub-AlexNet bboxes (kernel raises when input dim < kernel dim); W43 adds an explicit gate that skips the crop compute earlier (no inner-try cost) + surfaces the threshold to operators as a tunable env-var. Same default-equivalent behaviour: bboxes ≥ 11 dim continue through the W40 crop path; bboxes < 11 dim now fall back to the full-frame `lpips` value via the existing W40 fallback branch without the inner-try detour. Pattern: tightens the W40 implementation's soft edge via the W42 lesson "exhaustively enumerate failure modes + treat each as a fallback signal" — the inner try/except remains as defence-in-depth for unexpected exceptions (Wave 43 — Phase 1 cleanup wave 1 of 3, Tranche E polish from the post-Wave-42 backlog) | ⋆ | 🔨 | UX |
+| 181 | 7 | `EDITOR_METRICS_LPIPS_TRUNK_NET` env-var knob — three-valued env-var (`alex` default / `vgg` / `squeeze`) gating the W39 [IMPROVE-176] LPIPS trunk net selection. Pre-Wave-43 W39 hard-codes `_LPIPS_NET_DEFAULT = "alex"` at module scope; W43 makes the trunk net runtime-tunable. Power-user use cases: `vgg` for higher perceptual fidelity (~528MB torchvision weights vs alex's 244MB; per-call forward pass ~2x slower), `squeeze` for the tiny-model trunk (smallest, fastest, but less accurate). Default `alex` preserves W39 behaviour exactly. The W39 module-scope `_lpips_model_cache` already keys by trunk-net name so multi-trunk coexistence is free (an operator who flips the env-var mid-process pays the model-load cost once per trunk net then reuses on subsequent calls). Invalid env-var values (anything other than `alex` / `vgg` / `squeeze`) silently fall back to `alex` + a debug log line — same shape as W32's invalid-pass_mode fallback (Wave 43 — Phase 1 cleanup wave 1 of 3, Tranche E polish from the post-Wave-42 backlog) | ⋆ | 🔨 | UX |
+| 182 | 7 | Preset JSON schema registry — NEW `data/registries/schemas/presets.schema.json` JSON-Schema 2020-12 document defining the export-bundle envelope shape `{schema_version: 1, name: str, description: str, steps: list[dict], exported_at: str (ISO-8601)}` + each step dict's `{operation: str, params: dict}` shape. Hooked into `editor_presets.py::import_preset` via the existing `local_ai_platform.registries._validate_against_schema` helper (W15 [IMPROVE-131] best-effort validation pattern); a payload that doesn't match the schema raises `jsonschema.ValidationError` → caller maps to 400 (replaces the previous adhoc isinstance + non-empty-name + steps-list-of-dicts checks with a single declarative source-of-truth that ALSO catches operator-edit typos like `"schema_version": "1"` string-vs-int + `"steps": null` instead of a list + missing required keys). Closes Tranche G remainder from the Wave 18 deferred queue + the [IMPROVE-162] schema_version=1 follow-up that flagged "operator-edit typo defence" as a design gap. Mirrors the W14 [IMPROVE-125] voices + instruct-models registries + W15 [IMPROVE-131] schema validation pattern — same registries dir, same schemas/ subdir, same `_validate_against_schema(filename)` helper, same best-effort discipline (skips silently when jsonschema unavailable) (Wave 43 — Phase 1 cleanup wave 1 of 3, Tranche G remainder from the post-Wave-42 backlog) | ⋆⋆ | 🔨 | UX |
 
 *Impact for [IMPROVE-59] is ⋆⋆⋆⋆⋆ if the app is ever distributed, ⋆⋆ if it stays local-only.
 
-**Legend:** A ``✓`` prefix marks items that have shipped. See §10.6 for the Wave 5 / 6 / 7 / 8 / 9 / 10 / 11 / 12 / 13 / 14 / 15 / 16 / 17 / 18 / 19 / 20 / 21 / 22 / 23 / 24 / 26 / 27 / 28 / 29 / 30 / 31 / 32 / 33 / 34 / 35 / 36 / 37 / 38 / 39 / 40 / 41 / 42 retrospective.
+**Legend:** A ``✓`` prefix marks items that have shipped. See §10.6 for the Wave 5 / 6 / 7 / 8 / 9 / 10 / 11 / 12 / 13 / 14 / 15 / 16 / 17 / 18 / 19 / 20 / 21 / 22 / 23 / 24 / 26 / 27 / 28 / 29 / 30 / 31 / 32 / 33 / 34 / 35 / 36 / 37 / 38 / 39 / 40 / 41 / 42 / 43 retrospective.
 
 ---
 
@@ -1260,6 +1263,168 @@ TRADE-OFF: editor-heavy users get hot first /editor/* calls
 at the cost of ~21s extra boot; default-off users keep
 current boot speed + lazy-init fallback. 3 commits (2 doc +
 1 numbered) — the planned single-numbered shape held.
+
+### Wave 43 — Phase 1 cleanup wave 1 of 3: Tranche E + G polish (in progress 2026-05-06)
+
+Theme: open Phase 1 of the §10.5.2 closure plan. Phase 1
+runs three thematic cleanup waves that ship truly-ready
+items from the post-Wave-42 backlog (Tranche E + G polish,
+provider + DAG consolidation, test-infrastructure
+consolidation). Wave 43 is wave 1 of 3 — the Tranche E
++ G polish wave, batching three small adjacent cleanups
+that all touch existing wave infrastructure (W39/W40
+LPIPS module, W28 [IMPROVE-162] preset export/import,
+W14/W15 registries/schemas pattern) without inventing
+new abstractions.
+
+Wave 43 ships three IMPROVE-N items in a multi-numbered
+shape (1 mid-doc + 3 sequential numbered + 1 retro = 5
+commits, the W36 cadence). Each IMPROVE-N is small enough
+to ship as a single numbered commit; bundling them as one
+multi-numbered wave keeps the §10.5 / §10.6 entries
+focused on a coherent theme ("Tranche E + G polish")
+rather than fragmenting across three single-numbered waves.
+
+  * IMPROVE-180 — `EDITOR_METRICS_LPIPS_PATCH_MIN_DIM`
+    explicit gate (~0.5d). The W40 [IMPROVE-177]
+    cropped-patch LPIPS variant currently relies on the
+    inner try/except to catch sub-AlexNet-kernel bboxes
+    (the AlexNet trunk's first conv layer is 11x11; a
+    7x7 crop produces a smaller-than-kernel input and
+    raises). That works but: (a) operators can't see
+    the threshold without reading the source comment,
+    (b) the inner-try cost is paid even when the bbox
+    is provably too small, and (c) the fallback message
+    in logs is "lpips_patch compute failed" rather than
+    a more informative "bbox too small for trunk".
+
+    W43 adds an explicit env-var-tunable gate at the
+    top of the bbox crop branch: when bbox dim is
+    < `EDITOR_METRICS_LPIPS_PATCH_MIN_DIM` (default 11),
+    fall back to full-frame `lpips` directly without
+    entering the inner try block. Default 11 matches
+    AlexNet's 11x11 kernel minimum (the operative
+    constraint for the default trunk net); operators
+    using the W43 IMPROVE-181 LPIPS_TRUNK_NET knob to
+    select `vgg` (3x3 conv) or `squeeze` (3x3 conv) can
+    drop the threshold to 3 to enable cropped-patch on
+    smaller bboxes.
+
+      - MODIFIED `src/local_ai_platform/images/compose_utils.py`
+        — NEW `_LPIPS_PATCH_MIN_DIM_DEFAULT = 11` +
+        `_LPIPS_PATCH_MIN_DIM_ENV =
+        "EDITOR_METRICS_LPIPS_PATCH_MIN_DIM"` constants
+        near the existing `_LPIPS_NET_DEFAULT` / `_LPIPS_ENABLED_ENV`
+        block; NEW `_lpips_patch_min_dim() -> int`
+        helper that reads env-var with int parsing +
+        fallback to default on parse failure. The W40
+        bbox-crop branch gains an early-exit gate
+        before the inner try/except: when either bbox
+        dim is < the threshold, `lpips_patch` falls
+        back to `lpips_val` directly + a debug log
+        line records `"lpips_patch bbox %dx%d below
+        min_dim %d; falling back"`.
+
+  * IMPROVE-181 — `EDITOR_METRICS_LPIPS_TRUNK_NET`
+    env-var knob (~0.5d). W39 [IMPROVE-176]
+    hard-codes `_LPIPS_NET_DEFAULT = "alex"` at module
+    scope. The richzhang/PerceptualSimilarity package
+    bundles linear-layer weights for three trunk nets
+    (`alex` / `vgg` / `squeeze`); `alex` is the
+    speed/accuracy default but `vgg` gives higher
+    perceptual fidelity (at ~2x bandwidth + ~2x
+    forward-pass cost) and `squeeze` is the
+    fastest+smallest (with measurably lower accuracy
+    on hard cases). W43 surfaces the trunk net as a
+    tunable env-var so power users can pick.
+
+    The W39 module-scope `_lpips_model_cache` is
+    already keyed by trunk-net name so multi-trunk
+    coexistence costs zero design work — flipping the
+    env-var mid-process triggers a one-time
+    model-load on first enabled call for the new
+    trunk + amortizes thereafter.
+
+      - MODIFIED `src/local_ai_platform/images/compose_utils.py`
+        — NEW `_LPIPS_TRUNK_NET_ENV =
+        "EDITOR_METRICS_LPIPS_TRUNK_NET"` constant +
+        `_LPIPS_TRUNK_NET_VALID = {"alex", "vgg",
+        "squeeze"}` validation set + NEW
+        `_lpips_trunk_net() -> str` helper that reads
+        env-var, validates against the set, falls back
+        to `_LPIPS_NET_DEFAULT` with a debug log line
+        on invalid values. Both LPIPS call sites
+        (full-frame + cropped-patch) replace the
+        hardcoded `_LPIPS_NET_DEFAULT` with
+        `_lpips_trunk_net()`.
+
+  * IMPROVE-182 — Preset JSON schema registry
+    (~0.5d). W28 [IMPROVE-162] introduced
+    `schema_version: 1` envelope versioning on preset
+    exports and ad-hoc isinstance + non-empty-name +
+    list-of-dicts checks in `import_preset`. Tranche
+    G partial closed there; the remainder is the
+    parallel registry shape — a JSON-Schema 2020-12
+    document under `data/registries/schemas/` that
+    the import path validates against, mirroring the
+    W14 [IMPROVE-125] voices + instruct-models
+    registries + W15 [IMPROVE-131]
+    `_validate_against_schema` discipline.
+
+    Benefits: (a) operator-edit typo defence — a
+    preset JSON with `"schema_version": "1"` (string
+    instead of int) or `"steps": null` (instead of a
+    list) raises `jsonschema.ValidationError` at
+    import time, with a precise per-field error
+    message; (b) declarative source-of-truth — the
+    schema document IS the spec, no scattered
+    isinstance checks; (c) downstream-tool
+    compatibility — third-party preset editors can
+    validate against the schema without parsing
+    Python source.
+
+      - NEW `data/registries/schemas/presets.schema.json`
+        JSON-Schema 2020-12 document defining the
+        export-bundle envelope shape + each step's
+        `{operation, params}` shape. `additionalProperties:
+        false` at both layers + `required` arrays pin
+        the shape against operator typos.
+
+      - MODIFIED `src/local_ai_platform/repositories/editor_presets.py`
+        — `import_preset` calls the existing W15
+        `local_ai_platform.registries._validate_against_schema(payload,
+        "presets.schema.json")` BEFORE the existing
+        ad-hoc checks. The ad-hoc checks remain as
+        defence-in-depth (handle the case where
+        jsonschema is unavailable + skips silently
+        per the W15 best-effort discipline).
+
+      - MODIFIED `src/local_ai_platform/registries.py`
+        — extends the `_validate_against_schema`
+        existing helper's accepted-filenames list
+        comment + adds a one-line cross-reference
+        comment for `presets.schema.json`.
+
+| # | Tag | SHA | What landed | Tests |
+|---|---|---|---|---:|
+| 1 | (doc)         | this    | Wave 43 mid-wave (start) — register Wave 43 in §10.5 + §10.6 with the Tranche E + G polish design + Phase 1 cleanup wave 1 of 3 framing per §10.5.2 closure plan. Updates §10.1 wave-status + §10.4 reservation rows for IMPROVE-180 / 181 / 182. | 0 |
+| 2 | [IMPROVE-180] | TBD     | Add explicit `EDITOR_METRICS_LPIPS_PATCH_MIN_DIM` env-var gate to the W40 [IMPROVE-177] cropped-patch LPIPS branch in `compose_utils.py`. NEW `_LPIPS_PATCH_MIN_DIM_DEFAULT = 11` + `_LPIPS_PATCH_MIN_DIM_ENV` constants + `_lpips_patch_min_dim()` helper + early-exit gate in the bbox crop branch. NEW behaviour tests in `tests/test_compose_utils_lpips.py` (or a parallel new file if grouping is cleaner). | TBD |
+| 3 | [IMPROVE-181] | TBD     | Add `EDITOR_METRICS_LPIPS_TRUNK_NET` env-var knob in `compose_utils.py`. NEW `_LPIPS_TRUNK_NET_ENV` + `_LPIPS_TRUNK_NET_VALID` + `_lpips_trunk_net()` helper. Both LPIPS call sites read the helper instead of `_LPIPS_NET_DEFAULT`. NEW behaviour tests pinning trunk-net selection + invalid-value fallback. | TBD |
+| 4 | [IMPROVE-182] | TBD     | NEW `data/registries/schemas/presets.schema.json` JSON-Schema 2020-12 document. MODIFIED `editor_presets.py::import_preset` to call `_validate_against_schema` before the existing ad-hoc checks. NEW behaviour tests in `tests/test_editor_preset_schema.py` pinning schema validation against typo cases. | TBD |
+| 5 | (doc)         | TBD     | Wave 43 end-wave retrospective. Flips Wave 43 status (in progress → ✓ shipped). Adds ✓ prefix on §10.4 IMPROVE-180/181/182 rows. NEW Wave 43 architectural impact subsection. | 0 |
+
+Wave 43 is the 13th post-Wave-25 wave to follow the
+doc-first wave shape (mid-doc → numbered → retro). It
+is the first multi-numbered wave since W37 — multi-
+numbered fits when a coherent theme bundles 2-4
+adjacent IMPROVE-N items, single-numbered fits when
+a single IMPROVE-N item carries the wave. The
+fit-for-purpose principle (W36 lesson, reinforced by
+W40 / W41 / W42 reuse pattern) drives the choice; W43
+chose multi-numbered because the three Tranche E + G
+items are thematically coherent + each individually
+small (~0.5d) but together produce a meaningful
+"polish" wave shape.
 
 ### Wave 42 — Path C: Logprob-based classifier confidence (✓ shipped 2026-05-06)
 
@@ -3545,7 +3710,7 @@ event inventory + schema coverage.
 
 ---
 
-## 10.6 Wave 5 + Wave 6 + Wave 7 + Wave 8 + Wave 9 + Wave 10 + Wave 11 + Wave 12 + Wave 13 + Wave 14 + Wave 15 + Wave 16 + Wave 17 + Wave 18 + Wave 19 + Wave 20 + Wave 21 + Wave 22 + Wave 23 + Wave 24 + Wave 25 + Wave 26 + Wave 27 + Wave 28 + Wave 29 + Wave 30 + Wave 31 + Wave 32 + Wave 33 + Wave 34 + Wave 35 + Wave 36 + Wave 37 + Wave 38 + Wave 39 + Wave 40 + Wave 41 + Wave 42 retrospective
+## 10.6 Wave 5 + Wave 6 + Wave 7 + Wave 8 + Wave 9 + Wave 10 + Wave 11 + Wave 12 + Wave 13 + Wave 14 + Wave 15 + Wave 16 + Wave 17 + Wave 18 + Wave 19 + Wave 20 + Wave 21 + Wave 22 + Wave 23 + Wave 24 + Wave 25 + Wave 26 + Wave 27 + Wave 28 + Wave 29 + Wave 30 + Wave 31 + Wave 32 + Wave 33 + Wave 34 + Wave 35 + Wave 36 + Wave 37 + Wave 38 + Wave 39 + Wave 40 + Wave 41 + Wave 42 + Wave 43 retrospective
 
 > **Status as of 2026-04-30:** Wave 5 fully shipped (12 commits, +216
 > tests). Wave 6 fully shipped (12 commits, +118 tests across 8
@@ -4579,6 +4744,28 @@ held end-to-end.
 
   * **Flutter widget tests 182 unchanged**. Path D is
     backend-only (settings + lifespan).
+
+### Wave 43 (in progress)
+
+| # | Tag | SHA | What landed | Tests |
+|---|---|---|---|---:|
+| 1 | (doc)         | this    | Wave 43 mid-wave (start) — register Wave 43 in §10.5 + §10.6 with the Tranche E + G polish design + Phase 1 cleanup wave 1 of 3 framing per §10.5.2 closure plan + post-Wave-42 backlog promotion. Updates §10.1 wave-status + §10.4 reservation rows for IMPROVE-180 / 181 / 182. | 0 |
+| 2 | [IMPROVE-180] | TBD     | Add explicit `EDITOR_METRICS_LPIPS_PATCH_MIN_DIM` env-var gate (default 11 = AlexNet kernel minimum) to the W40 [IMPROVE-177] cropped-patch LPIPS branch. NEW `_LPIPS_PATCH_MIN_DIM_DEFAULT` constant + `_LPIPS_PATCH_MIN_DIM_ENV` env-var name + `_lpips_patch_min_dim()` helper + early-exit gate in the bbox crop branch. NEW behaviour tests pinning the gate threshold + fallback shape. | TBD |
+| 3 | [IMPROVE-181] | TBD     | Add `EDITOR_METRICS_LPIPS_TRUNK_NET` env-var knob (`alex` default / `vgg` / `squeeze`) replacing the W39 hard-coded `_LPIPS_NET_DEFAULT` at the LPIPS call sites. NEW `_LPIPS_TRUNK_NET_ENV` + `_LPIPS_TRUNK_NET_VALID` set + `_lpips_trunk_net()` helper with validation + invalid-value fallback. NEW behaviour tests pinning trunk-net selection + invalid-value fallback. | TBD |
+| 4 | [IMPROVE-182] | TBD     | NEW `data/registries/schemas/presets.schema.json` JSON-Schema 2020-12 document defining the export-bundle envelope shape + each step's `{operation, params}` shape. MODIFIED `editor_presets.py::import_preset` to call `_validate_against_schema(payload, "presets.schema.json")` before the existing ad-hoc checks. NEW behaviour tests pinning schema validation against typo cases. | TBD |
+| 5 | (doc)         | TBD     | Wave 43 end-wave retrospective. Flips Wave 43 status (in progress → ✓ shipped). Adds ✓ prefix on §10.4 IMPROVE-180/181/182 rows. NEW Wave 43 architectural impact subsection. | 0 |
+
+Wave 43 is wave 1 of 3 in the §10.5.2 closure plan
+Phase 1 (cleanup arc). Multi-numbered shape (1 mid-doc
++ 3 sequential numbered + 1 retro = 5 commits) — same
+cadence as Wave 36's bucket A shape. First multi-
+numbered wave since Wave 37; thirteenth post-Wave-25
+wave overall (W26-W42 single-numbered except W36/W37,
+W43 multi-numbered). Multi-numbered fits the Tranche
+E + G polish bundle: three thematically coherent
+items, each ~0.5d, individually too small for a
+single-numbered wave but together producing a focused
+"polish" wave.
 
 ### Wave 42 (✓ shipped)
 
