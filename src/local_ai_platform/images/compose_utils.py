@@ -80,10 +80,28 @@ _SSIM_DEFAULT_WIN_SIZE = 7
 # / 'squeeze'. AlexNet is the smallest trunk (~244MB torchvision
 # weights vs. VGG's ~528MB / SqueezeNet's ~3MB-but-less-accurate);
 # the richzhang/PerceptualSimilarity README recommends 'alex' as the
-# speed/accuracy default for general perceptual-distance use. Hard-
-# coded for the v1 wire-up; future tuning can expose a knob if
-# needed.
+# speed/accuracy default for general perceptual-distance use.
+# [IMPROVE-181] W43 promotes the trunk net to a tunable env-var
+# (EDITOR_METRICS_LPIPS_TRUNK_NET); this constant is now the
+# fallback default rather than a hard-coded selection. Power users
+# can pick `vgg` for higher perceptual fidelity (~2x compute) or
+# `squeeze` for the smallest+fastest trunk (with measurably lower
+# accuracy on hard cases).
 _LPIPS_NET_DEFAULT = "alex"
+
+# [IMPROVE-181] Env-var name for the LPIPS trunk net selection.
+# Three valid values: `alex` (default, matches W39 behaviour) /
+# `vgg` (higher fidelity, larger model) / `squeeze` (smallest /
+# fastest). Invalid values silently fall back to alex per the W32
+# IMPROVE-166 invalid-pass_mode pattern.
+_LPIPS_TRUNK_NET_ENV = "EDITOR_METRICS_LPIPS_TRUNK_NET"
+
+# [IMPROVE-181] Validation set for the trunk net env-var. Matches
+# the lpips package's three bundled trunks. Adding a new trunk
+# requires both extending this set + verifying the package supports
+# it (richzhang/PerceptualSimilarity bundles linear-layer weights
+# only for these three).
+_LPIPS_TRUNK_NET_VALID = frozenset({"alex", "vgg", "squeeze"})
 
 # [IMPROVE-176] Env-var name that gates the LPIPS compute. Default-off
 # because: (a) first enabled call triggers a ~244MB torchvision
@@ -178,6 +196,50 @@ def _lpips_patch_min_dim() -> int:
             _LPIPS_PATCH_MIN_DIM_DEFAULT,
         )
         return _LPIPS_PATCH_MIN_DIM_DEFAULT
+
+
+def _lpips_trunk_net() -> str:
+    """Return the LPIPS trunk net selection (``alex`` / ``vgg`` /
+    ``squeeze``).
+
+    [IMPROVE-181] Reads ``EDITOR_METRICS_LPIPS_TRUNK_NET`` env-var
+    and validates against ``_LPIPS_TRUNK_NET_VALID``. Default is
+    ``_LPIPS_NET_DEFAULT`` (``"alex"``) which preserves W39
+    [IMPROVE-176] behaviour exactly. Invalid values silently fall
+    back to the default + emit a debug log so operators can see
+    why their tweak didn't apply.
+
+    The W39 module-scope ``_lpips_model_cache`` is keyed by trunk
+    net name so flipping the env-var mid-process triggers a
+    one-time model load on first enabled call for the new trunk
+    + amortizes thereafter. Operators who switch trunks
+    repeatedly within a process pay the load cost once per
+    distinct trunk net.
+
+    Per-call env-var read so test-side ``monkeypatch.setenv``
+    works without a settings-cache invalidation step (W37
+    [IMPROVE-173] lesson). Production cost is one
+    ``os.environ.get`` + one set-membership check; both are
+    microseconds.
+    """
+    import os
+
+    raw = os.environ.get(_LPIPS_TRUNK_NET_ENV)
+    if not raw:
+        return _LPIPS_NET_DEFAULT
+    if raw in _LPIPS_TRUNK_NET_VALID:
+        return raw
+    # Invalid value (typo, unsupported trunk name) falls back to
+    # the default. Same shape as the W32 IMPROVE-166 invalid-
+    # pass_mode fallback — operator typos shouldn't break the
+    # metrics path.
+    logger.debug(
+        "Invalid %s=%r (valid: %s); falling back to default %r",
+        _LPIPS_TRUNK_NET_ENV, raw,
+        sorted(_LPIPS_TRUNK_NET_VALID),
+        _LPIPS_NET_DEFAULT,
+    )
+    return _LPIPS_NET_DEFAULT
 
 
 def _get_lpips_model(net: str) -> Any:
@@ -469,7 +531,12 @@ def compute_diff_metrics(path_a: str, path_b: str) -> dict[str, Any]:
     lpips_patch: float | None = None
     if _lpips_enabled():
         try:
-            model = _get_lpips_model(_LPIPS_NET_DEFAULT)
+            # [IMPROVE-181] Read the trunk net selection from env-var
+            # so operators can switch between alex / vgg / squeeze
+            # without code changes. Default `alex` preserves W39
+            # behaviour. The W39 module-scope cache keys by trunk
+            # name so multi-trunk coexistence is free.
+            model = _get_lpips_model(_lpips_trunk_net())
             import lpips as _lpips_pkg
             tensor_a = _lpips_pkg.im2tensor(arr_a)
             tensor_b = _lpips_pkg.im2tensor(arr_b)

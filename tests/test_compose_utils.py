@@ -846,6 +846,148 @@ def test_lpips_patch_min_dim_env_var_loosens_threshold(
     assert call_log[1] == (8, 8)
 
 
+# ── [IMPROVE-181] LPIPS_TRUNK_NET knob (Wave 43) ─────────────────
+
+
+def test_lpips_trunk_net_default_is_alex():
+    """[IMPROVE-181] When the env-var is unset (or empty),
+    `_lpips_trunk_net()` returns the W39 default `"alex"`. This
+    pins backwards compatibility with W39 [IMPROVE-176] behaviour
+    — operators who haven't enabled the W43 knob see no change.
+    """
+    from local_ai_platform.images import compose_utils as cu
+
+    # Default constant pin.
+    assert cu._LPIPS_NET_DEFAULT == "alex"
+    # Default-valued helper.
+    assert cu._lpips_trunk_net() == "alex"
+
+
+def test_lpips_trunk_net_valid_set_pins_three_options():
+    """[IMPROVE-181] The valid trunk net set is exactly the three
+    bundled by the lpips package. Adding a new trunk net here
+    REQUIRES verifying the package supports it (the linear-layer
+    weights are bundled only for these three).
+    """
+    from local_ai_platform.images import compose_utils as cu
+
+    assert cu._LPIPS_TRUNK_NET_VALID == frozenset({"alex", "vgg", "squeeze"})
+
+
+def test_lpips_trunk_net_env_var_returns_each_valid_value(monkeypatch):
+    """[IMPROVE-181] All three valid env-var values pass through
+    the helper unchanged. Invalid values trigger fallback (covered
+    by the next test).
+    """
+    from local_ai_platform.images import compose_utils as cu
+
+    for net in ("alex", "vgg", "squeeze"):
+        monkeypatch.setenv("EDITOR_METRICS_LPIPS_TRUNK_NET", net)
+        assert cu._lpips_trunk_net() == net
+
+
+def test_lpips_trunk_net_invalid_falls_back_to_default(monkeypatch):
+    """[IMPROVE-181] Invalid trunk net values (typos like
+    `"alexnet"` / unsupported trunks like `"resnet"` / wrong-
+    case `"ALEX"`) silently fall back to `"alex"`. Same shape
+    as the W32 [IMPROVE-166] invalid-pass_mode fallback.
+    """
+    from local_ai_platform.images import compose_utils as cu
+
+    for invalid in ("alexnet", "resnet", "ALEX", "VGG", "  alex  ", ""):
+        monkeypatch.setenv("EDITOR_METRICS_LPIPS_TRUNK_NET", invalid)
+        assert cu._lpips_trunk_net() == "alex", (
+            f"Expected fallback to 'alex' for invalid value {invalid!r}"
+        )
+
+
+def test_lpips_trunk_net_passed_to_get_lpips_model(tmp_path, monkeypatch):
+    """[IMPROVE-181] The runtime call site reads the env-var via
+    `_lpips_trunk_net()` rather than the hardcoded
+    `_LPIPS_NET_DEFAULT` constant. Verify by setting the env-var
+    to `vgg` + capturing what the LPIPS branch passes to
+    `_get_lpips_model`.
+    """
+    import numpy as np
+    from local_ai_platform.images import compose_utils as cu
+
+    monkeypatch.setenv("EDITOR_METRICS_LPIPS_ENABLED", "1")
+    monkeypatch.setenv("EDITOR_METRICS_LPIPS_TRUNK_NET", "vgg")
+    monkeypatch.setattr(cu, "_lpips_model_cache", {})
+
+    captured_net: list[str] = []
+
+    class _DummyModel:
+        def __call__(self, tensor_a, tensor_b):
+            import torch
+            return torch.tensor(0.10)
+
+    def _capturing_get_lpips_model(net):
+        captured_net.append(net)
+        return _DummyModel()
+
+    monkeypatch.setattr(cu, "_get_lpips_model", _capturing_get_lpips_model)
+
+    a_arr = np.zeros((64, 64, 3), dtype=np.uint8)
+    b_arr = a_arr.copy()
+    b_arr[10:30, 10:30, :] = 200
+    a_path = tmp_path / "a.png"
+    b_path = tmp_path / "b.png"
+    Image.fromarray(a_arr, "RGB").save(a_path)
+    Image.fromarray(b_arr, "RGB").save(b_path)
+
+    cu.compute_diff_metrics(str(a_path), str(b_path))
+    # Both the full-frame and crop branches share `model` from the
+    # outer `_get_lpips_model` call, so we expect exactly one
+    # invocation; the trunk net string passed must be `vgg`.
+    assert captured_net == ["vgg"]
+
+
+def test_lpips_trunk_net_invalid_env_var_falls_back_at_runtime(
+    tmp_path, monkeypatch,
+):
+    """[IMPROVE-181] An invalid env-var at runtime causes the
+    call site to fall back to `_LPIPS_NET_DEFAULT` rather than
+    raising. Pin the safety discipline so a future change that
+    skips the validation in `_lpips_trunk_net` is caught at
+    integration test level.
+    """
+    import numpy as np
+    from local_ai_platform.images import compose_utils as cu
+
+    monkeypatch.setenv("EDITOR_METRICS_LPIPS_ENABLED", "1")
+    monkeypatch.setenv(
+        "EDITOR_METRICS_LPIPS_TRUNK_NET", "this-is-not-a-real-trunk",
+    )
+    monkeypatch.setattr(cu, "_lpips_model_cache", {})
+
+    captured_net: list[str] = []
+
+    class _DummyModel:
+        def __call__(self, tensor_a, tensor_b):
+            import torch
+            return torch.tensor(0.10)
+
+    monkeypatch.setattr(
+        cu, "_get_lpips_model",
+        lambda net: (captured_net.append(net) or _DummyModel()),
+    )
+
+    a_arr = np.zeros((64, 64, 3), dtype=np.uint8)
+    b_arr = a_arr.copy()
+    b_arr[10:30, 10:30, :] = 200
+    a_path = tmp_path / "a.png"
+    b_path = tmp_path / "b.png"
+    Image.fromarray(a_arr, "RGB").save(a_path)
+    Image.fromarray(b_arr, "RGB").save(b_path)
+
+    cu.compute_diff_metrics(str(a_path), str(b_path))
+    assert captured_net == ["alex"], (
+        f"Expected runtime fallback to 'alex' for invalid env-var; "
+        f"got {captured_net!r}"
+    )
+
+
 # ── weighted_blend ───────────────────────────────────────────────
 
 
