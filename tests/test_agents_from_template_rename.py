@@ -47,19 +47,6 @@ import pytest
 
 
 @pytest.fixture
-def tmp_db(monkeypatch, tmp_path):
-    """Redirect ``db.DB_PATH`` to a tmp file + initialize tables so
-    ``save_agent`` (which the helper calls) doesn't pollute the dev DB
-    or fail on a missing table. Each test starts with empty agents."""
-    from local_ai_platform import db as db_mod
-
-    path = tmp_path / "app.db"
-    monkeypatch.setattr(db_mod, "DB_PATH", path)
-    db_mod.init_db()
-    return path
-
-
-@pytest.fixture
 def fake_orchestrator():
     """A MagicMock with the two methods the helper calls. Lets us
     assert what got passed in without booting the real orchestrator

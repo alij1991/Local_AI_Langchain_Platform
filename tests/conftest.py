@@ -204,3 +204,83 @@ def obs_test_client(monkeypatch, tmp_path):
         # DB_PATH.
         c._db_mod = db_mod
         yield c
+
+
+# ── [IMPROVE-185] Wave 45 — Per-feature smoke fixtures ────────────
+
+
+@pytest.fixture
+def tmp_db(monkeypatch, tmp_path):
+    """[IMPROVE-185] Wave 45 — Shared `tmp_db` fixture.
+
+    Redirects ``local_ai_platform.db.DB_PATH`` to a per-test
+    tmp file + runs ``db_mod.init_db()`` so consumers can use
+    the schema without polluting the dev database.
+
+    Returns the tmp DB path so tests that need to assert against
+    the file can pass it explicitly (e.g. to ``AsyncDB(...)``).
+
+    Pre-Wave-45 this fixture was duplicated across 4 test files
+    (`test_agents_from_template_rename.py`,
+    `test_conversations_thread_id.py`, `test_context_compactor.py`,
+    `test_editor_user_presets.py`) — all the same 4-line pattern.
+    W45 IMPROVE-185 extracts the duplicate into this conftest
+    fixture; consumers drop their local copy and inherit via
+    pytest's name-resolution rules.
+
+    NOT used by ``test_db_pragmas.py`` — its `tmp_db` is a
+    distinct shape (no ``init_db()`` + adds a
+    ``_journal_mode_logged`` reset). That fixture stays local.
+    """
+    from local_ai_platform import db as db_mod
+
+    path = tmp_path / "app.db"
+    monkeypatch.setattr(db_mod, "DB_PATH", path)
+    db_mod.init_db()
+    return path
+
+
+@pytest.fixture
+def tmp_editor_env(monkeypatch, tmp_path):
+    """[IMPROVE-185] Wave 45 — Shared `tmp_editor_env` fixture.
+
+    Redirects both ``db.DB_PATH`` and
+    ``images.editor.EDITOR_DATA_DIR`` to per-test tmp paths so
+    archive moves and DB writes don't touch the dev environment.
+
+    Returns ``(editor_data_dir, archive_root)`` tuple. The
+    archive root is derived dynamically by
+    ``_editor_archive_root()`` so monkeypatching
+    ``EDITOR_DATA_DIR`` is enough — no second patch needed
+    (regression-pinned by
+    ``test_archive_root_follows_editor_data_dir``).
+
+    Pre-Wave-45 this fixture was duplicated across 2 test files
+    (`test_editor_archive_on_close.py` +
+    `test_editor_session_ttl_cleanup.py`) — same shape, same
+    return tuple. W45 IMPROVE-185 extracts the duplicate; both
+    consumers inherit via pytest's name-resolution rules.
+    """
+    from local_ai_platform import db as db_mod
+    from local_ai_platform.images import editor as editor_mod
+
+    db_path = tmp_path / "app.db"
+    monkeypatch.setattr(db_mod, "DB_PATH", db_path)
+    db_mod.init_db()
+
+    editor_dir = tmp_path / "editor"
+    editor_dir.mkdir(parents=True, exist_ok=True)
+    monkeypatch.setattr(editor_mod, "EDITOR_DATA_DIR", editor_dir)
+
+    archive_root = editor_dir / "_archive"
+    # [IMPROVE-185] Pre-W45 the archive_on_close.py fixture
+    # didn't pre-create archive_root (production code does it
+    # via `mkdir(parents=True, exist_ok=True)` on first archive),
+    # but the session_ttl_cleanup.py fixture DID. Pre-create
+    # here so both consumer profiles work — archive_on_close
+    # tests are unaffected (the prod code's mkdir is idempotent
+    # via exist_ok=True), and session_ttl_cleanup tests that
+    # use direct `bucket.mkdir()` (without parents=True)
+    # against pre-existing-archive_root succeed.
+    archive_root.mkdir(parents=True, exist_ok=True)
+    return editor_dir, archive_root

@@ -62,27 +62,15 @@ import pytest
 # ── Fixtures ──────────────────────────────────────────────────────────
 
 
-@pytest.fixture
-def tmp_editor_env(monkeypatch, tmp_path):
-    """Redirect ``EDITOR_DATA_DIR`` + DB_PATH to tmp paths so the
-    prune runs against an isolated archive + DB. Returns
-    ``(editor_data_dir, archive_root)``. Same shape as
-    ``tests/test_editor_archive_on_close.py::tmp_editor_env``.
-    """
-    from local_ai_platform import db as db_mod
-    from local_ai_platform.images import editor as editor_mod
-
-    db_path = tmp_path / "app.db"
-    monkeypatch.setattr(db_mod, "DB_PATH", db_path)
-    db_mod.init_db()
-
-    editor_dir = tmp_path / "editor"
-    editor_dir.mkdir(parents=True, exist_ok=True)
-    monkeypatch.setattr(editor_mod, "EDITOR_DATA_DIR", editor_dir)
-
-    archive_root = editor_dir / "_archive"
-    archive_root.mkdir(parents=True, exist_ok=True)
-    return editor_dir, archive_root
+# [IMPROVE-185] Wave 45 — `tmp_editor_env` fixture extracted to
+# `tests/conftest.py` as a shared fixture; this consumer
+# inherits via pytest's name-resolution rules. Note the
+# pre-W45 local fixture also did `archive_root.mkdir` after
+# the return setup, but that was redundant — every test in
+# this file uses `_seed_archived_session` below which creates
+# buckets via `bucket.mkdir(parents=True, exist_ok=True)`,
+# which auto-creates `archive_root`. The conftest fixture's
+# return tuple matches the pre-W45 local shape.
 
 
 def _seed_archived_session(

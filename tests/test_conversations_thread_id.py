@@ -34,19 +34,10 @@ from pathlib import Path
 import pytest
 
 
-@pytest.fixture
-def tmp_db(monkeypatch, tmp_path):
-    """Redirect db.DB_PATH to a tmp-path file and initialize the schema."""
-    from local_ai_platform import db as db_mod
-
-    path = tmp_path / "app.db"
-    monkeypatch.setattr(db_mod, "DB_PATH", path)
-    # repositories.conversations imported ``get_conn`` by value, so
-    # patching db.DB_PATH alone doesn't reach the repo — we also need
-    # the repo to use the redirected conn. get_conn() reads DB_PATH at
-    # call time so this works transparently.
-    db_mod.init_db()
-    return path
+# [IMPROVE-185] Wave 45 — `tmp_db` fixture extracted to
+# `tests/conftest.py` as a shared fixture; this consumer
+# inherits via pytest's name-resolution rules (the local
+# definition was dropped).
 
 
 def _create_legacy_db_without_thread_id(path: Path) -> None:

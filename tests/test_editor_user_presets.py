@@ -51,16 +51,9 @@ import pytest
 # ── Repository unit tests ──────────────────────────────────────────
 
 
-@pytest.fixture
-def tmp_db(monkeypatch, tmp_path):
-    """Redirect ``db.DB_PATH`` + initialize tables so the preset
-    repository can write without touching the dev DB."""
-    from local_ai_platform import db as db_mod
-
-    path = tmp_path / "app.db"
-    monkeypatch.setattr(db_mod, "DB_PATH", path)
-    db_mod.init_db()
-    return path
+# [IMPROVE-185] Wave 45 — `tmp_db` fixture extracted to
+# `tests/conftest.py` as a shared fixture; this consumer
+# inherits via pytest's name-resolution rules.
 
 
 def test_repo_create_then_get_round_trip(tmp_db):

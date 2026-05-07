@@ -44,29 +44,9 @@ import pytest
 # ── Fixtures ────────────────────────────────────────────────────────
 
 
-@pytest.fixture
-def tmp_editor_env(monkeypatch, tmp_path):
-    """Redirect both ``EDITOR_DATA_DIR`` and the DB to tmp paths so
-    archive moves and DB writes don't touch the dev environment.
-
-    Returns ``(editor_data_dir, archive_root)``. The archive root is
-    derived dynamically by ``_editor_archive_root()`` so just
-    monkeypatching ``EDITOR_DATA_DIR`` is enough — no second patch
-    needed (regression-pinned by
-    ``test_archive_root_follows_editor_data_dir``)."""
-    from local_ai_platform import db as db_mod
-    from local_ai_platform.images import editor as editor_mod
-
-    db_path = tmp_path / "app.db"
-    monkeypatch.setattr(db_mod, "DB_PATH", db_path)
-    db_mod.init_db()
-
-    editor_dir = tmp_path / "editor"
-    editor_dir.mkdir(parents=True, exist_ok=True)
-    monkeypatch.setattr(editor_mod, "EDITOR_DATA_DIR", editor_dir)
-
-    archive_root = editor_dir / "_archive"
-    return editor_dir, archive_root
+# [IMPROVE-185] Wave 45 — `tmp_editor_env` fixture extracted to
+# `tests/conftest.py` as a shared fixture; this consumer
+# inherits via pytest's name-resolution rules.
 
 
 def _seed_active_session(editor_data_dir: Path) -> str:

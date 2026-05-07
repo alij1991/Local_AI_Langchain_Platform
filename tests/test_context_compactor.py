@@ -36,19 +36,9 @@ from local_ai_platform.providers.base import ChatMessage
 # ── Fixtures ─────────────────────────────────────────────────────────
 
 
-@pytest.fixture
-def tmp_db(monkeypatch, tmp_path):
-    """Redirect ``db.DB_PATH`` to a tmp-path file + run ``init_db``.
-
-    Same shape as ``test_conversations_thread_id.py:tmp_db`` so the
-    suite has a consistent isolation pattern.
-    """
-    from local_ai_platform import db as db_mod
-
-    path = tmp_path / "app.db"
-    monkeypatch.setattr(db_mod, "DB_PATH", path)
-    db_mod.init_db()
-    return path
+# [IMPROVE-185] Wave 45 — `tmp_db` fixture extracted to
+# `tests/conftest.py` as a shared fixture; this consumer
+# inherits via pytest's name-resolution rules.
 
 
 @pytest.fixture(autouse=True)
