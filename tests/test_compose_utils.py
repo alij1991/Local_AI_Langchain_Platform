@@ -621,6 +621,231 @@ def test_lpips_patch_falls_back_to_lpips_on_crop_failure(
     assert m["lpips_patch"] == m["lpips"]
 
 
+# ── [IMPROVE-180] LPIPS_PATCH_MIN_DIM gate (Wave 43) ─────────────
+
+
+def test_lpips_patch_min_dim_default_is_11():
+    """[IMPROVE-180] The default minimum bbox dim is 11 — matches
+    AlexNet's first conv kernel (11x11). Operators on the default
+    `alex` trunk net (W39 / W40 default) need bboxes ≥ 11 dim for
+    the LPIPS forward pass to succeed; smaller bboxes fall back
+    to full-frame `lpips` directly.
+
+    Pin so a future tweak that changes the default value (e.g. to
+    align with a different default trunk net) is caught here +
+    forces a re-think of operator behaviour.
+    """
+    from local_ai_platform.images import compose_utils as cu
+
+    assert cu._LPIPS_PATCH_MIN_DIM_DEFAULT == 11
+
+
+def test_lpips_patch_min_dim_env_var_overrides_default(monkeypatch):
+    """[IMPROVE-180] Setting `EDITOR_METRICS_LPIPS_PATCH_MIN_DIM=5`
+    causes `_lpips_patch_min_dim()` to return 5 instead of the
+    default 11. Operators using IMPROVE-181's vgg / squeeze trunk
+    nets (3x3 first conv) drop the threshold to 3 to enable
+    cropped-patch on smaller bboxes.
+    """
+    from local_ai_platform.images import compose_utils as cu
+
+    monkeypatch.setenv("EDITOR_METRICS_LPIPS_PATCH_MIN_DIM", "5")
+    assert cu._lpips_patch_min_dim() == 5
+
+    monkeypatch.setenv("EDITOR_METRICS_LPIPS_PATCH_MIN_DIM", "3")
+    assert cu._lpips_patch_min_dim() == 3
+
+
+def test_lpips_patch_min_dim_invalid_falls_back_to_default(monkeypatch):
+    """[IMPROVE-180] Invalid env-var values (non-int, e.g. `"abc"`
+    / `"1.5"` / empty / None) silently fall back to the default
+    11. Same shape as the W32 [IMPROVE-166] invalid-pass_mode
+    fallback — operator typos shouldn't break the metrics path.
+    """
+    from local_ai_platform.images import compose_utils as cu
+
+    # Non-numeric.
+    monkeypatch.setenv("EDITOR_METRICS_LPIPS_PATCH_MIN_DIM", "abc")
+    assert cu._lpips_patch_min_dim() == 11
+
+    # Float string (int() rejects).
+    monkeypatch.setenv("EDITOR_METRICS_LPIPS_PATCH_MIN_DIM", "1.5")
+    assert cu._lpips_patch_min_dim() == 11
+
+    # Empty string treated as missing.
+    monkeypatch.setenv("EDITOR_METRICS_LPIPS_PATCH_MIN_DIM", "")
+    assert cu._lpips_patch_min_dim() == 11
+
+    # Unset entirely.
+    monkeypatch.delenv("EDITOR_METRICS_LPIPS_PATCH_MIN_DIM", raising=False)
+    assert cu._lpips_patch_min_dim() == 11
+
+
+def test_lpips_patch_skips_compute_when_bbox_below_min_dim(
+    tmp_path, monkeypatch,
+):
+    """[IMPROVE-180] When the W38 bbox is below the
+    `_lpips_patch_min_dim()` threshold, `lpips_patch` falls back
+    to the full-frame `lpips` value WITHOUT calling the crop
+    forward pass — saving the cost of the inner-try detour.
+
+    Verify by counting model invocations: a sub-min-dim bbox
+    should produce exactly ONE call (full-frame only); a
+    >= min-dim bbox would produce TWO (full + crop). The fake
+    model below records call count.
+    """
+    import numpy as np
+    from local_ai_platform.images import compose_utils as cu
+
+    monkeypatch.setenv("EDITOR_METRICS_LPIPS_ENABLED", "1")
+    monkeypatch.setattr(cu, "_lpips_model_cache", {})
+
+    call_log: list[tuple[int, int]] = []
+
+    class _CallCountingFakeModel:
+        def __call__(self, tensor_a, tensor_b):
+            import torch
+            # Record the H, W dim of the input tensor (after im2tensor's
+            # CHW reshape, shape is [1, 3, H, W]).
+            shape = tensor_a.shape
+            call_log.append((int(shape[2]), int(shape[3])))
+            return torch.tensor(0.20)
+
+    monkeypatch.setattr(
+        cu, "_get_lpips_model",
+        lambda net: _CallCountingFakeModel(),
+    )
+
+    # 64x64 black image with a 8x8 white square — 8 < default 11
+    # so the crop branch should NOT run.
+    a_arr = np.zeros((64, 64, 3), dtype=np.uint8)
+    b_arr = a_arr.copy()
+    b_arr[0:8, 0:8, :] = 255
+    a_path = tmp_path / "a.png"
+    b_path = tmp_path / "b.png"
+    Image.fromarray(a_arr, "RGB").save(a_path)
+    Image.fromarray(b_arr, "RGB").save(b_path)
+
+    m = cu.compute_diff_metrics(str(a_path), str(b_path))
+    # Sanity: bbox derived from changed-pixels mask is 8x8 (the
+    # white square) — the W38 frac < 90% gate passes (8x8 / 64x64
+    # = ~1.6%) but IMPROVE-180 gate fires because 8 < 11.
+    assert m["patch_bbox"] is not None
+    assert m["patch_bbox"]["x1"] - m["patch_bbox"]["x0"] == 8
+    assert m["patch_bbox"]["y1"] - m["patch_bbox"]["y0"] == 8
+    # Exactly one call: full-frame only. The crop forward pass
+    # was gated out by IMPROVE-180.
+    assert len(call_log) == 1
+    assert call_log[0] == (64, 64)
+    # lpips_patch falls back to lpips_val.
+    assert m["lpips_patch"] == m["lpips"]
+
+
+def test_lpips_patch_runs_crop_when_bbox_at_or_above_min_dim(
+    tmp_path, monkeypatch,
+):
+    """[IMPROVE-180] When the bbox is >= min_dim, the crop forward
+    pass DOES run (control test for the gate-skips test above).
+    Pin so a regression that accidentally inverts the gate
+    condition is caught.
+    """
+    import numpy as np
+    from local_ai_platform.images import compose_utils as cu
+
+    monkeypatch.setenv("EDITOR_METRICS_LPIPS_ENABLED", "1")
+    monkeypatch.setattr(cu, "_lpips_model_cache", {})
+
+    call_log: list[tuple[int, int]] = []
+
+    class _CallCountingFakeModel:
+        def __call__(self, tensor_a, tensor_b):
+            import torch
+            shape = tensor_a.shape
+            call_log.append((int(shape[2]), int(shape[3])))
+            return torch.tensor(0.20)
+
+    monkeypatch.setattr(
+        cu, "_get_lpips_model",
+        lambda net: _CallCountingFakeModel(),
+    )
+
+    # 64x64 black image with a 16x16 white square — 16 >= default 11.
+    a_arr = np.zeros((64, 64, 3), dtype=np.uint8)
+    b_arr = a_arr.copy()
+    b_arr[0:16, 0:16, :] = 255
+    a_path = tmp_path / "a.png"
+    b_path = tmp_path / "b.png"
+    Image.fromarray(a_arr, "RGB").save(a_path)
+    Image.fromarray(b_arr, "RGB").save(b_path)
+
+    m = cu.compute_diff_metrics(str(a_path), str(b_path))
+    # Sanity: bbox is 16x16, above the default 11.
+    assert m["patch_bbox"]["x1"] - m["patch_bbox"]["x0"] == 16
+    assert m["patch_bbox"]["y1"] - m["patch_bbox"]["y0"] == 16
+    # Two calls: full-frame + crop. The crop forward pass DID run.
+    assert len(call_log) == 2
+    assert call_log[0] == (64, 64)
+    assert call_log[1] == (16, 16)
+
+
+def test_lpips_patch_min_dim_env_var_loosens_threshold(
+    tmp_path, monkeypatch,
+):
+    """[IMPROVE-180] Setting
+    `EDITOR_METRICS_LPIPS_PATCH_MIN_DIM=5` enables the crop pass
+    on bboxes that would otherwise fall back at the default 11.
+    The intended use case: operators on IMPROVE-181's vgg or
+    squeeze trunk net (3x3 first conv) want cropped-patch
+    enabled for small edits.
+
+    Note: the test bbox must also pass the W38 [IMPROVE-175]
+    SSIM patch gate (`bbox_h >= _SSIM_DEFAULT_WIN_SIZE = 7`)
+    for `patch_bbox` to be non-None at all. Use 8x8 bbox here:
+    8 >= 7 (SSIM gate passes → patch_bbox set), 8 < default 11
+    (default IMPROVE-180 gate would skip the crop), 8 >= 5
+    (loosened threshold permits the crop).
+    """
+    import numpy as np
+    from local_ai_platform.images import compose_utils as cu
+
+    monkeypatch.setenv("EDITOR_METRICS_LPIPS_ENABLED", "1")
+    monkeypatch.setenv("EDITOR_METRICS_LPIPS_PATCH_MIN_DIM", "5")
+    monkeypatch.setattr(cu, "_lpips_model_cache", {})
+
+    call_log: list[tuple[int, int]] = []
+
+    class _CallCountingFakeModel:
+        def __call__(self, tensor_a, tensor_b):
+            import torch
+            shape = tensor_a.shape
+            call_log.append((int(shape[2]), int(shape[3])))
+            return torch.tensor(0.20)
+
+    monkeypatch.setattr(
+        cu, "_get_lpips_model",
+        lambda net: _CallCountingFakeModel(),
+    )
+
+    # 64x64 image with an 8x8 white square — 8 >= 7 (SSIM gate
+    # passes → patch_bbox set), 8 < default 11 (default
+    # IMPROVE-180 gate would skip), 8 >= 5 (loosened threshold
+    # permits the crop pass).
+    a_arr = np.zeros((64, 64, 3), dtype=np.uint8)
+    b_arr = a_arr.copy()
+    b_arr[0:8, 0:8, :] = 255
+    a_path = tmp_path / "a.png"
+    b_path = tmp_path / "b.png"
+    Image.fromarray(a_arr, "RGB").save(a_path)
+    Image.fromarray(b_arr, "RGB").save(b_path)
+
+    m = cu.compute_diff_metrics(str(a_path), str(b_path))
+    # Both calls fired: the loosened threshold permits the 8x8
+    # bbox to enter the crop branch.
+    assert m["patch_bbox"] is not None
+    assert len(call_log) == 2
+    assert call_log[1] == (8, 8)
+
+
 # ── weighted_blend ───────────────────────────────────────────────
 
 

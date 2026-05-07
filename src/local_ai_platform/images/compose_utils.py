@@ -111,6 +111,25 @@ _LPIPS_ENABLED_TRUTHY = {"1", "true", "True", "TRUE", "yes", "Yes"}
 # cost (just the forward pass).
 _lpips_model_cache: dict[str, Any] = {}
 
+# [IMPROVE-180] Minimum bbox dim for the W40 [IMPROVE-177] cropped-
+# patch LPIPS variant. Default 11 matches AlexNet's first conv layer
+# kernel size (11x11) — bboxes smaller than the kernel cause the
+# trunk net's first conv to raise ("Calculated padded input size per
+# channel ... Kernel size: 11"). Pre-Wave-43 the W40 inner try/except
+# caught these cases at fallback cost; W43 gates explicitly at the
+# top of the bbox crop branch + surfaces the threshold to operators
+# as a tunable env-var so they can tighten or loosen depending on
+# the W43 IMPROVE-181 trunk net selection (vgg / squeeze use 3x3
+# first conv so their effective minimum is 3).
+_LPIPS_PATCH_MIN_DIM_DEFAULT = 11
+
+# [IMPROVE-180] Env-var name for the cropped-patch min-dim threshold.
+# Operators using IMPROVE-181 LPIPS_TRUNK_NET=vgg or =squeeze (3x3
+# first conv) can drop this to 3 to enable cropped-patch on smaller
+# bboxes. The default 11 is correct for the alex trunk net (the W39
+# / W40 default).
+_LPIPS_PATCH_MIN_DIM_ENV = "EDITOR_METRICS_LPIPS_PATCH_MIN_DIM"
+
 
 def _lpips_enabled() -> bool:
     """Return True iff the LPIPS env-var is set to a truthy value.
@@ -123,6 +142,42 @@ def _lpips_enabled() -> bool:
     import os
 
     return os.environ.get(_LPIPS_ENABLED_ENV, "") in _LPIPS_ENABLED_TRUTHY
+
+
+def _lpips_patch_min_dim() -> int:
+    """Return the LPIPS cropped-patch minimum-bbox-dim threshold.
+
+    [IMPROVE-180] Reads ``EDITOR_METRICS_LPIPS_PATCH_MIN_DIM`` env-var
+    and parses as int; falls back to ``_LPIPS_PATCH_MIN_DIM_DEFAULT``
+    (11) on missing or unparseable values. Per-call env-var read so
+    test-side ``monkeypatch.setenv`` works without a settings-cache
+    invalidation step (matches the W37 [IMPROVE-173] lesson — per-
+    call lookups are cheaper to test than cached singletons).
+
+    Production cost is one ``os.environ.get`` + one ``int()`` parse;
+    both are microseconds. Invalid values (non-int, e.g. ``"abc"`` or
+    ``"1.5"``) emit a debug log so operators can see why their tweak
+    didn't apply, then fall back to the default.
+    """
+    import os
+
+    raw = os.environ.get(_LPIPS_PATCH_MIN_DIM_ENV)
+    if not raw:
+        return _LPIPS_PATCH_MIN_DIM_DEFAULT
+    try:
+        return int(raw)
+    except (ValueError, TypeError):
+        # Invalid value falls back to the default; debug log helps
+        # an operator see why their tweak didn't apply. Same shape
+        # as the W32 IMPROVE-166 invalid-pass_mode fallback (silent
+        # at WARNING level for routine operator typos; promotes to
+        # diagnostic output only when DEBUG is enabled).
+        logger.debug(
+            "Invalid %s=%r; falling back to default %d",
+            _LPIPS_PATCH_MIN_DIM_ENV, raw,
+            _LPIPS_PATCH_MIN_DIM_DEFAULT,
+        )
+        return _LPIPS_PATCH_MIN_DIM_DEFAULT
 
 
 def _get_lpips_model(net: str) -> Any:
@@ -430,35 +485,64 @@ def compute_diff_metrics(path_a: str, path_b: str) -> dict[str, Any]:
             # succeeded. Only the bbox-crop branch below diverges.
             lpips_patch = lpips_val
             if patch_bbox is not None:
-                try:
-                    crop_a = arr_a[
-                        patch_bbox["y0"]:patch_bbox["y1"],
-                        patch_bbox["x0"]:patch_bbox["x1"],
-                        :,
-                    ]
-                    crop_b = arr_b[
-                        patch_bbox["y0"]:patch_bbox["y1"],
-                        patch_bbox["x0"]:patch_bbox["x1"],
-                        :,
-                    ]
-                    tensor_crop_a = _lpips_pkg.im2tensor(crop_a)
-                    tensor_crop_b = _lpips_pkg.im2tensor(crop_b)
-                    distance_patch = model(tensor_crop_a, tensor_crop_b)
-                    lpips_patch = float(distance_patch)
-                except Exception as exc:
-                    # Inner try/except mirrors the W38 ssim_patch
-                    # fallback: a crop-only failure (e.g. LPIPS
-                    # AlexNet conv layers can't run on a 7x7 crop
-                    # because the kernel is 11x11) shouldn't
-                    # poison the full-frame value. Fall back to
-                    # the full-frame lpips_val that was already
-                    # computed successfully.
+                # [IMPROVE-180] Explicit min-dim gate ahead of the
+                # crop compute. Pre-Wave-43 the inner try/except
+                # caught sub-kernel bboxes at fallback cost (Alex's
+                # 11x11 conv raises on smaller inputs); W43 gates
+                # before the inner try so a provably too-small
+                # bbox falls back to full-frame `lpips` directly
+                # without paying the inner-try cost. The gate is
+                # env-var-tunable so operators using IMPROVE-181's
+                # vgg / squeeze trunk nets (3x3 first conv) can
+                # drop the threshold to 3. The inner try/except
+                # remains as defence-in-depth for unexpected
+                # exceptions when the bbox passes the gate.
+                bbox_h = patch_bbox["y1"] - patch_bbox["y0"]
+                bbox_w = patch_bbox["x1"] - patch_bbox["x0"]
+                min_dim = _lpips_patch_min_dim()
+                if bbox_h < min_dim or bbox_w < min_dim:
                     logger.debug(
-                        "lpips_patch compute failed (%s); falling "
-                        "back to full-frame lpips",
-                        exc,
+                        "lpips_patch bbox %dx%d below min_dim %d; "
+                        "falling back to full-frame lpips",
+                        bbox_h, bbox_w, min_dim,
                     )
-                    lpips_patch = lpips_val
+                    # lpips_patch already initialized to lpips_val
+                    # above; nothing further to do.
+                else:
+                    try:
+                        crop_a = arr_a[
+                            patch_bbox["y0"]:patch_bbox["y1"],
+                            patch_bbox["x0"]:patch_bbox["x1"],
+                            :,
+                        ]
+                        crop_b = arr_b[
+                            patch_bbox["y0"]:patch_bbox["y1"],
+                            patch_bbox["x0"]:patch_bbox["x1"],
+                            :,
+                        ]
+                        tensor_crop_a = _lpips_pkg.im2tensor(crop_a)
+                        tensor_crop_b = _lpips_pkg.im2tensor(crop_b)
+                        distance_patch = model(tensor_crop_a, tensor_crop_b)
+                        lpips_patch = float(distance_patch)
+                    except Exception as exc:
+                        # Inner try/except mirrors the W38 ssim_patch
+                        # fallback: a crop-only failure (e.g. LPIPS
+                        # AlexNet conv layers can't run on a 7x7 crop
+                        # because the kernel is 11x11) shouldn't
+                        # poison the full-frame value. Fall back to
+                        # the full-frame lpips_val that was already
+                        # computed successfully. With IMPROVE-180's
+                        # explicit gate above, this branch now only
+                        # fires on genuinely unexpected exceptions
+                        # (e.g. corrupt model weights, OOM during
+                        # forward pass) — operator-tunable bbox-
+                        # size mismatches are caught earlier.
+                        logger.debug(
+                            "lpips_patch compute failed (%s); falling "
+                            "back to full-frame lpips",
+                            exc,
+                        )
+                        lpips_patch = lpips_val
         except Exception as exc:
             logger.debug(
                 "lpips compute failed (%s); returning None", exc,
