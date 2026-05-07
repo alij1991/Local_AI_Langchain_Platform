@@ -307,6 +307,26 @@ async def lifespan(app: FastAPI):
     except Exception as exc:
         logger.warning("Partner memory warmup task scheduling failed: %s", exc)
 
+    # [IMPROVE-183] Wave 44 — HF accelerate offload manager probe.
+    # Detects whether `accelerate.hooks.AlignDevicesHook` /
+    # `cpu_offload_with_hook` are reachable so the OOM ladder's
+    # stage 4 fallback can WARN when the offload-call site
+    # succeeds despite the offload manager being broken. Same
+    # fire-and-forget asyncio.create_task pattern as W22 above —
+    # boot doesn't wait. Result is cached at module scope by
+    # `accelerate_probe.probe_accelerate()` + read by the OOM
+    # ladder + bundle.json provenance via `get_probe_result()`.
+    try:
+        from local_ai_platform.images.accelerate_probe import probe_accelerate
+        asyncio.create_task(asyncio.to_thread(probe_accelerate))
+        logger.info(
+            "Accelerate offload-manager probe scheduled (Wave 44 IMPROVE-183)"
+        )
+    except Exception as exc:
+        logger.warning(
+            "Accelerate offload-manager probe scheduling failed: %s", exc,
+        )
+
     # [IMPROVE-164] Wave 30 — editor session TTL cleanup. When
     # ``EDITOR_SESSION_TTL_DAYS=N`` (default 0 = disabled) is set,
     # lifespan schedules a fire-and-forget asyncio.create_task that

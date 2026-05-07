@@ -401,10 +401,33 @@ def _write_bundle_metadata(zf: zipfile.ZipFile) -> None:
             f"{sys.version_info.micro}"
         ),
         "diffusers_version": _try_diffusers_version(),
+        # [IMPROVE-183] Wave 44 — surfaces the lifespan
+        # accelerate-probe result so operators can correlate
+        # exported snapshots with offload-manager state. None
+        # when the probe hasn't completed yet (e.g. partner
+        # export fires before the lifespan task finishes — the
+        # consumer reading the bundle should treat None as
+        # "probe-not-yet-run, retry later"). Mirrors the W12
+        # additive-field discipline.
+        "accelerate_probe": _try_accelerate_probe_result(),
     }
     zf.writestr(
         "bundle.json", json.dumps(metadata, indent=2, default=str),
     )
+
+
+def _try_accelerate_probe_result() -> dict[str, Any] | None:
+    """[IMPROVE-183] Best-effort read of the cached accelerate
+    probe result. Returns None when the probe module isn't
+    importable (test environments that skip the images package)
+    OR when the probe hasn't completed yet (lifespan task still
+    in flight).
+    """
+    try:
+        from local_ai_platform.images.accelerate_probe import get_probe_result
+        return get_probe_result()
+    except Exception:
+        return None
 
 
 def _write_profile(zf: zipfile.ZipFile, engine: Any) -> None:

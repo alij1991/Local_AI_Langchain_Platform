@@ -2987,6 +2987,29 @@ def _diffusers_worker(payload: dict[str, Any], out_q: Any) -> None:
                     # Last resort fallback — use cpu offload + force VAE to CUDA
                     _q_type = "FP8" if _use_fp8 else "NF4"
                     _log(f"Applying model CPU offload for {_q_type} model (device={device})")
+                    # [IMPROVE-183] Wave 44 — read the lifespan
+                    # accelerate-probe result. WARN when the probe
+                    # reported the offload manager non-functional so
+                    # operators see the connection between
+                    # "accelerate broken" and OOM at inference time.
+                    try:
+                        from local_ai_platform.images.accelerate_probe import (
+                            get_probe_result as _accel_probe_result,
+                        )
+                        _ap = _accel_probe_result()
+                        if _ap is not None and not _ap.get("functional", True):
+                            logger.warning(
+                                "[IMPROVE-183] Stage 4 CPU offload entered "
+                                "but accelerate probe reports non-functional "
+                                "(reason=%r, accelerate_version=%r). OOM at "
+                                "inference time is the expected failure mode.",
+                                _ap.get("reason"),
+                                _ap.get("accelerate_version"),
+                            )
+                    except Exception:
+                        # Best-effort — probe-readback failure should
+                        # not block the offload attempt.
+                        pass
                     try:
                         pipe.enable_model_cpu_offload()
                         # Force VAE to CUDA — decode() bypasses offload hooks
@@ -2998,12 +3021,46 @@ def _diffusers_worker(payload: dict[str, Any], out_q: Any) -> None:
                         _log(f"CPU offload failed for {_q_type} model: {e}")
             elif bool(payload.get("use_sequential_cpu_offload", False)):
                 _log(f"Applying sequential CPU offload (device={device})")
+                # [IMPROVE-183] Wave 44 — same WARN-on-broken-probe
+                # pattern as the stage 4 NF4/FP8 callsite above.
+                try:
+                    from local_ai_platform.images.accelerate_probe import (
+                        get_probe_result as _accel_probe_result,
+                    )
+                    _ap = _accel_probe_result()
+                    if _ap is not None and not _ap.get("functional", True):
+                        logger.warning(
+                            "[IMPROVE-183] Sequential CPU offload entered "
+                            "but accelerate probe reports non-functional "
+                            "(reason=%r, accelerate_version=%r).",
+                            _ap.get("reason"),
+                            _ap.get("accelerate_version"),
+                        )
+                except Exception:
+                    pass
                 try:
                     pipe.enable_sequential_cpu_offload()
                 except Exception as e:
                     _log(f"Sequential CPU offload failed: {e}")
             elif bool(payload.get("use_model_cpu_offload", payload.get("enable_cpu_offload", False))):
                 _log(f"Applying model CPU offload (device={device})")
+                # [IMPROVE-183] Wave 44 — same WARN-on-broken-probe
+                # pattern as the two callsites above.
+                try:
+                    from local_ai_platform.images.accelerate_probe import (
+                        get_probe_result as _accel_probe_result,
+                    )
+                    _ap = _accel_probe_result()
+                    if _ap is not None and not _ap.get("functional", True):
+                        logger.warning(
+                            "[IMPROVE-183] Model CPU offload entered "
+                            "but accelerate probe reports non-functional "
+                            "(reason=%r, accelerate_version=%r).",
+                            _ap.get("reason"),
+                            _ap.get("accelerate_version"),
+                        )
+                except Exception:
+                    pass
                 try:
                     pipe.enable_model_cpu_offload()
                 except Exception as e:

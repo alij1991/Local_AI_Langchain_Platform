@@ -187,6 +187,7 @@ ImageAction = Literal[
 # normalise here; the event-name drift is real and a future
 # cleanup would touch every consumer query/dashboard.
 ImagesAction = Literal[
+    "accelerate_probe",
     "detect_hints",
 ]
 
@@ -1568,6 +1569,24 @@ class ImagePostprocessContext(TypedDict):
     input_bytes: int
 
 
+class ImagesAccelerateProbeContext(TypedDict):
+    """[IMPROVE-183] Context schema for ``images.accelerate_probe``.
+
+    Fires once per process from `images/accelerate_probe.py` after
+    the lifespan-task probe completes (W22 [IMPROVE-156] fire-and-
+    forget pattern). Operators can correlate this event with the
+    OOM ladder's stage 4 fallback WARNING logs to diagnose subtle
+    accelerate-hook issues that succeed at the offload-call site
+    but OOM at inference time.
+
+    Wave 44 [IMPROVE-183] — Phase 1 cleanup wave 2 of 3.
+    """
+    __pydantic_config__ = _FORBID_EXTRA  # type: ignore[misc]
+    functional: bool
+    reason: NotRequired[str | None]
+    accelerate_version: NotRequired[str | None]
+
+
 class ImagesDetectHintsContext(TypedDict):
     """[IMPROVE-107] Context schema for ``images.detect_hints``.
 
@@ -1799,6 +1818,7 @@ EVENT_CONTEXT_SCHEMAS: dict[tuple[str, str], type] = {
     ("image", "postprocess"): ImagePostprocessContext,
     ("image", "vram_probe"): ImageVramProbeContext,
     ("image", "warmup"): ImageWarmupContext,
+    ("images", "accelerate_probe"): ImagesAccelerateProbeContext,
     ("images", "detect_hints"): ImagesDetectHintsContext,
     ("instruct_edit", "load"): InstructEditLoadContext,
     ("instruct_edit", "run"): InstructEditRunContext,
