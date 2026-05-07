@@ -71,18 +71,27 @@ class TokenCounter:
         self._init_tokenizer()
 
     def _init_tokenizer(self) -> None:
-        # Try tiktoken first (fast, works offline for common models)
-        try:
-            import tiktoken
-            try:
-                self._tokenizer = tiktoken.encoding_for_model(self._model or "gpt-4")
-            except KeyError:
-                self._tokenizer = tiktoken.get_encoding("cl100k_base")
-            return
-        except ImportError:
-            pass
+        # [IMPROVE-184] Wave 44 — delegate the tiktoken load to the
+        # shared `_get_tiktoken_encoding()` helper in
+        # `token_counting.py`. Pre-W44 this method had its own
+        # `tiktoken.encoding_for_model(...)` + cl100k_base fallback
+        # that duplicated the loader logic in
+        # `_tiktoken_count`. The helper unifies both. Default model
+        # for the encoding lookup is `gpt-4` (matching the pre-W44
+        # behaviour: TokenCounter() with no model passes "gpt-4" to
+        # encoding_for_model; the helper does the same model-aware
+        # lookup with cl100k_base fallback on KeyError).
+        from .token_counting import _get_tiktoken_encoding
 
-        # Try transformers tokenizer
+        encoding = _get_tiktoken_encoding(self._model or "gpt-4")
+        if encoding is not None:
+            self._tokenizer = encoding
+            return
+
+        # Try transformers tokenizer (separate family of tokenizers,
+        # not unified with the tiktoken path; stays inline). The
+        # AutoTokenizer.from_pretrained() call is for HuggingFace
+        # model IDs that don't have a tiktoken-registered encoding.
         if self._model:
             try:
                 from transformers import AutoTokenizer
@@ -91,7 +100,11 @@ class TokenCounter:
             except Exception:
                 pass
 
-        # Fallback: character-based estimation (4 chars ≈ 1 token)
+        # Fallback: character-based estimation (4 chars ≈ 1 token).
+        # This tier is also distinct from the executor's
+        # `_estimate_tokens` 4-char heuristic — that one is a
+        # hot-path optimization for DAG inter-node context that the
+        # closure plan deliberately preserves untouched.
         self._tokenizer = None
 
     def count(self, text: str) -> int:

@@ -52,6 +52,79 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 
+# [IMPROVE-184] Wave 44 — Module-scope cache for tiktoken
+# encodings, keyed by model name (or "cl100k_base" sentinel
+# when no model is supplied). Shared between this module's
+# `_tiktoken_count` (tier 2 of `count_tokens`) and
+# `memory.py:TokenCounter._init_tokenizer` (the chat-history
+# truncation tokenizer). Pre-Wave-44 each consumer had its own
+# tiktoken loader (TokenCounter cached at instance level;
+# _tiktoken_count re-fetched per call, relying on tiktoken's
+# internal cache); W44 unifies both into this single
+# module-scope cache so the loader logic ships in one place.
+_tiktoken_encoding_cache: dict[str, Any] = {}
+
+
+def _get_tiktoken_encoding(model: str | None = None) -> Any | None:
+    """[IMPROVE-184] Return a cached tiktoken encoding for ``model``.
+
+    Lookup order:
+
+      1. Cache key = ``model`` (when supplied) or ``"cl100k_base"``
+         (when None). Hit returns the cached encoding immediately.
+      2. Try ``tiktoken.encoding_for_model(model)`` when ``model``
+         is supplied. Falls back to ``cl100k_base`` on KeyError
+         (the model isn't registered with tiktoken).
+      3. When ``model`` is None, fetch ``cl100k_base`` directly.
+
+    Returns:
+        The tiktoken Encoding instance; or ``None`` when tiktoken
+        isn't importable (offline test environments) or when
+        loading fails.
+
+    Wave 44 unification target: the pre-W44 codebase had two
+    independent loaders:
+
+      * ``memory.py:TokenCounter._init_tokenizer`` — model-aware
+        (tries `encoding_for_model` first), instance-level cache.
+      * ``token_counting.py:_tiktoken_count`` — cl100k_base only,
+        relied on tiktoken's internal cache.
+
+    Both call sites now route through this helper. The
+    transformers fallback + char-count fallback in TokenCounter
+    stay inline (different fallback chains for different consumer
+    profiles); the executor's `_estimate_tokens` 4-char heuristic
+    stays AS-IS as a hot-path optimization.
+    """
+    cache_key = model or "cl100k_base"
+    cached = _tiktoken_encoding_cache.get(cache_key)
+    if cached is not None:
+        return cached
+
+    try:
+        import tiktoken
+    except ImportError:
+        return None
+
+    try:
+        if model:
+            try:
+                enc = tiktoken.encoding_for_model(model)
+            except KeyError:
+                enc = tiktoken.get_encoding("cl100k_base")
+        else:
+            enc = tiktoken.get_encoding("cl100k_base")
+    except Exception as exc:
+        # tiktoken can fail to load encodings in offline test
+        # environments where the BPE file isn't bundled; surface
+        # as a cache miss rather than crashing.
+        logger.debug("tiktoken encoding load failed for %r: %s", model, exc)
+        return None
+
+    _tiktoken_encoding_cache[cache_key] = enc
+    return enc
+
+
 def _split_count(text: str) -> int:
     """Tier 3 fallback. ``max(1, …)`` matches the pre-IMPROVE-13/16
     accumulator's lower bound so a non-empty chunk always counts as at
@@ -66,20 +139,19 @@ def _tiktoken_count(text: str) -> int | None:
     """Tier 2. Returns None if tiktoken isn't importable so the caller
     drops to tier 3. ``cl100k_base`` is the OpenAI gpt-4 encoding —
     not perfect for every model but consistently within ~5% of native
-    tokenizer counts on English, far better than split."""
+    tokenizer counts on English, far better than split.
+
+    [IMPROVE-184] Wave 44 — delegates the cl100k_base load to the
+    shared `_get_tiktoken_encoding()` helper so the loader logic
+    is unified with `memory.py:TokenCounter._init_tokenizer`."""
     if not text:
         return 0
-    try:
-        import tiktoken
-    except ImportError:
+    enc = _get_tiktoken_encoding()  # cl100k_base default
+    if enc is None:
         return None
     try:
-        enc = tiktoken.get_encoding("cl100k_base")
         return len(enc.encode(text))
     except Exception as exc:
-        # tiktoken can fail to load encodings in offline test
-        # environments where the cl100k_base BPE file isn't bundled;
-        # surface as a tier miss rather than crashing the perf chain.
         logger.debug("tiktoken encode failed: %s", exc)
         return None
 
